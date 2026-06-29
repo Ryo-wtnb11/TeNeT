@@ -14,9 +14,9 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError,
-    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
-    TensorMap,
+    unique_braid_tree, unique_permute_tree, BlockKey, BlockLayout, BlockStructure, BlockView,
+    BlockViewMut, BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
+    FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols, TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -655,6 +655,110 @@ where
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+pub fn build_unique_all_codomain_tree_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    validate_all_codomain_operation_scope(&operation)?;
+
+    let mut specs = Vec::with_capacity(src_structure.block_count());
+    for index in 0..src_structure.block_count() {
+        let block = src_structure.block(index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index,
+            });
+        };
+        validate_all_codomain_fusion_tree_block(index, src_key)?;
+
+        let (dst_codomain_tree, coefficient) = match &operation {
+            TreeTransformOperationKey::Permute {
+                codomain_permutation,
+                ..
+            } => unique_permute_tree(rule, src_key.codomain_tree(), codomain_permutation)?,
+            TreeTransformOperationKey::Braid {
+                codomain_permutation,
+                codomain_levels,
+                ..
+            } => unique_braid_tree(
+                rule,
+                src_key.codomain_tree(),
+                codomain_permutation,
+                codomain_levels,
+            )?,
+            TreeTransformOperationKey::Transpose { .. } => {
+                unreachable!("all-codomain operation scope validation rejected transpose")
+            }
+        };
+        let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, src_key.domain_tree().clone());
+        specs.push(TreeTransformGroupBlockSpec::single(
+            src_key.group_key(),
+            dst_key,
+            src_key.clone(),
+            coefficient,
+        ));
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
+fn validate_all_codomain_operation_scope(
+    operation: &TreeTransformOperationKey,
+) -> Result<(), OperationError> {
+    let scope_error = || OperationError::UnsupportedTreeTransformScope {
+        operation: operation.clone(),
+        message: "all-codomain UniqueFusion lowering requires an empty domain operation",
+    };
+
+    match operation {
+        TreeTransformOperationKey::Permute {
+            domain_permutation,
+            ..
+        } if domain_permutation.is_empty() => Ok(()),
+        TreeTransformOperationKey::Braid {
+            domain_permutation,
+            domain_levels,
+            ..
+        } if domain_permutation.is_empty() && domain_levels.is_empty() => Ok(()),
+        TreeTransformOperationKey::Permute { .. } | TreeTransformOperationKey::Braid { .. } => {
+            Err(scope_error())
+        }
+        TreeTransformOperationKey::Transpose { .. } => Err(OperationError::UnsupportedTreeTransformScope {
+            operation: operation.clone(),
+            message: "all-codomain UniqueFusion lowering supports explicit Permute or Braid operations",
+        }),
+    }
+}
+
+fn validate_all_codomain_fusion_tree_block(
+    index: usize,
+    key: &FusionTreeBlockKey,
+) -> Result<(), OperationError> {
+    let domain = key.domain_tree();
+    if domain.uncoupled().is_empty()
+        && domain.coupled().is_none()
+        && domain.is_dual().is_empty()
+        && domain.innerlines().is_empty()
+        && domain.vertices().is_empty()
+    {
+        return Ok(());
+    }
+    Err(OperationError::ExpectedAllCodomainFusionTree { index })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -2449,6 +2553,9 @@ pub enum OperationError {
         tensor: &'static str,
         index: usize,
     },
+    ExpectedAllCodomainFusionTree {
+        index: usize,
+    },
     InvalidPermutation {
         axes: Vec<usize>,
         rank: usize,
@@ -2475,6 +2582,10 @@ pub enum OperationError {
     UnsupportedBraidingStyle {
         operation: TreeTransformOperationKey,
         style: BraidingStyleKind,
+    },
+    UnsupportedTreeTransformScope {
+        operation: TreeTransformOperationKey,
+        message: &'static str,
     },
     MissingBlockKey {
         key: BlockKey,
@@ -2537,6 +2648,12 @@ impl fmt::Display for OperationError {
             Self::ExpectedFusionTreeBlock { tensor, index } => {
                 write!(f, "{tensor} block {index} is not a fusion-tree block")
             }
+            Self::ExpectedAllCodomainFusionTree { index } => {
+                write!(
+                    f,
+                    "source fusion-tree block {index} is not an all-codomain tree"
+                )
+            }
             Self::InvalidPermutation { axes, rank } => {
                 write!(f, "invalid axis permutation {axes:?} for rank {rank}")
             }
@@ -2571,6 +2688,12 @@ impl fmt::Display for OperationError {
                 write!(
                     f,
                     "unsupported braiding style {style:?} for tree transform operation {operation:?}"
+                )
+            }
+            Self::UnsupportedTreeTransformScope { operation, message } => {
+                write!(
+                    f,
+                    "unsupported tree transform scope for operation {operation:?}: {message}"
                 )
             }
             Self::MissingBlockKey { key } => {
@@ -2716,7 +2839,10 @@ mod tests {
     use super::*;
     use num_complex::{Complex32, Complex64};
     use std::fmt::Debug;
-    use tenet_core::{BraidingStyleKind, MultiplicityFreeFusionRule, SectorId, TensorMapSpace};
+    use tenet_core::{
+        BraidingStyleKind, FusionTreeKey, MultiplicityFreeFusionRule,
+        MultiplicityFreeFusionSymbols, SectorId, TensorMapSpace,
+    };
 
     fn fusion_tree_test_key<
         const COD: usize,
@@ -2750,6 +2876,40 @@ mod tests {
         }
     }
 
+    fn empty_fusion_tree() -> FusionTreeKey {
+        FusionTreeKey::new(
+            Vec::<SectorId>::new(),
+            None,
+            Vec::<bool>::new(),
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        )
+    }
+
+    fn all_codomain_fusion_tree_test_key<
+        const COD: usize,
+        const COD_DUAL: usize,
+        const COD_INNER: usize,
+        const COD_VERTICES: usize,
+    >(
+        codomain: [usize; COD],
+        coupled: Option<usize>,
+        codomain_is_dual: [bool; COD_DUAL],
+        codomain_innerlines: [usize; COD_INNER],
+        codomain_vertices: [usize; COD_VERTICES],
+    ) -> BlockKey {
+        BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids(
+                codomain,
+                coupled,
+                codomain_is_dual,
+                codomain_innerlines,
+                codomain_vertices,
+            ),
+            empty_fusion_tree(),
+        ))
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct UniqueZ2Rule;
 
@@ -2773,6 +2933,39 @@ mod tests {
 
     impl MultiplicityFreeFusionRule for UniqueZ2Rule {}
 
+    impl MultiplicityFreeFusionSymbols for UniqueZ2Rule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct UniqueAnyonicRule;
 
@@ -2795,6 +2988,43 @@ mod tests {
     }
 
     impl MultiplicityFreeFusionRule for UniqueAnyonicRule {}
+
+    impl MultiplicityFreeFusionSymbols for UniqueAnyonicRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            if left.id() == 1 && right.id() == 1 {
+                -2.0
+            } else {
+                1.0
+            }
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     struct UniquePlanarRule;
@@ -4485,6 +4715,122 @@ mod tests {
         assert_eq!(plan.specs()[0].src_keys(), &[src_key.clone()]);
         assert_eq!(plan.specs()[0].dst_keys(), &[src_key]);
         assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    }
+
+    #[test]
+    fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
+        let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, true], [], [1]);
+        let expected_dst_key =
+            all_codomain_fusion_tree_test_key([1, 1], Some(0), [true, false], [], [1]);
+        let src_tree = expect_tree_key(&src_key);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])])
+                .unwrap();
+
+        let plan = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueAnyonicRule,
+            TreeTransformOperationKey::braid(
+                [1, 0],
+                Vec::<usize>::new(),
+                [0, 1],
+                Vec::<usize>::new(),
+            ),
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[-2.0]);
+    }
+
+    #[test]
+    fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
+        let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, true], [], [1]);
+        let expected_dst_key =
+            all_codomain_fusion_tree_test_key([0, 1], Some(1), [true, false], [], [1]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])])
+                .unwrap();
+
+        let plan = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueZ2Rule,
+            TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    }
+
+    #[test]
+    fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
+        let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, false], [], [1]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+        let operation = TreeTransformOperationKey::braid([1, 0], [0], [0, 1], [0]);
+
+        let err = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueZ2Rule,
+            operation.clone(),
+            &src_structure,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTreeTransformScope {
+                operation,
+                message: "all-codomain UniqueFusion lowering requires an empty domain operation",
+            }
+        );
+    }
+
+    #[test]
+    fn unique_all_codomain_plan_builder_rejects_nonempty_domain_tree() {
+        let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+
+        let err = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueZ2Rule,
+            TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+            &src_structure,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::ExpectedAllCodomainFusionTree { index: 0 }
+        );
+    }
+
+    #[test]
+    fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
+        let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+        let operation = TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new());
+
+        let err = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueAnyonicRule,
+            operation.clone(),
+            &src_structure,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedBraidingStyle {
+                operation,
+                style: BraidingStyleKind::Anyonic,
+            }
+        );
     }
 
     #[test]
