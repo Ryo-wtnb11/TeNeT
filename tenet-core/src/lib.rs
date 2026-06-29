@@ -2098,6 +2098,21 @@ impl SectorStructure {
             .map(|position| self.sorted_indices[position])
     }
 
+    pub fn find_fusion_tree_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {
+        if let (Some(lookup), Some(id)) = (&self.compact_lookup, key.compact_id()) {
+            if let Some(index) = lookup.get(id) {
+                return Some(index);
+            }
+        }
+        self.sorted_indices
+            .binary_search_by(|&index| match self.blocks[index].key() {
+                BlockKey::Dense => std::cmp::Ordering::Less,
+                BlockKey::FusionTree(tree) => tree.cmp(key),
+            })
+            .ok()
+            .map(|position| self.sorted_indices[position])
+    }
+
     #[inline]
     pub fn has_compact_lookup(&self) -> bool {
         self.compact_lookup.is_some()
@@ -2511,6 +2526,10 @@ impl BlockStructure {
         self.sector.find_index(key)
     }
 
+    pub fn find_block_index_by_fusion_tree_key(&self, key: &FusionTreeBlockKey) -> Option<usize> {
+        self.sector.find_fusion_tree_index(key)
+    }
+
     pub fn pair_block_indices_from(&self, src: &BlockStructure) -> Result<Vec<usize>, CoreError> {
         self.sector.pair_indices_from(&src.sector)
     }
@@ -2531,6 +2550,22 @@ impl BlockStructure {
             key: self.sector.key(index)?,
             degeneracy: self.degeneracy.block(index)?,
         })
+    }
+
+    pub fn block_by_key(&self, key: &BlockKey) -> Result<BlockRef<'_>, CoreError> {
+        let index = self
+            .find_block_index_by_key(key)
+            .ok_or_else(|| CoreError::MissingBlockKey { key: key.clone() })?;
+        self.block(index)
+    }
+
+    pub fn fusion_tree_block(&self, key: &FusionTreeBlockKey) -> Result<BlockRef<'_>, CoreError> {
+        let index = self
+            .find_block_index_by_fusion_tree_key(key)
+            .ok_or_else(|| CoreError::MissingBlockKey {
+                key: BlockKey::FusionTree(key.clone()),
+            })?;
+        self.block(index)
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {
@@ -2692,6 +2727,29 @@ where
             block.offset(),
         )
     }
+
+    pub fn block_by_key(&self, key: &BlockKey) -> Result<BlockView<'_, T>, CoreError> {
+        let block = self.structure.block_by_key(key)?;
+        BlockView::new(
+            self.storage.as_slice(),
+            block.shape(),
+            block.strides(),
+            block.offset(),
+        )
+    }
+
+    pub fn subblock_by_tree(
+        &self,
+        key: &FusionTreeBlockKey,
+    ) -> Result<BlockView<'_, T>, CoreError> {
+        let block = self.structure.fusion_tree_block(key)?;
+        BlockView::new(
+            self.storage.as_slice(),
+            block.shape(),
+            block.strides(),
+            block.offset(),
+        )
+    }
 }
 
 impl<T, const NOUT: usize, const NIN: usize, S, D> TensorMap<T, NOUT, NIN, S, D>
@@ -2715,6 +2773,29 @@ where
 
     pub fn block_mut(&mut self, index: usize) -> Result<BlockViewMut<'_, T>, CoreError> {
         let block = self.structure.block(index)?;
+        BlockViewMut::new(
+            self.storage.as_mut_slice(),
+            block.shape(),
+            block.strides(),
+            block.offset(),
+        )
+    }
+
+    pub fn block_mut_by_key(&mut self, key: &BlockKey) -> Result<BlockViewMut<'_, T>, CoreError> {
+        let block = self.structure.block_by_key(key)?;
+        BlockViewMut::new(
+            self.storage.as_mut_slice(),
+            block.shape(),
+            block.strides(),
+            block.offset(),
+        )
+    }
+
+    pub fn subblock_mut_by_tree(
+        &mut self,
+        key: &FusionTreeBlockKey,
+    ) -> Result<BlockViewMut<'_, T>, CoreError> {
+        let block = self.structure.fusion_tree_block(key)?;
         BlockViewMut::new(
             self.storage.as_mut_slice(),
             block.shape(),
@@ -4063,6 +4144,184 @@ mod tests {
         assert_eq!(block.strides(), &[1, 2, 6]);
         assert_eq!(block.offset(), 0);
         assert_eq!(block.data()[23], 23.0);
+    }
+
+    #[test]
+    fn block_structure_finds_fusion_tree_subblock_by_key() {
+        let first = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let second = FusionTreeBlockKey::pair_from_sector_ids(
+            [0],
+            [0],
+            Some(0),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (BlockKey::from(second.clone()), vec![1, 4]),
+                (BlockKey::from(first.clone()), vec![2, 3]),
+            ],
+        )
+        .unwrap();
+
+        let first_block = structure.fusion_tree_block(&first).unwrap();
+        let second_block = structure
+            .block_by_key(&BlockKey::from(second.clone()))
+            .unwrap();
+
+        assert_eq!(first_block.key(), &BlockKey::from(first));
+        assert_eq!(first_block.shape(), &[2, 3]);
+        assert_eq!(first_block.offset(), 4);
+        assert_eq!(second_block.key(), &BlockKey::from(second));
+        assert_eq!(second_block.shape(), &[1, 4]);
+        assert_eq!(second_block.offset(), 0);
+    }
+
+    #[test]
+    fn tensormap_subblock_by_tree_returns_matching_view() {
+        let first = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let second = FusionTreeBlockKey::pair_from_sector_ids(
+            [0],
+            [0],
+            Some(0),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (BlockKey::from(second.clone()), vec![1, 2]),
+                (BlockKey::from(first.clone()), vec![2, 2]),
+            ],
+        )
+        .unwrap();
+        let space = TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap();
+        let tensor = TensorMap::<i32, 1, 1>::from_vec_with_structure(
+            vec![10, 20, 30, 40, 50, 60],
+            space,
+            structure,
+        )
+        .unwrap();
+
+        let first_view = tensor.subblock_by_tree(&first).unwrap();
+        let second_view = tensor.block_by_key(&BlockKey::from(second)).unwrap();
+
+        assert_eq!(first_view.shape(), &[2, 2]);
+        assert_eq!(first_view.offset(), 2);
+        assert_eq!(
+            &first_view.data()[first_view.offset()..first_view.offset() + 4],
+            &[30, 40, 50, 60]
+        );
+        assert_eq!(second_view.shape(), &[1, 2]);
+        assert_eq!(second_view.offset(), 0);
+    }
+
+    #[test]
+    fn tensormap_subblock_mut_by_tree_updates_selected_storage() {
+        let key = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (BlockKey::sector_ids([0]), vec![1, 2]),
+                (BlockKey::from(key.clone()), vec![2, 1]),
+            ],
+        )
+        .unwrap();
+        let space = TensorMapSpace::<1, 1>::from_dims([3], [2]).unwrap();
+        let mut tensor =
+            TensorMap::<i32, 1, 1>::from_vec_with_structure(vec![1, 2, 3, 4], space, structure)
+                .unwrap();
+
+        {
+            let mut view = tensor.subblock_mut_by_tree(&key).unwrap();
+            let offset = view.offset();
+            view.data_mut()[offset] = 30;
+            view.data_mut()[offset + 1] = 40;
+        }
+
+        assert_eq!(tensor.data(), &[1, 2, 30, 40]);
+    }
+
+    #[test]
+    fn subblock_by_tree_reports_missing_fusion_tree_key() {
+        let existing = FusionTreeBlockKey::pair_from_sector_ids(
+            [0],
+            [0],
+            Some(0),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let missing = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(BlockKey::from(existing), vec![1, 1])],
+        )
+        .unwrap();
+        let space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let tensor =
+            TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
+
+        let err = tensor.subblock_by_tree(&missing).unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::MissingBlockKey {
+                key: BlockKey::from(missing),
+            }
+        );
     }
 
     #[test]
