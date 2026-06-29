@@ -181,6 +181,14 @@ impl FusionStyleKind {
     pub const fn has_multiplicity(self) -> bool {
         matches!(self, Self::Generic)
     }
+
+    pub const fn combined_with(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Generic, _) | (_, Self::Generic) => Self::Generic,
+            (Self::Simple, _) | (_, Self::Simple) => Self::Simple,
+            (Self::Unique, Self::Unique) => Self::Unique,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -648,6 +656,316 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols {
             * self.sqrt_dim_scalar(right)
             * self.inv_sqrt_dim_scalar(coupled)
             * self.f_symbol_scalar(left, right, self.dual(right), left, coupled, self.vacuum())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ProductSector<Left, Right> {
+    left: Left,
+    right: Right,
+}
+
+impl<Left, Right> ProductSector<Left, Right> {
+    pub const fn new(left: Left, right: Right) -> Self {
+        Self { left, right }
+    }
+
+    #[inline]
+    pub const fn left(&self) -> &Left {
+        &self.left
+    }
+
+    #[inline]
+    pub const fn right(&self) -> &Right {
+        &self.right
+    }
+
+    pub fn sector_id_with<C>(self) -> SectorId
+    where
+        C: ProductSectorCodec,
+        Left: Into<SectorId>,
+        Right: Into<SectorId>,
+    {
+        C::encode(self.left.into(), self.right.into())
+    }
+}
+
+pub trait ProductSectorCodec {
+    fn try_encode(left: SectorId, right: SectorId) -> Option<SectorId>;
+
+    fn encode(left: SectorId, right: SectorId) -> SectorId {
+        Self::try_encode(left, right).expect("product sector id overflow")
+    }
+
+    fn decode(sector: SectorId) -> Option<(SectorId, SectorId)>;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct TensorKitProductCodec;
+
+impl ProductSectorCodec for TensorKitProductCodec {
+    fn try_encode(left: SectorId, right: SectorId) -> Option<SectorId> {
+        let left = left.id() as u128;
+        let right = right.id() as u128;
+        let sum = left.checked_add(right)?;
+        let paired = sum
+            .checked_mul(sum + 1)
+            .and_then(|value| value.checked_div(2))
+            .and_then(|value| value.checked_add(left))
+            .and_then(|value| usize::try_from(value).ok())?;
+        Some(SectorId::new(paired))
+    }
+
+    fn decode(sector: SectorId) -> Option<(SectorId, SectorId)> {
+        let paired = sector.id() as u128;
+        let sum = tensor_kit_product_pairing_sum(paired);
+        let triangular = sum.checked_mul(sum + 1)?.checked_div(2)?;
+        let left = paired.checked_sub(triangular)?;
+        let right = sum.checked_sub(left)?;
+        Some((
+            SectorId::new(usize::try_from(left).ok()?),
+            SectorId::new(usize::try_from(right).ok()?),
+        ))
+    }
+}
+
+fn tensor_kit_product_pairing_sum(paired: u128) -> u128 {
+    let mut low = 0u128;
+    let mut high = 1u128;
+    while triangular_number(high) <= paired {
+        high *= 2;
+    }
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        if triangular_number(mid) <= paired {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+fn triangular_number(value: u128) -> u128 {
+    value * (value + 1) / 2
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ProductFusionRule<LeftRule, RightRule, Codec = TensorKitProductCodec> {
+    left: LeftRule,
+    right: RightRule,
+    _codec: PhantomData<Codec>,
+}
+
+impl<LeftRule, RightRule, Codec> ProductFusionRule<LeftRule, RightRule, Codec> {
+    pub const fn new(left: LeftRule, right: RightRule) -> Self {
+        Self {
+            left,
+            right,
+            _codec: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub const fn left_rule(&self) -> &LeftRule {
+        &self.left
+    }
+
+    #[inline]
+    pub const fn right_rule(&self) -> &RightRule {
+        &self.right
+    }
+
+    pub fn encode_sector(&self, left: SectorId, right: SectorId) -> SectorId
+    where
+        Codec: ProductSectorCodec,
+    {
+        Codec::encode(left, right)
+    }
+
+    pub fn decode_sector(&self, sector: SectorId) -> Option<(SectorId, SectorId)>
+    where
+        Codec: ProductSectorCodec,
+    {
+        Codec::decode(sector)
+    }
+
+    fn decode_sector_or_panic(&self, sector: SectorId) -> (SectorId, SectorId)
+    where
+        Codec: ProductSectorCodec,
+    {
+        self.decode_sector(sector)
+            .expect("product fusion rule received an invalid product sector")
+    }
+}
+
+impl<LeftRule, RightRule, Codec> Default for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: Default,
+    RightRule: Default,
+{
+    fn default() -> Self {
+        Self::new(LeftRule::default(), RightRule::default())
+    }
+}
+
+impl<LeftRule, RightRule, Codec> FusionRule for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: FusionRule,
+    RightRule: FusionRule,
+    Codec: ProductSectorCodec,
+{
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.left
+            .fusion_style()
+            .combined_with(self.right.fusion_style())
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.left
+            .braiding_style()
+            .combined_with(self.right.braiding_style())
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.encode_sector(self.left.vacuum(), self.right.vacuum())
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.encode_sector(self.left.dual(left), self.right.dual(right))
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        let (left_left, left_right) = self.decode_sector_or_panic(left);
+        let (right_left, right_right) = self.decode_sector_or_panic(right);
+        let left_channels = self.left.fusion_channels(left_left, right_left);
+        let right_channels = self.right.fusion_channels(left_right, right_right);
+        let mut channels = Vec::with_capacity(left_channels.len() * right_channels.len());
+        for right_channel in right_channels {
+            for &left_channel in &left_channels {
+                let channel = self.encode_sector(left_channel, right_channel);
+                if !channels.contains(&channel) {
+                    channels.push(channel);
+                }
+            }
+        }
+        channels
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        let (left_left, left_right) = self.decode_sector_or_panic(left);
+        let (right_left, right_right) = self.decode_sector_or_panic(right);
+        let (coupled_left, coupled_right) = self.decode_sector_or_panic(coupled);
+        self.left.nsymbol(left_left, right_left, coupled_left)
+            * self.right.nsymbol(left_right, right_right, coupled_right)
+    }
+}
+
+impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionRule
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: MultiplicityFreeFusionRule,
+    RightRule: MultiplicityFreeFusionRule,
+    Codec: ProductSectorCodec,
+{
+}
+
+impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionSymbols
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
+    RightRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
+    Codec: ProductSectorCodec,
+{
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (middle_l, middle_r) = self.decode_sector_or_panic(middle);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        let (left_coupled_l, left_coupled_r) = self.decode_sector_or_panic(left_coupled);
+        let (right_coupled_l, right_coupled_r) = self.decode_sector_or_panic(right_coupled);
+        self.left.f_symbol_scalar(
+            left_l,
+            middle_l,
+            right_l,
+            coupled_l,
+            left_coupled_l,
+            right_coupled_l,
+        ) * self.right.f_symbol_scalar(
+            left_r,
+            middle_r,
+            right_r,
+            coupled_r,
+            left_coupled_r,
+            right_coupled_r,
+        )
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        self.left.r_symbol_scalar(left_l, right_l, coupled_l)
+            * self.right.r_symbol_scalar(left_r, right_r, coupled_r)
+    }
+}
+
+impl<LeftRule, RightRule, Codec> MultiplicityFreeRigidSymbols
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    RightRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    Codec: ProductSectorCodec,
+{
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.sqrt_dim_scalar(left) * self.right.sqrt_dim_scalar(right)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.inv_sqrt_dim_scalar(left) * self.right.inv_sqrt_dim_scalar(right)
+    }
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.frobenius_schur_phase_scalar(left)
+            * self.right.frobenius_schur_phase_scalar(right)
+    }
+
+    fn a_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        self.left.a_symbol_scalar(left_l, right_l, coupled_l)
+            * self.right.a_symbol_scalar(left_r, right_r, coupled_r)
+    }
+
+    fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        self.left.b_symbol_scalar(left_l, right_l, coupled_l)
+            * self.right.b_symbol_scalar(left_r, right_r, coupled_r)
     }
 }
 
@@ -5031,6 +5349,18 @@ mod tests {
         U1Irrep::new(charge).sector_id()
     }
 
+    fn z2_even() -> SectorId {
+        Z2Irrep::EVEN.sector_id()
+    }
+
+    fn z2_odd() -> SectorId {
+        Z2Irrep::ODD.sector_id()
+    }
+
+    fn su2(twice_spin: usize) -> SectorId {
+        SU2Irrep::from_twice_spin(twice_spin).sector_id()
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct BranchingMultiplicityFreeRule;
 
@@ -6122,6 +6452,103 @@ mod tests {
             rule.fusion_channels(U1Irrep::new(-2).sector_id(), U1Irrep::new(5).sector_id()),
             vec![U1Irrep::new(3).sector_id()]
         );
+    }
+
+    #[test]
+    fn product_sector_codec_uses_tensorkit_diagonal_component_order() {
+        let expected = [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (0, 2),
+            (1, 1),
+            (2, 0),
+            (0, 3),
+            (1, 2),
+            (2, 1),
+            (3, 0),
+        ];
+
+        for (id, &(left, right)) in expected.iter().enumerate() {
+            let encoded = TensorKitProductCodec::encode(SectorId::new(left), SectorId::new(right));
+            assert_eq!(encoded, SectorId::new(id));
+            assert_eq!(
+                TensorKitProductCodec::decode(encoded),
+                Some((SectorId::new(left), SectorId::new(right)))
+            );
+        }
+    }
+
+    #[test]
+    fn product_fusion_rule_combines_fermion_parity_and_u1_componentwise() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = FpU1Rule::default();
+        let sector = |parity, charge| rule.encode_sector(parity, u1(charge));
+        let odd_two = sector(z2_odd(), 2);
+        let odd_minus_five = sector(z2_odd(), -5);
+        let even_minus_three = sector(z2_even(), -3);
+
+        assert_eq!(rule.fusion_style(), FusionStyleKind::Unique);
+        assert_eq!(rule.braiding_style(), BraidingStyleKind::Fermionic);
+        assert_eq!(rule.vacuum(), sector(z2_even(), 0));
+        assert_eq!(rule.dual(odd_two), sector(z2_odd(), -2));
+        assert_eq!(
+            rule.fusion_channels(odd_two, odd_minus_five),
+            vec![even_minus_three]
+        );
+        assert_eq!(rule.nsymbol(odd_two, odd_minus_five, even_minus_three), 1);
+        assert_eq!(
+            rule.r_symbol_scalar(odd_two, odd_minus_five, even_minus_three),
+            -1.0
+        );
+        assert_eq!(rule.sqrt_dim_scalar(odd_two), 1.0);
+    }
+
+    #[test]
+    fn product_fusion_rule_nested_fz2_u1_su2_channels_and_symbols_match_tensorkit() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = FpU1Su2Rule::default();
+        let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+        let sector = |parity, charge, twice_spin| {
+            rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        };
+
+        let a = sector(z2_odd(), 1, 1);
+        let b = sector(z2_odd(), -1, 1);
+        let c0 = sector(z2_even(), 0, 0);
+        let c2 = sector(z2_even(), 0, 2);
+
+        assert_eq!(rule.fusion_style(), FusionStyleKind::Simple);
+        assert_eq!(rule.braiding_style(), BraidingStyleKind::Fermionic);
+        assert_eq!(rule.dual(a), sector(z2_odd(), -1, 1));
+        assert_eq!(rule.fusion_channels(a, b), vec![c0, c2]);
+        assert_eq!(rule.r_symbol_scalar(a, b, c0), 1.0);
+        assert_eq!(rule.r_symbol_scalar(a, b, c2), -1.0);
+        assert!((rule.sqrt_dim_scalar(c2) - 3.0_f64.sqrt()).abs() < 1.0e-12);
+
+        let vacuum_left = left_sector(z2_even(), 0);
+        let spin_half = rule.encode_sector(vacuum_left, su2(1));
+        let spin_zero = rule.encode_sector(vacuum_left, su2(0));
+        assert!(
+            (rule.f_symbol_scalar(
+                spin_half, spin_half, spin_half, spin_half, spin_zero, spin_zero,
+            ) + 0.5)
+                .abs()
+                < 1.0e-12
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Z2 fusion received an invalid sector")]
+    fn product_fusion_rule_panics_on_component_invalid_sector_like_existing_rules() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = FpU1Rule::default();
+        let invalid_left_component = rule.encode_sector(SectorId::new(2), u1(0));
+        let valid = rule.encode_sector(z2_even(), u1(0));
+
+        let _ = rule.fusion_channels(invalid_left_component, valid);
     }
 
     #[test]
