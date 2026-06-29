@@ -14,8 +14,9 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError, FusionRule,
-    FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey, TensorMap,
+    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError,
+    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
+    TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -633,6 +634,7 @@ where
             style: rule.fusion_style(),
         });
     }
+    operation.validate_braiding_support(rule)?;
 
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
@@ -661,6 +663,10 @@ pub enum TreeTransformOperationKey {
         codomain_permutation: Vec<usize>,
         domain_permutation: Vec<usize>,
     },
+    Permute {
+        codomain_permutation: Vec<usize>,
+        domain_permutation: Vec<usize>,
+    },
     Braid {
         codomain_permutation: Vec<usize>,
         domain_permutation: Vec<usize>,
@@ -684,6 +690,20 @@ impl TreeTransformOperationKey {
         }
     }
 
+    pub fn permute<Codomain, Domain>(
+        codomain_permutation: Codomain,
+        domain_permutation: Domain,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+    {
+        Self::Permute {
+            codomain_permutation: codomain_permutation.into_iter().collect(),
+            domain_permutation: domain_permutation.into_iter().collect(),
+        }
+    }
+
     pub fn braid<Codomain, Domain, CodomainLevels, DomainLevels>(
         codomain_permutation: Codomain,
         domain_permutation: Domain,
@@ -702,6 +722,23 @@ impl TreeTransformOperationKey {
             codomain_levels: codomain_levels.into_iter().collect(),
             domain_levels: domain_levels.into_iter().collect(),
         }
+    }
+
+    pub fn requires_symmetric_braiding(&self) -> bool {
+        matches!(self, Self::Permute { .. })
+    }
+
+    pub fn validate_braiding_support<R>(&self, rule: &R) -> Result<(), OperationError>
+    where
+        R: FusionRule,
+    {
+        if self.requires_symmetric_braiding() && !rule.braiding_style().is_symmetric() {
+            return Err(OperationError::UnsupportedBraidingStyle {
+                operation: self.clone(),
+                style: rule.braiding_style(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -2435,6 +2472,10 @@ pub enum OperationError {
         operation: TreeTransformOperationKey,
         style: FusionStyleKind,
     },
+    UnsupportedBraidingStyle {
+        operation: TreeTransformOperationKey,
+        style: BraidingStyleKind,
+    },
     MissingBlockKey {
         key: BlockKey,
     },
@@ -2524,6 +2565,12 @@ impl fmt::Display for OperationError {
                 write!(
                     f,
                     "unsupported fusion style {style:?} for tree transform operation {operation:?}"
+                )
+            }
+            Self::UnsupportedBraidingStyle { operation, style } => {
+                write!(
+                    f,
+                    "unsupported braiding style {style:?} for tree transform operation {operation:?}"
                 )
             }
             Self::MissingBlockKey { key } => {
@@ -2725,6 +2772,52 @@ mod tests {
     }
 
     impl MultiplicityFreeFusionRule for UniqueZ2Rule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct UniqueAnyonicRule;
+
+    impl FusionRule for UniqueAnyonicRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Anyonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for UniqueAnyonicRule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct UniquePlanarRule;
+
+    impl FusionRule for UniquePlanarRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::NoBraiding
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for UniquePlanarRule {}
 
     #[derive(Clone, Copy, Debug)]
     struct SimpleSu2Rule;
@@ -4335,6 +4428,63 @@ mod tests {
                 style: FusionStyleKind::Generic,
             }
         );
+    }
+
+    #[test]
+    fn tree_transform_operation_key_distinguishes_permute_from_explicit_braid() {
+        assert!(TreeTransformOperationKey::permute([1, 0], [0]).requires_symmetric_braiding());
+        assert!(!TreeTransformOperationKey::transpose([1, 0], [0]).requires_symmetric_braiding());
+        assert!(!TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0])
+            .requires_symmetric_braiding());
+    }
+
+    #[test]
+    fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding() {
+        let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+        let operation = TreeTransformOperationKey::permute([1, 0], [0]);
+
+        let err = build_unique_tree_transform_group_plan(
+            &UniqueAnyonicRule,
+            operation.clone(),
+            &src_structure,
+            |_| -> Result<(FusionTreeBlockKey, f64), OperationError> {
+                unreachable!("permutation must reject non-symmetric braiding before key transform")
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedBraidingStyle {
+                operation,
+                style: BraidingStyleKind::Anyonic,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_logic() {
+        let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+        let src_tree = expect_tree_key(&src_key);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key.clone(), vec![1, 1, 1])])
+                .unwrap();
+
+        let plan = build_unique_tree_transform_group_plan(
+            &UniquePlanarRule,
+            TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0]),
+            &src_structure,
+            |src| Ok((src.clone(), 1.0_f64)),
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key.clone()]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
     }
 
     #[test]
