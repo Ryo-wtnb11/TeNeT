@@ -1,5 +1,5 @@
 [workspace]
-members = ["tenet", "tenet-dense", "tenet-strided"]
+members = ["tenet", "tenet-core", "tenet-dense", "tenet-operations"]
 resolver = "2"
 
 [workspace.package]

@@ -2,10 +2,14 @@
 
 //! Public facade for the active TeNeT rebuild.
 
+pub mod core {
+    pub use tenet_core::*;
+}
+
 pub mod dense {
     pub use tenet_dense::*;
 }
 
-pub mod strided {
-    pub use tenet_strided::*;
+pub mod operations {
+    pub use tenet_operations::*;
 }

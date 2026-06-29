@@ -9,7 +9,6 @@
 use core::fmt;
 
 use num_complex::{Complex32, Complex64};
-use tenet_strided::{StridedError, StridedLayout};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DenseDType {
@@ -50,7 +49,7 @@ impl<'a, T> DenseView<'a, T> {
         strides: &'a [usize],
         offset: usize,
     ) -> Result<Self, DenseError> {
-        StridedLayout::new(data.len(), offset, shape, strides)?;
+        validate_dense_layout(data.len(), offset, shape, strides)?;
         Ok(Self {
             data,
             shape,
@@ -78,15 +77,55 @@ impl<'a, T> DenseView<'a, T> {
     pub fn offset(&self) -> usize {
         self.offset
     }
+}
+
+#[derive(Debug)]
+pub struct DenseViewMut<'a, T> {
+    data: &'a mut [T],
+    shape: &'a [usize],
+    strides: &'a [usize],
+    offset: usize,
+}
+
+impl<'a, T> DenseViewMut<'a, T> {
+    pub fn new(
+        data: &'a mut [T],
+        shape: &'a [usize],
+        strides: &'a [usize],
+        offset: usize,
+    ) -> Result<Self, DenseError> {
+        validate_dense_layout(data.len(), offset, shape, strides)?;
+        Ok(Self {
+            data,
+            shape,
+            strides,
+            offset,
+        })
+    }
 
     #[inline]
-    pub fn layout(&self) -> Result<StridedLayout<'a>, DenseError> {
-        Ok(StridedLayout::new(
-            self.data.len(),
-            self.offset,
-            self.shape,
-            self.strides,
-        )?)
+    pub fn data(&self) -> &[T] {
+        self.data
+    }
+
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut [T] {
+        self.data
+    }
+
+    #[inline]
+    pub fn shape(&self) -> &'a [usize] {
+        self.shape
+    }
+
+    #[inline]
+    pub fn strides(&self) -> &'a [usize] {
+        self.strides
+    }
+
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset
     }
 }
 
@@ -102,6 +141,43 @@ pub enum DenseRead<'a> {
 }
 
 impl DenseRead<'_> {
+    pub fn dtype(&self) -> DenseDType {
+        match self {
+            Self::F32(_) => DenseDType::F32,
+            Self::F64(_) => DenseDType::F64,
+            Self::I32(_) => DenseDType::I32,
+            Self::I64(_) => DenseDType::I64,
+            Self::Bool(_) => DenseDType::Bool,
+            Self::C32(_) => DenseDType::C32,
+            Self::C64(_) => DenseDType::C64,
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            Self::F32(view) => view.shape(),
+            Self::F64(view) => view.shape(),
+            Self::I32(view) => view.shape(),
+            Self::I64(view) => view.shape(),
+            Self::Bool(view) => view.shape(),
+            Self::C32(view) => view.shape(),
+            Self::C64(view) => view.shape(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum DenseWrite<'a> {
+    F32(DenseViewMut<'a, f32>),
+    F64(DenseViewMut<'a, f64>),
+    I32(DenseViewMut<'a, i32>),
+    I64(DenseViewMut<'a, i64>),
+    Bool(DenseViewMut<'a, bool>),
+    C32(DenseViewMut<'a, Complex32>),
+    C64(DenseViewMut<'a, Complex64>),
+}
+
+impl DenseWrite<'_> {
     pub fn dtype(&self) -> DenseDType {
         match self {
             Self::F32(_) => DenseDType::F32,
@@ -212,13 +288,18 @@ pub trait DenseExecutor {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DenseError {
-    Strided(StridedError),
+    RankMismatch {
+        shape: usize,
+        strides: usize,
+    },
+    ElementCountOverflow,
     StrideOverflow {
         value: usize,
     },
     OffsetOverflow {
         value: usize,
     },
+    OutOfBounds,
     Backend {
         backend: DenseBackend,
         op: &'static str,
@@ -229,13 +310,20 @@ pub enum DenseError {
 impl fmt::Display for DenseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Strided(err) => err.fmt(f),
+            Self::RankMismatch { shape, strides } => {
+                write!(
+                    f,
+                    "rank mismatch: shape rank {shape}, strides rank {strides}"
+                )
+            }
+            Self::ElementCountOverflow => write!(f, "dense view element count overflow"),
             Self::StrideOverflow { value } => {
                 write!(f, "dense view stride {value} does not fit in isize")
             }
             Self::OffsetOverflow { value } => {
                 write!(f, "dense view offset {value} does not fit in isize")
             }
+            Self::OutOfBounds => write!(f, "dense view accesses outside the buffer"),
             Self::Backend {
                 backend,
                 op,
@@ -249,10 +337,51 @@ impl fmt::Display for DenseError {
 
 impl std::error::Error for DenseError {}
 
-impl From<StridedError> for DenseError {
-    fn from(value: StridedError) -> Self {
-        Self::Strided(value)
+fn validate_dense_layout(
+    len: usize,
+    offset: usize,
+    shape: &[usize],
+    strides: &[usize],
+) -> Result<(), DenseError> {
+    if shape.len() != strides.len() {
+        return Err(DenseError::RankMismatch {
+            shape: shape.len(),
+            strides: strides.len(),
+        });
     }
+    if shape.iter().any(|&dim| dim == 0) {
+        return if offset <= len {
+            Ok(())
+        } else {
+            Err(DenseError::OutOfBounds)
+        };
+    }
+    if offset >= len {
+        return Err(DenseError::OutOfBounds);
+    }
+    let max_delta = max_offset_delta(shape, strides)?;
+    let last = offset
+        .checked_add(max_delta)
+        .ok_or(DenseError::OffsetOverflow { value: offset })?;
+    if last < len {
+        Ok(())
+    } else {
+        Err(DenseError::OutOfBounds)
+    }
+}
+
+fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseError> {
+    shape
+        .iter()
+        .zip(strides)
+        .try_fold(0usize, |acc, (&dim, &stride)| {
+            let steps = dim.saturating_sub(1);
+            let delta = steps
+                .checked_mul(stride)
+                .ok_or(DenseError::StrideOverflow { value: stride })?;
+            acc.checked_add(delta)
+                .ok_or(DenseError::ElementCountOverflow)
+        })
 }
 
 #[cfg(feature = "tenferro")]
@@ -567,7 +696,7 @@ mod tests {
         let shape = [2, 3];
         let strides = [1, 4];
         let err = DenseView::new(&data, &shape, &strides, 0).unwrap_err();
-        assert_eq!(err, DenseError::Strided(StridedError::OutOfBounds));
+        assert_eq!(err, DenseError::OutOfBounds);
     }
 
     #[cfg(feature = "tenferro")]

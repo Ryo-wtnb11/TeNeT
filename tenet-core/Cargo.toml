@@ -1,11 +1,12 @@
 [package]
-name = "tenet-strided"
+name = "tenet-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "tenet_strided"
+name = "tenet_core"
 path = "src/lib.rs"
 
+[dependencies]

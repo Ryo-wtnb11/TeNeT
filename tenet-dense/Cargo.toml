@@ -21,7 +21,6 @@ tenferro = [
 
 [dependencies]
 num-complex = "0.4"
-tenet-strided = { path = "../tenet-strided" }
 tenferro-cpu = { path = "../../tenferro-rs/crates/tenferro-cpu", default-features = false, optional = true }
 tenferro-linalg = { path = "../../tenferro-rs/crates/tenferro-linalg", default-features = false, optional = true }
 tenferro-tensor = { path = "../../tenferro-rs/crates/tenferro-tensor", default-features = false, optional = true }

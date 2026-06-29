@@ -19,5 +19,7 @@ Initial crate layout:
 
 - `tenet-dense`: dense block executor boundary. The default executor currently
   adapts tenferro while keeping tenferro types out of higher tensor algorithms.
-- `tenet-strided`: low-level strided adapter boundary.
+- `tenet-operations`: TensorOperations-style tensoradd/contract/permute
+  lowering. It uses `strided-rs` internally at the same granularity as the
+  TensorKit ecosystem uses Strided.jl/StridedViews.jl.
 - `tenet`: public facade crate.

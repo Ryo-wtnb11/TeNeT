@@ -10,5 +10,6 @@ name = "tenet"
 path = "src/lib.rs"
 
 [dependencies]
+tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense" }
-tenet-strided = { path = "../tenet-strided" }
+tenet-operations = { path = "../tenet-operations" }
