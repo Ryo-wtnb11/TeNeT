@@ -8,6 +8,7 @@
 
 use core::fmt;
 use core::marker::PhantomData;
+use core::ops::Mul;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -409,6 +410,8 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     type Scalar: Clone;
 
     fn scalar_one(&self) -> Self::Scalar;
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar;
 
     fn f_symbol_scalar(
         &self,
@@ -814,6 +817,19 @@ pub fn unique_artin_braid_first<R>(
 ) -> Result<(FusionTreeKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    unique_artin_braid_at(rule, tree, 0)
+}
+
+pub fn unique_artin_braid_at<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    index: usize,
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
 {
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -823,25 +839,40 @@ where
     }
 
     let rank = tree.uncoupled().len();
-    if rank < 2 {
-        return Err(CoreError::InvalidBraidIndex { index: 0, rank });
+    if index + 1 >= rank {
+        return Err(CoreError::InvalidBraidIndex { index, rank });
     }
 
-    let left = tree.uncoupled()[0];
-    let right = tree.uncoupled()[1];
+    let left = tree.uncoupled()[index];
+    let right = tree.uncoupled()[index + 1];
     let mut uncoupled = tree.uncoupled().to_vec();
-    uncoupled.swap(0, 1);
+    uncoupled.swap(index, index + 1);
     let mut is_dual = tree.is_dual().to_vec();
-    is_dual.swap(0, 1);
-    let braided = FusionTreeKey::new(
-        uncoupled,
-        tree.coupled(),
-        is_dual,
-        tree.innerlines().iter().copied(),
-        tree.vertices().iter().copied(),
-    );
+    is_dual.swap(index, index + 1);
+    let mut innerlines = tree.innerlines().to_vec();
+    let mut vertices = tree.vertices().to_vec();
 
     if left == rule.vacuum() || right == rule.vacuum() {
+        if index > 0 {
+            let inner_source = if left == rule.vacuum() {
+                inner_extended_sector(tree, index + 1)?
+            } else {
+                inner_extended_sector(tree, index - 1)?
+            };
+            *innerlines
+                .get_mut(index - 1)
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "unit braid past the first adjacent pair requires an innerline",
+                })? = inner_source;
+            if vertices.len() <= index {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "unit braid past the first adjacent pair requires adjacent vertices",
+                });
+            }
+            vertices.swap(index - 1, index);
+        }
+
+        let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
         return Ok((braided, rule.scalar_one()));
     }
 
@@ -853,20 +884,79 @@ where
         });
     }
 
-    let coupled = if rank > 2 {
-        tree.innerlines()
+    if index == 0 {
+        let coupled = if rank > 2 {
+            tree.innerlines()
+                .first()
+                .copied()
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "first braid of a rank > 2 tree requires the first innerline",
+                })?
+        } else {
+            tree.coupled().ok_or(CoreError::MalformedFusionTree {
+                message: "first braid of a rank 2 tree requires a coupled sector",
+            })?
+        };
+
+        let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
+        return Ok((braided, rule.r_symbol_scalar(left, right, coupled)));
+    }
+
+    let a = inner_extended_sector(tree, index - 1)?;
+    let b = left;
+    let c = inner_extended_sector(tree, index)?;
+    let d = right;
+    let e = inner_extended_sector(tree, index + 1)?;
+    let c_prime = only_fusion_channel(rule, a, d)?;
+    *innerlines
+        .get_mut(index - 1)
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "non-first braid requires an innerline to update",
+        })? = c_prime;
+    let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
+    let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
+    let right_r = rule.r_symbol_scalar(a, d, c_prime);
+    let left_r = rule.r_symbol_scalar(c, d, e);
+    Ok((braided, left_r * rule.scalar_conj(f_symbol * right_r)))
+}
+
+fn inner_extended_sector(tree: &FusionTreeKey, index: usize) -> Result<SectorId, CoreError> {
+    let rank = tree.uncoupled().len();
+    if index == 0 {
+        return tree
+            .uncoupled()
             .first()
             .copied()
             .ok_or(CoreError::MalformedFusionTree {
-                message: "first braid of a rank > 2 tree requires the first innerline",
-            })?
-    } else {
-        tree.coupled().ok_or(CoreError::MalformedFusionTree {
-            message: "first braid of a rank 2 tree requires a coupled sector",
-        })?
-    };
+                message: "inner-extended tree requires at least one uncoupled sector",
+            });
+    }
+    if index + 1 == rank {
+        return tree.coupled().ok_or(CoreError::MalformedFusionTree {
+            message: "inner-extended tree requires a coupled sector",
+        });
+    }
+    tree.innerlines()
+        .get(index - 1)
+        .copied()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "inner-extended tree is missing an innerline",
+        })
+}
 
-    Ok((braided, rule.r_symbol_scalar(left, right, coupled)))
+fn only_fusion_channel<R>(rule: &R, left: SectorId, right: SectorId) -> Result<SectorId, CoreError>
+where
+    R: FusionRule,
+{
+    let channels = rule.fusion_channels(left, right);
+    match channels.as_slice() {
+        [sector] => Ok(*sector),
+        _ => Err(CoreError::FusionChannelCount {
+            left,
+            right,
+            count: channels.len(),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -2146,6 +2236,11 @@ pub enum CoreError {
         right: SectorId,
         style: BraidingStyleKind,
     },
+    FusionChannelCount {
+        left: SectorId,
+        right: SectorId,
+        count: usize,
+    },
     MalformedFusionTree {
         message: &'static str,
     },
@@ -2207,6 +2302,12 @@ impl fmt::Display for CoreError {
                 write!(
                     f,
                     "cannot braid non-unit sectors {left:?} and {right:?} with braiding style {style:?}"
+                )
+            }
+            Self::FusionChannelCount { left, right, count } => {
+                write!(
+                    f,
+                    "expected one fusion channel for {left:?} x {right:?}, got {count}"
                 )
             }
             Self::MalformedFusionTree { message } => {
@@ -2390,6 +2491,10 @@ mod tests {
             1.0
         }
 
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
         fn f_symbol_scalar(
             &self,
             _left: SectorId,
@@ -2442,6 +2547,10 @@ mod tests {
             1.0
         }
 
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
         fn f_symbol_scalar(
             &self,
             _left: SectorId,
@@ -2492,6 +2601,10 @@ mod tests {
 
         fn scalar_one(&self) -> Self::Scalar {
             1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
         }
 
         fn f_symbol_scalar(
@@ -2712,6 +2825,49 @@ mod tests {
         );
         assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
         assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_artin_braid_at_updates_innerline_for_later_unit_crossing() {
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 0, 1], Some(0), [false, false, true], [1], [1, 1]);
+
+        let (braided, coefficient) = unique_artin_braid_at(&PlanarZ2Rule, &tree, 1).unwrap();
+
+        assert_eq!(coefficient, 1.0);
+        assert_eq!(
+            braided.uncoupled(),
+            &[SectorId::new(1), SectorId::new(1), SectorId::new(0)]
+        );
+        assert_eq!(braided.is_dual(), &[false, true, false]);
+        assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
+        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_artin_braid_at_uses_f_and_r_symbols_for_later_crossing() {
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, true, false], [0], [1, 1]);
+
+        let (braided, coefficient) = unique_artin_braid_at(&FermionicZ2Rule, &tree, 1).unwrap();
+
+        assert_eq!(coefficient, -1.0);
+        assert_eq!(
+            braided.uncoupled(),
+            &[SectorId::new(1), SectorId::new(1), SectorId::new(1)]
+        );
+        assert_eq!(braided.is_dual(), &[false, false, true]);
+        assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
+        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_artin_braid_at_rejects_out_of_range_index() {
+        let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]);
+
+        let err = unique_artin_braid_at(&FermionicZ2Rule, &tree, 1).unwrap_err();
+
+        assert_eq!(err, CoreError::InvalidBraidIndex { index: 1, rank: 2 });
     }
 
     #[test]
