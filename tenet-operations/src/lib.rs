@@ -310,7 +310,6 @@ impl TensorAddDescriptor {
                 src_block: term.src_block(),
                 layout_start,
                 rank,
-                element_count: element_count(dst_block.shape())?,
                 dst_offset: offset_to_isize(dst_block.offset())?,
                 src_offset: offset_to_isize(src_block.offset())?,
             });
@@ -326,7 +325,6 @@ pub(crate) struct TensorAddDescriptorTerm {
     src_block: usize,
     layout_start: usize,
     rank: usize,
-    element_count: usize,
     dst_offset: isize,
     src_offset: isize,
 }
@@ -1214,13 +1212,6 @@ where
         + strided_kernel::MaybeSendSync,
 {
     let shape = descriptor.shape(term);
-    if term.element_count == 1 {
-        let dst_index = prepared_offset_to_usize(term.dst_offset)?;
-        let src_index = prepared_offset_to_usize(term.src_offset)?;
-        tensoradd_scalar_into(&mut dst_data[dst_index], src_data[src_index], alpha, beta);
-        return Ok(());
-    }
-
     let dst_strides = descriptor.dst_strides(term);
     let src_strides = descriptor.src_strides(term);
     let mut dst =
@@ -1259,18 +1250,6 @@ where
         + One
         + strided_kernel::MaybeSendSync,
 {
-    if dst_layout.element_count == 1 {
-        let dst_index = prepared_offset_to_usize(dst_layout.offset)?;
-        let src_index = prepared_offset_to_usize(src_layout.offset)?;
-        tensoradd_scalar_into(
-            &mut dst_data[dst_index],
-            src_data[src_index],
-            alpha * coefficient,
-            beta,
-        );
-        return Ok(());
-    }
-
     let shape = layouts.shape(dst_layout);
     let mut dst = strided_kernel::StridedViewMut::new(
         dst_data,
@@ -1322,22 +1301,6 @@ where
         + One
         + strided_kernel::MaybeSendSync,
 {
-    if element_count == 1 {
-        return tree_transform_scalar_multi(
-            layouts,
-            dst_layout_start,
-            dst_count,
-            src_layout_start,
-            src_count,
-            coefficient_start,
-            coefficients_src_by_dst,
-            dst_data,
-            src_data,
-            alpha,
-            beta,
-        );
-    }
-
     let source_len = element_count
         .checked_mul(src_count)
         .ok_or(OperationError::ElementCountOverflow)?;
@@ -1385,54 +1348,6 @@ where
         )?;
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn tree_transform_scalar_multi<T>(
-    layouts: &TreeTransformLayoutTable,
-    dst_layout_start: usize,
-    dst_count: usize,
-    src_layout_start: usize,
-    src_count: usize,
-    coefficient_start: usize,
-    coefficients_src_by_dst: &[T],
-    dst_data: &mut [T],
-    src_data: &[T],
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One,
-{
-    for dst_index in 0..dst_count {
-        let mut sum = T::zero();
-        for src_index in 0..src_count {
-            let src_layout = layouts.entry(src_layout_start + src_index);
-            let src_offset = prepared_offset_to_usize(src_layout.offset)?;
-            let coefficient =
-                coefficients_src_by_dst[coefficient_start + src_index + dst_index * src_count];
-            sum = sum + src_data[src_offset] * coefficient;
-        }
-        let dst_layout = layouts.entry(dst_layout_start + dst_index);
-        let dst_offset = prepared_offset_to_usize(dst_layout.offset)?;
-        tensoradd_scalar_into(&mut dst_data[dst_offset], sum, alpha, beta);
-    }
-    Ok(())
-}
-
-#[inline]
-fn tensoradd_scalar_into<T>(dst: &mut T, src: T, alpha: T, beta: T)
-where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One,
-{
-    let scaled_src = alpha * src;
-    if beta.is_zero() {
-        *dst = scaled_src;
-    } else if beta.is_one() {
-        *dst = *dst + scaled_src;
-    } else {
-        *dst = *dst * beta + scaled_src;
-    }
 }
 
 fn pack_layout_into_column<T>(
@@ -1553,9 +1468,6 @@ pub enum OperationError {
         axes: Vec<usize>,
         rank: usize,
     },
-    InvalidPreparedOffset {
-        offset: isize,
-    },
     RankMismatch {
         expected: usize,
         actual: usize,
@@ -1626,9 +1538,6 @@ impl fmt::Display for OperationError {
             }
             Self::InvalidPermutation { axes, rank } => {
                 write!(f, "invalid axis permutation {axes:?} for rank {rank}")
-            }
-            Self::InvalidPreparedOffset { offset } => {
-                write!(f, "invalid prepared tensor offset {offset}")
             }
             Self::RankMismatch { expected, actual } => {
                 write!(f, "rank mismatch: expected {expected}, got {actual}")
@@ -1710,10 +1619,6 @@ fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, OperationError> {
 
 fn offset_to_isize(offset: usize) -> Result<isize, OperationError> {
     isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
-}
-
-fn prepared_offset_to_usize(offset: isize) -> Result<usize, OperationError> {
-    usize::try_from(offset).map_err(|_| OperationError::InvalidPreparedOffset { offset })
 }
 
 fn element_count(shape: &[usize]) -> Result<usize, OperationError> {
@@ -1907,40 +1812,6 @@ mod tests {
         assert_eq!(dst.data(), expected.as_slice());
     }
 
-    fn assert_tensoradd_scalar_dtype<T>(src_value: T, fill: T, alpha: T, beta: T, expected: T)
-    where
-        T: Copy
-            + Clone
-            + Debug
-            + PartialEq
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + Zero
-            + One
-            + strided_kernel::MaybeSendSync,
-    {
-        let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-        let src = TensorMap::<T, 2, 0>::from_vec(vec![src_value], space.clone()).unwrap();
-        let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
-        let structure =
-            TensorAddStructure::compile(&dst, &src, AxisPermutation::identity()).unwrap();
-        let mut backend = HostTensorOperations;
-        let mut allocator = HostAllocator::default();
-
-        tensoradd_execute_with(
-            &mut backend,
-            &mut allocator,
-            &structure,
-            &mut dst,
-            &src,
-            alpha,
-            beta,
-        )
-        .unwrap();
-
-        assert_eq!(dst.data(), &[expected]);
-    }
-
     fn assert_tree_single_dtype<T>(
         values: Vec<T>,
         fill: T,
@@ -2059,62 +1930,6 @@ mod tests {
         assert_eq!(dst.data(), expected.as_slice());
         assert_eq!(workspace.source_len(), 8);
         assert_eq!(workspace.destination_len(), 8);
-    }
-
-    fn assert_tree_multi_scalar_dtype<T>(
-        coefficients: Vec<T>,
-        alpha: T,
-        beta: T,
-        fill: T,
-        expected: Vec<T>,
-    ) where
-        T: Copy
-            + Clone
-            + Debug
-            + PartialEq
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + Zero
-            + One
-            + strided_kernel::MaybeSendSync,
-    {
-        let space = TensorMapSpace::<2, 0>::from_dims([2, 1], []).unwrap();
-        let structure = BlockStructure::packed_column_major(2, [vec![1, 1], vec![1, 1]]).unwrap();
-        let src = TensorMap::<T, 2, 0>::from_vec_with_structure(
-            vec![T::one(), T::one() + T::one()],
-            space.clone(),
-            structure.clone(),
-        )
-        .unwrap();
-        let mut dst =
-            TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 2], space, structure).unwrap();
-        let transform = TreeTransformStructure::compile(
-            &dst,
-            &src,
-            &[TreeTransformBlockSpec::multi(
-                vec![0, 1],
-                vec![0, 1],
-                coefficients,
-            )],
-        )
-        .unwrap();
-        let mut backend = HostTensorOperations;
-        let mut workspace = TreeTransformWorkspace::default();
-
-        tree_transform_execute_with(
-            &mut backend,
-            &mut workspace,
-            &transform,
-            &mut dst,
-            &src,
-            alpha,
-            beta,
-        )
-        .unwrap();
-
-        assert_eq!(dst.data(), expected.as_slice());
-        assert_eq!(workspace.source_len(), 0);
-        assert_eq!(workspace.destination_len(), 0);
     }
 
     #[test]
@@ -2275,28 +2090,6 @@ mod tests {
     }
 
     #[test]
-    fn tensoradd_scalar_replay_supports_all_numeric_dtypes() {
-        assert_tensoradd_scalar_dtype(2.0_f32, 10.0, 3.0, 5.0, 56.0);
-        assert_tensoradd_scalar_dtype(2.0_f64, 10.0, 3.0, 5.0, 56.0);
-        assert_tensoradd_scalar_dtype(2_i32, 10, 3, 5, 56);
-        assert_tensoradd_scalar_dtype(2_i64, 10, 3, 5, 56);
-        assert_tensoradd_scalar_dtype(
-            Complex32::new(2.0, 1.0),
-            Complex32::new(10.0, 1.0),
-            Complex32::new(3.0, 0.0),
-            Complex32::new(5.0, 0.0),
-            Complex32::new(56.0, 8.0),
-        );
-        assert_tensoradd_scalar_dtype(
-            Complex64::new(2.0, 1.0),
-            Complex64::new(10.0, 1.0),
-            Complex64::new(3.0, 0.0),
-            Complex64::new(5.0, 0.0),
-            Complex64::new(56.0, 8.0),
-        );
-    }
-
-    #[test]
     fn tree_transform_single_replay_supports_all_numeric_dtypes() {
         assert_tree_single_dtype(
             vec![1.0_f32, 2.0, 3.0, 4.0],
@@ -2351,50 +2144,6 @@ mod tests {
                 Complex64::new(58.0, 7.0),
                 Complex64::new(64.0, 1.0),
             ],
-        );
-    }
-
-    #[test]
-    fn tree_transform_multi_scalar_replay_supports_all_numeric_dtypes_without_workspace() {
-        assert_tree_multi_scalar_dtype(
-            vec![2.0_f32, 3.0, 5.0, 7.0],
-            2.0,
-            10.0,
-            1.0,
-            vec![26.0, 48.0],
-        );
-        assert_tree_multi_scalar_dtype(
-            vec![2.0_f64, 3.0, 5.0, 7.0],
-            2.0,
-            10.0,
-            1.0,
-            vec![26.0, 48.0],
-        );
-        assert_tree_multi_scalar_dtype(vec![2_i32, 3, 5, 7], 2, 10, 1, vec![26, 48]);
-        assert_tree_multi_scalar_dtype(vec![2_i64, 3, 5, 7], 2, 10, 1, vec![26, 48]);
-        assert_tree_multi_scalar_dtype(
-            vec![
-                Complex32::new(2.0, 0.0),
-                Complex32::new(3.0, 0.0),
-                Complex32::new(5.0, 0.0),
-                Complex32::new(7.0, 0.0),
-            ],
-            Complex32::new(2.0, 0.0),
-            Complex32::new(10.0, 0.0),
-            Complex32::new(1.0, 1.0),
-            vec![Complex32::new(26.0, 10.0), Complex32::new(48.0, 10.0)],
-        );
-        assert_tree_multi_scalar_dtype(
-            vec![
-                Complex64::new(2.0, 0.0),
-                Complex64::new(3.0, 0.0),
-                Complex64::new(5.0, 0.0),
-                Complex64::new(7.0, 0.0),
-            ],
-            Complex64::new(2.0, 0.0),
-            Complex64::new(10.0, 0.0),
-            Complex64::new(1.0, 1.0),
-            vec![Complex64::new(26.0, 10.0), Complex64::new(48.0, 10.0)],
         );
     }
 
