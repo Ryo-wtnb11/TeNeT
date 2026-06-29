@@ -10,9 +10,13 @@ use core::fmt;
 use core::ops::{Add, Mul};
 use std::sync::Arc;
 
+use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError, TensorMap,
+};
+use tenet_dense::{
+    DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -770,6 +774,39 @@ pub struct HostAllocator {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HostTensorOperations;
 
+#[derive(Debug)]
+pub struct DenseTreeTransformOperations<E = DefaultDenseExecutor> {
+    dense: E,
+}
+
+impl DenseTreeTransformOperations<DefaultDenseExecutor> {
+    pub fn default_executor() -> Self {
+        Self {
+            dense: DefaultDenseExecutor::new(),
+        }
+    }
+}
+
+impl<E> DenseTreeTransformOperations<E> {
+    pub fn new(dense: E) -> Self {
+        Self { dense }
+    }
+
+    pub fn dense(&self) -> &E {
+        &self.dense
+    }
+
+    pub fn dense_mut(&mut self) -> &mut E {
+        &mut self.dense
+    }
+}
+
+impl Default for DenseTreeTransformOperations<DefaultDenseExecutor> {
+    fn default() -> Self {
+        Self::default_executor()
+    }
+}
+
 impl TensorOperationsBackend for HostTensorOperations {
     type Allocator = HostAllocator;
 
@@ -829,6 +866,68 @@ where
         beta: T,
     ) -> Result<(), OperationError> {
         tree_transform_structure_with_strided_kernel(workspace, structure, dst, src, alpha, beta)
+    }
+}
+
+#[doc(hidden)]
+pub trait DenseRecouplingScalar:
+    Copy
+    + Add<Self, Output = Self>
+    + Mul<Self, Output = Self>
+    + PartialEq
+    + Zero
+    + One
+    + strided_kernel::MaybeSendSync
+    + 'static
+{
+    fn dense_read(view: DenseView<'_, Self>) -> DenseRead<'_>;
+    fn dense_write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_>;
+}
+
+macro_rules! impl_dense_recoupling_scalar {
+    ($ty:ty, $read_variant:ident, $write_variant:ident) => {
+        impl DenseRecouplingScalar for $ty {
+            fn dense_read(view: DenseView<'_, Self>) -> DenseRead<'_> {
+                DenseRead::$read_variant(view)
+            }
+
+            fn dense_write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
+                DenseWrite::$write_variant(view)
+            }
+        }
+    };
+}
+
+impl_dense_recoupling_scalar!(f32, F32, F32);
+impl_dense_recoupling_scalar!(f64, F64, F64);
+impl_dense_recoupling_scalar!(Complex32, C32, C32);
+impl_dense_recoupling_scalar!(Complex64, C64, C64);
+
+impl<E, T> TreeTransformBackend<T> for DenseTreeTransformOperations<E>
+where
+    E: DenseExecutor,
+    T: DenseRecouplingScalar,
+{
+    type Workspace = TreeTransformWorkspace<T>;
+
+    fn tree_transform_structure_into<const NOUT: usize, const NIN: usize, S>(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<T>,
+        dst: &mut TensorMap<T, NOUT, NIN, S>,
+        src: &TensorMap<T, NOUT, NIN, S>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError> {
+        tree_transform_structure_with_dense_recoupling(
+            &mut self.dense,
+            workspace,
+            structure,
+            dst,
+            src,
+            alpha,
+            beta,
+        )
     }
 }
 
@@ -1158,6 +1257,68 @@ where
     Ok(())
 }
 
+fn tree_transform_structure_with_dense_recoupling<E, T, const NOUT: usize, const NIN: usize, S>(
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<T>,
+    structure: &TreeTransformStructure<T>,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    T: DenseRecouplingScalar,
+{
+    structure.validate_replay_structures(dst.structure(), src.structure())?;
+    let dst_data = dst.data_mut();
+    let src_data = src.data();
+
+    for block in &structure.blocks {
+        match *block {
+            TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } => tree_transform_single_with_strided_kernel(
+                &mut workspace.zero_strides,
+                &structure.layouts,
+                structure.layouts.entry(dst_layout),
+                structure.layouts.entry(src_layout),
+                structure.coefficient(coefficient),
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )?,
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+            } => tree_transform_multi_with_dense_recoupling(
+                dense,
+                workspace,
+                &structure.layouts,
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+                &structure.coefficients_src_by_dst,
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )?,
+        }
+    }
+    Ok(())
+}
+
 fn tensoradd_block_with_strided_kernel<T>(
     allocator: &mut HostAllocator,
     dst: BlockViewMut<'_, T>,
@@ -1349,6 +1510,74 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+fn tree_transform_multi_with_dense_recoupling<E, T>(
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<T>,
+    layouts: &TreeTransformLayoutTable,
+    dst_layout_start: usize,
+    dst_count: usize,
+    src_layout_start: usize,
+    src_count: usize,
+    coefficient_start: usize,
+    element_count: usize,
+    coefficients_src_by_dst: &[T],
+    dst_data: &mut [T],
+    src_data: &[T],
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    T: DenseRecouplingScalar,
+{
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    workspace.source.resize(source_len, T::zero());
+    workspace.destination.resize(destination_len, T::zero());
+
+    for src_index in 0..src_count {
+        let layout = layouts.entry(src_layout_start + src_index);
+        pack_layout_into_column(
+            layouts,
+            layout,
+            src_data,
+            &mut workspace.source,
+            src_index * element_count,
+        )?;
+    }
+
+    apply_recoupling_matrix_with_dense_executor(
+        dense,
+        &mut workspace.destination,
+        &workspace.source,
+        coefficients_src_by_dst,
+        coefficient_start,
+        element_count,
+        src_count,
+        dst_count,
+    )?;
+
+    for dst_index in 0..dst_count {
+        let layout = layouts.entry(dst_layout_start + dst_index);
+        scatter_column_into_layout(
+            &mut workspace.zero_strides,
+            layouts,
+            layout,
+            &workspace.destination,
+            dst_index * element_count,
+            dst_data,
+            alpha,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_recoupling_matrix_src_times_u_transpose<T>(
     destination: &mut [T],
     source: &[T],
@@ -1410,6 +1639,81 @@ where
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_recoupling_matrix_with_dense_executor<E, T>(
+    dense: &mut E,
+    destination: &mut [T],
+    source: &[T],
+    coefficients_src_by_dst: &[T],
+    coefficient_start: usize,
+    element_count: usize,
+    src_count: usize,
+    dst_count: usize,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    T: DenseRecouplingScalar,
+{
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_count = src_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_end = coefficient_start
+        .checked_add(coefficient_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+
+    if source.len() != source_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: source_len,
+            actual: source.len(),
+        });
+    }
+    if destination.len() != destination_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: destination_len,
+            actual: destination.len(),
+        });
+    }
+    if coefficients_src_by_dst.len() < coefficient_end {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: coefficient_end,
+            actual: coefficients_src_by_dst.len(),
+        });
+    }
+
+    let source_shape = [element_count, src_count];
+    let source_strides = [1, element_count];
+    let coefficient_shape = [src_count, dst_count];
+    let coefficient_strides = [1, src_count];
+    let destination_shape = [element_count, dst_count];
+    let destination_strides = [1, element_count];
+
+    let lhs = T::dense_read(
+        DenseView::new(source, &source_shape, &source_strides, 0).map_err(OperationError::Dense)?,
+    );
+    let rhs = T::dense_read(
+        DenseView::new(
+            coefficients_src_by_dst,
+            &coefficient_shape,
+            &coefficient_strides,
+            coefficient_start,
+        )
+        .map_err(OperationError::Dense)?,
+    );
+    let output = T::dense_write(
+        DenseViewMut::new(destination, &destination_shape, &destination_strides, 0)
+            .map_err(OperationError::Dense)?,
+    );
+    dense
+        .matmul_into(output, lhs, rhs)
+        .map_err(OperationError::Dense)
 }
 
 fn pack_layout_into_column<T>(
@@ -1505,6 +1809,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationError {
     Core(CoreError),
+    Dense(DenseError),
     BlockIndexOutOfBounds {
         tensor: &'static str,
         index: usize,
@@ -1564,6 +1869,7 @@ impl fmt::Display for OperationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Core(err) => err.fmt(f),
+            Self::Dense(err) => err.fmt(f),
             Self::BlockIndexOutOfBounds {
                 tensor,
                 index,
@@ -2054,6 +2360,130 @@ mod tests {
         assert_eq!(workspace.destination_len(), 4);
     }
 
+    fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
+        src_values: Vec<T>,
+        coefficients_src_by_dst: Vec<T>,
+        alpha: T,
+        beta: T,
+        fill: T,
+        expected: Vec<T>,
+    ) where
+        T: DenseRecouplingScalar + Clone + Debug,
+    {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
+        let src =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(src_values, src_space, src_structure)
+                .unwrap();
+        let mut dst =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 4], dst_space, dst_structure)
+                .unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1, 2],
+                coefficients_src_by_dst,
+            )],
+        )
+        .unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+        assert_eq!(workspace.source_len(), 6);
+        assert_eq!(workspace.destination_len(), 4);
+    }
+
+    #[derive(Default)]
+    struct CountingDenseExecutor {
+        dot_general_into_calls: usize,
+    }
+
+    impl DenseExecutor for CountingDenseExecutor {
+        fn svd(
+            &mut self,
+            _input: DenseRead<'_>,
+        ) -> Result<Vec<tenet_dense::DenseTensor>, DenseError> {
+            unreachable!("tree transform does not call svd")
+        }
+
+        fn qr(
+            &mut self,
+            _input: DenseRead<'_>,
+        ) -> Result<Vec<tenet_dense::DenseTensor>, DenseError> {
+            unreachable!("tree transform does not call qr")
+        }
+
+        fn eigh(
+            &mut self,
+            _input: DenseRead<'_>,
+        ) -> Result<Vec<tenet_dense::DenseTensor>, DenseError> {
+            unreachable!("tree transform does not call eigh")
+        }
+
+        fn dot_general_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            config: &tenet_dense::DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            self.dot_general_into_calls += 1;
+            assert_eq!(config, &tenet_dense::DenseDotConfig::matmul());
+
+            // This mock pins the TensorKit-style `mul!` boundary only:
+            // `buffer_src :: (blocksize, n_src)` times `U^T :: (n_src, n_dst)`
+            // into `buffer_dst :: (blocksize, n_dst)`. Numerical GEMM behavior
+            // is covered by the DefaultDenseExecutor test.
+            let (mut output, lhs, rhs) = match (output, lhs, rhs) {
+                (DenseWrite::F64(output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                    (output, lhs, rhs)
+                }
+                _ => panic!("counting executor only covers f64 recoupling"),
+            };
+
+            assert_eq!(lhs.shape(), &[2, 3]);
+            assert_eq!(lhs.strides(), &[1, 2]);
+            assert_eq!(lhs.offset(), 0);
+            assert_eq!(lhs.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+            assert_eq!(rhs.shape(), &[3, 2]);
+            assert_eq!(rhs.strides(), &[1, 3]);
+            assert_eq!(rhs.offset(), 0);
+            assert_eq!(rhs.data(), &[10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0]);
+
+            assert_eq!(output.shape(), &[2, 2]);
+            assert_eq!(output.strides(), &[1, 2]);
+            assert_eq!(output.offset(), 0);
+
+            let out_strides = output.strides().to_vec();
+            let out_offset = output.offset();
+            let out_data = output.data_mut();
+            out_data[out_offset] = 5310.0;
+            out_data[out_offset + out_strides[0]] = 6420.0;
+            out_data[out_offset + out_strides[1]] = 10620.0;
+            out_data[out_offset + out_strides[0] + out_strides[1]] = 12840.0;
+            Ok(())
+        }
+    }
+
     #[test]
     fn tensorcopy_supports_all_storage_dtypes() {
         assert_tensorcopy_dtype(vec![1.0_f32, 2.0, 3.0, 4.0], 0.0);
@@ -2431,6 +2861,125 @@ mod tests {
                 Complex64::new(25683.0, 3.0),
             ],
         );
+    }
+
+    #[test]
+    fn tree_transform_dense_backend_matches_tensorkit_recoupling_orientation_for_gemm_dtypes() {
+        assert_tree_multi_tensorkit_orientation_dense_dtype(
+            vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            2.0,
+            3.0,
+            1.0,
+            vec![10623.0, 12843.0, 21243.0, 25683.0],
+        );
+        assert_tree_multi_tensorkit_orientation_dense_dtype(
+            vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            2.0,
+            3.0,
+            1.0,
+            vec![10623.0, 12843.0, 21243.0, 25683.0],
+        );
+        assert_tree_multi_tensorkit_orientation_dense_dtype(
+            vec![
+                Complex32::new(1.0, 0.0),
+                Complex32::new(2.0, 0.0),
+                Complex32::new(3.0, 0.0),
+                Complex32::new(4.0, 0.0),
+                Complex32::new(5.0, 0.0),
+                Complex32::new(6.0, 0.0),
+            ],
+            vec![
+                Complex32::new(10.0, 0.0),
+                Complex32::new(100.0, 0.0),
+                Complex32::new(1000.0, 0.0),
+                Complex32::new(20.0, 0.0),
+                Complex32::new(200.0, 0.0),
+                Complex32::new(2000.0, 0.0),
+            ],
+            Complex32::new(2.0, 0.0),
+            Complex32::new(3.0, 0.0),
+            Complex32::new(1.0, 1.0),
+            vec![
+                Complex32::new(10623.0, 3.0),
+                Complex32::new(12843.0, 3.0),
+                Complex32::new(21243.0, 3.0),
+                Complex32::new(25683.0, 3.0),
+            ],
+        );
+        assert_tree_multi_tensorkit_orientation_dense_dtype(
+            vec![
+                Complex64::new(1.0, 0.0),
+                Complex64::new(2.0, 0.0),
+                Complex64::new(3.0, 0.0),
+                Complex64::new(4.0, 0.0),
+                Complex64::new(5.0, 0.0),
+                Complex64::new(6.0, 0.0),
+            ],
+            vec![
+                Complex64::new(10.0, 0.0),
+                Complex64::new(100.0, 0.0),
+                Complex64::new(1000.0, 0.0),
+                Complex64::new(20.0, 0.0),
+                Complex64::new(200.0, 0.0),
+                Complex64::new(2000.0, 0.0),
+            ],
+            Complex64::new(2.0, 0.0),
+            Complex64::new(3.0, 0.0),
+            Complex64::new(1.0, 1.0),
+            vec![
+                Complex64::new(10623.0, 3.0),
+                Complex64::new(12843.0, 3.0),
+                Complex64::new(21243.0, 3.0),
+                Complex64::new(25683.0, 3.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tree_transform_dense_backend_calls_dense_matmul_for_multi_tree_blocks() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            src_space,
+            src_structure,
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], dst_space, dst_structure)
+                .unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1, 2],
+                vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            )],
+        )
+        .unwrap();
+        let mut backend = DenseTreeTransformOperations::new(CountingDenseExecutor::default());
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(backend.dense().dot_general_into_calls, 1);
+        assert_eq!(dst.data(), &[10623.0, 12843.0, 21243.0, 25683.0]);
     }
 
     #[test]
