@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use tenet_core::{BlockKey, BlockStructure, TensorMap, TensorMapSpace};
 use tenet_operations::{
     tensoradd_execute_with, tree_transform_execute_with, AxisPermutation, HostAllocator,
-    HostTensorOperations, TensorAddStructure, TreeTransformBlockSpec, TreeTransformStructure,
-    TreeTransformWorkspace,
+    HostTensorOperations, TensorAddStructure, TreeTransformBlockSpec, TreeTransformKeyBlockSpec,
+    TreeTransformStructure, TreeTransformWorkspace,
 };
 
 const BLOCK_COUNTS: &[usize] = &[1, 8, 64, 512, 4096];
@@ -35,6 +35,13 @@ fn main() {
     println!("group_count,compile_ns,compiled_replay_ns");
     for &group_count in BLOCK_COUNTS {
         run_tree_multi_case(group_count);
+    }
+    println!();
+    println!("# keyed TreeTransform multi-tree path");
+    println!("group_count,key_order,compile_ns,compiled_replay_ns");
+    for &group_count in BLOCK_COUNTS {
+        run_tree_multi_keyed_case(group_count, KeyOrder::Ordered);
+        run_tree_multi_keyed_case(group_count, KeyOrder::Reversed);
     }
 }
 
@@ -193,6 +200,60 @@ fn run_tree_multi_case(group_count: usize) {
     println!(
         "{},{},{}",
         group_count,
+        compile_elapsed.as_nanos(),
+        replay_elapsed.as_nanos()
+    );
+}
+
+fn run_tree_multi_keyed_case(group_count: usize, key_order: KeyOrder) {
+    let block_count = group_count * 2;
+    let src = tensor(block_count, KeyOrder::Ordered);
+    let mut dst = tensor(block_count, key_order);
+    let specs = (0..group_count)
+        .map(|group| {
+            let first = group * 2;
+            TreeTransformKeyBlockSpec::multi(
+                [
+                    BlockKey::sector_ids([first]),
+                    BlockKey::sector_ids([first + 1]),
+                ],
+                [
+                    BlockKey::sector_ids([first]),
+                    BlockKey::sector_ids([first + 1]),
+                ],
+                vec![1.0_f64, 2.0, 3.0, 4.0],
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let compile_iters = iterations(block_count, 100_000);
+    let compile_elapsed = elapsed_per_iter(compile_iters, || {
+        let structure = TreeTransformStructure::compile_keyed(&dst, &src, &specs).unwrap();
+        black_box(structure.block_count());
+    });
+
+    let structure = TreeTransformStructure::compile_keyed(&dst, &src, &specs).unwrap();
+    let replay_iters = iterations(block_count, 30_000);
+    let mut backend = HostTensorOperations;
+    let mut workspace = TreeTransformWorkspace::default();
+    let replay_elapsed = elapsed_per_iter(replay_iters, || {
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            1.0_f64,
+            0.0_f64,
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
+    println!(
+        "{},{},{},{}",
+        group_count,
+        key_order.name(),
         compile_elapsed.as_nanos(),
         replay_elapsed.as_nanos()
     );
