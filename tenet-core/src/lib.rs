@@ -434,6 +434,12 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
         coupled: SectorId,
         bent_leg_is_dual: bool,
     ) -> Self::Scalar;
+
+    fn foldright_scalar(
+        &self,
+        source: &FusionTreeBlockKey,
+        destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -983,6 +989,56 @@ where
     )
 }
 
+pub fn unique_transpose_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreePivotalSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    if !is_cyclic_permutation(&permutation) {
+        return Err(CoreError::InvalidPermutation {
+            permutation,
+            rank: codomain_rank + domain_rank,
+        });
+    }
+
+    let mut position = match permutation.iter().position(|&axis| axis == 0) {
+        Some(position) => position,
+        None => return Ok((tree_pair.clone(), rule.scalar_one())),
+    };
+    let mut current = unique_repartition_tree_pair(rule, tree_pair, codomain_permutation.len())?;
+    let total_rank = codomain_rank + domain_rank;
+    if total_rank == 0 || position == 0 {
+        return Ok(current);
+    }
+
+    let half_rank = total_rank >> 1;
+    while position > 0 && position < half_rank {
+        let (next, coefficient) = unique_cycle_anticlockwise_tree_pair(rule, &current.0)?;
+        current = (next, current.1 * coefficient);
+        position -= 1;
+    }
+    while position >= half_rank && position > 0 {
+        let (next, coefficient) = unique_cycle_clockwise_tree_pair(rule, &current.0)?;
+        current = (next, current.1 * coefficient);
+        position = (position + 1) % total_rank;
+    }
+
+    Ok(current)
+}
+
 pub fn unique_repartition_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -1367,6 +1423,179 @@ where
     ))
 }
 
+fn unique_foldright_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreePivotalSymbols,
+{
+    let codomain = tree_pair.codomain_tree();
+    let codomain_rank = codomain.uncoupled().len();
+    if codomain_rank == 0 {
+        return Err(CoreError::MalformedFusionTree {
+            message: "foldright requires at least one codomain leg",
+        });
+    }
+    let first = codomain.uncoupled()[0];
+    let first_is_dual =
+        codomain
+            .is_dual()
+            .first()
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "codomain tree is missing the first duality flag",
+            })?;
+    let codomain_prime = unique_multi_fmove_tree(rule, codomain)?;
+    let recoupled = codomain_prime
+        .coupled()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "foldright recoupled codomain tree requires a coupled sector",
+        })?;
+    let domain_prime = unique_multi_fmove_inv_tree(
+        rule,
+        rule.dual(first),
+        recoupled,
+        tree_pair.domain_tree(),
+        !first_is_dual,
+    )?;
+    let destination = FusionTreeBlockKey::pair(codomain_prime, domain_prime);
+    let coefficient = rule.foldright_scalar(tree_pair, &destination);
+    Ok((destination, coefficient))
+}
+
+fn unique_foldleft_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreePivotalSymbols,
+{
+    let swapped = FusionTreeBlockKey::pair(
+        tree_pair.domain_tree().clone(),
+        tree_pair.codomain_tree().clone(),
+    );
+    let (folded, coefficient) = unique_foldright_tree_pair(rule, &swapped)?;
+    Ok((
+        FusionTreeBlockKey::pair(folded.domain_tree().clone(), folded.codomain_tree().clone()),
+        rule.scalar_conj(coefficient),
+    ))
+}
+
+fn unique_cycle_clockwise_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreePivotalSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let (tmp, first_coefficient) = if tree_pair.codomain_tree().uncoupled().is_empty() {
+        unique_bendleft_tree_pair(rule, tree_pair)?
+    } else {
+        unique_foldright_tree_pair(rule, tree_pair)?
+    };
+    let (dst, second_coefficient) = if tree_pair.codomain_tree().uncoupled().is_empty() {
+        unique_foldright_tree_pair(rule, &tmp)?
+    } else {
+        unique_bendleft_tree_pair(rule, &tmp)?
+    };
+    Ok((dst, first_coefficient * second_coefficient))
+}
+
+fn unique_cycle_anticlockwise_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreePivotalSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let (tmp, first_coefficient) = if tree_pair.domain_tree().uncoupled().is_empty() {
+        unique_bendright_tree_pair(rule, tree_pair)?
+    } else {
+        unique_foldleft_tree_pair(rule, tree_pair)?
+    };
+    let (dst, second_coefficient) = if tree_pair.domain_tree().uncoupled().is_empty() {
+        unique_foldleft_tree_pair(rule, &tmp)?
+    } else {
+        unique_bendright_tree_pair(rule, &tmp)?
+    };
+    Ok((dst, first_coefficient * second_coefficient))
+}
+
+fn unique_multi_fmove_tree<R>(rule: &R, tree: &FusionTreeKey) -> Result<FusionTreeKey, CoreError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let first = tree
+        .uncoupled()
+        .first()
+        .copied()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "multi_Fmove requires at least one uncoupled sector",
+        })?;
+    let coupled = tree.coupled().ok_or(CoreError::MalformedFusionTree {
+        message: "multi_Fmove requires a coupled sector",
+    })?;
+    let recoupled = only_fusion_channel(rule, rule.dual(first), coupled)?;
+    unique_standard_fusion_tree(
+        rule,
+        &tree.uncoupled()[1..],
+        recoupled,
+        &tree.is_dual()[1..],
+    )
+}
+
+fn unique_multi_fmove_inv_tree<R>(
+    rule: &R,
+    leading_sector: SectorId,
+    coupled: SectorId,
+    tree: &FusionTreeKey,
+    leading_is_dual: bool,
+) -> Result<FusionTreeKey, CoreError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
+    uncoupled.push(leading_sector);
+    uncoupled.extend_from_slice(tree.uncoupled());
+    let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
+    is_dual.push(leading_is_dual);
+    is_dual.extend_from_slice(tree.is_dual());
+    unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)
+}
+
+fn unique_standard_fusion_tree<R>(
+    rule: &R,
+    uncoupled: &[SectorId],
+    coupled: SectorId,
+    is_dual: &[bool],
+) -> Result<FusionTreeKey, CoreError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    if uncoupled.len() != is_dual.len() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree sectors and duality flags must have matching length",
+        });
+    }
+    let effective = uncoupled
+        .iter()
+        .zip(is_dual)
+        .map(|(&sector, &dual)| if dual { rule.dual(sector) } else { sector })
+        .collect::<Vec<_>>();
+    let trees = collect_fusion_trees_for_coupled(rule, uncoupled, is_dual, &effective, coupled);
+    match trees.as_slice() {
+        [tree] => Ok(tree.clone()),
+        _ => Err(CoreError::FusionChannelCount {
+            left: coupled,
+            right: coupled,
+            count: trees.len(),
+        }),
+    }
+}
+
 fn linearize_tree_pair_axis(axis: usize, codomain_rank: usize, domain_rank: usize) -> usize {
     if axis < codomain_rank {
         axis
@@ -1393,6 +1622,16 @@ fn validate_permutation(permutation: &[usize], rank: usize) -> Result<(), CoreEr
         seen[axis] = true;
     }
     Ok(())
+}
+
+fn is_cyclic_permutation(permutation: &[usize]) -> bool {
+    let rank = permutation.len();
+    for index in 0..rank {
+        if permutation[(index + 1) % rank] != (permutation[index] + 1) % rank {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -2980,6 +3219,14 @@ mod tests {
         ) -> Self::Scalar {
             1.0
         }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
+        ) -> Self::Scalar {
+            1.0
+        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -3108,6 +3355,14 @@ mod tests {
         ) -> Self::Scalar {
             1.0
         }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
+        ) -> Self::Scalar {
+            1.0
+        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -3187,6 +3442,14 @@ mod tests {
             _bent_sector: SectorId,
             _coupled: SectorId,
             _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
         ) -> Self::Scalar {
             1.0
         }
@@ -3645,6 +3908,120 @@ mod tests {
         assert_eq!(permuted.codomain_is_dual(), &[false]);
         assert_eq!(permuted.domain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(permuted.domain_is_dual(), &[true]);
+    }
+
+    #[test]
+    fn unique_transpose_tree_pair_is_cyclic_and_reversible() {
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+
+        let (transposed, coefficient) =
+            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[1], &[0]).unwrap();
+        let (roundtrip, inverse_coefficient) =
+            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &transposed, &[1], &[0]).unwrap();
+
+        assert_eq!(coefficient, 1.0);
+        assert_eq!(inverse_coefficient, 1.0);
+        assert_eq!(roundtrip, source);
+    }
+
+    #[test]
+    fn unique_transpose_tree_pair_matches_tensorkit_clockwise_cycle() {
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1, 0],
+            Some(1),
+            [false, false],
+            [false, false],
+            [],
+            [],
+            [1],
+            [1],
+        );
+        let expected = FusionTreeBlockKey::pair_from_sector_ids(
+            [0, 0],
+            [1, 1],
+            Some(0),
+            [false, true],
+            [true, false],
+            [],
+            [],
+            [1],
+            [1],
+        );
+
+        let (transposed, coefficient) =
+            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[1, 3], &[0, 2]).unwrap();
+
+        assert_eq!(coefficient, 1.0);
+        assert_eq!(transposed, expected);
+    }
+
+    #[test]
+    fn unique_transpose_tree_pair_matches_tensorkit_anticlockwise_cycle() {
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1, 0],
+            Some(1),
+            [false, false],
+            [false, false],
+            [],
+            [],
+            [1],
+            [1],
+        );
+        let expected = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 1],
+            [0, 0],
+            Some(0),
+            [true, false],
+            [false, true],
+            [],
+            [],
+            [1],
+            [1],
+        );
+
+        let (transposed, coefficient) =
+            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[2, 0], &[3, 1]).unwrap();
+
+        assert_eq!(coefficient, 1.0);
+        assert_eq!(transposed, expected);
+    }
+
+    #[test]
+    fn unique_transpose_tree_pair_rejects_noncyclic_permutation() {
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1],
+            Some(1),
+            [false, false],
+            [false],
+            [],
+            [],
+            [1],
+            [],
+        );
+
+        let err = unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[0, 2], &[1])
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::InvalidPermutation {
+                permutation: vec![0, 2, 1],
+                rank: 3,
+            }
+        );
     }
 
     #[test]

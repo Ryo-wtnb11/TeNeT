@@ -15,9 +15,10 @@ use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
     unique_braid_tree, unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
-    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError,
-    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
-    MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols, TensorMap,
+    unique_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut,
+    BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
+    FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols,
+    MultiplicityFreePivotalSymbols, TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -763,11 +764,11 @@ where
                 codomain_levels,
                 domain_levels,
             )?,
-            TreeTransformOperationKey::Transpose { .. } => {
-                return Err(OperationError::UnsupportedTreeTransformScope {
-                    operation: operation.clone(),
-                    message: "UniqueFusion tree-pair lowering supports explicit Permute or Braid operations",
-                });
+            TreeTransformOperationKey::Transpose {
+                codomain_permutation,
+                domain_permutation,
+            } => {
+                unique_transpose_tree_pair(rule, src_key, codomain_permutation, domain_permutation)?
             }
         };
         specs.push(TreeTransformGroupBlockSpec::single(
@@ -3040,6 +3041,14 @@ mod tests {
         ) -> Self::Scalar {
             1.0
         }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
+        ) -> Self::Scalar {
+            1.0
+        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -3109,6 +3118,14 @@ mod tests {
             _bent_sector: SectorId,
             _coupled: SectorId,
             _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
         ) -> Self::Scalar {
             1.0
         }
@@ -5006,37 +5023,71 @@ mod tests {
     }
 
     #[test]
-    fn unique_tree_pair_plan_builder_rejects_transpose_scope() {
+    fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
         let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
             [1],
             [1],
             Some(1),
             [false],
-            [false],
+            [true],
             [],
             [],
             [],
             [],
         ));
+        let expected_dst_key = src_key.clone();
         let src_structure =
-            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
-        let operation = TreeTransformOperationKey::transpose([0], [1]);
+            BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])])
+                .unwrap();
+        let operation = TreeTransformOperationKey::transpose([1], [0]);
 
-        let err = build_unique_tree_pair_transform_group_plan(
-            &UniqueZ2Rule,
-            operation.clone(),
-            &src_structure,
-        )
-        .unwrap_err();
+        let plan =
+            build_unique_tree_pair_transform_group_plan(&UniqueZ2Rule, operation, &src_structure)
+                .unwrap();
 
-        assert_eq!(
-            err,
-            OperationError::UnsupportedTreeTransformScope {
-                operation,
-                message:
-                    "UniqueFusion tree-pair lowering supports explicit Permute or Braid operations",
-            }
-        );
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    }
+
+    #[test]
+    fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1, 0],
+            Some(1),
+            [false, false],
+            [false, false],
+            [],
+            [],
+            [1],
+            [1],
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 1],
+            [0, 0],
+            Some(0),
+            [true, false],
+            [false, true],
+            [],
+            [],
+            [1],
+            [1],
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(4, [(src_key.clone(), vec![1, 1, 1, 1])])
+                .unwrap();
+        let operation = TreeTransformOperationKey::transpose([2, 0], [3, 1]);
+
+        let plan =
+            build_unique_tree_pair_transform_group_plan(&UniqueZ2Rule, operation, &src_structure)
+                .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
     }
 
     #[test]
