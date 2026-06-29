@@ -377,6 +377,52 @@ impl FusionTreeHomSpace {
         SectorStructure::from_keys(rank, self.fusion_tree_keys(rule))
     }
 
+    pub fn unique_fusion_tree_key_from_external_sectors<R>(
+        &self,
+        rule: &R,
+        sectors: &[SectorId],
+    ) -> Result<FusionTreeBlockKey, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        if rule.fusion_style() != FusionStyleKind::Unique {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Unique,
+                actual: rule.fusion_style(),
+            });
+        }
+
+        let rank = self.codomain.len() + self.domain.len();
+        if sectors.len() != rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: rank,
+                actual: sectors.len(),
+            });
+        }
+
+        let codomain_tree = unique_fusion_tree_for_selected_space(
+            rule,
+            &self.codomain,
+            &sectors[..self.codomain.len()],
+        )?;
+        let domain_sectors = sectors[self.codomain.len()..]
+            .iter()
+            .map(|&sector| rule.dual(sector))
+            .collect::<Vec<_>>();
+        let domain_tree =
+            unique_fusion_tree_for_selected_space(rule, &self.domain, &domain_sectors)?;
+        let codomain_coupled = codomain_tree.coupled().unwrap_or_else(|| rule.vacuum());
+        let domain_coupled = domain_tree.coupled().unwrap_or_else(|| rule.vacuum());
+        if codomain_coupled != domain_coupled {
+            return Err(CoreError::SectorMismatch {
+                expected: codomain_coupled,
+                actual: domain_coupled,
+            });
+        }
+
+        Ok(FusionTreeBlockKey::pair(codomain_tree, domain_tree))
+    }
+
     pub fn fusion_tree_groups<R>(&self, rule: &R) -> Result<Vec<FusionTreeBlockGroup>, CoreError>
     where
         R: MultiplicityFreeFusionRule,
@@ -505,6 +551,61 @@ where
     let uncoupled = legs.iter().map(|leg| leg.sector()).collect::<Vec<_>>();
     let is_dual = legs.iter().map(|leg| leg.is_dual()).collect::<Vec<_>>();
     collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled)
+}
+
+fn unique_fusion_tree_for_selected_space<R>(
+    rule: &R,
+    space: &FusionProductSpace,
+    selected: &[SectorId],
+) -> Result<FusionTreeKey, CoreError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    if selected.len() != space.len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: space.len(),
+            actual: selected.len(),
+        });
+    }
+    for (&sector, leg) in selected.iter().zip(space.legs()) {
+        if !leg.sectors().contains(&sector) {
+            return Err(CoreError::InvalidSector { sector });
+        }
+    }
+    let is_dual = space
+        .legs()
+        .iter()
+        .map(SectorLeg::is_dual)
+        .collect::<Vec<_>>();
+    let coupled = unique_effective_coupled_sector(rule, selected, &is_dual)?;
+    unique_standard_fusion_tree(rule, selected, coupled, &is_dual)
+}
+
+fn unique_effective_coupled_sector<R>(
+    rule: &R,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
+) -> Result<SectorId, CoreError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    if uncoupled.len() != is_dual.len() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree sectors and duality flags must have matching length",
+        });
+    }
+    let mut effective =
+        uncoupled
+            .iter()
+            .zip(is_dual)
+            .map(|(&sector, &dual)| if dual { rule.dual(sector) } else { sector });
+    let Some(mut coupled) = effective.next() else {
+        return Ok(rule.vacuum());
+    };
+    for sector in effective {
+        coupled = only_fusion_channel(rule, coupled, sector)?;
+    }
+    Ok(coupled)
 }
 
 fn collect_fusion_trees_for_coupled<R>(
@@ -3000,6 +3101,13 @@ pub enum CoreError {
         right: SectorId,
         style: BraidingStyleKind,
     },
+    InvalidSector {
+        sector: SectorId,
+    },
+    SectorMismatch {
+        expected: SectorId,
+        actual: SectorId,
+    },
     FusionChannelCount {
         left: SectorId,
         right: SectorId,
@@ -3076,6 +3184,10 @@ impl fmt::Display for CoreError {
                     f,
                     "cannot braid non-unit sectors {left:?} and {right:?} with braiding style {style:?}"
                 )
+            }
+            Self::InvalidSector { sector } => write!(f, "invalid sector {sector:?}"),
+            Self::SectorMismatch { expected, actual } => {
+                write!(f, "sector mismatch: expected {expected:?}, got {actual:?}")
             }
             Self::FusionChannelCount { left, right, count } => {
                 write!(
@@ -3309,6 +3421,33 @@ mod tests {
             1.0
         }
     }
+
+    #[derive(Clone, Copy, Debug)]
+    struct Z4PointedRule;
+
+    impl FusionRule for Z4PointedRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            SectorId::new((4 - sector.id() % 4) % 4)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 4)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for Z4PointedRule {}
 
     #[derive(Clone, Copy, Debug)]
     struct PlanarZ2Rule;
@@ -4482,6 +4621,68 @@ mod tests {
         assert_eq!(
             groups[0].group_key(),
             &FusionTreeGroupKey::from_sector_ids([1, 1], [1, 1], [false, false], [false, false])
+        );
+    }
+
+    #[test]
+    fn unique_homspace_builds_subblock_key_from_external_sectors() {
+        let rule = Z2MultiplicityFreeRule;
+        let hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
+
+        let key = hom
+            .unique_fusion_tree_key_from_external_sectors(
+                &rule,
+                &[SectorId::new(1), SectorId::new(1)],
+            )
+            .unwrap();
+
+        assert_eq!(key.codomain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(key.domain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(key.coupled(), Some(SectorId::new(1)));
+        assert_eq!(key.codomain_is_dual(), &[false]);
+        assert_eq!(key.domain_is_dual(), &[false]);
+    }
+
+    #[test]
+    fn unique_homspace_dualizes_domain_external_sectors_like_tensorkit() {
+        let rule = Z4PointedRule;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+        );
+
+        let key = hom
+            .unique_fusion_tree_key_from_external_sectors(
+                &rule,
+                &[SectorId::new(1), SectorId::new(3)],
+            )
+            .unwrap();
+
+        assert_eq!(key.codomain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(key.domain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(key.coupled(), Some(SectorId::new(1)));
+    }
+
+    #[test]
+    fn unique_homspace_rejects_invalid_external_sector_tuple() {
+        let rule = Z4PointedRule;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+        );
+
+        let err = hom
+            .unique_fusion_tree_key_from_external_sectors(
+                &rule,
+                &[SectorId::new(1), SectorId::new(2)],
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::InvalidSector {
+                sector: SectorId::new(2),
+            }
         );
     }
 
