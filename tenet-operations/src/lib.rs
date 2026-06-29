@@ -1330,7 +1330,6 @@ where
         element_count,
         src_count,
         dst_count,
-        alpha,
     )?;
 
     for dst_index in 0..dst_count {
@@ -1342,6 +1341,7 @@ where
             &workspace.destination,
             dst_index * element_count,
             dst_data,
+            alpha,
             beta,
         )?;
     }
@@ -1357,7 +1357,6 @@ fn apply_recoupling_matrix_src_times_u_transpose<T>(
     element_count: usize,
     src_count: usize,
     dst_count: usize,
-    alpha: T,
 ) -> Result<(), OperationError>
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero,
@@ -1407,7 +1406,7 @@ where
                 let src_value = source[element + src_index * element_count];
                 sum = sum + src_value * coeff;
             }
-            destination[dst_column_start + element] = alpha * sum;
+            destination[dst_column_start + element] = sum;
         }
     }
     Ok(())
@@ -1448,6 +1447,7 @@ fn scatter_column_into_layout<T>(
     packed: &[T],
     packed_offset: usize,
     dst_data: &mut [T],
+    alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
 where
@@ -1476,12 +1476,12 @@ where
     .map_err(strided_error)?;
 
     if beta.is_zero() {
-        strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+        strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
     } else {
         if !beta.is_one() {
             scale_destination(zero_strides, &mut dst, beta)?;
         }
-        strided_kernel::axpy(&mut dst, &src, T::one()).map_err(strided_error)
+        strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
     }
 }
 

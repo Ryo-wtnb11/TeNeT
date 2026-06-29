@@ -203,6 +203,54 @@ impl DenseWrite<'_> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseDotConfig {
+    lhs_contracting_dims: Vec<usize>,
+    rhs_contracting_dims: Vec<usize>,
+    lhs_batch_dims: Vec<usize>,
+    rhs_batch_dims: Vec<usize>,
+}
+
+impl DenseDotConfig {
+    pub fn new(
+        lhs_contracting_dims: Vec<usize>,
+        rhs_contracting_dims: Vec<usize>,
+        lhs_batch_dims: Vec<usize>,
+        rhs_batch_dims: Vec<usize>,
+    ) -> Self {
+        Self {
+            lhs_contracting_dims,
+            rhs_contracting_dims,
+            lhs_batch_dims,
+            rhs_batch_dims,
+        }
+    }
+
+    pub fn matmul() -> Self {
+        Self::new(vec![1], vec![0], Vec::new(), Vec::new())
+    }
+
+    #[inline]
+    pub fn lhs_contracting_dims(&self) -> &[usize] {
+        &self.lhs_contracting_dims
+    }
+
+    #[inline]
+    pub fn rhs_contracting_dims(&self) -> &[usize] {
+        &self.rhs_contracting_dims
+    }
+
+    #[inline]
+    pub fn lhs_batch_dims(&self) -> &[usize] {
+        &self.lhs_batch_dims
+    }
+
+    #[inline]
+    pub fn rhs_batch_dims(&self) -> &[usize] {
+        &self.rhs_batch_dims
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DenseTensor {
     backend: DenseBackend,
@@ -284,6 +332,23 @@ pub trait DenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError>;
+
+    fn matmul_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+    ) -> Result<(), DenseError> {
+        self.dot_general_into(output, lhs, rhs, &DenseDotConfig::matmul())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -393,7 +458,10 @@ mod tenferro_adapter {
 
     use tenferro_cpu::CpuBackend;
     use tenferro_linalg::LinalgBackend;
-    use tenferro_tensor::{Tensor, TensorView, TypedTensorView};
+    use tenferro_tensor::{
+        DotGeneralConfig, Tensor, TensorDot, TensorRead, TensorView, TensorViewMut, TensorWrite,
+        TypedTensorView, TypedTensorViewMut,
+    };
 
     #[derive(Debug)]
     pub struct DefaultDenseExecutor {
@@ -438,6 +506,21 @@ mod tenferro_adapter {
                 .map(wrap_outputs)
                 .map_err(|err| tenferro_error("eigh_read", err))
         }
+
+        fn dot_general_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            config: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            self.backend
+                .dot_general_read_into(lhs, rhs, &tenferro_dot_config(config), output)
+                .map_err(|err| tenferro_error("dot_general_read_into", err))
+        }
     }
 
     fn wrap_outputs(outputs: Vec<Tensor>) -> Vec<DenseTensor> {
@@ -459,6 +542,18 @@ mod tenferro_adapter {
         }
     }
 
+    fn tenferro_view_mut(output: DenseWrite<'_>) -> Result<TensorViewMut<'_>, DenseError> {
+        match output {
+            DenseWrite::F32(view) => typed_tenferro_view_mut(view).map(TensorViewMut::F32),
+            DenseWrite::F64(view) => typed_tenferro_view_mut(view).map(TensorViewMut::F64),
+            DenseWrite::I32(view) => typed_tenferro_view_mut(view).map(TensorViewMut::I32),
+            DenseWrite::I64(view) => typed_tenferro_view_mut(view).map(TensorViewMut::I64),
+            DenseWrite::Bool(view) => typed_tenferro_view_mut(view).map(TensorViewMut::Bool),
+            DenseWrite::C32(view) => typed_tenferro_view_mut(view).map(TensorViewMut::C32),
+            DenseWrite::C64(view) => typed_tenferro_view_mut(view).map(TensorViewMut::C64),
+        }
+    }
+
     fn typed_tenferro_view<'a, T: 'static>(
         view: DenseView<'a, T>,
     ) -> Result<TypedTensorView<'a, T>, DenseError> {
@@ -468,6 +563,32 @@ mod tenferro_adapter {
         })?;
         TypedTensorView::from_slice(view.shape(), strides, offset, view.data())
             .map_err(|err| tenferro_error("TypedTensorView::from_slice", err))
+    }
+
+    fn typed_tenferro_view_mut<'a, T: 'static>(
+        view: DenseViewMut<'a, T>,
+    ) -> Result<TypedTensorViewMut<'a, T>, DenseError> {
+        let DenseViewMut {
+            data,
+            shape,
+            strides,
+            offset,
+        } = view;
+        let shape = shape.to_vec();
+        let strides = strides_to_isize(strides)?;
+        let offset =
+            isize::try_from(offset).map_err(|_| DenseError::OffsetOverflow { value: offset })?;
+        TypedTensorViewMut::from_slice(shape, strides, offset, data)
+            .map_err(|err| tenferro_error("TypedTensorViewMut::from_slice", err))
+    }
+
+    fn tenferro_dot_config(config: &DenseDotConfig) -> DotGeneralConfig {
+        DotGeneralConfig {
+            lhs_contracting_dims: config.lhs_contracting_dims().to_vec(),
+            rhs_contracting_dims: config.rhs_contracting_dims().to_vec(),
+            lhs_batch_dims: config.lhs_batch_dims().to_vec(),
+            rhs_batch_dims: config.rhs_batch_dims().to_vec(),
+        }
     }
 }
 
@@ -697,6 +818,118 @@ mod tests {
         let strides = [1, 4];
         let err = DenseView::new(&data, &shape, &strides, 0).unwrap_err();
         assert_eq!(err, DenseError::OutOfBounds);
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_matmul_into_matches_tensorkit_recoupling_view_for_all_gemm_dtypes() {
+        let lhs_shape = [2, 3];
+        let lhs_strides = [1, 2];
+        let rhs_shape = [3, 2];
+        let rhs_strides = [1, 3];
+        let out_shape = [2, 2];
+        let out_strides = [1, 4];
+        let out_offset = 1;
+
+        let mut executor = DefaultDenseExecutor::new();
+
+        let lhs_f32 = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let u_f32 = vec![10.0_f32, 100.0, 1000.0, 20.0, 200.0, 2000.0];
+        let mut out_f32 = vec![-1.0_f32; 8];
+        executor
+            .matmul_into(
+                DenseWrite::F32(
+                    DenseViewMut::new(&mut out_f32, &out_shape, &out_strides, out_offset).unwrap(),
+                ),
+                DenseRead::F32(DenseView::new(&lhs_f32, &lhs_shape, &lhs_strides, 0).unwrap()),
+                DenseRead::F32(DenseView::new(&u_f32, &rhs_shape, &rhs_strides, 0).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            out_f32,
+            vec![-1.0, 5310.0, 6420.0, -1.0, -1.0, 10620.0, 12840.0, -1.0]
+        );
+
+        let lhs_f64 = vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let u_f64 = vec![10.0_f64, 100.0, 1000.0, 20.0, 200.0, 2000.0];
+        let mut out_f64 = vec![-1.0_f64; 8];
+        executor
+            .matmul_into(
+                DenseWrite::F64(
+                    DenseViewMut::new(&mut out_f64, &out_shape, &out_strides, out_offset).unwrap(),
+                ),
+                DenseRead::F64(DenseView::new(&lhs_f64, &lhs_shape, &lhs_strides, 0).unwrap()),
+                DenseRead::F64(DenseView::new(&u_f64, &rhs_shape, &rhs_strides, 0).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            out_f64,
+            vec![-1.0, 5310.0, 6420.0, -1.0, -1.0, 10620.0, 12840.0, -1.0]
+        );
+
+        let lhs_c32 = lhs_f32
+            .iter()
+            .map(|&value| Complex32::new(value, 0.0))
+            .collect::<Vec<_>>();
+        let u_c32 = u_f32
+            .iter()
+            .map(|&value| Complex32::new(value, 0.0))
+            .collect::<Vec<_>>();
+        let mut out_c32 = vec![Complex32::new(-1.0, -2.0); 8];
+        executor
+            .matmul_into(
+                DenseWrite::C32(
+                    DenseViewMut::new(&mut out_c32, &out_shape, &out_strides, out_offset).unwrap(),
+                ),
+                DenseRead::C32(DenseView::new(&lhs_c32, &lhs_shape, &lhs_strides, 0).unwrap()),
+                DenseRead::C32(DenseView::new(&u_c32, &rhs_shape, &rhs_strides, 0).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            out_c32,
+            vec![
+                Complex32::new(-1.0, -2.0),
+                Complex32::new(5310.0, 0.0),
+                Complex32::new(6420.0, 0.0),
+                Complex32::new(-1.0, -2.0),
+                Complex32::new(-1.0, -2.0),
+                Complex32::new(10620.0, 0.0),
+                Complex32::new(12840.0, 0.0),
+                Complex32::new(-1.0, -2.0),
+            ]
+        );
+
+        let lhs_c64 = lhs_f64
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect::<Vec<_>>();
+        let u_c64 = u_f64
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect::<Vec<_>>();
+        let mut out_c64 = vec![Complex64::new(-1.0, -2.0); 8];
+        executor
+            .matmul_into(
+                DenseWrite::C64(
+                    DenseViewMut::new(&mut out_c64, &out_shape, &out_strides, out_offset).unwrap(),
+                ),
+                DenseRead::C64(DenseView::new(&lhs_c64, &lhs_shape, &lhs_strides, 0).unwrap()),
+                DenseRead::C64(DenseView::new(&u_c64, &rhs_shape, &rhs_strides, 0).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            out_c64,
+            vec![
+                Complex64::new(-1.0, -2.0),
+                Complex64::new(5310.0, 0.0),
+                Complex64::new(6420.0, 0.0),
+                Complex64::new(-1.0, -2.0),
+                Complex64::new(-1.0, -2.0),
+                Complex64::new(10620.0, 0.0),
+                Complex64::new(12840.0, 0.0),
+                Complex64::new(-1.0, -2.0),
+            ]
+        );
     }
 
     #[cfg(feature = "tenferro")]
