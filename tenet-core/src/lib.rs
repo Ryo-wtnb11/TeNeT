@@ -428,13 +428,24 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        if rule.fusion_style() != FusionStyleKind::Unique {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Unique,
-                actual: rule.fusion_style(),
+        let mut keys = self.fusion_tree_keys_from_external_sectors(rule, sectors)?;
+        if keys.len() != 1 {
+            return Err(CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: keys.len(),
             });
         }
+        Ok(keys.remove(0))
+    }
 
+    pub fn fusion_tree_keys_from_external_sectors<R>(
+        &self,
+        rule: &R,
+        sectors: &[SectorId],
+    ) -> Result<Vec<FusionTreeBlockKey>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
         let rank = self.codomain.len() + self.domain.len();
         if sectors.len() != rank {
             return Err(CoreError::DimensionMismatch {
@@ -443,7 +454,7 @@ impl FusionTreeHomSpace {
             });
         }
 
-        let codomain_tree = unique_fusion_tree_for_selected_space(
+        let codomain = fusion_trees_by_coupled_for_selected_space(
             rule,
             &self.codomain,
             &sectors[..self.codomain.len()],
@@ -452,18 +463,34 @@ impl FusionTreeHomSpace {
             .iter()
             .map(|&sector| rule.dual(sector))
             .collect::<Vec<_>>();
-        let domain_tree =
-            unique_fusion_tree_for_selected_space(rule, &self.domain, &domain_sectors)?;
-        let codomain_coupled = codomain_tree.coupled().unwrap_or_else(|| rule.vacuum());
-        let domain_coupled = domain_tree.coupled().unwrap_or_else(|| rule.vacuum());
-        if codomain_coupled != domain_coupled {
-            return Err(CoreError::SectorMismatch {
-                expected: codomain_coupled,
-                actual: domain_coupled,
-            });
+        let domain =
+            fusion_trees_by_coupled_for_selected_space(rule, &self.domain, &domain_sectors)?;
+        let mut keys = Vec::new();
+        let mut codomain_index = 0usize;
+        let mut domain_index = 0usize;
+        while codomain_index < codomain.len() && domain_index < domain.len() {
+            match codomain[codomain_index]
+                .coupled
+                .cmp(&domain[domain_index].coupled)
+            {
+                std::cmp::Ordering::Less => codomain_index += 1,
+                std::cmp::Ordering::Greater => domain_index += 1,
+                std::cmp::Ordering::Equal => {
+                    for domain_tree in &domain[domain_index].trees {
+                        for codomain_tree in &codomain[codomain_index].trees {
+                            keys.push(FusionTreeBlockKey::pair(
+                                codomain_tree.clone(),
+                                domain_tree.clone(),
+                            ));
+                        }
+                    }
+                    codomain_index += 1;
+                    domain_index += 1;
+                }
+            }
         }
 
-        Ok(FusionTreeBlockKey::pair(codomain_tree, domain_tree))
+        Ok(keys)
     }
 
     pub fn fusion_tree_groups<R>(&self, rule: &R) -> Result<Vec<FusionTreeBlockGroup>, CoreError>
@@ -1584,11 +1611,11 @@ where
     collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled)
 }
 
-fn unique_fusion_tree_for_selected_space<R>(
+fn fusion_trees_by_coupled_for_selected_space<R>(
     rule: &R,
     space: &FusionProductSpace,
     selected: &[SectorId],
-) -> Result<FusionTreeKey, CoreError>
+) -> Result<Vec<CoupledFusionTrees>, CoreError>
 where
     R: MultiplicityFreeFusionRule,
 {
@@ -1603,36 +1630,22 @@ where
             return Err(CoreError::InvalidSector { sector });
         }
     }
-    let is_dual = space
-        .legs()
-        .iter()
-        .map(SectorLeg::is_dual)
-        .collect::<Vec<_>>();
-    let coupled = unique_effective_coupled_sector(rule, selected, &is_dual)?;
-    unique_standard_fusion_tree(rule, selected, coupled, &is_dual)
-}
 
-fn unique_effective_coupled_sector<R>(
-    rule: &R,
-    uncoupled: &[SectorId],
-    is_dual: &[bool],
-) -> Result<SectorId, CoreError>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    if uncoupled.len() != is_dual.len() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "fusion tree sectors and duality flags must have matching length",
-        });
+    let legs = selected
+        .iter()
+        .zip(space.legs())
+        .map(|(&sector, leg)| FusionTreeLeg::new(sector, leg.is_dual()))
+        .collect::<Vec<_>>();
+    let effective = effective_sectors(rule, &legs);
+    let mut grouped = Vec::new();
+    for coupled in possible_coupled_sectors(rule, &effective) {
+        let trees = fusion_trees_for_coupled(rule, &legs, coupled);
+        if !trees.is_empty() {
+            grouped.push(CoupledFusionTrees { coupled, trees });
+        }
     }
-    let mut effective = uncoupled.iter().copied();
-    let Some(mut coupled) = effective.next() else {
-        return Ok(rule.vacuum());
-    };
-    for sector in effective {
-        coupled = only_fusion_channel(rule, coupled, sector)?;
-    }
-    Ok(coupled)
+    grouped.sort_by_key(|group| group.coupled);
+    Ok(grouped)
 }
 
 fn collect_fusion_trees_for_coupled<R>(
@@ -4857,14 +4870,36 @@ where
     where
         R: MultiplicityFreeFusionRule,
     {
+        let mut blocks = self.subblocks_by_sectors(rule, sectors)?;
+        if blocks.len() != 1 {
+            return Err(CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: blocks.len(),
+            });
+        }
+        Ok(blocks.remove(0))
+    }
+
+    pub fn subblocks_by_sectors<R>(
+        &self,
+        rule: &R,
+        sectors: &[SectorId],
+    ) -> Result<Vec<BlockView<'_, T>>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
         let fusion_space = self
             .fusion_space
             .as_ref()
             .ok_or(CoreError::MissingFusionSpace)?;
-        let key = fusion_space
+        let keys = fusion_space
             .homspace()
-            .unique_fusion_tree_key_from_external_sectors(rule, sectors)?;
-        self.subblock_by_tree(&key)
+            .fusion_tree_keys_from_external_sectors(rule, sectors)?;
+        let mut blocks = Vec::with_capacity(keys.len());
+        for key in keys {
+            blocks.push(self.subblock_by_tree(&key)?);
+        }
+        Ok(blocks)
     }
 }
 
@@ -6541,6 +6576,119 @@ mod tests {
     }
 
     #[test]
+    fn product_fusion_tree_homspace_matches_tensorkit_fz2_u1_su2_fixture() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = FpU1Su2Rule::default();
+        let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+        let sector = |parity, charge, twice_spin| {
+            rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        };
+
+        let a = sector(z2_odd(), 1, 1);
+        let b = sector(z2_odd(), -1, 1);
+        let c0 = sector(z2_even(), 0, 0);
+        let c1 = sector(z2_even(), 0, 2);
+        assert_eq!(a.id(), 43);
+        assert_eq!(b.id(), 19);
+        assert_eq!(c0.id(), 0);
+        assert_eq!(c1.id(), 3);
+
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
+            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        );
+        let keys = hom.fusion_tree_keys(&rule);
+
+        assert_eq!(keys.len(), 2);
+        for (key, coupled) in keys.iter().zip([c0, c1]) {
+            assert_eq!(key.coupled(), Some(coupled));
+            assert_eq!(key.codomain_uncoupled(), &[a, b]);
+            assert_eq!(key.domain_uncoupled(), &[coupled]);
+            assert_eq!(key.codomain_is_dual(), &[false, false]);
+            assert_eq!(key.domain_is_dual(), &[false]);
+            assert_eq!(key.codomain_innerlines(), &[]);
+            assert_eq!(key.domain_innerlines(), &[]);
+            assert_eq!(key.codomain_vertices(), &[SectorId::new(1)]);
+            assert_eq!(key.domain_vertices(), &[]);
+        }
+    }
+
+    #[test]
+    fn product_subblock_by_sectors_handles_simple_fusion_channels_without_manual_tree_keys() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = FpU1Su2Rule::default();
+        let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+        let sector = |parity, charge, twice_spin| {
+            rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        };
+
+        let a = sector(z2_odd(), 1, 1);
+        let b = sector(z2_odd(), -1, 1);
+        let c0 = sector(z2_even(), 0, 0);
+        let c1 = sector(z2_even(), 0, 2);
+        let dense = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
+            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        );
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            dense,
+            hom,
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        let tensor =
+            TensorMap::<i32, 2, 1>::from_vec_with_fusion_space(vec![100, 200], fusion_space)
+                .unwrap();
+
+        let c0_block = tensor.subblock_by_sectors(&rule, &[a, b, c0]).unwrap();
+        let c1_block = tensor.subblock_by_sectors(&rule, &[a, b, c1]).unwrap();
+        assert_eq!(c0_block.offset(), 0);
+        assert_eq!(c0_block.data()[c0_block.offset()], 100);
+        assert_eq!(c1_block.offset(), 1);
+        assert_eq!(c1_block.data()[c1_block.offset()], 200);
+
+        let all_c0_blocks = tensor.subblocks_by_sectors(&rule, &[a, b, c0]).unwrap();
+        assert_eq!(all_c0_blocks.len(), 1);
+        assert_eq!(all_c0_blocks[0].offset(), 0);
+    }
+
+    #[test]
+    fn product_external_domain_sector_is_dualized_componentwise() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = FpU1Rule::default();
+        let a = rule.encode_sector(z2_odd(), u1(2));
+        let external_domain = rule.dual(a);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([a], false)]),
+            FusionProductSpace::new([SectorLeg::new([a], false)]),
+        );
+
+        let keys = hom
+            .fusion_tree_keys_from_external_sectors(&rule, &[a, external_domain])
+            .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].codomain_uncoupled(), &[a]);
+        assert_eq!(keys[0].domain_uncoupled(), &[a]);
+        assert_eq!(keys[0].coupled(), Some(a));
+
+        let err = hom
+            .fusion_tree_keys_from_external_sectors(&rule, &[a, a])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CoreError::InvalidSector {
+                sector: external_domain
+            }
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "Z2 fusion received an invalid sector")]
     fn product_fusion_rule_panics_on_component_invalid_sector_like_existing_rules() {
         type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
@@ -7368,6 +7516,65 @@ mod tests {
         let groups = hom.fusion_tree_groups(&rule).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].block_indices(), &[0, 1]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_external_sectors_preserve_su2_simple_innerline_order() {
+        let rule = SU2FusionRule;
+        let half = SectorId::new(1);
+        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+
+        let keys = hom
+            .fusion_tree_keys_from_external_sectors(&rule, &[half, half, half, half])
+            .unwrap();
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].codomain_uncoupled(), &[half, half, half]);
+        assert_eq!(keys[0].domain_uncoupled(), &[half]);
+        assert_eq!(keys[0].codomain_innerlines(), &[SectorId::new(0)]);
+        assert_eq!(keys[1].codomain_innerlines(), &[SectorId::new(2)]);
+        assert_eq!(
+            fusion_tree_pair_order(&keys),
+            vec![(vec![1, 1, 1], vec![1], 1), (vec![1, 1, 1], vec![1], 1),]
+        );
+    }
+
+    #[test]
+    fn tensormap_subblocks_by_sectors_returns_all_su2_simple_innerline_blocks() {
+        let rule = SU2FusionRule;
+        let half = SectorId::new(1);
+        let dense = TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap();
+        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            dense,
+            hom,
+            &rule,
+            [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
+        )
+        .unwrap();
+        let tensor =
+            TensorMap::<i32, 3, 1>::from_vec_with_fusion_space(vec![11, 22], fusion_space).unwrap();
+
+        let blocks = tensor
+            .subblocks_by_sectors(&rule, &[half, half, half, half])
+            .unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].offset(), 0);
+        assert_eq!(blocks[0].data()[blocks[0].offset()], 11);
+        assert_eq!(blocks[1].offset(), 1);
+        assert_eq!(blocks[1].data()[blocks[1].offset()], 22);
+
+        let err = tensor
+            .subblock_by_sectors(&rule, &[half, half, half, half])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: 2,
+            }
+        );
     }
 
     #[test]
