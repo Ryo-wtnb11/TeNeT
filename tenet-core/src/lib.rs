@@ -161,41 +161,48 @@ impl From<usize> for SectorId {
 pub struct FusionTreeGroupKey {
     codomain_uncoupled: Vec<SectorId>,
     domain_uncoupled: Vec<SectorId>,
-    is_dual: Vec<bool>,
+    codomain_is_dual: Vec<bool>,
+    domain_is_dual: Vec<bool>,
 }
 
 impl FusionTreeGroupKey {
-    pub fn new<Codomain, Domain, Dual>(
+    pub fn new<Codomain, Domain, CodomainDual, DomainDual>(
         codomain_uncoupled: Codomain,
         domain_uncoupled: Domain,
-        is_dual: Dual,
+        codomain_is_dual: CodomainDual,
+        domain_is_dual: DomainDual,
     ) -> Self
     where
         Codomain: IntoIterator<Item = SectorId>,
         Domain: IntoIterator<Item = SectorId>,
-        Dual: IntoIterator<Item = bool>,
+        CodomainDual: IntoIterator<Item = bool>,
+        DomainDual: IntoIterator<Item = bool>,
     {
         Self {
             codomain_uncoupled: codomain_uncoupled.into_iter().collect(),
             domain_uncoupled: domain_uncoupled.into_iter().collect(),
-            is_dual: is_dual.into_iter().collect(),
+            codomain_is_dual: codomain_is_dual.into_iter().collect(),
+            domain_is_dual: domain_is_dual.into_iter().collect(),
         }
     }
 
-    pub fn from_sector_ids<Codomain, Domain, Dual>(
+    pub fn from_sector_ids<Codomain, Domain, CodomainDual, DomainDual>(
         codomain_uncoupled: Codomain,
         domain_uncoupled: Domain,
-        is_dual: Dual,
+        codomain_is_dual: CodomainDual,
+        domain_is_dual: DomainDual,
     ) -> Self
     where
         Codomain: IntoIterator<Item = usize>,
         Domain: IntoIterator<Item = usize>,
-        Dual: IntoIterator<Item = bool>,
+        CodomainDual: IntoIterator<Item = bool>,
+        DomainDual: IntoIterator<Item = bool>,
     {
         Self::new(
             codomain_uncoupled.into_iter().map(SectorId::new),
             domain_uncoupled.into_iter().map(SectorId::new),
-            is_dual,
+            codomain_is_dual,
+            domain_is_dual,
         )
     }
 
@@ -210,36 +217,82 @@ impl FusionTreeGroupKey {
     }
 
     #[inline]
-    pub fn is_dual(&self) -> &[bool] {
-        &self.is_dual
+    pub fn codomain_is_dual(&self) -> &[bool] {
+        &self.codomain_is_dual
+    }
+
+    #[inline]
+    pub fn domain_is_dual(&self) -> &[bool] {
+        &self.domain_is_dual
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct FusionTreeBlockKey {
+pub struct FusionTreeKey {
     uncoupled: Vec<SectorId>,
     coupled: Option<SectorId>,
+    is_dual: Vec<bool>,
+    innerlines: Vec<SectorId>,
     vertices: Vec<SectorId>,
 }
 
-impl FusionTreeBlockKey {
-    pub fn new(
-        uncoupled: Vec<SectorId>,
+impl FusionTreeKey {
+    pub fn new<Uncoupled, Dual, Innerlines, Vertices>(
+        uncoupled: Uncoupled,
         coupled: Option<SectorId>,
-        vertices: Vec<SectorId>,
-    ) -> Self {
+        is_dual: Dual,
+        innerlines: Innerlines,
+        vertices: Vertices,
+    ) -> Self
+    where
+        Uncoupled: IntoIterator<Item = SectorId>,
+        Dual: IntoIterator<Item = bool>,
+        Innerlines: IntoIterator<Item = SectorId>,
+        Vertices: IntoIterator<Item = SectorId>,
+    {
         Self {
-            uncoupled,
+            uncoupled: uncoupled.into_iter().collect(),
             coupled,
-            vertices,
+            is_dual: is_dual.into_iter().collect(),
+            innerlines: innerlines.into_iter().collect(),
+            vertices: vertices.into_iter().collect(),
         }
+    }
+
+    pub fn from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
+        uncoupled: Uncoupled,
+        coupled: Option<usize>,
+        is_dual: Dual,
+        innerlines: Innerlines,
+        vertices: Vertices,
+    ) -> Self
+    where
+        Uncoupled: IntoIterator<Item = usize>,
+        Dual: IntoIterator<Item = bool>,
+        Innerlines: IntoIterator<Item = usize>,
+        Vertices: IntoIterator<Item = usize>,
+    {
+        Self::new(
+            uncoupled.into_iter().map(SectorId::new),
+            coupled.map(SectorId::new),
+            is_dual,
+            innerlines.into_iter().map(SectorId::new),
+            vertices.into_iter().map(SectorId::new),
+        )
     }
 
     pub fn from_uncoupled<I>(uncoupled: I) -> Self
     where
         I: IntoIterator<Item = SectorId>,
     {
-        Self::new(uncoupled.into_iter().collect(), None, Vec::new())
+        let uncoupled = uncoupled.into_iter().collect::<Vec<_>>();
+        Self::new(
+            uncoupled.clone(),
+            None,
+            vec![false; uncoupled.len()],
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     #[inline]
@@ -253,8 +306,213 @@ impl FusionTreeBlockKey {
     }
 
     #[inline]
+    pub fn is_dual(&self) -> &[bool] {
+        &self.is_dual
+    }
+
+    #[inline]
+    pub fn innerlines(&self) -> &[SectorId] {
+        &self.innerlines
+    }
+
+    #[inline]
     pub fn vertices(&self) -> &[SectorId] {
         &self.vertices
+    }
+
+    fn compact_id(&self) -> Option<usize> {
+        if self.uncoupled.len() == 1
+            && self.coupled.is_none()
+            && self.innerlines.is_empty()
+            && self.vertices.is_empty()
+        {
+            Some(self.uncoupled[0].id())
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct FusionTreeBlockKey {
+    codomain_tree: FusionTreeKey,
+    domain_tree: FusionTreeKey,
+}
+
+impl FusionTreeBlockKey {
+    pub fn new(
+        uncoupled: Vec<SectorId>,
+        coupled: Option<SectorId>,
+        vertices: Vec<SectorId>,
+    ) -> Self {
+        let is_dual = vec![false; uncoupled.len()];
+        Self::pair(
+            FusionTreeKey::new(uncoupled, coupled, is_dual, Vec::new(), vertices),
+            FusionTreeKey::new(
+                Vec::<SectorId>::new(),
+                None,
+                Vec::<bool>::new(),
+                Vec::<SectorId>::new(),
+                Vec::<SectorId>::new(),
+            ),
+        )
+    }
+
+    pub fn pair(codomain_tree: FusionTreeKey, domain_tree: FusionTreeKey) -> Self {
+        Self {
+            codomain_tree,
+            domain_tree,
+        }
+    }
+
+    pub fn pair_from_sector_ids<
+        Codomain,
+        Domain,
+        CodomainDual,
+        DomainDual,
+        CodomainInner,
+        DomainInner,
+        CodomainVertices,
+        DomainVertices,
+    >(
+        codomain_uncoupled: Codomain,
+        domain_uncoupled: Domain,
+        coupled: Option<usize>,
+        codomain_is_dual: CodomainDual,
+        domain_is_dual: DomainDual,
+        codomain_innerlines: CodomainInner,
+        domain_innerlines: DomainInner,
+        codomain_vertices: CodomainVertices,
+        domain_vertices: DomainVertices,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+        CodomainDual: IntoIterator<Item = bool>,
+        DomainDual: IntoIterator<Item = bool>,
+        CodomainInner: IntoIterator<Item = usize>,
+        DomainInner: IntoIterator<Item = usize>,
+        CodomainVertices: IntoIterator<Item = usize>,
+        DomainVertices: IntoIterator<Item = usize>,
+    {
+        Self::pair(
+            FusionTreeKey::from_sector_ids(
+                codomain_uncoupled,
+                coupled,
+                codomain_is_dual,
+                codomain_innerlines,
+                codomain_vertices,
+            ),
+            FusionTreeKey::from_sector_ids(
+                domain_uncoupled,
+                coupled,
+                domain_is_dual,
+                domain_innerlines,
+                domain_vertices,
+            ),
+        )
+    }
+
+    pub fn from_uncoupled<I>(uncoupled: I) -> Self
+    where
+        I: IntoIterator<Item = SectorId>,
+    {
+        Self::pair(
+            FusionTreeKey::from_uncoupled(uncoupled),
+            FusionTreeKey::new(
+                Vec::<SectorId>::new(),
+                None,
+                Vec::<bool>::new(),
+                Vec::<SectorId>::new(),
+                Vec::<SectorId>::new(),
+            ),
+        )
+    }
+
+    #[inline]
+    pub fn codomain_tree(&self) -> &FusionTreeKey {
+        &self.codomain_tree
+    }
+
+    #[inline]
+    pub fn domain_tree(&self) -> &FusionTreeKey {
+        &self.domain_tree
+    }
+
+    #[inline]
+    pub fn uncoupled(&self) -> &[SectorId] {
+        self.codomain_tree.uncoupled()
+    }
+
+    #[inline]
+    pub fn codomain_uncoupled(&self) -> &[SectorId] {
+        self.codomain_tree.uncoupled()
+    }
+
+    #[inline]
+    pub fn domain_uncoupled(&self) -> &[SectorId] {
+        self.domain_tree.uncoupled()
+    }
+
+    #[inline]
+    pub fn coupled(&self) -> Option<SectorId> {
+        self.codomain_tree.coupled()
+    }
+
+    #[inline]
+    pub fn vertices(&self) -> &[SectorId] {
+        self.codomain_tree.vertices()
+    }
+
+    #[inline]
+    pub fn codomain_vertices(&self) -> &[SectorId] {
+        self.codomain_tree.vertices()
+    }
+
+    #[inline]
+    pub fn domain_vertices(&self) -> &[SectorId] {
+        self.domain_tree.vertices()
+    }
+
+    #[inline]
+    pub fn codomain_innerlines(&self) -> &[SectorId] {
+        self.codomain_tree.innerlines()
+    }
+
+    #[inline]
+    pub fn domain_innerlines(&self) -> &[SectorId] {
+        self.domain_tree.innerlines()
+    }
+
+    #[inline]
+    pub fn codomain_is_dual(&self) -> &[bool] {
+        self.codomain_tree.is_dual()
+    }
+
+    #[inline]
+    pub fn domain_is_dual(&self) -> &[bool] {
+        self.domain_tree.is_dual()
+    }
+
+    pub fn group_key(&self) -> FusionTreeGroupKey {
+        FusionTreeGroupKey::new(
+            self.codomain_tree.uncoupled().iter().copied(),
+            self.domain_tree.uncoupled().iter().copied(),
+            self.codomain_tree.is_dual().iter().copied(),
+            self.domain_tree.is_dual().iter().copied(),
+        )
+    }
+
+    fn compact_id(&self) -> Option<usize> {
+        if self.domain_tree.uncoupled().is_empty()
+            && self.domain_tree.coupled().is_none()
+            && self.domain_tree.innerlines().is_empty()
+            && self.domain_tree.vertices().is_empty()
+        {
+            self.codomain_tree.compact_id()
+        } else {
+            None
+        }
     }
 }
 
@@ -290,14 +548,14 @@ impl BlockKey {
     fn compact_id(&self) -> Option<usize> {
         match self {
             Self::Dense => Some(0),
-            Self::FusionTree(tree)
-                if tree.coupled().is_none()
-                    && tree.vertices().is_empty()
-                    && tree.uncoupled().len() == 1 =>
-            {
-                Some(tree.uncoupled()[0].id())
-            }
-            Self::FusionTree(_) => None,
+            Self::FusionTree(tree) => tree.compact_id(),
+        }
+    }
+
+    pub fn fusion_tree_group_key(&self) -> Option<FusionTreeGroupKey> {
+        match self {
+            Self::Dense => None,
+            Self::FusionTree(tree) => Some(tree.group_key()),
         }
     }
 }
@@ -1531,21 +1789,66 @@ mod tests {
 
     #[test]
     fn fusion_tree_group_key_records_external_sector_tuples_and_duality() {
-        let group = FusionTreeGroupKey::from_sector_ids([2, 3], [5], [false, true, true]);
+        let group = FusionTreeGroupKey::from_sector_ids([2, 3], [5], [false, true], [true]);
 
         assert_eq!(
             group.codomain_uncoupled(),
             &[SectorId::new(2), SectorId::new(3)]
         );
         assert_eq!(group.domain_uncoupled(), &[SectorId::new(5)]);
-        assert_eq!(group.is_dual(), &[false, true, true]);
+        assert_eq!(group.codomain_is_dual(), &[false, true]);
+        assert_eq!(group.domain_is_dual(), &[true]);
 
         let same = FusionTreeGroupKey::new(
             [SectorId::new(2), SectorId::new(3)],
             [SectorId::new(5)],
-            [false, true, true],
+            [false, true],
+            [true],
         );
         assert_eq!(group, same);
+    }
+
+    #[test]
+    fn fusion_tree_block_key_records_tensorkit_subblock_pair_fields() {
+        let key = FusionTreeBlockKey::pair_from_sector_ids(
+            [2, 3],
+            [5, 7],
+            Some(11),
+            [false, true],
+            [true, false],
+            [13],
+            [17],
+            [19, 23],
+            [29, 31],
+        );
+
+        assert_eq!(
+            key.codomain_uncoupled(),
+            &[SectorId::new(2), SectorId::new(3)]
+        );
+        assert_eq!(
+            key.domain_uncoupled(),
+            &[SectorId::new(5), SectorId::new(7)]
+        );
+        assert_eq!(key.coupled(), Some(SectorId::new(11)));
+        assert_eq!(key.codomain_is_dual(), &[false, true]);
+        assert_eq!(key.domain_is_dual(), &[true, false]);
+        assert_eq!(key.codomain_innerlines(), &[SectorId::new(13)]);
+        assert_eq!(key.domain_innerlines(), &[SectorId::new(17)]);
+        assert_eq!(
+            key.codomain_vertices(),
+            &[SectorId::new(19), SectorId::new(23)]
+        );
+        assert_eq!(
+            key.domain_vertices(),
+            &[SectorId::new(29), SectorId::new(31)]
+        );
+
+        let group = key.group_key();
+        assert_eq!(group.codomain_uncoupled(), key.codomain_uncoupled());
+        assert_eq!(group.domain_uncoupled(), key.domain_uncoupled());
+        assert_eq!(group.codomain_is_dual(), key.codomain_is_dual());
+        assert_eq!(group.domain_is_dual(), key.domain_is_dual());
     }
 
     #[test]

@@ -3731,7 +3731,7 @@ mod tests {
 
     #[test]
     fn tree_transform_group_block_spec_preserves_group_identity_and_lowers_to_keyed() {
-        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true, true]);
+        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
         let dst_key1 = BlockKey::sector_ids([101, 201]);
         let dst_key2 = BlockKey::sector_ids([102, 202]);
         let src_key = BlockKey::sector_ids([301, 401]);
@@ -3759,7 +3759,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![30]
         );
-        assert_eq!(spec.group_key().is_dual(), &[false, true, true]);
+        assert_eq!(spec.group_key().codomain_is_dual(), &[false, true]);
+        assert_eq!(spec.group_key().domain_is_dual(), &[true]);
 
         let keyed_spec = spec.to_keyed_spec();
         assert_eq!(keyed_spec.dst_keys(), &[dst_key1, dst_key2]);
@@ -3769,7 +3770,7 @@ mod tests {
 
     #[test]
     fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
-        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true, true]);
+        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
         let key10 = BlockKey::sector_ids([10]);
         let key20 = BlockKey::sector_ids([20]);
         let key100 = BlockKey::sector_ids([100]);
@@ -3835,7 +3836,7 @@ mod tests {
     fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
         let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
         let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-        let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false, true]);
+        let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [true]);
         let present_key = BlockKey::sector_ids([1]);
         let missing_key = BlockKey::sector_ids([2]);
         let src_structure =
