@@ -8,6 +8,7 @@
 
 use core::fmt;
 use core::ops::{Add, Mul};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
@@ -613,6 +614,196 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             src_structure,
             &self.specs,
         )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum TreeTransformOperationKey {
+    Transpose {
+        codomain_permutation: Vec<usize>,
+        domain_permutation: Vec<usize>,
+    },
+    Braid {
+        codomain_permutation: Vec<usize>,
+        domain_permutation: Vec<usize>,
+        codomain_levels: Vec<usize>,
+        domain_levels: Vec<usize>,
+    },
+}
+
+impl TreeTransformOperationKey {
+    pub fn transpose<Codomain, Domain>(
+        codomain_permutation: Codomain,
+        domain_permutation: Domain,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+    {
+        Self::Transpose {
+            codomain_permutation: codomain_permutation.into_iter().collect(),
+            domain_permutation: domain_permutation.into_iter().collect(),
+        }
+    }
+
+    pub fn braid<Codomain, Domain, CodomainLevels, DomainLevels>(
+        codomain_permutation: Codomain,
+        domain_permutation: Domain,
+        codomain_levels: CodomainLevels,
+        domain_levels: DomainLevels,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+        CodomainLevels: IntoIterator<Item = usize>,
+        DomainLevels: IntoIterator<Item = usize>,
+    {
+        Self::Braid {
+            codomain_permutation: codomain_permutation.into_iter().collect(),
+            domain_permutation: domain_permutation.into_iter().collect(),
+            codomain_levels: codomain_levels.into_iter().collect(),
+            domain_levels: domain_levels.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformGroupPlanKey {
+    operation: TreeTransformOperationKey,
+    groups: Vec<TreeTransformCachedGroupKey>,
+}
+
+impl TreeTransformGroupPlanKey {
+    pub fn new<Groups>(operation: TreeTransformOperationKey, groups: Groups) -> Self
+    where
+        Groups: IntoIterator<Item = TreeTransformCachedGroupKey>,
+    {
+        Self {
+            operation,
+            groups: groups.into_iter().collect(),
+        }
+    }
+
+    pub fn from_plan<T>(
+        operation: TreeTransformOperationKey,
+        plan: &TreeTransformGroupPlan<T>,
+    ) -> Self {
+        Self::new(
+            operation,
+            plan.specs()
+                .iter()
+                .map(TreeTransformCachedGroupKey::from_spec),
+        )
+    }
+
+    #[inline]
+    pub fn operation(&self) -> &TreeTransformOperationKey {
+        &self.operation
+    }
+
+    #[inline]
+    pub fn groups(&self) -> &[TreeTransformCachedGroupKey] {
+        &self.groups
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformCachedGroupKey {
+    group_key: FusionTreeGroupKey,
+    dst_keys: Vec<BlockKey>,
+    src_keys: Vec<BlockKey>,
+}
+
+impl TreeTransformCachedGroupKey {
+    pub fn new<DstKeys, SrcKeys, KDst, KSrc>(
+        group_key: FusionTreeGroupKey,
+        dst_keys: DstKeys,
+        src_keys: SrcKeys,
+    ) -> Self
+    where
+        DstKeys: IntoIterator<Item = KDst>,
+        SrcKeys: IntoIterator<Item = KSrc>,
+        KDst: Into<BlockKey>,
+        KSrc: Into<BlockKey>,
+    {
+        Self {
+            group_key,
+            dst_keys: dst_keys.into_iter().map(Into::into).collect(),
+            src_keys: src_keys.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn from_spec<T>(spec: &TreeTransformGroupBlockSpec<T>) -> Self {
+        Self {
+            group_key: spec.group_key().clone(),
+            dst_keys: spec.dst_keys().to_vec(),
+            src_keys: spec.src_keys().to_vec(),
+        }
+    }
+
+    #[inline]
+    pub fn group_key(&self) -> &FusionTreeGroupKey {
+        &self.group_key
+    }
+
+    #[inline]
+    pub fn dst_keys(&self) -> &[BlockKey] {
+        &self.dst_keys
+    }
+
+    #[inline]
+    pub fn src_keys(&self) -> &[BlockKey] {
+        &self.src_keys
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeTransformGroupPlanCache<T> {
+    plans: HashMap<TreeTransformGroupPlanKey, TreeTransformGroupPlan<T>>,
+}
+
+impl<T> Default for TreeTransformGroupPlanCache<T> {
+    fn default() -> Self {
+        Self {
+            plans: HashMap::new(),
+        }
+    }
+}
+
+impl<T> TreeTransformGroupPlanCache<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.plans.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
+
+    pub fn get(&self, key: &TreeTransformGroupPlanKey) -> Option<&TreeTransformGroupPlan<T>> {
+        self.plans.get(key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: TreeTransformGroupPlanKey,
+        plan: TreeTransformGroupPlan<T>,
+    ) -> Option<TreeTransformGroupPlan<T>> {
+        self.plans.insert(key, plan)
+    }
+
+    pub fn get_or_insert_with<F>(
+        &mut self,
+        key: TreeTransformGroupPlanKey,
+        build: F,
+    ) -> &TreeTransformGroupPlan<T>
+    where
+        F: FnOnce() -> TreeTransformGroupPlan<T>,
+    {
+        self.plans.entry(key).or_insert_with(build)
     }
 }
 
@@ -4086,15 +4277,75 @@ mod tests {
         )
         .unwrap();
         let plan = TreeTransformGroupPlan::new(vec![spec]);
+        let key = TreeTransformGroupPlanKey::from_plan(
+            TreeTransformOperationKey::transpose([1, 0], [0]),
+            &plan,
+        );
+        let large_spec = TreeTransformGroupBlockSpec::from_block_groups(
+            &dst_large,
+            &dst_large.fusion_tree_groups()[0],
+            &src_large,
+            &src_large.fusion_tree_groups()[0],
+            vec![1.0_f64, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
+        let large_plan = TreeTransformGroupPlan::new(vec![large_spec]);
+        let large_key = TreeTransformGroupPlanKey::from_plan(
+            TreeTransformOperationKey::transpose([1, 0], [0]),
+            &large_plan,
+        );
+        let mut cache = TreeTransformGroupPlanCache::new();
+
+        cache.insert(key.clone(), plan.clone());
 
         let small_structure = plan.compile_structures(&dst_small, &src_small).unwrap();
-        let large_structure = plan.compile_structures(&dst_large, &src_large).unwrap();
+        let cached = cache.get(&large_key).unwrap();
+        let large_structure = cached.compile_structures(&dst_large, &src_large).unwrap();
 
+        assert_eq!(key, large_key);
+        assert_eq!(cache.len(), 1);
         assert_eq!(plan.specs().len(), 1);
         assert_eq!(small_structure.block_count(), 1);
         assert_eq!(large_structure.block_count(), 1);
         assert_eq!(small_structure.workspace_lens(), (4, 4));
         assert_eq!(large_structure.workspace_lens(), (6, 6));
+    }
+
+    #[test]
+    fn tree_transform_group_plan_cache_key_tracks_operation_but_not_coefficients() {
+        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
+        let dst_key = fusion_tree_test_key([20, 10], [30], 7, [true, false], [true]);
+        let src_key = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
+        let plan_a = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
+            group_key.clone(),
+            dst_key.clone(),
+            src_key.clone(),
+            2.0_f64,
+        )]);
+        let plan_b = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
+            group_key, dst_key, src_key, 3.0_f64,
+        )]);
+
+        let transpose = TreeTransformGroupPlanKey::from_plan(
+            TreeTransformOperationKey::transpose([1, 0], [0]),
+            &plan_a,
+        );
+        let same_operation_different_coefficients = TreeTransformGroupPlanKey::from_plan(
+            TreeTransformOperationKey::transpose([1, 0], [0]),
+            &plan_b,
+        );
+        let different_permutation = TreeTransformGroupPlanKey::from_plan(
+            TreeTransformOperationKey::transpose([0, 1], [0]),
+            &plan_a,
+        );
+        let braid = TreeTransformGroupPlanKey::from_plan(
+            TreeTransformOperationKey::braid([1, 0], [0], [2], [0]),
+            &plan_a,
+        );
+
+        assert_eq!(transpose, same_operation_different_coefficients);
+        assert_ne!(transpose, different_permutation);
+        assert_ne!(transpose, braid);
     }
 
     #[test]
