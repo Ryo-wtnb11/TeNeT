@@ -808,6 +808,67 @@ impl FusionTreeKey {
     }
 }
 
+pub fn unique_artin_braid_first<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+{
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: rule.fusion_style(),
+        });
+    }
+
+    let rank = tree.uncoupled().len();
+    if rank < 2 {
+        return Err(CoreError::InvalidBraidIndex { index: 0, rank });
+    }
+
+    let left = tree.uncoupled()[0];
+    let right = tree.uncoupled()[1];
+    let mut uncoupled = tree.uncoupled().to_vec();
+    uncoupled.swap(0, 1);
+    let mut is_dual = tree.is_dual().to_vec();
+    is_dual.swap(0, 1);
+    let braided = FusionTreeKey::new(
+        uncoupled,
+        tree.coupled(),
+        is_dual,
+        tree.innerlines().iter().copied(),
+        tree.vertices().iter().copied(),
+    );
+
+    if left == rule.vacuum() || right == rule.vacuum() {
+        return Ok((braided, rule.scalar_one()));
+    }
+
+    if !rule.braiding_style().has_braiding() {
+        return Err(CoreError::UnsupportedSectorBraid {
+            left,
+            right,
+            style: rule.braiding_style(),
+        });
+    }
+
+    let coupled = if rank > 2 {
+        tree.innerlines()
+            .first()
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "first braid of a rank > 2 tree requires the first innerline",
+            })?
+    } else {
+        tree.coupled().ok_or(CoreError::MalformedFusionTree {
+            message: "first braid of a rank 2 tree requires a coupled sector",
+        })?
+    };
+
+    Ok((braided, rule.r_symbol_scalar(left, right, coupled)))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeBlockKey {
     codomain_tree: FusionTreeKey,
@@ -2060,16 +2121,55 @@ impl<'a, T> BlockViewMut<'a, T> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoreError {
-    RankMismatch { shape: usize, strides: usize },
-    StructureRankMismatch { expected: usize, actual: usize },
-    DimensionMismatch { expected: usize, actual: usize },
-    BlockCountMismatch { expected: usize, actual: usize },
-    BlockIndexOutOfBounds { index: usize, count: usize },
-    DuplicateBlockKey { key: BlockKey },
-    MissingBlockKey { key: BlockKey },
+    RankMismatch {
+        shape: usize,
+        strides: usize,
+    },
+    StructureRankMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    DimensionMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidBraidIndex {
+        index: usize,
+        rank: usize,
+    },
+    UnsupportedFusionStyle {
+        expected: FusionStyleKind,
+        actual: FusionStyleKind,
+    },
+    UnsupportedSectorBraid {
+        left: SectorId,
+        right: SectorId,
+        style: BraidingStyleKind,
+    },
+    MalformedFusionTree {
+        message: &'static str,
+    },
+    BlockCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    BlockIndexOutOfBounds {
+        index: usize,
+        count: usize,
+    },
+    DuplicateBlockKey {
+        key: BlockKey,
+    },
+    MissingBlockKey {
+        key: BlockKey,
+    },
     ElementCountOverflow,
-    OffsetOverflow { value: usize },
-    StrideOverflow { value: usize },
+    OffsetOverflow {
+        value: usize,
+    },
+    StrideOverflow {
+        value: usize,
+    },
     OutOfBounds,
 }
 
@@ -2090,6 +2190,27 @@ impl fmt::Display for CoreError {
             }
             Self::DimensionMismatch { expected, actual } => {
                 write!(f, "dimension mismatch: expected {expected}, got {actual}")
+            }
+            Self::InvalidBraidIndex { index, rank } => {
+                write!(
+                    f,
+                    "cannot braid adjacent fusion-tree outputs at index {index} for rank {rank}"
+                )
+            }
+            Self::UnsupportedFusionStyle { expected, actual } => {
+                write!(
+                    f,
+                    "unsupported fusion style {actual:?}; expected {expected:?}"
+                )
+            }
+            Self::UnsupportedSectorBraid { left, right, style } => {
+                write!(
+                    f,
+                    "cannot braid non-unit sectors {left:?} and {right:?} with braiding style {style:?}"
+                )
+            }
+            Self::MalformedFusionTree { message } => {
+                write!(f, "malformed fusion tree: {message}")
             }
             Self::BlockCountMismatch { expected, actual } => {
                 write!(f, "block count mismatch: expected {expected}, got {actual}")
@@ -2292,6 +2413,114 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
+    struct PlanarZ2Rule;
+
+    impl FusionRule for PlanarZ2Rule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::NoBraiding
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for PlanarZ2Rule {}
+
+    impl MultiplicityFreeFusionSymbols for PlanarZ2Rule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct FermionicZ2Rule;
+
+    impl FusionRule for FermionicZ2Rule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Fermionic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for FermionicZ2Rule {}
+
+    impl MultiplicityFreeFusionSymbols for FermionicZ2Rule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            if left.id() == 1 && right.id() == 1 {
+                -1.0
+            } else {
+                1.0
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     struct Su2MultiplicityFreeRule;
 
     impl FusionRule for Su2MultiplicityFreeRule {
@@ -2423,6 +2652,66 @@ mod tests {
             z2.r_symbol_scalar(SectorId::new(1), SectorId::new(1), SectorId::new(0)),
             1.0
         );
+    }
+
+    #[test]
+    fn unique_artin_braid_first_allows_unit_crossing_without_braiding() {
+        let tree = FusionTreeKey::from_sector_ids([0, 1], Some(1), [false, true], [], [1]);
+
+        let (braided, coefficient) = unique_artin_braid_first(&PlanarZ2Rule, &tree).unwrap();
+
+        assert_eq!(coefficient, 1.0);
+        assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(0)]);
+        assert_eq!(braided.is_dual(), &[true, false]);
+        assert_eq!(braided.coupled(), Some(SectorId::new(1)));
+        assert!(braided.innerlines().is_empty());
+        assert_eq!(braided.vertices(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_artin_braid_first_rejects_nonunit_crossing_without_braiding() {
+        let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]);
+
+        let err = unique_artin_braid_first(&PlanarZ2Rule, &tree).unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::UnsupportedSectorBraid {
+                left: SectorId::new(1),
+                right: SectorId::new(1),
+                style: BraidingStyleKind::NoBraiding,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_artin_braid_first_uses_r_symbol_for_first_crossing() {
+        let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, true], [], [1]);
+
+        let (braided, coefficient) = unique_artin_braid_first(&FermionicZ2Rule, &tree).unwrap();
+
+        assert_eq!(coefficient, -1.0);
+        assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(1)]);
+        assert_eq!(braided.is_dual(), &[true, false]);
+        assert_eq!(braided.coupled(), Some(SectorId::new(0)));
+        assert!(braided.innerlines().is_empty());
+        assert_eq!(braided.vertices(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_artin_braid_first_uses_first_innerline_for_rank_three() {
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
+
+        let (braided, coefficient) = unique_artin_braid_first(&FermionicZ2Rule, &tree).unwrap();
+
+        assert_eq!(coefficient, -1.0);
+        assert_eq!(
+            braided.uncoupled(),
+            &[SectorId::new(1), SectorId::new(1), SectorId::new(1)]
+        );
+        assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
+        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
     }
 
     #[test]
