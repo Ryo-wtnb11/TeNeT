@@ -158,6 +158,64 @@ impl From<usize> for SectorId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct FusionTreeGroupKey {
+    codomain_uncoupled: Vec<SectorId>,
+    domain_uncoupled: Vec<SectorId>,
+    is_dual: Vec<bool>,
+}
+
+impl FusionTreeGroupKey {
+    pub fn new<Codomain, Domain, Dual>(
+        codomain_uncoupled: Codomain,
+        domain_uncoupled: Domain,
+        is_dual: Dual,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = SectorId>,
+        Domain: IntoIterator<Item = SectorId>,
+        Dual: IntoIterator<Item = bool>,
+    {
+        Self {
+            codomain_uncoupled: codomain_uncoupled.into_iter().collect(),
+            domain_uncoupled: domain_uncoupled.into_iter().collect(),
+            is_dual: is_dual.into_iter().collect(),
+        }
+    }
+
+    pub fn from_sector_ids<Codomain, Domain, Dual>(
+        codomain_uncoupled: Codomain,
+        domain_uncoupled: Domain,
+        is_dual: Dual,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+        Dual: IntoIterator<Item = bool>,
+    {
+        Self::new(
+            codomain_uncoupled.into_iter().map(SectorId::new),
+            domain_uncoupled.into_iter().map(SectorId::new),
+            is_dual,
+        )
+    }
+
+    #[inline]
+    pub fn codomain_uncoupled(&self) -> &[SectorId] {
+        &self.codomain_uncoupled
+    }
+
+    #[inline]
+    pub fn domain_uncoupled(&self) -> &[SectorId] {
+        &self.domain_uncoupled
+    }
+
+    #[inline]
+    pub fn is_dual(&self) -> &[bool] {
+        &self.is_dual
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeBlockKey {
     uncoupled: Vec<SectorId>,
     coupled: Option<SectorId>,
@@ -1469,6 +1527,25 @@ mod tests {
                 key: BlockKey::sector_ids([7])
             }
         );
+    }
+
+    #[test]
+    fn fusion_tree_group_key_records_external_sector_tuples_and_duality() {
+        let group = FusionTreeGroupKey::from_sector_ids([2, 3], [5], [false, true, true]);
+
+        assert_eq!(
+            group.codomain_uncoupled(),
+            &[SectorId::new(2), SectorId::new(3)]
+        );
+        assert_eq!(group.domain_uncoupled(), &[SectorId::new(5)]);
+        assert_eq!(group.is_dual(), &[false, true, true]);
+
+        let same = FusionTreeGroupKey::new(
+            [SectorId::new(2), SectorId::new(3)],
+            [SectorId::new(5)],
+            [false, true, true],
+        );
+        assert_eq!(group, same);
     }
 
     #[test]

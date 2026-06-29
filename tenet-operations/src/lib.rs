@@ -13,7 +13,8 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError, TensorMap,
+    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError, FusionTreeGroupKey,
+    TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -469,6 +470,87 @@ impl<T: Copy> TreeTransformKeyBlockSpec<T> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TreeTransformGroupBlockSpec<T> {
+    group_key: FusionTreeGroupKey,
+    dst_keys: Vec<BlockKey>,
+    src_keys: Vec<BlockKey>,
+    coefficients_src_by_dst: Vec<T>,
+}
+
+impl<T> TreeTransformGroupBlockSpec<T> {
+    pub fn single<KDst, KSrc>(
+        group_key: FusionTreeGroupKey,
+        dst_key: KDst,
+        src_key: KSrc,
+        coefficient: T,
+    ) -> Self
+    where
+        KDst: Into<BlockKey>,
+        KSrc: Into<BlockKey>,
+    {
+        Self {
+            group_key,
+            dst_keys: vec![dst_key.into()],
+            src_keys: vec![src_key.into()],
+            coefficients_src_by_dst: vec![coefficient],
+        }
+    }
+
+    pub fn multi<DstKeys, SrcKeys, KDst, KSrc>(
+        group_key: FusionTreeGroupKey,
+        dst_keys: DstKeys,
+        src_keys: SrcKeys,
+        coefficients_src_by_dst: Vec<T>,
+    ) -> Self
+    where
+        DstKeys: IntoIterator<Item = KDst>,
+        SrcKeys: IntoIterator<Item = KSrc>,
+        KDst: Into<BlockKey>,
+        KSrc: Into<BlockKey>,
+    {
+        Self {
+            group_key,
+            dst_keys: dst_keys.into_iter().map(Into::into).collect(),
+            src_keys: src_keys.into_iter().map(Into::into).collect(),
+            coefficients_src_by_dst,
+        }
+    }
+
+    #[inline]
+    pub fn group_key(&self) -> &FusionTreeGroupKey {
+        &self.group_key
+    }
+
+    #[inline]
+    pub fn dst_keys(&self) -> &[BlockKey] {
+        &self.dst_keys
+    }
+
+    #[inline]
+    pub fn src_keys(&self) -> &[BlockKey] {
+        &self.src_keys
+    }
+
+    /// Recoupling matrix coefficients stored as `U[dst, src]` in row-major
+    /// destination-by-source order: `coeff[src + dst * src_count]`.
+    #[inline]
+    pub fn coefficients_src_by_dst(&self) -> &[T] {
+        &self.coefficients_src_by_dst
+    }
+
+    fn to_keyed_spec(&self) -> TreeTransformKeyBlockSpec<T>
+    where
+        T: Clone,
+    {
+        TreeTransformKeyBlockSpec::multi(
+            self.dst_keys.clone(),
+            self.src_keys.clone(),
+            self.coefficients_src_by_dst.clone(),
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
     blocks: Vec<TreeTransformBlock>,
@@ -525,6 +607,42 @@ impl<T: Copy> TreeTransformStructure<T> {
             Arc::new(src_structure.clone()),
             specs,
         )
+    }
+
+    pub fn compile_grouped<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+        specs: &[TreeTransformGroupBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_grouped_shared_structures(
+            Arc::clone(dst.structure()),
+            Arc::clone(src.structure()),
+            specs,
+        )
+    }
+
+    pub fn compile_grouped_structures(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        specs: &[TreeTransformGroupBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_grouped_shared_structures(
+            Arc::new(dst_structure.clone()),
+            Arc::new(src_structure.clone()),
+            specs,
+        )
+    }
+
+    fn compile_grouped_shared_structures(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[TreeTransformGroupBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        let keyed_specs = specs
+            .iter()
+            .map(TreeTransformGroupBlockSpec::to_keyed_spec)
+            .collect::<Vec<_>>();
+        Self::compile_keyed_shared_structures(dst_structure, src_structure, &keyed_specs)
     }
 
     fn compile_keyed_shared_structures(
@@ -3609,6 +3727,143 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, OperationError::MissingBlockKey { key: key2 });
+    }
+
+    #[test]
+    fn tree_transform_group_block_spec_preserves_group_identity_and_lowers_to_keyed() {
+        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true, true]);
+        let dst_key1 = BlockKey::sector_ids([101, 201]);
+        let dst_key2 = BlockKey::sector_ids([102, 202]);
+        let src_key = BlockKey::sector_ids([301, 401]);
+        let spec = TreeTransformGroupBlockSpec::multi(
+            group_key.clone(),
+            [dst_key1.clone(), dst_key2.clone()],
+            [src_key.clone()],
+            vec![2.0_f64, 3.0],
+        );
+
+        assert_eq!(spec.group_key(), &group_key);
+        assert_eq!(
+            spec.group_key()
+                .codomain_uncoupled()
+                .iter()
+                .map(|sector| sector.id())
+                .collect::<Vec<_>>(),
+            vec![10, 20]
+        );
+        assert_eq!(
+            spec.group_key()
+                .domain_uncoupled()
+                .iter()
+                .map(|sector| sector.id())
+                .collect::<Vec<_>>(),
+            vec![30]
+        );
+        assert_eq!(spec.group_key().is_dual(), &[false, true, true]);
+
+        let keyed_spec = spec.to_keyed_spec();
+        assert_eq!(keyed_spec.dst_keys(), &[dst_key1, dst_key2]);
+        assert_eq!(keyed_spec.src_keys(), &[src_key]);
+        assert_eq!(keyed_spec.coefficients_src_by_dst(), &[2.0, 3.0]);
+    }
+
+    #[test]
+    fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
+        let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true, true]);
+        let key10 = BlockKey::sector_ids([10]);
+        let key20 = BlockKey::sector_ids([20]);
+        let key100 = BlockKey::sector_ids([100]);
+        let key200 = BlockKey::sector_ids([200]);
+        let key300 = BlockKey::sector_ids([300]);
+        let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+        let src_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (key100.clone(), vec![2, 1]),
+                (key300.clone(), vec![2, 1]),
+                (key200.clone(), vec![2, 1]),
+            ],
+        )
+        .unwrap();
+        let dst_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
+        )
+        .unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            src_space,
+            src_structure,
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
+                .unwrap();
+        let structure = TreeTransformStructure::compile_grouped(
+            &dst,
+            &src,
+            &[TreeTransformGroupBlockSpec::multi(
+                group_key,
+                [key10, key20],
+                [key100, key200, key300],
+                vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            )],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(structure.block_count(), 1);
+        assert_eq!(dst.data(), &[7020.0, 9240.0, 3510.0, 4620.0]);
+        assert_eq!(workspace.source_len(), 6);
+        assert_eq!(workspace.destination_len(), 4);
+    }
+
+    #[test]
+    fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false, true]);
+        let present_key = BlockKey::sector_ids([1]);
+        let missing_key = BlockKey::sector_ids([2]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(present_key.clone(), vec![2, 2])])
+                .unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(present_key.clone(), vec![2, 2])])
+                .unwrap();
+        let src =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure)
+                .unwrap();
+        let dst =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
+                .unwrap();
+
+        let err = TreeTransformStructure::compile_grouped(
+            &dst,
+            &src,
+            &[TreeTransformGroupBlockSpec::single(
+                group_key,
+                missing_key.clone(),
+                present_key,
+                1.0,
+            )],
+        )
+        .unwrap_err();
+
+        assert_eq!(err, OperationError::MissingBlockKey { key: missing_key });
     }
 
     #[test]
