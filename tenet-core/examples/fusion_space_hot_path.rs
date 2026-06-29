@@ -2,8 +2,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use tenet_core::{
-    BraidingStyleKind, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeHomSpace, MultiplicityFreeFusionRule, SectorId, SectorLeg, TensorMap, TensorMapSpace,
+    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMap,
+    TensorMapSpace, U1FusionRule, U1Irrep,
 };
 
 const CHARGE_COUNTS: &[usize] = &[1, 8, 64, 512, 4096];
@@ -16,50 +16,8 @@ fn main() {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct U1PointedRule;
-
-impl U1PointedRule {
-    const OFFSET: i32 = 1_000_000;
-
-    fn encode(charge: i32) -> SectorId {
-        let shifted = charge
-            .checked_add(Self::OFFSET)
-            .expect("benchmark U(1) charge should stay in encoded range");
-        SectorId::new(usize::try_from(shifted).expect("encoded charge should be non-negative"))
-    }
-
-    fn decode(sector: SectorId) -> i32 {
-        i32::try_from(sector.id()).expect("benchmark sector id should fit i32") - Self::OFFSET
-    }
-}
-
-impl FusionRule for U1PointedRule {
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Unique
-    }
-
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
-    }
-
-    fn vacuum(&self) -> SectorId {
-        Self::encode(0)
-    }
-
-    fn dual(&self, sector: SectorId) -> SectorId {
-        Self::encode(-Self::decode(sector))
-    }
-
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-        vec![Self::encode(Self::decode(left) + Self::decode(right))]
-    }
-}
-
-impl MultiplicityFreeFusionRule for U1PointedRule {}
-
 fn run_u1_case(charge_count: usize) {
-    let rule = U1PointedRule;
+    let rule = U1FusionRule;
     let charges = charges(charge_count);
     let compile_iters = iterations(charge_count, 200_000);
     let build_elapsed = elapsed_per_iter(compile_iters, || {
@@ -85,8 +43,8 @@ fn run_u1_case(charge_count: usize) {
     let sector_elapsed = elapsed_per_op(lookup_iters, charge_count, || {
         let mut checksum = 0usize;
         for charge in &charges {
-            let sector = U1PointedRule::encode(*charge);
-            let external_domain = U1PointedRule::encode(-*charge);
+            let sector = U1Irrep::new(*charge).sector_id();
+            let external_domain = U1Irrep::new(-*charge).sector_id();
             let block = tensor
                 .subblock_by_sectors(&rule, &[sector, external_domain])
                 .unwrap();
@@ -112,10 +70,10 @@ fn charges(charge_count: usize) -> Vec<i32> {
         .collect()
 }
 
-fn fusion_space(rule: &U1PointedRule, charges: &[i32]) -> FusionTensorMapSpace<1, 1> {
+fn fusion_space(rule: &U1FusionRule, charges: &[i32]) -> FusionTensorMapSpace<1, 1> {
     let sectors = charges
         .iter()
-        .map(|&charge| U1PointedRule::encode(charge))
+        .map(|&charge| U1Irrep::new(charge))
         .collect::<Vec<_>>();
     let dense = TensorMapSpace::<1, 1>::from_dims([charges.len()], [charges.len()]).unwrap();
     let hom = FusionTreeHomSpace::new(

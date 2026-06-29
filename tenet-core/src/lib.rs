@@ -224,11 +224,12 @@ pub struct SectorLeg {
 }
 
 impl SectorLeg {
-    pub fn new<Sectors>(sectors: Sectors, is_dual: bool) -> Self
+    pub fn new<Sectors, Sector>(sectors: Sectors, is_dual: bool) -> Self
     where
-        Sectors: IntoIterator<Item = SectorId>,
+        Sectors: IntoIterator<Item = Sector>,
+        Sector: Into<SectorId>,
     {
-        let mut sectors = sectors.into_iter().collect::<Vec<_>>();
+        let mut sectors = sectors.into_iter().map(Into::into).collect::<Vec<_>>();
         sectors.sort_unstable();
         sectors.dedup();
         Self { sectors, is_dual }
@@ -325,14 +326,38 @@ impl FusionTreeHomSpace {
         Self { codomain, domain }
     }
 
+    pub fn from_sectors<Codomain, Domain, CodomainSector, DomainSector>(
+        codomain: Codomain,
+        domain: Domain,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = CodomainSector>,
+        Domain: IntoIterator<Item = DomainSector>,
+        CodomainSector: Into<SectorId>,
+        DomainSector: Into<SectorId>,
+    {
+        Self::new(
+            FusionProductSpace::new(
+                codomain
+                    .into_iter()
+                    .map(|sector| SectorLeg::new([sector], false)),
+            ),
+            FusionProductSpace::new(
+                domain
+                    .into_iter()
+                    .map(|sector| SectorLeg::new([sector], false)),
+            ),
+        )
+    }
+
     pub fn from_sector_ids<Codomain, Domain>(codomain: Codomain, domain: Domain) -> Self
     where
         Codomain: IntoIterator<Item = usize>,
         Domain: IntoIterator<Item = usize>,
     {
-        Self::new(
-            FusionProductSpace::from_sector_ids(codomain),
-            FusionProductSpace::from_sector_ids(domain),
+        Self::from_sectors(
+            codomain.into_iter().map(SectorId::new),
+            domain.into_iter().map(SectorId::new),
         )
     }
 
@@ -595,6 +620,343 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
         destination: &FusionTreeBlockKey,
     ) -> Self::Scalar;
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Z2Irrep {
+    parity: u8,
+}
+
+impl Z2Irrep {
+    pub const EVEN: Self = Self { parity: 0 };
+    pub const ODD: Self = Self { parity: 1 };
+
+    pub const fn new(parity: u8) -> Self {
+        Self { parity: parity & 1 }
+    }
+
+    #[inline]
+    pub const fn parity(self) -> u8 {
+        self.parity
+    }
+
+    #[inline]
+    pub const fn sector_id(self) -> SectorId {
+        SectorId::new(self.parity as usize)
+    }
+
+    pub const fn from_sector_id(sector: SectorId) -> Option<Self> {
+        match sector.id() {
+            0 => Some(Self::EVEN),
+            1 => Some(Self::ODD),
+            _ => None,
+        }
+    }
+}
+
+impl From<Z2Irrep> for SectorId {
+    fn from(value: Z2Irrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Z2FusionRule;
+
+impl FusionRule for Z2FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        Z2Irrep::EVEN.into()
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        let left = Z2Irrep::from_sector_id(left).expect("Z2 fusion received an invalid sector");
+        let right = Z2Irrep::from_sector_id(right).expect("Z2 fusion received an invalid sector");
+        vec![Z2Irrep::new(left.parity() ^ right.parity()).into()]
+    }
+}
+
+impl MultiplicityFreeFusionRule for Z2FusionRule {}
+
+impl MultiplicityFreeFusionSymbols for Z2FusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for Z2FusionRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreeBlockKey,
+        _destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct FermionParityFusionRule;
+
+impl FusionRule for FermionParityFusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Fermionic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        Z2Irrep::EVEN.into()
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        Z2FusionRule.fusion_channels(left, right)
+    }
+}
+
+impl MultiplicityFreeFusionRule for FermionParityFusionRule {}
+
+impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
+        if left == Z2Irrep::ODD.into() && right == Z2Irrep::ODD.into() {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for FermionParityFusionRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreeBlockKey,
+        _destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct U1Irrep {
+    charge: i32,
+}
+
+impl U1Irrep {
+    pub const fn new(charge: i32) -> Self {
+        Self { charge }
+    }
+
+    #[inline]
+    pub const fn charge(self) -> i32 {
+        self.charge
+    }
+
+    pub const fn sector_id(self) -> SectorId {
+        let charge = self.charge as i64;
+        if charge >= 0 {
+            SectorId::new((charge as usize) * 2)
+        } else {
+            SectorId::new(((-charge) as usize) * 2 - 1)
+        }
+    }
+
+    pub fn from_sector_id(sector: SectorId) -> Option<Self> {
+        let id = sector.id();
+        if id > u32::MAX as usize {
+            return None;
+        }
+        let charge = if id % 2 == 0 {
+            i64::try_from(id / 2).ok()?
+        } else {
+            -i64::try_from((id + 1) / 2).ok()?
+        };
+        i32::try_from(charge).ok().map(Self::new)
+    }
+}
+
+impl From<U1Irrep> for SectorId {
+    fn from(value: U1Irrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct U1FusionRule;
+
+impl FusionRule for U1FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        U1Irrep::new(0).into()
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let sector = U1Irrep::from_sector_id(sector).expect("U(1) dual received an invalid sector");
+        U1Irrep::new(
+            sector
+                .charge()
+                .checked_neg()
+                .expect("U(1) dual charge overflow"),
+        )
+        .into()
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        let left = U1Irrep::from_sector_id(left).expect("U(1) fusion received an invalid sector");
+        let right = U1Irrep::from_sector_id(right).expect("U(1) fusion received an invalid sector");
+        vec![U1Irrep::new(
+            left.charge()
+                .checked_add(right.charge())
+                .expect("U(1) fusion charge overflow"),
+        )
+        .into()]
+    }
+}
+
+impl MultiplicityFreeFusionRule for U1FusionRule {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SU2Irrep {
+    twice_spin: usize,
+}
+
+impl SU2Irrep {
+    pub const fn from_twice_spin(twice_spin: usize) -> Self {
+        Self { twice_spin }
+    }
+
+    #[inline]
+    pub const fn twice_spin(self) -> usize {
+        self.twice_spin
+    }
+
+    #[inline]
+    pub const fn sector_id(self) -> SectorId {
+        SectorId::new(self.twice_spin)
+    }
+
+    pub const fn from_sector_id(sector: SectorId) -> Self {
+        Self::from_twice_spin(sector.id())
+    }
+}
+
+impl From<SU2Irrep> for SectorId {
+    fn from(value: SU2Irrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct SU2FusionRule;
+
+impl FusionRule for SU2FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Simple
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SU2Irrep::from_twice_spin(0).into()
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        let left = SU2Irrep::from_sector_id(left).twice_spin();
+        let right = SU2Irrep::from_sector_id(right).twice_spin();
+        let min = left.abs_diff(right);
+        let max = left + right;
+        (min..=max)
+            .step_by(2)
+            .map(|twice_spin| SU2Irrep::from_twice_spin(twice_spin).into())
+            .collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for SU2FusionRule {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CoupledFusionTrees {
@@ -3516,82 +3878,6 @@ mod tests {
     impl MultiplicityFreeFusionRule for BranchingMultiplicityFreeRule {}
 
     #[derive(Clone, Copy, Debug)]
-    struct Z2MultiplicityFreeRule;
-
-    impl FusionRule for Z2MultiplicityFreeRule {
-        fn fusion_style(&self) -> FusionStyleKind {
-            FusionStyleKind::Unique
-        }
-
-        fn braiding_style(&self) -> BraidingStyleKind {
-            BraidingStyleKind::Bosonic
-        }
-
-        fn vacuum(&self) -> SectorId {
-            SectorId::new(0)
-        }
-
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-            vec![SectorId::new((left.id() + right.id()) % 2)]
-        }
-    }
-
-    impl MultiplicityFreeFusionRule for Z2MultiplicityFreeRule {}
-
-    impl MultiplicityFreeFusionSymbols for Z2MultiplicityFreeRule {
-        type Scalar = f64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
-
-        fn f_symbol_scalar(
-            &self,
-            _left: SectorId,
-            _middle: SectorId,
-            _right: SectorId,
-            _coupled: SectorId,
-            _left_coupled: SectorId,
-            _right_coupled: SectorId,
-        ) -> Self::Scalar {
-            1.0
-        }
-
-        fn r_symbol_scalar(
-            &self,
-            _left: SectorId,
-            _right: SectorId,
-            _coupled: SectorId,
-        ) -> Self::Scalar {
-            1.0
-        }
-    }
-
-    impl MultiplicityFreePivotalSymbols for Z2MultiplicityFreeRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            1.0
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreeBlockKey,
-            _destination: &FusionTreeBlockKey,
-        ) -> Self::Scalar {
-            1.0
-        }
-    }
-
-    #[derive(Clone, Copy, Debug)]
     struct Z4PointedRule;
 
     impl FusionRule for Z4PointedRule {
@@ -3718,86 +4004,6 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct FermionicZ2Rule;
-
-    impl FusionRule for FermionicZ2Rule {
-        fn fusion_style(&self) -> FusionStyleKind {
-            FusionStyleKind::Unique
-        }
-
-        fn braiding_style(&self) -> BraidingStyleKind {
-            BraidingStyleKind::Fermionic
-        }
-
-        fn vacuum(&self) -> SectorId {
-            SectorId::new(0)
-        }
-
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-            vec![SectorId::new((left.id() + right.id()) % 2)]
-        }
-    }
-
-    impl MultiplicityFreeFusionRule for FermionicZ2Rule {}
-
-    impl MultiplicityFreeFusionSymbols for FermionicZ2Rule {
-        type Scalar = f64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
-
-        fn f_symbol_scalar(
-            &self,
-            _left: SectorId,
-            _middle: SectorId,
-            _right: SectorId,
-            _coupled: SectorId,
-            _left_coupled: SectorId,
-            _right_coupled: SectorId,
-        ) -> Self::Scalar {
-            1.0
-        }
-
-        fn r_symbol_scalar(
-            &self,
-            left: SectorId,
-            right: SectorId,
-            _coupled: SectorId,
-        ) -> Self::Scalar {
-            if left.id() == 1 && right.id() == 1 {
-                -1.0
-            } else {
-                1.0
-            }
-        }
-    }
-
-    impl MultiplicityFreePivotalSymbols for FermionicZ2Rule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            1.0
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreeBlockKey,
-            _destination: &FusionTreeBlockKey,
-        ) -> Self::Scalar {
-            1.0
-        }
-    }
-
-    #[derive(Clone, Copy, Debug)]
     struct AsymmetricAnyonicRule;
 
     impl FusionRule for AsymmetricAnyonicRule {
@@ -3887,31 +4093,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy, Debug)]
-    struct Su2MultiplicityFreeRule;
-
-    impl FusionRule for Su2MultiplicityFreeRule {
-        fn fusion_style(&self) -> FusionStyleKind {
-            FusionStyleKind::Simple
-        }
-
-        fn braiding_style(&self) -> BraidingStyleKind {
-            BraidingStyleKind::Bosonic
-        }
-
-        fn vacuum(&self) -> SectorId {
-            SectorId::new(0)
-        }
-
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-            let min = left.id().abs_diff(right.id());
-            let max = left.id() + right.id();
-            (min..=max).step_by(2).map(SectorId::new).collect()
-        }
-    }
-
-    impl MultiplicityFreeFusionRule for Su2MultiplicityFreeRule {}
-
     fn fusion_tree_pair_order(keys: &[FusionTreeBlockKey]) -> Vec<(Vec<usize>, Vec<usize>, usize)> {
         keys.iter()
             .map(|key| {
@@ -3971,8 +4152,8 @@ mod tests {
 
     #[test]
     fn fusion_rule_exposes_unique_outputs_and_nsymbol_separately() {
-        let z2 = Z2MultiplicityFreeRule;
-        let su2 = Su2MultiplicityFreeRule;
+        let z2 = Z2FusionRule;
+        let su2 = SU2FusionRule;
 
         assert_eq!(z2.fusion_style(), FusionStyleKind::Unique);
         assert_eq!(
@@ -4001,7 +4182,7 @@ mod tests {
 
     #[test]
     fn multiplicity_free_symbols_are_a_separate_scalar_api() {
-        let z2 = Z2MultiplicityFreeRule;
+        let z2 = Z2FusionRule;
 
         assert_eq!(z2.scalar_one(), 1.0);
         assert_eq!(
@@ -4055,7 +4236,8 @@ mod tests {
     fn unique_artin_braid_first_uses_r_symbol_for_first_crossing() {
         let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, true], [], [1]);
 
-        let (braided, coefficient) = unique_artin_braid_first(&FermionicZ2Rule, &tree).unwrap();
+        let (braided, coefficient) =
+            unique_artin_braid_first(&FermionParityFusionRule, &tree).unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(1)]);
@@ -4070,7 +4252,8 @@ mod tests {
         let tree =
             FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
 
-        let (braided, coefficient) = unique_artin_braid_first(&FermionicZ2Rule, &tree).unwrap();
+        let (braided, coefficient) =
+            unique_artin_braid_first(&FermionParityFusionRule, &tree).unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(
@@ -4103,7 +4286,8 @@ mod tests {
         let tree =
             FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, true, false], [0], [1, 1]);
 
-        let (braided, coefficient) = unique_artin_braid_at(&FermionicZ2Rule, &tree, 1).unwrap();
+        let (braided, coefficient) =
+            unique_artin_braid_at(&FermionParityFusionRule, &tree, 1).unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(
@@ -4119,7 +4303,7 @@ mod tests {
     fn unique_artin_braid_at_rejects_out_of_range_index() {
         let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]);
 
-        let err = unique_artin_braid_at(&FermionicZ2Rule, &tree, 1).unwrap_err();
+        let err = unique_artin_braid_at(&FermionParityFusionRule, &tree, 1).unwrap_err();
 
         assert_eq!(err, CoreError::InvalidBraidIndex { index: 1, rank: 2 });
     }
@@ -4142,7 +4326,7 @@ mod tests {
             FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
 
         let (braided, coefficient) =
-            unique_braid_tree(&FermionicZ2Rule, &tree, &[2, 0, 1], &[0, 1, 2]).unwrap();
+            unique_braid_tree(&FermionParityFusionRule, &tree, &[2, 0, 1], &[0, 1, 2]).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(
@@ -4248,7 +4432,7 @@ mod tests {
         );
 
         let (all_out, coefficient) =
-            unique_repartition_tree_pair(&Z2MultiplicityFreeRule, &source, 3).unwrap();
+            unique_repartition_tree_pair(&Z2FusionRule, &source, 3).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(
@@ -4278,8 +4462,15 @@ mod tests {
             ),
         );
 
-        let (braided, coefficient) =
-            unique_braid_tree_pair(&FermionicZ2Rule, &source, &[1, 0], &[], &[0, 1], &[]).unwrap();
+        let (braided, coefficient) = unique_braid_tree_pair(
+            &FermionParityFusionRule,
+            &source,
+            &[1, 0],
+            &[],
+            &[0, 1],
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(
@@ -4306,7 +4497,7 @@ mod tests {
         );
 
         let (permuted, coefficient) =
-            unique_permute_tree_pair(&Z2MultiplicityFreeRule, &source, &[0], &[2, 1]).unwrap();
+            unique_permute_tree_pair(&Z2FusionRule, &source, &[0], &[2, 1]).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(permuted.codomain_uncoupled(), &[SectorId::new(1)]);
@@ -4333,7 +4524,7 @@ mod tests {
         );
 
         let (permuted, coefficient) =
-            unique_permute_tree_pair(&FermionicZ2Rule, &source, &[1], &[0]).unwrap();
+            unique_permute_tree_pair(&FermionParityFusionRule, &source, &[1], &[0]).unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(permuted.codomain_uncoupled(), &[SectorId::new(1)]);
@@ -4357,9 +4548,9 @@ mod tests {
         );
 
         let (transposed, coefficient) =
-            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[1], &[0]).unwrap();
+            unique_transpose_tree_pair(&Z2FusionRule, &source, &[1], &[0]).unwrap();
         let (roundtrip, inverse_coefficient) =
-            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &transposed, &[1], &[0]).unwrap();
+            unique_transpose_tree_pair(&Z2FusionRule, &transposed, &[1], &[0]).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(inverse_coefficient, 1.0);
@@ -4392,7 +4583,7 @@ mod tests {
         );
 
         let (transposed, coefficient) =
-            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[1, 3], &[0, 2]).unwrap();
+            unique_transpose_tree_pair(&Z2FusionRule, &source, &[1, 3], &[0, 2]).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(transposed, expected);
@@ -4424,7 +4615,7 @@ mod tests {
         );
 
         let (transposed, coefficient) =
-            unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[2, 0], &[3, 1]).unwrap();
+            unique_transpose_tree_pair(&Z2FusionRule, &source, &[2, 0], &[3, 1]).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(transposed, expected);
@@ -4444,8 +4635,7 @@ mod tests {
             [],
         );
 
-        let err = unique_transpose_tree_pair(&Z2MultiplicityFreeRule, &source, &[0, 2], &[1])
-            .unwrap_err();
+        let err = unique_transpose_tree_pair(&Z2FusionRule, &source, &[0, 2], &[1]).unwrap_err();
 
         assert_eq!(
             err,
@@ -4676,8 +4866,77 @@ mod tests {
     }
 
     #[test]
+    fn public_u1_irrep_roundtrips_compact_ids_and_fuses() {
+        let rule = U1FusionRule;
+        let charges = [
+            U1Irrep::new(-2),
+            U1Irrep::new(-1),
+            U1Irrep::new(0),
+            U1Irrep::new(1),
+            U1Irrep::new(2),
+        ];
+        let ids = charges.map(SectorId::from);
+
+        assert_eq!(
+            ids,
+            [
+                SectorId::new(3),
+                SectorId::new(1),
+                SectorId::new(0),
+                SectorId::new(2),
+                SectorId::new(4),
+            ]
+        );
+        for charge in charges {
+            assert_eq!(U1Irrep::from_sector_id(charge.sector_id()), Some(charge));
+        }
+        assert_eq!(rule.vacuum(), U1Irrep::new(0).sector_id());
+        assert_eq!(
+            rule.dual(U1Irrep::new(3).sector_id()),
+            U1Irrep::new(-3).sector_id()
+        );
+        assert_eq!(
+            rule.fusion_channels(U1Irrep::new(-2).sector_id(), U1Irrep::new(5).sector_id()),
+            vec![U1Irrep::new(3).sector_id()]
+        );
+    }
+
+    #[test]
+    fn public_su2_irrep_fusion_channels_match_doubled_spin_order() {
+        let rule = SU2FusionRule;
+
+        assert_eq!(
+            rule.fusion_channels(
+                SU2Irrep::from_twice_spin(1).sector_id(),
+                SU2Irrep::from_twice_spin(2).sector_id(),
+            ),
+            vec![
+                SU2Irrep::from_twice_spin(1).sector_id(),
+                SU2Irrep::from_twice_spin(3).sector_id(),
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_sector_homspace_builds_u1_tree_key() {
+        let rule = U1FusionRule;
+        let hom = FusionTreeHomSpace::from_sectors([U1Irrep::new(2)], [U1Irrep::new(2)]);
+
+        let key = hom
+            .unique_fusion_tree_key_from_external_sectors(
+                &rule,
+                &[U1Irrep::new(2).sector_id(), U1Irrep::new(-2).sector_id()],
+            )
+            .unwrap();
+
+        assert_eq!(key.codomain_uncoupled(), &[U1Irrep::new(2).sector_id()]);
+        assert_eq!(key.domain_uncoupled(), &[U1Irrep::new(2).sector_id()]);
+        assert_eq!(key.coupled(), Some(U1Irrep::new(2).sector_id()));
+    }
+
+    #[test]
     fn fusion_tensor_space_builds_subblockstructure_from_homspace() {
-        let rule = Z2MultiplicityFreeRule;
+        let rule = Z2FusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
@@ -4716,7 +4975,7 @@ mod tests {
 
     #[test]
     fn fusion_tensor_space_rejects_homspace_rank_mismatch() {
-        let rule = Z2MultiplicityFreeRule;
+        let rule = Z2FusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
         let hom = FusionTreeHomSpace::from_sector_ids([0, 1], [0]);
 
@@ -4739,7 +4998,7 @@ mod tests {
 
     #[test]
     fn tensormap_subblock_by_sectors_matches_z2_unique() {
-        let rule = Z2MultiplicityFreeRule;
+        let rule = Z2FusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
@@ -4786,7 +5045,7 @@ mod tests {
 
     #[test]
     fn tensormap_subblock_by_sectors_handles_fermionic_z2_key() {
-        let rule = FermionicZ2Rule;
+        let rule = FermionParityFusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
         let hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
         let fusion_space =
@@ -4829,7 +5088,7 @@ mod tests {
 
     #[test]
     fn subblock_by_sectors_requires_fusion_tensor_space() {
-        let rule = Z2MultiplicityFreeRule;
+        let rule = Z2FusionRule;
         let space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
         let tensor = TensorMap::<f64, 1, 1>::from_vec(vec![1.0], space).unwrap();
 
@@ -5003,7 +5262,7 @@ mod tests {
 
     #[test]
     fn unique_homspace_builds_subblock_key_from_external_sectors() {
-        let rule = Z2MultiplicityFreeRule;
+        let rule = Z2FusionRule;
         let hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
 
         let key = hom
@@ -5090,7 +5349,7 @@ mod tests {
 
     #[test]
     fn fusion_tree_homspace_matches_tensorkit_z2_fusiontreelist_order() {
-        let rule = Z2MultiplicityFreeRule;
+        let rule = Z2FusionRule;
         let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(), leg()]),
@@ -5125,7 +5384,7 @@ mod tests {
 
     #[test]
     fn fusion_tree_homspace_matches_tensorkit_su2_simple_order() {
-        let rule = Su2MultiplicityFreeRule;
+        let rule = SU2FusionRule;
         let leg = || {
             SectorLeg::new(
                 [SectorId::new(0), SectorId::new(1), SectorId::new(2)],
@@ -5166,7 +5425,7 @@ mod tests {
 
     #[test]
     fn fusion_tree_homspace_matches_tensorkit_su2_innerline_order() {
-        let rule = Su2MultiplicityFreeRule;
+        let rule = SU2FusionRule;
         let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
 
         let keys = hom.fusion_tree_keys(&rule);
