@@ -14,12 +14,14 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    multiplicity_free_braid_tree, multiplicity_free_permute_tree, unique_braid_tree,
-    unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
-    unique_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut,
-    BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
-    FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols,
-    MultiplicityFreePivotalSymbols, TensorMap,
+    multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
+    multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
+    multiplicity_free_transpose_tree_pair, unique_braid_tree, unique_braid_tree_pair,
+    unique_permute_tree, unique_permute_tree_pair, unique_transpose_tree_pair, BlockKey,
+    BlockLayout, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError, FusionRule,
+    FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
+    MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols,
+    TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -789,6 +791,109 @@ where
                     dst_codomain_tree,
                     src_key.domain_tree().clone(),
                 ));
+                let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
+                    dst_row
+                } else {
+                    let dst_row = dst_keys.len();
+                    dst_index_by_key.insert(dst_key.clone(), dst_row);
+                    dst_keys.push(dst_key);
+                    rows.push(vec![R::Scalar::zero(); src_column + 1]);
+                    dst_row
+                };
+                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient;
+            }
+        }
+
+        let src_count = src_keys.len();
+        let mut coefficients_src_by_dst = Vec::with_capacity(dst_keys.len() * src_count);
+        for row in rows {
+            coefficients_src_by_dst.extend(row);
+        }
+        specs.push(TreeTransformGroupBlockSpec::multi(
+            group.group_key().clone(),
+            dst_keys,
+            src_keys,
+            coefficients_src_by_dst,
+        ));
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
+pub fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+
+    let mut specs = Vec::new();
+    for group in src_structure.fusion_tree_groups() {
+        let src_block_indices = group.block_indices();
+        let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
+        let mut dst_keys = Vec::<BlockKey>::new();
+        let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+        let mut rows = Vec::<Vec<R::Scalar>>::new();
+
+        for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
+            let block = src_structure.block(src_block_index)?;
+            let BlockKey::FusionTree(src_key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index: src_block_index,
+                });
+            };
+            src_keys.push(BlockKey::from(src_key.clone()));
+
+            let transformed = match &operation {
+                TreeTransformOperationKey::Permute {
+                    codomain_permutation,
+                    domain_permutation,
+                } => multiplicity_free_permute_tree_pair(
+                    rule,
+                    src_key,
+                    codomain_permutation,
+                    domain_permutation,
+                )?,
+                TreeTransformOperationKey::Braid {
+                    codomain_permutation,
+                    domain_permutation,
+                    codomain_levels,
+                    domain_levels,
+                } => multiplicity_free_braid_tree_pair(
+                    rule,
+                    src_key,
+                    codomain_permutation,
+                    domain_permutation,
+                    codomain_levels,
+                    domain_levels,
+                )?,
+                TreeTransformOperationKey::Transpose {
+                    codomain_permutation,
+                    domain_permutation,
+                } => multiplicity_free_transpose_tree_pair(
+                    rule,
+                    src_key,
+                    codomain_permutation,
+                    domain_permutation,
+                )?,
+            };
+
+            for row in &mut rows {
+                row.push(R::Scalar::zero());
+            }
+            for (dst_tree_key, coefficient) in transformed {
+                let dst_key = BlockKey::from(dst_tree_key);
                 let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
                     dst_row
                 } else {
@@ -4883,6 +4988,56 @@ mod tests {
                 "coefficient {actual} != {expected}"
             );
         }
+    }
+
+    #[test]
+    fn multiplicity_free_su2_tree_pair_plan_builder_handles_domain_crossing() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [true],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])])
+                .unwrap();
+        let dst_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(expected_dst_key.clone(), vec![1, 1])],
+        )
+        .unwrap();
+
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan(
+            &SU2FusionRule,
+            TreeTransformOperationKey::permute([1], [0]),
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        let spec = &plan.specs()[0];
+        assert_eq!(spec.src_keys(), &[src_key]);
+        assert_eq!(spec.dst_keys(), &[expected_dst_key]);
+        assert_eq!(spec.coefficients_src_by_dst().len(), 1);
+        assert!((spec.coefficients_src_by_dst()[0] - 1.0).abs() < 1.0e-12);
+        plan.compile_structures(&dst_structure, &src_structure)
+            .unwrap();
     }
 
     #[test]
