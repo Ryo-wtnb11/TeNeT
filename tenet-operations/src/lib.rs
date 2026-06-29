@@ -14,9 +14,10 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    unique_braid_tree, unique_permute_tree, BlockKey, BlockLayout, BlockStructure, BlockView,
-    BlockViewMut, BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
-    FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols, TensorMap,
+    unique_braid_tree, unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
+    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError,
+    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
+    MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols, TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -706,6 +707,69 @@ where
             }
         };
         let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, src_key.domain_tree().clone());
+        specs.push(TreeTransformGroupBlockSpec::single(
+            src_key.group_key(),
+            dst_key,
+            src_key.clone(),
+            coefficient,
+        ));
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
+pub fn build_unique_tree_pair_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreePivotalSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+
+    let mut specs = Vec::with_capacity(src_structure.block_count());
+    for index in 0..src_structure.block_count() {
+        let block = src_structure.block(index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index,
+            });
+        };
+
+        let (dst_key, coefficient) = match &operation {
+            TreeTransformOperationKey::Permute {
+                codomain_permutation,
+                domain_permutation,
+            } => unique_permute_tree_pair(rule, src_key, codomain_permutation, domain_permutation)?,
+            TreeTransformOperationKey::Braid {
+                codomain_permutation,
+                domain_permutation,
+                codomain_levels,
+                domain_levels,
+            } => unique_braid_tree_pair(
+                rule,
+                src_key,
+                codomain_permutation,
+                domain_permutation,
+                codomain_levels,
+                domain_levels,
+            )?,
+            TreeTransformOperationKey::Transpose { .. } => {
+                return Err(OperationError::UnsupportedTreeTransformScope {
+                    operation: operation.clone(),
+                    message: "UniqueFusion tree-pair lowering supports explicit Permute or Braid operations",
+                });
+            }
+        };
         specs.push(TreeTransformGroupBlockSpec::single(
             src_key.group_key(),
             dst_key,
@@ -2966,6 +3030,18 @@ mod tests {
         }
     }
 
+    impl MultiplicityFreePivotalSymbols for UniqueZ2Rule {
+        fn bendright_scalar(
+            &self,
+            _left_coupled: SectorId,
+            _bent_sector: SectorId,
+            _coupled: SectorId,
+            _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            1.0
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct UniqueAnyonicRule;
 
@@ -3023,6 +3099,18 @@ mod tests {
             } else {
                 1.0
             }
+        }
+    }
+
+    impl MultiplicityFreePivotalSymbols for UniqueAnyonicRule {
+        fn bendright_scalar(
+            &self,
+            _left_coupled: SectorId,
+            _bent_sector: SectorId,
+            _coupled: SectorId,
+            _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            1.0
         }
     }
 
@@ -4829,6 +4917,124 @@ mod tests {
             OperationError::UnsupportedBraidingStyle {
                 operation,
                 style: BraidingStyleKind::Anyonic,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [0, 1],
+            Some(1),
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1, 0],
+            Some(1),
+            [false],
+            [true, false],
+            [],
+            [],
+            [],
+            [1],
+        ));
+        let src_tree = expect_tree_key(&src_key);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key.clone(), vec![1, 1, 1])])
+                .unwrap();
+
+        let plan = build_unique_tree_pair_transform_group_plan(
+            &UniqueZ2Rule,
+            TreeTransformOperationKey::permute([0], [2, 1]),
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    }
+
+    #[test]
+    fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])])
+                .unwrap();
+
+        let plan = build_unique_tree_pair_transform_group_plan(
+            &UniqueAnyonicRule,
+            TreeTransformOperationKey::braid([1], [0], [0], [1]),
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[-2.0]);
+    }
+
+    #[test]
+    fn unique_tree_pair_plan_builder_rejects_transpose_scope() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+        let operation = TreeTransformOperationKey::transpose([0], [1]);
+
+        let err = build_unique_tree_pair_transform_group_plan(
+            &UniqueZ2Rule,
+            operation.clone(),
+            &src_structure,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTreeTransformScope {
+                operation,
+                message:
+                    "UniqueFusion tree-pair lowering supports explicit Permute or Braid operations",
             }
         );
     }
