@@ -831,6 +831,70 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
+    unique_artin_braid_at_with_inverse(rule, tree, index, false)
+}
+
+pub fn unique_braid_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    permutation: &[usize],
+    levels: &[usize],
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let rank = tree.uncoupled().len();
+    if levels.len() != rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: levels.len(),
+        });
+    }
+    let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
+    let mut current = tree.clone();
+    let mut coefficient = rule.scalar_one();
+    let mut current_levels = levels.to_vec();
+    for swap in swaps {
+        let inverse = current_levels[swap] > current_levels[swap + 1];
+        let (next, step_coefficient) =
+            unique_artin_braid_at_with_inverse(rule, &current, swap, inverse)?;
+        coefficient = coefficient * step_coefficient;
+        current_levels.swap(swap, swap + 1);
+        current = next;
+    }
+    Ok((current, coefficient))
+}
+
+pub fn unique_permute_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    permutation: &[usize],
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    let levels = (0..tree.uncoupled().len()).collect::<Vec<_>>();
+    unique_braid_tree(rule, tree, permutation, &levels)
+}
+
+fn unique_artin_braid_at_with_inverse<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    index: usize,
+    inverse: bool,
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Unique,
@@ -899,7 +963,12 @@ where
         };
 
         let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
-        return Ok((braided, rule.r_symbol_scalar(left, right, coupled)));
+        let coefficient = if inverse {
+            rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+        } else {
+            rule.r_symbol_scalar(left, right, coupled)
+        };
+        return Ok((braided, coefficient));
     }
 
     let a = inner_extended_sector(tree, index - 1)?;
@@ -915,9 +984,54 @@ where
         })? = c_prime;
     let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
     let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
-    let right_r = rule.r_symbol_scalar(a, d, c_prime);
-    let left_r = rule.r_symbol_scalar(c, d, e);
-    Ok((braided, left_r * rule.scalar_conj(f_symbol * right_r)))
+    let coefficient = if inverse {
+        let left = rule.r_symbol_scalar(d, c, e);
+        let right = rule.r_symbol_scalar(d, a, c_prime);
+        rule.scalar_conj(left * f_symbol) * right
+    } else {
+        let left = rule.r_symbol_scalar(c, d, e);
+        let right = rule.r_symbol_scalar(a, d, c_prime);
+        left * rule.scalar_conj(f_symbol * right)
+    };
+    Ok((braided, coefficient))
+}
+
+fn permutation_to_adjacent_swaps(
+    permutation: &[usize],
+    rank: usize,
+) -> Result<Vec<usize>, CoreError> {
+    if permutation.len() != rank {
+        return Err(CoreError::InvalidPermutation {
+            permutation: permutation.to_vec(),
+            rank,
+        });
+    }
+    let mut seen = vec![false; rank];
+    for &axis in permutation {
+        if axis >= rank || seen[axis] {
+            return Err(CoreError::InvalidPermutation {
+                permutation: permutation.to_vec(),
+                rank,
+            });
+        }
+        seen[axis] = true;
+    }
+
+    let mut work = permutation.to_vec();
+    let mut swaps = Vec::new();
+    for target in 0..rank.saturating_sub(1) {
+        let source = work[target];
+        for swap in (target..source).rev() {
+            swaps.push(swap);
+        }
+        for item in work.iter_mut().take(rank).skip(target + 1) {
+            if *item < source {
+                *item += 1;
+            }
+        }
+        work[target] = target;
+    }
+    Ok(swaps)
 }
 
 fn inner_extended_sector(tree: &FusionTreeKey, index: usize) -> Result<SectorId, CoreError> {
@@ -2227,9 +2341,17 @@ pub enum CoreError {
         index: usize,
         rank: usize,
     },
+    InvalidPermutation {
+        permutation: Vec<usize>,
+        rank: usize,
+    },
     UnsupportedFusionStyle {
         expected: FusionStyleKind,
         actual: FusionStyleKind,
+    },
+    UnsupportedBraidingStyle {
+        expected: &'static str,
+        actual: BraidingStyleKind,
     },
     UnsupportedSectorBraid {
         left: SectorId,
@@ -2292,10 +2414,19 @@ impl fmt::Display for CoreError {
                     "cannot braid adjacent fusion-tree outputs at index {index} for rank {rank}"
                 )
             }
+            Self::InvalidPermutation { permutation, rank } => {
+                write!(f, "invalid permutation {permutation:?} for rank {rank}")
+            }
             Self::UnsupportedFusionStyle { expected, actual } => {
                 write!(
                     f,
                     "unsupported fusion style {actual:?}; expected {expected:?}"
+                )
+            }
+            Self::UnsupportedBraidingStyle { expected, actual } => {
+                write!(
+                    f,
+                    "unsupported braiding style {actual:?}; expected {expected}"
                 )
             }
             Self::UnsupportedSectorBraid { left, right, style } => {
@@ -2634,6 +2765,76 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
+    struct AsymmetricAnyonicRule;
+
+    impl FusionRule for AsymmetricAnyonicRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Anyonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => vec![SectorId::new(x)],
+                (1, 2) | (2, 1) => vec![SectorId::new(3)],
+                (3, 1) | (1, 3) => vec![SectorId::new(2)],
+                (3, 2) | (2, 3) => vec![SectorId::new(1)],
+                _ => vec![SectorId::new((left.id() + right.id()) % 4)],
+            }
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for AsymmetricAnyonicRule {}
+
+    impl MultiplicityFreeFusionSymbols for AsymmetricAnyonicRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            11.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            match (left.id(), right.id()) {
+                (1, 2) => 5.0,
+                (2, 1) => 7.0,
+                (3, 2) => 13.0,
+                (2, 3) => 17.0,
+                (1, 3) => 19.0,
+                (3, 1) => 23.0,
+                _ => 1.0,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     struct Su2MultiplicityFreeRule;
 
     impl FusionRule for Su2MultiplicityFreeRule {
@@ -2868,6 +3069,94 @@ mod tests {
         let err = unique_artin_braid_at(&FermionicZ2Rule, &tree, 1).unwrap_err();
 
         assert_eq!(err, CoreError::InvalidBraidIndex { index: 1, rank: 2 });
+    }
+
+    #[test]
+    fn permutation_to_adjacent_swaps_matches_tensorkit_order() {
+        assert_eq!(
+            permutation_to_adjacent_swaps(&[2, 0, 1], 3).unwrap(),
+            vec![1, 0]
+        );
+        assert_eq!(
+            permutation_to_adjacent_swaps(&[3, 0, 2, 1], 4).unwrap(),
+            vec![2, 1, 0, 2]
+        );
+    }
+
+    #[test]
+    fn unique_braid_tree_replays_tensorkit_swap_order_and_level_updates() {
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
+
+        let (braided, coefficient) =
+            unique_braid_tree(&FermionicZ2Rule, &tree, &[2, 0, 1], &[0, 1, 2]).unwrap();
+
+        assert_eq!(coefficient, 1.0);
+        assert_eq!(
+            braided.uncoupled(),
+            &[SectorId::new(1), SectorId::new(1), SectorId::new(1)]
+        );
+        assert_eq!(braided.is_dual(), &[false, false, false]);
+        assert_eq!(braided.coupled(), Some(SectorId::new(1)));
+        assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
+        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_braid_tree_uses_inverse_artin_branch_from_levels() {
+        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+
+        let (braided_forward, forward) =
+            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0, 1]).unwrap();
+        let (braided_inverse, inverse) =
+            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[1, 0]).unwrap();
+
+        assert_eq!(forward, 5.0);
+        assert_eq!(inverse, 7.0);
+        assert_eq!(braided_forward, braided_inverse);
+        assert_eq!(
+            braided_forward.uncoupled(),
+            &[SectorId::new(2), SectorId::new(1)]
+        );
+        assert_eq!(braided_forward.coupled(), Some(SectorId::new(3)));
+    }
+
+    #[test]
+    fn unique_braid_tree_rejects_invalid_permutation_and_level_count() {
+        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+
+        let err = unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 1], &[0, 1]).unwrap_err();
+        assert_eq!(
+            err,
+            CoreError::InvalidPermutation {
+                permutation: vec![1, 1],
+                rank: 2,
+            }
+        );
+
+        let err = unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0]).unwrap_err();
+        assert_eq!(
+            err,
+            CoreError::DimensionMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_permute_tree_requires_symmetric_braiding() {
+        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+
+        let err = unique_permute_tree(&AsymmetricAnyonicRule, &tree, &[1, 0]).unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: BraidingStyleKind::Anyonic,
+            }
+        );
     }
 
     #[test]
