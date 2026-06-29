@@ -182,6 +182,40 @@ impl FusionStyleKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BraidingStyleKind {
+    NoBraiding,
+    Bosonic,
+    Fermionic,
+    Anyonic,
+}
+
+impl BraidingStyleKind {
+    #[inline]
+    pub const fn has_braiding(self) -> bool {
+        !matches!(self, Self::NoBraiding)
+    }
+
+    #[inline]
+    pub const fn is_symmetric(self) -> bool {
+        matches!(self, Self::Bosonic | Self::Fermionic)
+    }
+
+    #[inline]
+    pub const fn is_bosonic(self) -> bool {
+        matches!(self, Self::Bosonic)
+    }
+
+    pub const fn combined_with(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NoBraiding, _) | (_, Self::NoBraiding) => Self::NoBraiding,
+            (Self::Anyonic, _) | (_, Self::Anyonic) => Self::Anyonic,
+            (Self::Fermionic, _) | (_, Self::Fermionic) => Self::Fermionic,
+            (Self::Bosonic, Self::Bosonic) => Self::Bosonic,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SectorLeg {
     sectors: Vec<SectorId>,
@@ -354,6 +388,8 @@ impl FusionTreeHomSpace {
 pub trait FusionRule {
     fn fusion_style(&self) -> FusionStyleKind;
 
+    fn braiding_style(&self) -> BraidingStyleKind;
+
     fn vacuum(&self) -> SectorId;
 
     fn dual(&self, sector: SectorId) -> SectorId {
@@ -368,6 +404,24 @@ pub trait FusionRule {
 }
 
 pub trait MultiplicityFreeFusionRule: FusionRule {}
+
+pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
+    type Scalar: Clone;
+
+    fn scalar_one(&self) -> Self::Scalar;
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar;
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar;
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CoupledFusionTrees {
@@ -2157,6 +2211,10 @@ mod tests {
             FusionStyleKind::Simple
         }
 
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
         fn vacuum(&self) -> SectorId {
             SectorId::new(0)
         }
@@ -2189,6 +2247,10 @@ mod tests {
             FusionStyleKind::Unique
         }
 
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
         fn vacuum(&self) -> SectorId {
             SectorId::new(0)
         }
@@ -2200,12 +2262,45 @@ mod tests {
 
     impl MultiplicityFreeFusionRule for Z2MultiplicityFreeRule {}
 
+    impl MultiplicityFreeFusionSymbols for Z2MultiplicityFreeRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            1.0
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct Su2MultiplicityFreeRule;
 
     impl FusionRule for Su2MultiplicityFreeRule {
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Simple
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
         }
 
         fn vacuum(&self) -> SectorId {
@@ -2251,6 +2346,34 @@ mod tests {
     }
 
     #[test]
+    fn braiding_style_kind_matches_tensorkit_hierarchy() {
+        assert!(!BraidingStyleKind::NoBraiding.has_braiding());
+        assert!(BraidingStyleKind::Bosonic.has_braiding());
+        assert!(BraidingStyleKind::Fermionic.has_braiding());
+        assert!(BraidingStyleKind::Anyonic.has_braiding());
+
+        assert!(!BraidingStyleKind::NoBraiding.is_symmetric());
+        assert!(BraidingStyleKind::Bosonic.is_symmetric());
+        assert!(BraidingStyleKind::Fermionic.is_symmetric());
+        assert!(!BraidingStyleKind::Anyonic.is_symmetric());
+
+        assert!(BraidingStyleKind::Bosonic.is_bosonic());
+        assert!(!BraidingStyleKind::Fermionic.is_bosonic());
+        assert_eq!(
+            BraidingStyleKind::Bosonic.combined_with(BraidingStyleKind::Fermionic),
+            BraidingStyleKind::Fermionic
+        );
+        assert_eq!(
+            BraidingStyleKind::Fermionic.combined_with(BraidingStyleKind::Anyonic),
+            BraidingStyleKind::Anyonic
+        );
+        assert_eq!(
+            BraidingStyleKind::Anyonic.combined_with(BraidingStyleKind::NoBraiding),
+            BraidingStyleKind::NoBraiding
+        );
+    }
+
+    #[test]
     fn fusion_rule_exposes_unique_outputs_and_nsymbol_separately() {
         let z2 = Z2MultiplicityFreeRule;
         let su2 = Su2MultiplicityFreeRule;
@@ -2277,6 +2400,28 @@ mod tests {
         assert_eq!(
             su2.nsymbol(SectorId::new(1), SectorId::new(1), SectorId::new(2)),
             1
+        );
+    }
+
+    #[test]
+    fn multiplicity_free_symbols_are_a_separate_scalar_api() {
+        let z2 = Z2MultiplicityFreeRule;
+
+        assert_eq!(z2.scalar_one(), 1.0);
+        assert_eq!(
+            z2.f_symbol_scalar(
+                SectorId::new(1),
+                SectorId::new(1),
+                SectorId::new(1),
+                SectorId::new(1),
+                SectorId::new(0),
+                SectorId::new(0),
+            ),
+            1.0
+        );
+        assert_eq!(
+            z2.r_symbol_scalar(SectorId::new(1), SectorId::new(1), SectorId::new(0)),
+            1.0
         );
     }
 

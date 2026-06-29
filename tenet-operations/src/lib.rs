@@ -2669,7 +2669,7 @@ mod tests {
     use super::*;
     use num_complex::{Complex32, Complex64};
     use std::fmt::Debug;
-    use tenet_core::{MultiplicityFreeFusionRule, SectorId, TensorMapSpace};
+    use tenet_core::{BraidingStyleKind, MultiplicityFreeFusionRule, SectorId, TensorMapSpace};
 
     fn fusion_tree_test_key<
         const COD: usize,
@@ -2711,6 +2711,10 @@ mod tests {
             FusionStyleKind::Unique
         }
 
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
         fn vacuum(&self) -> SectorId {
             SectorId::new(0)
         }
@@ -2728,6 +2732,10 @@ mod tests {
     impl FusionRule for SimpleSu2Rule {
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Simple
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
         }
 
         fn vacuum(&self) -> SectorId {
@@ -2749,6 +2757,10 @@ mod tests {
     impl FusionRule for GenericMultiplicityRule {
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Anyonic
         }
 
         fn vacuum(&self) -> SectorId {
