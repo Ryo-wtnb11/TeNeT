@@ -1373,10 +1373,7 @@ where
     let front_is_dual = &is_dual[..is_dual.len() - 1];
     let front_effective = &effective[..effective.len() - 1];
     let mut trees = Vec::new();
-    for front_coupled in possible_coupled_sectors(rule, front_effective) {
-        if rule.nsymbol(front_coupled, last, coupled) == 0 {
-            continue;
-        }
+    for front_coupled in tensor_kit_front_coupled_candidates(rule, front_effective, last, coupled) {
         for front_tree in collect_fusion_trees_for_coupled(
             rule,
             front_uncoupled,
@@ -1398,6 +1395,28 @@ where
         }
     }
     trees
+}
+
+fn tensor_kit_front_coupled_candidates<R>(
+    rule: &R,
+    front_effective: &[SectorId],
+    last: SectorId,
+    coupled: SectorId,
+) -> Vec<SectorId>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let possible_fronts = possible_coupled_sectors(rule, front_effective);
+    let mut candidates = Vec::new();
+    for candidate in rule.fusion_channels(coupled, rule.dual(last)) {
+        if possible_fronts.binary_search(&candidate).is_ok()
+            && rule.nsymbol(candidate, last, coupled) != 0
+            && !candidates.contains(&candidate)
+        {
+            candidates.push(candidate);
+        }
+    }
+    candidates
 }
 
 fn possible_coupled_sectors<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
@@ -1424,9 +1443,7 @@ fn effective_sectors<R>(_rule: &R, legs: &[FusionTreeLeg]) -> Vec<SectorId>
 where
     R: MultiplicityFreeFusionRule,
 {
-    legs.iter()
-        .map(|leg| leg.sector())
-        .collect()
+    legs.iter().map(|leg| leg.sector()).collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -5010,6 +5027,10 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
 mod tests {
     use super::*;
 
+    fn u1(charge: i32) -> SectorId {
+        U1Irrep::new(charge).sector_id()
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct BranchingMultiplicityFreeRule;
 
@@ -5045,6 +5066,39 @@ mod tests {
     }
 
     impl MultiplicityFreeFusionRule for BranchingMultiplicityFreeRule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct UnsortedFusionIteratorOrderRule;
+
+    impl FusionRule for UnsortedFusionIteratorOrderRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => vec![SectorId::new(x)],
+                (1, 1) => vec![SectorId::new(2), SectorId::new(0)],
+                (1, 2) | (2, 1) => vec![SectorId::new(1)],
+                (2, 2) => vec![SectorId::new(0)],
+                _ => Vec::new(),
+            }
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for UnsortedFusionIteratorOrderRule {}
 
     #[derive(Clone, Copy, Debug)]
     struct Z4PointedRule;
@@ -6221,6 +6275,145 @@ mod tests {
         assert!((permuted[0].1 - 1.0).abs() < 1.0e-12);
     }
 
+    fn u1_nonselfdual_tree_pair_fixture() -> FusionTreeBlockKey {
+        FusionTreeBlockKey::pair(
+            FusionTreeKey::new(
+                [u1(1), u1(2)],
+                Some(u1(3)),
+                [false, false],
+                Vec::<SectorId>::new(),
+                [SectorId::new(1)],
+            ),
+            FusionTreeKey::new(
+                [u1(3)],
+                Some(u1(3)),
+                [false],
+                Vec::<SectorId>::new(),
+                Vec::<SectorId>::new(),
+            ),
+        )
+    }
+
+    #[test]
+    fn u1_bendright_dualizes_visible_sector_and_flips_isdual_like_tensorkit() {
+        let out = multiplicity_free_bendright_tree_pair(
+            &U1FusionRule,
+            &u1_nonselfdual_tree_pair_fixture(),
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, 1.0);
+        assert_eq!(out[0].0.codomain_uncoupled(), &[u1(1)]);
+        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(1)));
+        assert_eq!(out[0].0.codomain_is_dual(), &[false]);
+        assert_eq!(out[0].0.codomain_innerlines(), &[]);
+        assert_eq!(out[0].0.codomain_vertices(), &[]);
+        assert_eq!(out[0].0.domain_uncoupled(), &[u1(3), u1(-2)]);
+        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(1)));
+        assert_eq!(out[0].0.domain_is_dual(), &[false, true]);
+        assert_eq!(out[0].0.domain_innerlines(), &[]);
+        assert_eq!(out[0].0.domain_vertices(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn u1_foldright_dualizes_first_visible_sector_and_flips_isdual_like_tensorkit() {
+        let out = multiplicity_free_foldright_tree_pair(
+            &U1FusionRule,
+            &u1_nonselfdual_tree_pair_fixture(),
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, 1.0);
+        assert_eq!(out[0].0.codomain_uncoupled(), &[u1(2)]);
+        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(2)));
+        assert_eq!(out[0].0.codomain_is_dual(), &[false]);
+        assert_eq!(out[0].0.codomain_innerlines(), &[]);
+        assert_eq!(out[0].0.codomain_vertices(), &[]);
+        assert_eq!(out[0].0.domain_uncoupled(), &[u1(-1), u1(3)]);
+        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(2)));
+        assert_eq!(out[0].0.domain_is_dual(), &[true, false]);
+        assert_eq!(out[0].0.domain_innerlines(), &[]);
+        assert_eq!(out[0].0.domain_vertices(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn u1_repartition_to_all_domain_matches_tensorkit_nonselfdual_fixture() {
+        let out = multiplicity_free_repartition_tree_pair(
+            &U1FusionRule,
+            &u1_nonselfdual_tree_pair_fixture(),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, 1.0);
+        assert_eq!(out[0].0.codomain_uncoupled(), &[]);
+        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.codomain_is_dual(), &[]);
+        assert_eq!(out[0].0.codomain_innerlines(), &[]);
+        assert_eq!(out[0].0.codomain_vertices(), &[]);
+        assert_eq!(out[0].0.domain_uncoupled(), &[u1(3), u1(-2), u1(-1)]);
+        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.domain_is_dual(), &[false, true, true]);
+        assert_eq!(out[0].0.domain_innerlines(), &[u1(1)]);
+        assert_eq!(
+            out[0].0.domain_vertices(),
+            &[SectorId::new(1), SectorId::new(1)]
+        );
+    }
+
+    #[test]
+    fn u1_repartition_to_all_codomain_matches_tensorkit_nonselfdual_fixture() {
+        let out = multiplicity_free_repartition_tree_pair(
+            &U1FusionRule,
+            &u1_nonselfdual_tree_pair_fixture(),
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, 1.0);
+        assert_eq!(out[0].0.codomain_uncoupled(), &[u1(1), u1(2), u1(-3)]);
+        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.codomain_is_dual(), &[false, false, true]);
+        assert_eq!(out[0].0.codomain_innerlines(), &[u1(3)]);
+        assert_eq!(
+            out[0].0.codomain_vertices(),
+            &[SectorId::new(1), SectorId::new(1)]
+        );
+        assert_eq!(out[0].0.domain_uncoupled(), &[]);
+        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.domain_is_dual(), &[]);
+        assert_eq!(out[0].0.domain_innerlines(), &[]);
+        assert_eq!(out[0].0.domain_vertices(), &[]);
+    }
+
+    #[test]
+    fn u1_transpose_cyclic_23_1_matches_tensorkit_nonselfdual_fixture() {
+        let out = multiplicity_free_transpose_tree_pair(
+            &U1FusionRule,
+            &u1_nonselfdual_tree_pair_fixture(),
+            &[1, 2],
+            &[0],
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, 1.0);
+        assert_eq!(out[0].0.codomain_uncoupled(), &[u1(2), u1(-3)]);
+        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(-1)));
+        assert_eq!(out[0].0.codomain_is_dual(), &[false, true]);
+        assert_eq!(out[0].0.codomain_innerlines(), &[]);
+        assert_eq!(out[0].0.codomain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(out[0].0.domain_uncoupled(), &[u1(-1)]);
+        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(-1)));
+        assert_eq!(out[0].0.domain_is_dual(), &[true]);
+        assert_eq!(out[0].0.domain_innerlines(), &[]);
+        assert_eq!(out[0].0.domain_vertices(), &[]);
+    }
+
     #[test]
     fn typed_sector_homspace_builds_u1_tree_key() {
         let rule = U1FusionRule;
@@ -6748,6 +6941,22 @@ mod tests {
         let groups = hom.fusion_tree_groups(&rule).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].block_indices(), &[0, 1]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_uses_tensorkit_parent_iterator_order_not_ord_sort() {
+        let rule = UnsortedFusionIteratorOrderRule;
+        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // TensorKit rank >= 3 iterator picks the parent line from
+        // `coupled ⊗ dual(last)` order. This toy rule returns 1 ⊗ 1 as [2, 0],
+        // deliberately opposite to `SectorId` Ord, so an Ord-based replay would
+        // produce [0], [2].
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].codomain_innerlines(), &[SectorId::new(2)]);
+        assert_eq!(keys[1].codomain_innerlines(), &[SectorId::new(0)]);
     }
 
     #[test]
