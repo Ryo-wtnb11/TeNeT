@@ -8,6 +8,7 @@
 
 use core::fmt;
 use core::marker::PhantomData;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -665,6 +666,31 @@ impl SectorBlock {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FusionTreeBlockGroup {
+    group_key: FusionTreeGroupKey,
+    block_indices: Vec<usize>,
+}
+
+impl FusionTreeBlockGroup {
+    pub fn new(group_key: FusionTreeGroupKey, block_indices: Vec<usize>) -> Self {
+        Self {
+            group_key,
+            block_indices,
+        }
+    }
+
+    #[inline]
+    pub fn group_key(&self) -> &FusionTreeGroupKey {
+        &self.group_key
+    }
+
+    #[inline]
+    pub fn block_indices(&self) -> &[usize] {
+        &self.block_indices
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SectorStructure {
     rank: usize,
     blocks: Vec<SectorBlock>,
@@ -728,6 +754,23 @@ impl SectorStructure {
     #[inline]
     pub fn blocks(&self) -> &[SectorBlock] {
         &self.blocks
+    }
+
+    pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
+        let mut groups = Vec::<FusionTreeBlockGroup>::new();
+        let mut group_indices = HashMap::<FusionTreeGroupKey, usize>::new();
+        for (index, block) in self.blocks.iter().enumerate() {
+            let Some(group_key) = block.key().fusion_tree_group_key() else {
+                continue;
+            };
+            if let Some(&group_index) = group_indices.get(&group_key) {
+                groups[group_index].block_indices.push(index);
+            } else {
+                group_indices.insert(group_key.clone(), groups.len());
+                groups.push(FusionTreeBlockGroup::new(group_key, vec![index]));
+            }
+        }
+        groups
     }
 
     pub fn block(&self, index: usize) -> Result<&SectorBlock, CoreError> {
@@ -1158,6 +1201,10 @@ impl BlockStructure {
     #[inline]
     pub fn degeneracy_structure(&self) -> &DegeneracyStructure {
         &self.degeneracy
+    }
+
+    pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
+        self.sector.fusion_tree_groups()
     }
 
     pub fn find_block_index_by_key(&self, key: &BlockKey) -> Option<usize> {
@@ -1849,6 +1896,93 @@ mod tests {
         assert_eq!(group.domain_uncoupled(), key.domain_uncoupled());
         assert_eq!(group.codomain_is_dual(), key.codomain_is_dual());
         assert_eq!(group.domain_is_dual(), key.domain_is_dual());
+    }
+
+    #[test]
+    fn fusion_tree_groups_preserve_structure_order_and_ignore_internal_tree_data() {
+        let first = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [10, 20],
+            [30],
+            Some(5),
+            [false, true],
+            [true],
+            [101],
+            [201],
+            [301, 302],
+            [401],
+        ));
+        let second = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [2, 3],
+            Some(4),
+            [true],
+            [false, true],
+            [],
+            [202],
+            [303],
+            [402, 403],
+        ));
+        let same_group_as_first = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [10, 20],
+            [30],
+            Some(6),
+            [false, true],
+            [true],
+            [102],
+            [203],
+            [304, 305],
+            [404],
+        ));
+
+        let keys = vec![first.clone(), second.clone(), same_group_as_first.clone()];
+        let sector = SectorStructure::from_keys(2, keys.clone()).unwrap();
+        let block_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            keys.into_iter().map(|key| (key, vec![1, 1])),
+        )
+        .unwrap();
+
+        let sector_groups = sector.fusion_tree_groups();
+        let block_groups = block_structure.fusion_tree_groups();
+        assert_eq!(sector_groups, block_groups);
+        assert_eq!(sector_groups.len(), 2);
+        assert_eq!(sector_groups[0].block_indices(), &[0, 2]);
+        assert_eq!(sector_groups[1].block_indices(), &[1]);
+        assert_eq!(
+            sector_groups[0].group_key(),
+            &FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true])
+        );
+        assert_eq!(
+            sector_groups[1].group_key(),
+            &FusionTreeGroupKey::from_sector_ids([1], [2, 3], [true], [false, true])
+        );
+    }
+
+    #[test]
+    fn fusion_tree_groups_ignore_dense_blocks() {
+        let key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [7],
+            [8],
+            Some(9),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let sector = SectorStructure::from_keys(2, [BlockKey::trivial(), key]).unwrap();
+        let groups = sector.fusion_tree_groups();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].block_indices(), &[1]);
+        assert_eq!(
+            groups[0].group_key(),
+            &FusionTreeGroupKey::from_sector_ids([7], [8], [false], [true])
+        );
+
+        let dense = BlockStructure::trivial(&[2, 3]).unwrap();
+        assert!(dense.fusion_tree_groups().is_empty());
     }
 
     #[test]
