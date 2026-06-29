@@ -352,17 +352,27 @@ impl FusionTreeHomSpace {
     {
         let codomain = fusion_trees_by_coupled_for_space(rule, &self.codomain);
         let domain = fusion_trees_by_coupled_for_space(rule, &self.domain);
-        let coupled = common_coupled_sectors(&codomain, &domain);
         let mut keys = Vec::new();
-        for sector in coupled {
-            let domain_trees = trees_for_coupled(&domain, sector);
-            let codomain_trees = trees_for_coupled(&codomain, sector);
-            for domain_tree in domain_trees {
-                for codomain_tree in codomain_trees {
-                    keys.push(FusionTreeBlockKey::pair(
-                        codomain_tree.clone(),
-                        domain_tree.clone(),
-                    ));
+        let mut codomain_index = 0usize;
+        let mut domain_index = 0usize;
+        while codomain_index < codomain.len() && domain_index < domain.len() {
+            match codomain[codomain_index]
+                .coupled
+                .cmp(&domain[domain_index].coupled)
+            {
+                std::cmp::Ordering::Less => codomain_index += 1,
+                std::cmp::Ordering::Greater => domain_index += 1,
+                std::cmp::Ordering::Equal => {
+                    for domain_tree in &domain[domain_index].trees {
+                        for codomain_tree in &codomain[codomain_index].trees {
+                            keys.push(FusionTreeBlockKey::pair(
+                                codomain_tree.clone(),
+                                domain_tree.clone(),
+                            ));
+                        }
+                    }
+                    codomain_index += 1;
+                    domain_index += 1;
                 }
             }
         }
@@ -822,32 +832,6 @@ where
             }
         })
         .collect()
-}
-
-fn common_coupled_sectors(
-    left: &[CoupledFusionTrees],
-    right: &[CoupledFusionTrees],
-) -> Vec<SectorId> {
-    let mut sectors = left
-        .iter()
-        .filter(|left_group| {
-            right
-                .iter()
-                .any(|right_group| right_group.coupled == left_group.coupled)
-        })
-        .map(|group| group.coupled)
-        .collect::<Vec<_>>();
-    sectors.sort_unstable();
-    sectors.dedup();
-    sectors
-}
-
-fn trees_for_coupled(groups: &[CoupledFusionTrees], coupled: SectorId) -> &[FusionTreeKey] {
-    groups
-        .iter()
-        .find(|group| group.coupled == coupled)
-        .map(|group| group.trees.as_slice())
-        .unwrap_or(&[])
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
