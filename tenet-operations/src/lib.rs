@@ -442,24 +442,8 @@ impl<T: Copy> TreeTransformKeyBlockSpec<T> {
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
     ) -> Result<TreeTransformBlockSpec<T>, OperationError> {
-        let dst_blocks = self
-            .dst_keys
-            .iter()
-            .map(|key| {
-                dst_structure
-                    .find_block_index_by_key(key)
-                    .ok_or_else(|| OperationError::MissingBlockKey { key: key.clone() })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let src_blocks = self
-            .src_keys
-            .iter()
-            .map(|key| {
-                src_structure
-                    .find_block_index_by_key(key)
-                    .ok_or_else(|| OperationError::MissingBlockKey { key: key.clone() })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let dst_blocks = block_indices_for_keys(dst_structure, &self.dst_keys)?;
+        let src_blocks = block_indices_for_keys(src_structure, &self.src_keys)?;
 
         Ok(TreeTransformBlockSpec::multi(
             dst_blocks,
@@ -564,16 +548,22 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     pub fn coefficients_src_by_dst(&self) -> &[T] {
         &self.coefficients_src_by_dst
     }
+}
 
-    fn to_keyed_spec(&self) -> TreeTransformKeyBlockSpec<T>
-    where
-        T: Clone,
-    {
-        TreeTransformKeyBlockSpec::multi(
-            self.dst_keys.clone(),
-            self.src_keys.clone(),
+impl<T: Copy> TreeTransformGroupBlockSpec<T> {
+    fn to_indexed_spec(
+        &self,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<TreeTransformBlockSpec<T>, OperationError> {
+        let dst_blocks = block_indices_for_keys(dst_structure, &self.dst_keys)?;
+        let src_blocks = block_indices_for_keys(src_structure, &self.src_keys)?;
+
+        Ok(TreeTransformBlockSpec::multi(
+            dst_blocks,
+            src_blocks,
             self.coefficients_src_by_dst.clone(),
-        )
+        ))
     }
 }
 
@@ -649,6 +639,19 @@ fn fusion_tree_group_block_keys(
         }
     }
     Ok(keys)
+}
+
+fn block_indices_for_keys(
+    structure: &BlockStructure,
+    keys: &[BlockKey],
+) -> Result<Vec<usize>, OperationError> {
+    keys.iter()
+        .map(|key| {
+            structure
+                .find_block_index_by_key(key)
+                .ok_or_else(|| OperationError::MissingBlockKey { key: key.clone() })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -739,11 +742,11 @@ impl<T: Copy> TreeTransformStructure<T> {
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformGroupBlockSpec<T>],
     ) -> Result<Self, OperationError> {
-        let keyed_specs = specs
+        let indexed_specs = specs
             .iter()
-            .map(TreeTransformGroupBlockSpec::to_keyed_spec)
-            .collect::<Vec<_>>();
-        Self::compile_keyed_shared_structures(dst_structure, src_structure, &keyed_specs)
+            .map(|spec| spec.to_indexed_spec(&dst_structure, &src_structure))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::compile_shared_structures(dst_structure, src_structure, &indexed_specs)
     }
 
     fn compile_keyed_shared_structures(
@@ -3866,7 +3869,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_transform_group_block_spec_preserves_group_identity_and_lowers_to_keyed() {
+    fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
         let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
         let dst_key1 = BlockKey::sector_ids([101, 201]);
         let dst_key2 = BlockKey::sector_ids([102, 202]);
@@ -3897,11 +3900,9 @@ mod tests {
         );
         assert_eq!(spec.group_key().codomain_is_dual(), &[false, true]);
         assert_eq!(spec.group_key().domain_is_dual(), &[true]);
-
-        let keyed_spec = spec.to_keyed_spec();
-        assert_eq!(keyed_spec.dst_keys(), &[dst_key1, dst_key2]);
-        assert_eq!(keyed_spec.src_keys(), &[src_key]);
-        assert_eq!(keyed_spec.coefficients_src_by_dst(), &[2.0, 3.0]);
+        assert_eq!(spec.dst_keys(), &[dst_key1, dst_key2]);
+        assert_eq!(spec.src_keys(), &[src_key]);
+        assert_eq!(spec.coefficients_src_by_dst(), &[2.0, 3.0]);
     }
 
     #[test]
