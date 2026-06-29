@@ -380,6 +380,95 @@ impl<T> TreeTransformBlockSpec<T> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TreeTransformKeyBlockSpec<T> {
+    dst_keys: Vec<BlockKey>,
+    src_keys: Vec<BlockKey>,
+    coefficients_src_by_dst: Vec<T>,
+}
+
+impl<T> TreeTransformKeyBlockSpec<T> {
+    pub fn single<KDst, KSrc>(dst_key: KDst, src_key: KSrc, coefficient: T) -> Self
+    where
+        KDst: Into<BlockKey>,
+        KSrc: Into<BlockKey>,
+    {
+        Self {
+            dst_keys: vec![dst_key.into()],
+            src_keys: vec![src_key.into()],
+            coefficients_src_by_dst: vec![coefficient],
+        }
+    }
+
+    pub fn multi<DstKeys, SrcKeys, KDst, KSrc>(
+        dst_keys: DstKeys,
+        src_keys: SrcKeys,
+        coefficients_src_by_dst: Vec<T>,
+    ) -> Self
+    where
+        DstKeys: IntoIterator<Item = KDst>,
+        SrcKeys: IntoIterator<Item = KSrc>,
+        KDst: Into<BlockKey>,
+        KSrc: Into<BlockKey>,
+    {
+        Self {
+            dst_keys: dst_keys.into_iter().map(Into::into).collect(),
+            src_keys: src_keys.into_iter().map(Into::into).collect(),
+            coefficients_src_by_dst,
+        }
+    }
+
+    #[inline]
+    pub fn dst_keys(&self) -> &[BlockKey] {
+        &self.dst_keys
+    }
+
+    #[inline]
+    pub fn src_keys(&self) -> &[BlockKey] {
+        &self.src_keys
+    }
+
+    /// Recoupling matrix coefficients stored as `U[dst, src]` in row-major
+    /// destination-by-source order: `coeff[src + dst * src_count]`.
+    #[inline]
+    pub fn coefficients_src_by_dst(&self) -> &[T] {
+        &self.coefficients_src_by_dst
+    }
+}
+
+impl<T: Copy> TreeTransformKeyBlockSpec<T> {
+    fn to_indexed_spec(
+        &self,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<TreeTransformBlockSpec<T>, OperationError> {
+        let dst_blocks = self
+            .dst_keys
+            .iter()
+            .map(|key| {
+                dst_structure
+                    .find_block_index_by_key(key)
+                    .ok_or_else(|| OperationError::MissingBlockKey { key: key.clone() })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let src_blocks = self
+            .src_keys
+            .iter()
+            .map(|key| {
+                src_structure
+                    .find_block_index_by_key(key)
+                    .ok_or_else(|| OperationError::MissingBlockKey { key: key.clone() })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(TreeTransformBlockSpec::multi(
+            dst_blocks,
+            src_blocks,
+            self.coefficients_src_by_dst.clone(),
+        ))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
     blocks: Vec<TreeTransformBlock>,
@@ -412,6 +501,42 @@ impl<T: Copy> TreeTransformStructure<T> {
             Arc::new(src_structure.clone()),
             specs,
         )
+    }
+
+    pub fn compile_keyed<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+        specs: &[TreeTransformKeyBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_keyed_shared_structures(
+            Arc::clone(dst.structure()),
+            Arc::clone(src.structure()),
+            specs,
+        )
+    }
+
+    pub fn compile_keyed_structures(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        specs: &[TreeTransformKeyBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_keyed_shared_structures(
+            Arc::new(dst_structure.clone()),
+            Arc::new(src_structure.clone()),
+            specs,
+        )
+    }
+
+    fn compile_keyed_shared_structures(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[TreeTransformKeyBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        let indexed_specs = specs
+            .iter()
+            .map(|spec| spec.to_indexed_spec(&dst_structure, &src_structure))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::compile_shared_structures(dst_structure, src_structure, &indexed_specs)
     }
 
     fn compile_shared_structures(
@@ -2411,6 +2536,81 @@ mod tests {
         assert_eq!(workspace.destination_len(), 4);
     }
 
+    fn assert_tree_multi_keyed_dtype<T>(
+        src_values: Vec<T>,
+        coefficients_src_by_dst: Vec<T>,
+        expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let key10 = BlockKey::sector_ids([10]);
+        let key20 = BlockKey::sector_ids([20]);
+        let key100 = BlockKey::sector_ids([100]);
+        let key200 = BlockKey::sector_ids([200]);
+        let key300 = BlockKey::sector_ids([300]);
+        let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+        let src_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (key100.clone(), vec![2, 1]),
+                (key300.clone(), vec![2, 1]),
+                (key200.clone(), vec![2, 1]),
+            ],
+        )
+        .unwrap();
+        let dst_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
+        )
+        .unwrap();
+        let src =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(src_values, src_space, src_structure)
+                .unwrap();
+        let mut dst = TensorMap::<T, 2, 0>::from_vec_with_structure(
+            vec![T::zero(); 4],
+            dst_space,
+            dst_structure,
+        )
+        .unwrap();
+        let structure = TreeTransformStructure::compile_keyed(
+            &dst,
+            &src,
+            &[TreeTransformKeyBlockSpec::multi(
+                vec![key10, key20],
+                vec![key100, key200, key300],
+                coefficients_src_by_dst,
+            )],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            T::one(),
+            T::zero(),
+        )
+        .unwrap();
+
+        assert_eq!(structure.block_count(), 1);
+        assert_eq!(dst.data(), expected.as_slice());
+        assert_eq!(workspace.source_len(), 6);
+        assert_eq!(workspace.destination_len(), 4);
+    }
+
     #[derive(Default)]
     struct CountingDenseExecutor {
         dot_general_into_calls: usize,
@@ -2983,6 +3183,78 @@ mod tests {
     }
 
     #[test]
+    fn tree_transform_compile_keyed_pairs_tree_blocks_by_key_not_index_for_all_numeric_dtypes() {
+        assert_tree_multi_keyed_dtype(
+            vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            vec![7020.0, 9240.0, 3510.0, 4620.0],
+        );
+        assert_tree_multi_keyed_dtype(
+            vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            vec![7020.0, 9240.0, 3510.0, 4620.0],
+        );
+        assert_tree_multi_keyed_dtype(
+            vec![1_i32, 2, 3, 4, 5, 6],
+            vec![10, 100, 1000, 20, 200, 2000],
+            vec![7020, 9240, 3510, 4620],
+        );
+        assert_tree_multi_keyed_dtype(
+            vec![1_i64, 2, 3, 4, 5, 6],
+            vec![10, 100, 1000, 20, 200, 2000],
+            vec![7020, 9240, 3510, 4620],
+        );
+        assert_tree_multi_keyed_dtype(
+            vec![
+                Complex32::new(1.0, 0.0),
+                Complex32::new(2.0, 0.0),
+                Complex32::new(3.0, 0.0),
+                Complex32::new(4.0, 0.0),
+                Complex32::new(5.0, 0.0),
+                Complex32::new(6.0, 0.0),
+            ],
+            vec![
+                Complex32::new(10.0, 0.0),
+                Complex32::new(100.0, 0.0),
+                Complex32::new(1000.0, 0.0),
+                Complex32::new(20.0, 0.0),
+                Complex32::new(200.0, 0.0),
+                Complex32::new(2000.0, 0.0),
+            ],
+            vec![
+                Complex32::new(7020.0, 0.0),
+                Complex32::new(9240.0, 0.0),
+                Complex32::new(3510.0, 0.0),
+                Complex32::new(4620.0, 0.0),
+            ],
+        );
+        assert_tree_multi_keyed_dtype(
+            vec![
+                Complex64::new(1.0, 0.0),
+                Complex64::new(2.0, 0.0),
+                Complex64::new(3.0, 0.0),
+                Complex64::new(4.0, 0.0),
+                Complex64::new(5.0, 0.0),
+                Complex64::new(6.0, 0.0),
+            ],
+            vec![
+                Complex64::new(10.0, 0.0),
+                Complex64::new(100.0, 0.0),
+                Complex64::new(1000.0, 0.0),
+                Complex64::new(20.0, 0.0),
+                Complex64::new(200.0, 0.0),
+                Complex64::new(2000.0, 0.0),
+            ],
+            vec![
+                Complex64::new(7020.0, 0.0),
+                Complex64::new(9240.0, 0.0),
+                Complex64::new(3510.0, 0.0),
+                Complex64::new(4620.0, 0.0),
+            ],
+        );
+    }
+
+    #[test]
     fn tensoradd_with_backend_allocator_applies_axis_permutation() {
         let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
         let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
@@ -3310,6 +3582,33 @@ mod tests {
             err,
             OperationError::DuplicateTransformDestination { dst_block: 0 }
         );
+    }
+
+    #[test]
+    fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let key1 = BlockKey::sector_ids([1]);
+        let key2 = BlockKey::sector_ids([2]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(key1.clone(), vec![2, 2])]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(key1.clone(), vec![2, 2])]).unwrap();
+        let src =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure)
+                .unwrap();
+        let dst =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
+                .unwrap();
+
+        let err = TreeTransformStructure::compile_keyed(
+            &dst,
+            &src,
+            &[TreeTransformKeyBlockSpec::single(key2.clone(), key1, 1.0)],
+        )
+        .unwrap_err();
+
+        assert_eq!(err, OperationError::MissingBlockKey { key: key2 });
     }
 
     #[test]
