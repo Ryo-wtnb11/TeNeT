@@ -14,7 +14,8 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    unique_braid_tree, unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
+    multiplicity_free_braid_tree, multiplicity_free_permute_tree, unique_braid_tree,
+    unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
     unique_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut,
     BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
     FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols,
@@ -713,6 +714,104 @@ where
             dst_key,
             src_key.clone(),
             coefficient,
+        ));
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
+pub fn build_multiplicity_free_all_codomain_tree_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    validate_all_codomain_operation_scope(&operation)?;
+
+    let mut specs = Vec::new();
+    for group in src_structure.fusion_tree_groups() {
+        let src_block_indices = group.block_indices();
+        let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
+        let mut dst_keys = Vec::<BlockKey>::new();
+        let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+        let mut rows = Vec::<Vec<R::Scalar>>::new();
+
+        for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
+            let block = src_structure.block(src_block_index)?;
+            let BlockKey::FusionTree(src_key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index: src_block_index,
+                });
+            };
+            validate_all_codomain_fusion_tree_block(src_block_index, src_key)?;
+            src_keys.push(BlockKey::from(src_key.clone()));
+
+            let transformed = match &operation {
+                TreeTransformOperationKey::Permute {
+                    codomain_permutation,
+                    ..
+                } => multiplicity_free_permute_tree(
+                    rule,
+                    src_key.codomain_tree(),
+                    codomain_permutation,
+                )?,
+                TreeTransformOperationKey::Braid {
+                    codomain_permutation,
+                    codomain_levels,
+                    ..
+                } => multiplicity_free_braid_tree(
+                    rule,
+                    src_key.codomain_tree(),
+                    codomain_permutation,
+                    codomain_levels,
+                )?,
+                TreeTransformOperationKey::Transpose { .. } => {
+                    unreachable!("all-codomain operation scope validation rejected transpose")
+                }
+            };
+
+            for row in &mut rows {
+                row.push(R::Scalar::zero());
+            }
+            for (dst_codomain_tree, coefficient) in transformed {
+                let dst_key = BlockKey::from(FusionTreeBlockKey::pair(
+                    dst_codomain_tree,
+                    src_key.domain_tree().clone(),
+                ));
+                let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
+                    dst_row
+                } else {
+                    let dst_row = dst_keys.len();
+                    dst_index_by_key.insert(dst_key.clone(), dst_row);
+                    dst_keys.push(dst_key);
+                    rows.push(vec![R::Scalar::zero(); src_column + 1]);
+                    dst_row
+                };
+                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient;
+            }
+        }
+
+        let src_count = src_keys.len();
+        let mut coefficients_src_by_dst = Vec::with_capacity(dst_keys.len() * src_count);
+        for row in rows {
+            coefficients_src_by_dst.extend(row);
+        }
+        specs.push(TreeTransformGroupBlockSpec::multi(
+            group.group_key().clone(),
+            dst_keys,
+            src_keys,
+            coefficients_src_by_dst,
         ));
     }
 
@@ -2906,7 +3005,7 @@ mod tests {
     use std::fmt::Debug;
     use tenet_core::{
         BraidingStyleKind, FusionTreeKey, MultiplicityFreeFusionRule,
-        MultiplicityFreeFusionSymbols, SectorId, TensorMapSpace,
+        MultiplicityFreeFusionSymbols, SU2FusionRule, SectorId, TensorMapSpace,
     };
 
     fn fusion_tree_test_key<
@@ -4737,6 +4836,53 @@ mod tests {
                 style: FusionStyleKind::Simple,
             }
         );
+    }
+
+    #[test]
+    fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let src_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+
+        let plan = build_multiplicity_free_all_codomain_tree_transform_group_plan(
+            &SU2FusionRule,
+            operation,
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        let spec = &plan.specs()[0];
+        assert_eq!(spec.src_keys(), &[src_key0.clone(), src_key1.clone()]);
+        assert_eq!(spec.dst_keys(), &[src_key0, src_key1]);
+        let expected = [0.5, 0.866_025_403_784_438_6, 0.866_025_403_784_438_6, -0.5];
+        assert_eq!(spec.coefficients_src_by_dst().len(), expected.len());
+        for (&actual, expected) in spec.coefficients_src_by_dst().iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "coefficient {actual} != {expected}"
+            );
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 use core::fmt;
 use core::marker::PhantomData;
-use core::ops::Mul;
+use core::ops::{Add, Mul};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -958,6 +958,126 @@ impl FusionRule for SU2FusionRule {
 
 impl MultiplicityFreeFusionRule for SU2FusionRule {}
 
+impl MultiplicityFreeFusionSymbols for SU2FusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        let j1 = SU2Irrep::from_sector_id(left).twice_spin();
+        let j2 = SU2Irrep::from_sector_id(middle).twice_spin();
+        let j3 = SU2Irrep::from_sector_id(right).twice_spin();
+        let j4 = SU2Irrep::from_sector_id(coupled).twice_spin();
+        let j5 = SU2Irrep::from_sector_id(left_coupled).twice_spin();
+        let j6 = SU2Irrep::from_sector_id(right_coupled).twice_spin();
+        su2_f_symbol_from_doubled_spins(j1, j2, j3, j4, j5, j6)
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        if self.nsymbol(left, right, coupled) == 0 {
+            return 0.0;
+        }
+        let left = SU2Irrep::from_sector_id(left).twice_spin();
+        let right = SU2Irrep::from_sector_id(right).twice_spin();
+        let coupled = SU2Irrep::from_sector_id(coupled).twice_spin();
+        let exponent = (left + right - coupled) / 2;
+        if exponent % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+}
+
+fn su2_f_symbol_from_doubled_spins(
+    j1: usize,
+    j2: usize,
+    j3: usize,
+    j4: usize,
+    j5: usize,
+    j6: usize,
+) -> f64 {
+    if [j1, j2, j3, j4, j5, j6].iter().all(|&j| j == 0) {
+        return 1.0;
+    }
+    let phase_exponent = (j1 + j2 + j3 + j4) / 2;
+    let phase = if phase_exponent % 2 == 0 { 1.0 } else { -1.0 };
+    let dimension_factor = (((j5 + 1) * (j6 + 1)) as f64).sqrt();
+    phase * dimension_factor * wigner_6j_doubled(j1, j2, j5, j3, j4, j6)
+}
+
+fn wigner_6j_doubled(j1: usize, j2: usize, j3: usize, j4: usize, j5: usize, j6: usize) -> f64 {
+    let Some(delta_ln) = su2_delta_ln(j1, j2, j3)
+        .and_then(|value| su2_delta_ln(j1, j5, j6).map(|next| value + next))
+        .and_then(|value| su2_delta_ln(j4, j2, j6).map(|next| value + next))
+        .and_then(|value| su2_delta_ln(j4, j5, j3).map(|next| value + next))
+    else {
+        return 0.0;
+    };
+
+    let x = [j1 + j2 + j3, j1 + j5 + j6, j4 + j2 + j6, j4 + j5 + j3];
+    let y = [j1 + j2 + j4 + j5, j1 + j3 + j4 + j6, j2 + j3 + j5 + j6];
+    let mut z_min = x.into_iter().max().unwrap_or(0);
+    let z_max = y.into_iter().min().unwrap_or(0);
+    if z_min > z_max {
+        return 0.0;
+    }
+    if z_min % 2 != 0 {
+        z_min += 1;
+    }
+
+    let mut sum = 0.0;
+    let mut z_doubled = z_min;
+    while z_doubled <= z_max {
+        let z = z_doubled / 2;
+        let mut term_ln = ln_factorial(z + 1);
+        for value in x {
+            term_ln -= ln_factorial((z_doubled - value) / 2);
+        }
+        for value in y {
+            term_ln -= ln_factorial((value - z_doubled) / 2);
+        }
+        let sign = if z % 2 == 0 { 1.0 } else { -1.0 };
+        sum += sign * term_ln.exp();
+        z_doubled += 2;
+    }
+
+    delta_ln.exp() * sum
+}
+
+fn su2_delta_ln(j1: usize, j2: usize, j3: usize) -> Option<f64> {
+    if (j1 + j2 + j3) % 2 != 0 {
+        return None;
+    }
+    if j1 + j2 < j3 || j1 + j3 < j2 || j2 + j3 < j1 {
+        return None;
+    }
+    Some(
+        0.5 * (ln_factorial((j1 + j2 - j3) / 2)
+            + ln_factorial((j1 + j3 - j2) / 2)
+            + ln_factorial((j2 + j3 - j1) / 2)
+            - ln_factorial((j1 + j2 + j3) / 2 + 1)),
+    )
+}
+
+fn ln_factorial(n: usize) -> f64 {
+    (1..=n).map(|value| (value as f64).ln()).sum()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CoupledFusionTrees {
     coupled: SectorId,
@@ -1446,6 +1566,100 @@ where
     unique_braid_tree(rule, tree, permutation, &levels)
 }
 
+pub fn multiplicity_free_artin_braid_at<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    index: usize,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    multiplicity_free_artin_braid_at_with_inverse(rule, tree, index, false)
+}
+
+pub fn multiplicity_free_braid_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    permutation: &[usize],
+    levels: &[usize],
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    let rank = tree.uncoupled().len();
+    if levels.len() != rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: levels.len(),
+        });
+    }
+    let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
+    let mut current = vec![(tree.clone(), rule.scalar_one())];
+    let mut current_levels = levels.to_vec();
+    for swap in swaps {
+        let inverse = current_levels[swap] > current_levels[swap + 1];
+        let mut next_terms = Vec::new();
+        for (tree, coefficient) in current {
+            for (next_tree, step_coefficient) in
+                multiplicity_free_artin_braid_at_with_inverse(rule, &tree, swap, inverse)?
+            {
+                push_or_accumulate_tree_term(
+                    &mut next_terms,
+                    next_tree,
+                    coefficient.clone() * step_coefficient,
+                );
+            }
+        }
+        current_levels.swap(swap, swap + 1);
+        current = next_terms;
+    }
+    Ok(current)
+}
+
+pub fn multiplicity_free_permute_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    permutation: &[usize],
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    let levels = (0..tree.uncoupled().len()).collect::<Vec<_>>();
+    multiplicity_free_braid_tree(rule, tree, permutation, &levels)
+}
+
+fn push_or_accumulate_tree_term<S>(
+    terms: &mut Vec<(FusionTreeKey, S)>,
+    tree: FusionTreeKey,
+    coefficient: S,
+) where
+    S: Clone + Add<Output = S>,
+{
+    if let Some((_, existing)) = terms
+        .iter_mut()
+        .find(|(existing_tree, _)| existing_tree == &tree)
+    {
+        *existing = existing.clone() + coefficient;
+    } else {
+        terms.push((tree, coefficient));
+    }
+}
+
 pub fn unique_braid_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -1765,6 +1979,138 @@ where
         left * rule.scalar_conj(f_symbol * right)
     };
     Ok((braided, coefficient))
+}
+
+fn multiplicity_free_artin_braid_at_with_inverse<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    index: usize,
+    inverse: bool,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+
+    let rank = tree.uncoupled().len();
+    if index + 1 >= rank {
+        return Err(CoreError::InvalidBraidIndex { index, rank });
+    }
+
+    let left = tree.uncoupled()[index];
+    let right = tree.uncoupled()[index + 1];
+    let mut uncoupled = tree.uncoupled().to_vec();
+    uncoupled.swap(index, index + 1);
+    let mut is_dual = tree.is_dual().to_vec();
+    is_dual.swap(index, index + 1);
+
+    if left == rule.vacuum() || right == rule.vacuum() {
+        let mut innerlines = tree.innerlines().to_vec();
+        let mut vertices = tree.vertices().to_vec();
+        if index > 0 {
+            let inner_source = if left == rule.vacuum() {
+                inner_extended_sector(tree, index + 1)?
+            } else {
+                inner_extended_sector(tree, index - 1)?
+            };
+            *innerlines
+                .get_mut(index - 1)
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "unit braid past the first adjacent pair requires an innerline",
+                })? = inner_source;
+            if vertices.len() <= index {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "unit braid past the first adjacent pair requires adjacent vertices",
+                });
+            }
+            vertices.swap(index - 1, index);
+        }
+        return Ok(vec![(
+            FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices),
+            rule.scalar_one(),
+        )]);
+    }
+
+    if !rule.braiding_style().has_braiding() {
+        return Err(CoreError::UnsupportedSectorBraid {
+            left,
+            right,
+            style: rule.braiding_style(),
+        });
+    }
+
+    if index == 0 {
+        let coupled = if rank > 2 {
+            tree.innerlines()
+                .first()
+                .copied()
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "first braid of a rank > 2 tree requires the first innerline",
+                })?
+        } else {
+            tree.coupled().ok_or(CoreError::MalformedFusionTree {
+                message: "first braid of a rank 2 tree requires a coupled sector",
+            })?
+        };
+        let coefficient = if inverse {
+            rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+        } else {
+            rule.r_symbol_scalar(left, right, coupled)
+        };
+        return Ok(vec![(
+            FusionTreeKey::new(
+                uncoupled,
+                tree.coupled(),
+                is_dual,
+                tree.innerlines().to_vec(),
+                tree.vertices().to_vec(),
+            ),
+            coefficient,
+        )]);
+    }
+
+    let a = inner_extended_sector(tree, index - 1)?;
+    let b = left;
+    let c = inner_extended_sector(tree, index)?;
+    let d = right;
+    let e = inner_extended_sector(tree, index + 1)?;
+    let mut terms = Vec::new();
+    for c_prime in rule.fusion_channels(a, d) {
+        if rule.nsymbol(c_prime, b, e) == 0 {
+            continue;
+        }
+        let mut innerlines = tree.innerlines().to_vec();
+        *innerlines
+            .get_mut(index - 1)
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "non-first braid requires an innerline to update",
+            })? = c_prime;
+        let braided = FusionTreeKey::new(
+            uncoupled.clone(),
+            tree.coupled(),
+            is_dual.clone(),
+            innerlines,
+            tree.vertices().to_vec(),
+        );
+        let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
+        let coefficient = if inverse {
+            let left = rule.r_symbol_scalar(d, c, e);
+            let right = rule.r_symbol_scalar(d, a, c_prime);
+            rule.scalar_conj(left * f_symbol) * right
+        } else {
+            let left = rule.r_symbol_scalar(c, d, e);
+            let right = rule.r_symbol_scalar(a, d, c_prime);
+            left * rule.scalar_conj(f_symbol * right)
+        };
+        terms.push((braided, coefficient));
+    }
+    Ok(terms)
 }
 
 fn permutation_to_adjacent_swaps(
@@ -4915,6 +5261,61 @@ mod tests {
                 SU2Irrep::from_twice_spin(3).sector_id(),
             ]
         );
+    }
+
+    #[test]
+    fn public_su2_f_and_r_symbols_match_tensorkit_values() {
+        let rule = SU2FusionRule;
+        let s = |twice_spin| SU2Irrep::from_twice_spin(twice_spin).sector_id();
+        let cases = [
+            ((1, 1, 1, 1, 0, 0), -0.5),
+            ((1, 1, 1, 1, 0, 2), 0.866_025_403_784_438_6),
+            ((1, 1, 1, 1, 2, 0), 0.866_025_403_784_438_6),
+            ((1, 1, 1, 1, 2, 2), 0.5),
+            ((1, 2, 1, 2, 1, 1), -1.0 / 3.0),
+            ((2, 2, 2, 2, 0, 2), -0.577_350_269_189_625_7),
+            ((2, 2, 2, 2, 2, 2), 0.5),
+            ((1, 1, 2, 2, 1, 1), 0.0),
+        ];
+
+        for ((a, b, c, d, e, f), expected) in cases {
+            let actual = rule.f_symbol_scalar(s(a), s(b), s(c), s(d), s(e), s(f));
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "F({a},{b},{c},{d},{e},{f}) = {actual}, expected {expected}"
+            );
+        }
+        assert_eq!(rule.r_symbol_scalar(s(1), s(1), s(0)), -1.0);
+        assert_eq!(rule.r_symbol_scalar(s(1), s(1), s(2)), 1.0);
+        assert_eq!(rule.r_symbol_scalar(s(1), s(2), s(0)), 0.0);
+    }
+
+    #[test]
+    fn multiplicity_free_su2_braid_expands_innerline_channels() {
+        let rule = SU2FusionRule;
+        let tree = FusionTreeKey::from_sector_ids(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+
+        let braided =
+            multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1, 3], &[0, 1, 2, 3]).unwrap();
+
+        assert_eq!(braided.len(), 2);
+        assert_eq!(braided[0].0.uncoupled(), &[SectorId::new(1); 4]);
+        assert_eq!(
+            braided[0].0.innerlines(),
+            &[SectorId::new(0), SectorId::new(1)]
+        );
+        assert!((braided[0].1 - 0.5).abs() < 1.0e-12);
+        assert_eq!(
+            braided[1].0.innerlines(),
+            &[SectorId::new(2), SectorId::new(1)]
+        );
+        assert!((braided[1].1 - 0.866_025_403_784_438_6).abs() < 1.0e-12);
     }
 
     #[test]
