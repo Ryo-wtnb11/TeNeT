@@ -158,6 +158,30 @@ impl From<usize> for SectorId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum FusionStyleKind {
+    Unique,
+    Simple,
+    Generic,
+}
+
+impl FusionStyleKind {
+    #[inline]
+    pub const fn is_multiplicity_free(self) -> bool {
+        matches!(self, Self::Unique | Self::Simple)
+    }
+
+    #[inline]
+    pub const fn has_multiple_outputs(self) -> bool {
+        matches!(self, Self::Simple | Self::Generic)
+    }
+
+    #[inline]
+    pub const fn has_multiplicity(self) -> bool {
+        matches!(self, Self::Generic)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SectorLeg {
     sectors: Vec<SectorId>,
@@ -327,15 +351,23 @@ impl FusionTreeHomSpace {
     }
 }
 
-pub trait MultiplicityFreeFusionRule {
+pub trait FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind;
+
     fn vacuum(&self) -> SectorId;
 
     fn dual(&self, sector: SectorId) -> SectorId {
         sector
     }
 
-    fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId>;
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId>;
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        usize::from(self.fusion_channels(left, right).contains(&coupled))
+    }
 }
+
+pub trait MultiplicityFreeFusionRule: FusionRule {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CoupledFusionTrees {
@@ -429,19 +461,14 @@ where
             Vec::<SectorId>::new(),
         )],
         1 => Vec::new(),
-        2 => {
-            if rule.fuse(effective[0], effective[1]).contains(&coupled) {
-                vec![FusionTreeKey::new(
-                    uncoupled.iter().copied(),
-                    Some(coupled),
-                    is_dual.iter().copied(),
-                    Vec::<SectorId>::new(),
-                    [SectorId::new(1)],
-                )]
-            } else {
-                Vec::new()
-            }
-        }
+        2 if rule.nsymbol(effective[0], effective[1], coupled) != 0 => vec![FusionTreeKey::new(
+            uncoupled.iter().copied(),
+            Some(coupled),
+            is_dual.iter().copied(),
+            Vec::<SectorId>::new(),
+            [SectorId::new(1)],
+        )],
+        2 => Vec::new(),
         _ => collect_nontrivial_fusion_trees_for_coupled(
             rule, uncoupled, is_dual, effective, coupled,
         ),
@@ -464,7 +491,7 @@ where
     let front_effective = &effective[..effective.len() - 1];
     let mut trees = Vec::new();
     for front_coupled in possible_coupled_sectors(rule, front_effective) {
-        if !rule.fuse(front_coupled, last).contains(&coupled) {
+        if rule.nsymbol(front_coupled, last, coupled) == 0 {
             continue;
         }
         for front_tree in collect_fusion_trees_for_coupled(
@@ -501,7 +528,7 @@ where
             let last = effective[effective.len() - 1];
             possible_coupled_sectors(rule, &effective[..effective.len() - 1])
                 .into_iter()
-                .flat_map(|front| rule.fuse(front, last))
+                .flat_map(|front| rule.fusion_channels(front, last))
                 .collect()
         }
     };
@@ -2125,7 +2152,11 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct BranchingMultiplicityFreeRule;
 
-    impl MultiplicityFreeFusionRule for BranchingMultiplicityFreeRule {
+    impl FusionRule for BranchingMultiplicityFreeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+
         fn vacuum(&self) -> SectorId {
             SectorId::new(0)
         }
@@ -2137,7 +2168,7 @@ mod tests {
             }
         }
 
-        fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
             match (left.id(), right.id()) {
                 (0, x) | (x, 0) => vec![SectorId::new(x)],
                 (1, 1) => vec![SectorId::new(0), SectorId::new(2)],
@@ -2148,33 +2179,47 @@ mod tests {
         }
     }
 
+    impl MultiplicityFreeFusionRule for BranchingMultiplicityFreeRule {}
+
     #[derive(Clone, Copy, Debug)]
     struct Z2MultiplicityFreeRule;
 
-    impl MultiplicityFreeFusionRule for Z2MultiplicityFreeRule {
+    impl FusionRule for Z2MultiplicityFreeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
         fn vacuum(&self) -> SectorId {
             SectorId::new(0)
         }
 
-        fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
             vec![SectorId::new((left.id() + right.id()) % 2)]
         }
     }
 
+    impl MultiplicityFreeFusionRule for Z2MultiplicityFreeRule {}
+
     #[derive(Clone, Copy, Debug)]
     struct Su2MultiplicityFreeRule;
 
-    impl MultiplicityFreeFusionRule for Su2MultiplicityFreeRule {
+    impl FusionRule for Su2MultiplicityFreeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+
         fn vacuum(&self) -> SectorId {
             SectorId::new(0)
         }
 
-        fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
             let min = left.id().abs_diff(right.id());
             let max = left.id() + right.id();
             (min..=max).step_by(2).map(SectorId::new).collect()
         }
     }
+
+    impl MultiplicityFreeFusionRule for Su2MultiplicityFreeRule {}
 
     fn fusion_tree_pair_order(keys: &[FusionTreeBlockKey]) -> Vec<(Vec<usize>, Vec<usize>, usize)> {
         keys.iter()
@@ -2190,6 +2235,49 @@ mod tests {
 
     fn sector_ids(sectors: &[SectorId]) -> Vec<usize> {
         sectors.iter().map(|sector| sector.id()).collect()
+    }
+
+    #[test]
+    fn fusion_style_kind_matches_tensorkit_multiplicity_free_split() {
+        assert!(FusionStyleKind::Unique.is_multiplicity_free());
+        assert!(FusionStyleKind::Simple.is_multiplicity_free());
+        assert!(!FusionStyleKind::Generic.is_multiplicity_free());
+        assert!(!FusionStyleKind::Unique.has_multiple_outputs());
+        assert!(FusionStyleKind::Simple.has_multiple_outputs());
+        assert!(FusionStyleKind::Generic.has_multiple_outputs());
+        assert!(!FusionStyleKind::Unique.has_multiplicity());
+        assert!(!FusionStyleKind::Simple.has_multiplicity());
+        assert!(FusionStyleKind::Generic.has_multiplicity());
+    }
+
+    #[test]
+    fn fusion_rule_exposes_unique_outputs_and_nsymbol_separately() {
+        let z2 = Z2MultiplicityFreeRule;
+        let su2 = Su2MultiplicityFreeRule;
+
+        assert_eq!(z2.fusion_style(), FusionStyleKind::Unique);
+        assert_eq!(
+            z2.fusion_channels(SectorId::new(1), SectorId::new(1)),
+            vec![SectorId::new(0)]
+        );
+        assert_eq!(
+            z2.nsymbol(SectorId::new(1), SectorId::new(1), SectorId::new(0)),
+            1
+        );
+        assert_eq!(
+            z2.nsymbol(SectorId::new(1), SectorId::new(1), SectorId::new(1)),
+            0
+        );
+
+        assert_eq!(su2.fusion_style(), FusionStyleKind::Simple);
+        assert_eq!(
+            su2.fusion_channels(SectorId::new(1), SectorId::new(1)),
+            vec![SectorId::new(0), SectorId::new(2)]
+        );
+        assert_eq!(
+            su2.nsymbol(SectorId::new(1), SectorId::new(1), SectorId::new(2)),
+            1
+        );
     }
 
     #[test]

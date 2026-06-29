@@ -14,8 +14,8 @@ use std::sync::Arc;
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError,
-    FusionTreeBlockGroup, FusionTreeGroupKey, TensorMap,
+    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError, FusionRule,
+    FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey, TensorMap,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -615,6 +615,44 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             &self.specs,
         )
     }
+}
+
+pub fn build_unique_tree_transform_group_plan<T, R, F>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+    mut transform: F,
+) -> Result<TreeTransformGroupPlan<T>, OperationError>
+where
+    R: FusionRule,
+    F: FnMut(&FusionTreeBlockKey) -> Result<(FusionTreeBlockKey, T), OperationError>,
+{
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+
+    let mut specs = Vec::with_capacity(src_structure.block_count());
+    for index in 0..src_structure.block_count() {
+        let block = src_structure.block(index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index,
+            });
+        };
+        let (dst_key, coefficient) = transform(src_key)?;
+        specs.push(TreeTransformGroupBlockSpec::single(
+            src_key.group_key(),
+            dst_key,
+            src_key.clone(),
+            coefficient,
+        ));
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -2370,6 +2408,10 @@ pub enum OperationError {
     },
     ElementCountOverflow,
     EmptyTransformBlock,
+    ExpectedFusionTreeBlock {
+        tensor: &'static str,
+        index: usize,
+    },
     InvalidPermutation {
         axes: Vec<usize>,
         rank: usize,
@@ -2388,6 +2430,10 @@ pub enum OperationError {
     StructureRankMismatch {
         expected: usize,
         actual: usize,
+    },
+    UnsupportedFusionStyle {
+        operation: TreeTransformOperationKey,
+        style: FusionStyleKind,
     },
     MissingBlockKey {
         key: BlockKey,
@@ -2447,6 +2493,9 @@ impl fmt::Display for OperationError {
             Self::EmptyTransformBlock => {
                 write!(f, "tree transform block has no source or destination")
             }
+            Self::ExpectedFusionTreeBlock { tensor, index } => {
+                write!(f, "{tensor} block {index} is not a fusion-tree block")
+            }
             Self::InvalidPermutation { axes, rank } => {
                 write!(f, "invalid axis permutation {axes:?} for rank {rank}")
             }
@@ -2469,6 +2518,12 @@ impl fmt::Display for OperationError {
                 write!(
                     f,
                     "block structure rank mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::UnsupportedFusionStyle { operation, style } => {
+                write!(
+                    f,
+                    "unsupported fusion style {style:?} for tree transform operation {operation:?}"
                 )
             }
             Self::MissingBlockKey { key } => {
@@ -2614,7 +2669,7 @@ mod tests {
     use super::*;
     use num_complex::{Complex32, Complex64};
     use std::fmt::Debug;
-    use tenet_core::{FusionTreeBlockKey, TensorMapSpace};
+    use tenet_core::{MultiplicityFreeFusionRule, SectorId, TensorMapSpace};
 
     fn fusion_tree_test_key<
         const COD: usize,
@@ -2639,6 +2694,81 @@ mod tests {
             [coupled + 300],
             [coupled + 400],
         ))
+    }
+
+    fn expect_tree_key(key: &BlockKey) -> FusionTreeBlockKey {
+        match key {
+            BlockKey::FusionTree(tree) => tree.clone(),
+            BlockKey::Dense => panic!("test expected a fusion-tree key"),
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct UniqueZ2Rule;
+
+    impl FusionRule for UniqueZ2Rule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for UniqueZ2Rule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct SimpleSu2Rule;
+
+    impl FusionRule for SimpleSu2Rule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            let min = left.id().abs_diff(right.id());
+            let max = left.id() + right.id();
+            (min..=max).step_by(2).map(SectorId::new).collect()
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for SimpleSu2Rule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct GenericMultiplicityRule;
+
+    impl FusionRule for GenericMultiplicityRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            match (left.id(), right.id()) {
+                (1, 1) => vec![SectorId::new(0), SectorId::new(1)],
+                (0, x) | (x, 0) => vec![SectorId::new(x)],
+                _ => Vec::new(),
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            match (left.id(), right.id(), coupled.id()) {
+                (1, 1, 1) => 2,
+                _ => usize::from(self.fusion_channels(left, right).contains(&coupled)),
+            }
+        }
     }
 
     #[test]
@@ -4094,6 +4224,105 @@ mod tests {
         assert_eq!(spec.dst_keys(), &[dst_key1, dst_key2]);
         assert_eq!(spec.src_keys(), &[src_key]);
         assert_eq!(spec.coefficients_src_by_dst(), &[2.0, 3.0]);
+    }
+
+    #[test]
+    fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
+        let src_key1 = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+        let src_key2 = fusion_tree_test_key([0, 1], [1], 1, [false, false], [false]);
+        let dst_key1 = fusion_tree_test_key([0, 1], [1], 1, [false, false], [false]);
+        let dst_key2 = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+        let src_tree1 = expect_tree_key(&src_key1);
+        let src_tree2 = expect_tree_key(&src_key2);
+        let dst_tree1 = expect_tree_key(&dst_key1);
+        let dst_tree2 = expect_tree_key(&dst_key2);
+        let src_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (src_key1.clone(), vec![1, 1]),
+                (src_key2.clone(), vec![1, 1]),
+            ],
+        )
+        .unwrap();
+
+        let plan = build_unique_tree_transform_group_plan(
+            &UniqueZ2Rule,
+            TreeTransformOperationKey::transpose([1, 0], [0]),
+            &src_structure,
+            |src| {
+                if src == &src_tree1 {
+                    Ok((dst_tree1.clone(), 2.0_f64))
+                } else if src == &src_tree2 {
+                    Ok((dst_tree2.clone(), 3.0_f64))
+                } else {
+                    panic!("unexpected source key {src:?}")
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 2);
+        assert_eq!(plan.specs()[0].group_key(), &src_tree1.group_key());
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key1]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[dst_key1]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[2.0]);
+        assert_eq!(plan.specs()[1].group_key(), &src_tree2.group_key());
+        assert_eq!(plan.specs()[1].src_keys(), &[src_key2]);
+        assert_eq!(plan.specs()[1].dst_keys(), &[dst_key2]);
+        assert_eq!(plan.specs()[1].coefficients_src_by_dst(), &[3.0]);
+    }
+
+    #[test]
+    fn unique_tree_transform_plan_builder_rejects_simple_fusion() {
+        let src_key = fusion_tree_test_key([1, 1, 1], [1], 1, [false, false, false], [false]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])])
+                .unwrap();
+        let operation = TreeTransformOperationKey::transpose([2, 1, 0], [0]);
+
+        let err = build_unique_tree_transform_group_plan(
+            &SimpleSu2Rule,
+            operation.clone(),
+            &src_structure,
+            |_| -> Result<(FusionTreeBlockKey, f64), OperationError> {
+                unreachable!("non-Unique fusion must be rejected before transforming keys")
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedFusionStyle {
+                operation,
+                style: FusionStyleKind::Simple,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_tree_transform_plan_builder_rejects_generic_fusion() {
+        let src_key = fusion_tree_test_key([1, 1], [1], 1, [false, false], [false]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+        let operation = TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0]);
+
+        let err = build_unique_tree_transform_group_plan(
+            &GenericMultiplicityRule,
+            operation.clone(),
+            &src_structure,
+            |_| -> Result<(FusionTreeBlockKey, f64), OperationError> {
+                unreachable!("GenericFusion must be rejected before transforming keys")
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedFusionStyle {
+                operation,
+                style: FusionStyleKind::Generic,
+            }
+        );
     }
 
     #[test]
