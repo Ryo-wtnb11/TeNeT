@@ -367,7 +367,8 @@ impl<T> TreeTransformBlockSpec<T> {
         &self.src_blocks
     }
 
-    /// Matrix coefficients stored as `coeff[src + dst * src_count]`.
+    /// Recoupling matrix coefficients stored as `U[dst, src]` in row-major
+    /// destination-by-source order: `coeff[src + dst * src_count]`.
     #[inline]
     pub fn coefficients_src_by_dst(&self) -> &[T] {
         &self.coefficients_src_by_dst
@@ -1321,19 +1322,16 @@ where
         )?;
     }
 
-    for dst_index in 0..dst_count {
-        let dst_column_start = dst_index * element_count;
-        for element in 0..element_count {
-            let mut sum = T::zero();
-            for src_index in 0..src_count {
-                let coeff =
-                    coefficients_src_by_dst[coefficient_start + src_index + dst_index * src_count];
-                let src_value = workspace.source[element + src_index * element_count];
-                sum = sum + src_value * coeff;
-            }
-            workspace.destination[dst_column_start + element] = alpha * sum;
-        }
-    }
+    apply_recoupling_matrix_src_times_u_transpose(
+        &mut workspace.destination,
+        &workspace.source,
+        coefficients_src_by_dst,
+        coefficient_start,
+        element_count,
+        src_count,
+        dst_count,
+        alpha,
+    )?;
 
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
@@ -1346,6 +1344,71 @@ where
             dst_data,
             beta,
         )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_recoupling_matrix_src_times_u_transpose<T>(
+    destination: &mut [T],
+    source: &[T],
+    coefficients_src_by_dst: &[T],
+    coefficient_start: usize,
+    element_count: usize,
+    src_count: usize,
+    dst_count: usize,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero,
+{
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_count = src_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_end = coefficient_start
+        .checked_add(coefficient_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+
+    if source.len() != source_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: source_len,
+            actual: source.len(),
+        });
+    }
+    if destination.len() != destination_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: destination_len,
+            actual: destination.len(),
+        });
+    }
+    if coefficients_src_by_dst.len() < coefficient_end {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: coefficient_end,
+            actual: coefficients_src_by_dst.len(),
+        });
+    }
+
+    // TensorKit's dense-vector GenericTreeTransformer uses `U[dst, src]` and
+    // computes `buffer_dst = buffer_src * transpose(U)` after packing source
+    // trees as columns. Keep this as the backend-replaceable boundary.
+    for dst_index in 0..dst_count {
+        let dst_column_start = dst_index * element_count;
+        let coefficient_row_start = coefficient_start + dst_index * src_count;
+        for element in 0..element_count {
+            let mut sum = T::zero();
+            for src_index in 0..src_count {
+                let coeff = coefficients_src_by_dst[coefficient_row_start + src_index];
+                let src_value = source[element + src_index * element_count];
+                sum = sum + src_value * coeff;
+            }
+            destination[dst_column_start + element] = alpha * sum;
+        }
     }
     Ok(())
 }
@@ -1932,6 +1995,65 @@ mod tests {
         assert_eq!(workspace.destination_len(), 8);
     }
 
+    fn assert_tree_multi_tensorkit_orientation_dtype<T>(
+        src_values: Vec<T>,
+        coefficients_src_by_dst: Vec<T>,
+        alpha: T,
+        beta: T,
+        fill: T,
+        expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1], vec![2, 1]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 1], vec![2, 1]]).unwrap();
+        let src =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(src_values, src_space, src_structure)
+                .unwrap();
+        let mut dst =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 4], dst_space, dst_structure)
+                .unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1, 2],
+                coefficients_src_by_dst,
+            )],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+        assert_eq!(workspace.source_len(), 6);
+        assert_eq!(workspace.destination_len(), 4);
+    }
+
     #[test]
     fn tensorcopy_supports_all_storage_dtypes() {
         assert_tensorcopy_dtype(vec![1.0_f32, 2.0, 3.0, 4.0], 0.0);
@@ -2217,6 +2339,96 @@ mod tests {
                 Complex64::new(114.0, 10.0),
                 Complex64::new(138.0, 10.0),
                 Complex64::new(162.0, 10.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tree_transform_multi_uses_tensorkit_recoupling_orientation_for_all_numeric_dtypes() {
+        assert_tree_multi_tensorkit_orientation_dtype(
+            vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            2.0,
+            3.0,
+            1.0,
+            vec![10623.0, 12843.0, 21243.0, 25683.0],
+        );
+        assert_tree_multi_tensorkit_orientation_dtype(
+            vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+            2.0,
+            3.0,
+            1.0,
+            vec![10623.0, 12843.0, 21243.0, 25683.0],
+        );
+        assert_tree_multi_tensorkit_orientation_dtype(
+            vec![1_i32, 2, 3, 4, 5, 6],
+            vec![10, 100, 1000, 20, 200, 2000],
+            2,
+            3,
+            1,
+            vec![10623, 12843, 21243, 25683],
+        );
+        assert_tree_multi_tensorkit_orientation_dtype(
+            vec![1_i64, 2, 3, 4, 5, 6],
+            vec![10, 100, 1000, 20, 200, 2000],
+            2,
+            3,
+            1,
+            vec![10623, 12843, 21243, 25683],
+        );
+        assert_tree_multi_tensorkit_orientation_dtype(
+            vec![
+                Complex32::new(1.0, 0.0),
+                Complex32::new(2.0, 0.0),
+                Complex32::new(3.0, 0.0),
+                Complex32::new(4.0, 0.0),
+                Complex32::new(5.0, 0.0),
+                Complex32::new(6.0, 0.0),
+            ],
+            vec![
+                Complex32::new(10.0, 0.0),
+                Complex32::new(100.0, 0.0),
+                Complex32::new(1000.0, 0.0),
+                Complex32::new(20.0, 0.0),
+                Complex32::new(200.0, 0.0),
+                Complex32::new(2000.0, 0.0),
+            ],
+            Complex32::new(2.0, 0.0),
+            Complex32::new(3.0, 0.0),
+            Complex32::new(1.0, 1.0),
+            vec![
+                Complex32::new(10623.0, 3.0),
+                Complex32::new(12843.0, 3.0),
+                Complex32::new(21243.0, 3.0),
+                Complex32::new(25683.0, 3.0),
+            ],
+        );
+        assert_tree_multi_tensorkit_orientation_dtype(
+            vec![
+                Complex64::new(1.0, 0.0),
+                Complex64::new(2.0, 0.0),
+                Complex64::new(3.0, 0.0),
+                Complex64::new(4.0, 0.0),
+                Complex64::new(5.0, 0.0),
+                Complex64::new(6.0, 0.0),
+            ],
+            vec![
+                Complex64::new(10.0, 0.0),
+                Complex64::new(100.0, 0.0),
+                Complex64::new(1000.0, 0.0),
+                Complex64::new(20.0, 0.0),
+                Complex64::new(200.0, 0.0),
+                Complex64::new(2000.0, 0.0),
+            ],
+            Complex64::new(2.0, 0.0),
+            Complex64::new(3.0, 0.0),
+            Complex64::new(1.0, 1.0),
+            vec![
+                Complex64::new(10623.0, 3.0),
+                Complex64::new(12843.0, 3.0),
+                Complex64::new(21243.0, 3.0),
+                Complex64::new(25683.0, 3.0),
             ],
         );
     }
