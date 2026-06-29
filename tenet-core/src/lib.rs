@@ -249,7 +249,8 @@ impl FusionProductSpace {
 
     fn selected_leg_tuples(&self) -> Vec<Vec<FusionTreeLeg>> {
         let mut tuples = Vec::new();
-        collect_selected_leg_tuples(&self.legs, 0, Vec::new(), &mut tuples);
+        let mut current = vec![None; self.legs.len()];
+        collect_selected_leg_tuples(&self.legs, self.legs.len(), &mut current, &mut tuples);
         tuples
     }
 }
@@ -321,25 +322,8 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let keys = self.fusion_tree_keys(rule);
-        let mut group_indices = HashMap::<FusionTreeGroupKey, Vec<usize>>::new();
-        for (index, key) in keys.iter().enumerate() {
-            group_indices
-                .entry(key.group_key())
-                .or_default()
-                .push(index);
-        }
-
-        let mut groups = Vec::new();
-        for domain_tuple in self.domain.selected_leg_tuples() {
-            for codomain_tuple in self.codomain.selected_leg_tuples() {
-                let group_key = fusion_tree_group_key_for_tuples(&codomain_tuple, &domain_tuple);
-                if let Some(indices) = group_indices.remove(&group_key) {
-                    groups.push(FusionTreeBlockGroup::new(group_key, indices));
-                }
-            }
-        }
-        Ok(groups)
+        self.sector_structure(rule)
+            .map(|structure| structure.fusion_tree_groups())
     }
 }
 
@@ -361,18 +345,24 @@ struct CoupledFusionTrees {
 
 fn collect_selected_leg_tuples(
     legs: &[SectorLeg],
-    index: usize,
-    current: Vec<FusionTreeLeg>,
+    remaining: usize,
+    current: &mut [Option<FusionTreeLeg>],
     tuples: &mut Vec<Vec<FusionTreeLeg>>,
 ) {
-    if index == legs.len() {
-        tuples.push(current);
+    if remaining == 0 {
+        tuples.push(
+            current
+                .iter()
+                .map(|leg| leg.expect("fusion tree leg tuple should be fully assigned"))
+                .collect(),
+        );
         return;
     }
+
+    let index = remaining - 1;
     for &sector in legs[index].sectors() {
-        let mut next = current.clone();
-        next.push(FusionTreeLeg::new(sector, legs[index].is_dual()));
-        collect_selected_leg_tuples(legs, index + 1, next, tuples);
+        current[index] = Some(FusionTreeLeg::new(sector, legs[index].is_dual()));
+        collect_selected_leg_tuples(legs, remaining - 1, current, tuples);
     }
 }
 
@@ -559,18 +549,6 @@ fn trees_for_coupled(groups: &[CoupledFusionTrees], coupled: SectorId) -> &[Fusi
         .find(|group| group.coupled == coupled)
         .map(|group| group.trees.as_slice())
         .unwrap_or(&[])
-}
-
-fn fusion_tree_group_key_for_tuples(
-    codomain: &[FusionTreeLeg],
-    domain: &[FusionTreeLeg],
-) -> FusionTreeGroupKey {
-    FusionTreeGroupKey::new(
-        codomain.iter().map(|leg| leg.sector()),
-        domain.iter().map(|leg| leg.sector()),
-        codomain.iter().map(|leg| leg.is_dual()),
-        domain.iter().map(|leg| leg.is_dual()),
-    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -2170,6 +2148,50 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct Z2MultiplicityFreeRule;
+
+    impl MultiplicityFreeFusionRule for Z2MultiplicityFreeRule {
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            vec![SectorId::new((left.id() + right.id()) % 2)]
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct Su2MultiplicityFreeRule;
+
+    impl MultiplicityFreeFusionRule for Su2MultiplicityFreeRule {
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            let min = left.id().abs_diff(right.id());
+            let max = left.id() + right.id();
+            (min..=max).step_by(2).map(SectorId::new).collect()
+        }
+    }
+
+    fn fusion_tree_pair_order(keys: &[FusionTreeBlockKey]) -> Vec<(Vec<usize>, Vec<usize>, usize)> {
+        keys.iter()
+            .map(|key| {
+                (
+                    sector_ids(key.codomain_uncoupled()),
+                    sector_ids(key.domain_uncoupled()),
+                    key.coupled().expect("test keys have a coupled sector").id(),
+                )
+            })
+            .collect()
+    }
+
+    fn sector_ids(sectors: &[SectorId]) -> Vec<usize> {
+        sectors.iter().map(|sector| sector.id()).collect()
+    }
+
     #[test]
     fn block_view_validates_column_major_layout() {
         let data = [0.0; 6];
@@ -2391,6 +2413,105 @@ mod tests {
         assert!(keys[0].domain_innerlines().is_empty());
         assert!(keys[0].domain_vertices().is_empty());
         assert_eq!(keys[0].domain_uncoupled(), &[SectorId::new(1)]);
+
+        let groups = hom.fusion_tree_groups(&rule).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].block_indices(), &[0, 1]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_matches_tensorkit_z2_fusiontreelist_order() {
+        let rule = Z2MultiplicityFreeRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // TensorKit.jl 6Camk:
+        // V=Vect[Z2Irrep](0=>1,1=>1); W=(V⊗V)←(V⊗V);
+        // [(f1.uncoupled, f2.uncoupled, f1.coupled) for (f1,f2) in fusiontrees(W)]
+        assert_eq!(
+            fusion_tree_pair_order(&keys),
+            vec![
+                (vec![0, 0], vec![0, 0], 0),
+                (vec![1, 1], vec![0, 0], 0),
+                (vec![0, 0], vec![1, 1], 0),
+                (vec![1, 1], vec![1, 1], 0),
+                (vec![1, 0], vec![1, 0], 1),
+                (vec![0, 1], vec![1, 0], 1),
+                (vec![1, 0], vec![0, 1], 1),
+                (vec![0, 1], vec![0, 1], 1),
+            ]
+        );
+
+        let groups = hom.fusion_tree_groups(&rule).unwrap();
+        assert_eq!(groups.len(), keys.len());
+        for (index, group) in groups.iter().enumerate() {
+            assert_eq!(group.block_indices(), &[index]);
+        }
+    }
+
+    #[test]
+    fn fusion_tree_homspace_matches_tensorkit_su2_simple_order() {
+        let rule = Su2MultiplicityFreeRule;
+        let leg = || {
+            SectorLeg::new(
+                [SectorId::new(0), SectorId::new(1), SectorId::new(2)],
+                false,
+            )
+        };
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // TensorKit.jl 6Camk with sector id = twice spin:
+        // V=Vect[SU2Irrep](0=>1,1//2=>1,1=>1); W=(V⊗V)←V;
+        // [(2f1.uncoupled, 2f2.uncoupled, 2f1.coupled) for (f1,f2) in fusiontrees(W)]
+        assert_eq!(
+            fusion_tree_pair_order(&keys),
+            vec![
+                (vec![0, 0], vec![0], 0),
+                (vec![1, 1], vec![0], 0),
+                (vec![2, 2], vec![0], 0),
+                (vec![1, 0], vec![1], 1),
+                (vec![0, 1], vec![1], 1),
+                (vec![2, 1], vec![1], 1),
+                (vec![1, 2], vec![1], 1),
+                (vec![2, 0], vec![2], 2),
+                (vec![1, 1], vec![2], 2),
+                (vec![0, 2], vec![2], 2),
+                (vec![2, 2], vec![2], 2),
+            ]
+        );
+        assert!(keys
+            .iter()
+            .all(|key| key.codomain_vertices() == [SectorId::new(1)]));
+        assert!(keys.iter().all(|key| key.domain_vertices().is_empty()));
+    }
+
+    #[test]
+    fn fusion_tree_homspace_matches_tensorkit_su2_innerline_order() {
+        let rule = Su2MultiplicityFreeRule;
+        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // TensorKit.jl 6Camk with sector id = twice spin:
+        // V=Vect[SU2Irrep](1//2=>1); W=(V⊗V⊗V)←V;
+        // codomain innerlines for fusiontrees(W) are [0], then [2].
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].codomain_innerlines(), &[SectorId::new(0)]);
+        assert_eq!(keys[1].codomain_innerlines(), &[SectorId::new(2)]);
+        assert_eq!(
+            fusion_tree_pair_order(&keys),
+            vec![(vec![1, 1, 1], vec![1], 1), (vec![1, 1, 1], vec![1], 1),]
+        );
 
         let groups = hom.fusion_tree_groups(&rule).unwrap();
         assert_eq!(groups.len(), 1);
