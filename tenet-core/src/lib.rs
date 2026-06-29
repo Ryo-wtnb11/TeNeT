@@ -432,6 +432,104 @@ impl FusionTreeHomSpace {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
+    dense_space: TensorMapSpace<NOUT, NIN>,
+    homspace: FusionTreeHomSpace,
+    subblock_structure: Arc<BlockStructure>,
+}
+
+impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
+    pub fn new(
+        dense_space: TensorMapSpace<NOUT, NIN>,
+        homspace: FusionTreeHomSpace,
+        subblock_structure: BlockStructure,
+    ) -> Result<Self, CoreError> {
+        Self::from_shared_subblock_structure(dense_space, homspace, Arc::new(subblock_structure))
+    }
+
+    pub fn from_shared_subblock_structure(
+        dense_space: TensorMapSpace<NOUT, NIN>,
+        homspace: FusionTreeHomSpace,
+        subblock_structure: Arc<BlockStructure>,
+    ) -> Result<Self, CoreError> {
+        Self::validate_homspace_rank(&homspace)?;
+        let rank = NOUT + NIN;
+        if subblock_structure.rank() != rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: rank,
+                actual: subblock_structure.rank(),
+            });
+        }
+        Ok(Self {
+            dense_space,
+            homspace,
+            subblock_structure,
+        })
+    }
+
+    pub fn from_degeneracy_shapes<R, Shapes>(
+        dense_space: TensorMapSpace<NOUT, NIN>,
+        homspace: FusionTreeHomSpace,
+        rule: &R,
+        shapes: Shapes,
+    ) -> Result<Self, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        Self::validate_homspace_rank(&homspace)?;
+        let keys = homspace.fusion_tree_keys(rule);
+        let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
+        if keys.len() != shapes.len() {
+            return Err(CoreError::BlockCountMismatch {
+                expected: keys.len(),
+                actual: shapes.len(),
+            });
+        }
+        let rank = NOUT + NIN;
+        let subblock_structure =
+            BlockStructure::packed_column_major_with_keys(rank, keys.into_iter().zip(shapes))?;
+        Self::new(dense_space, homspace, subblock_structure)
+    }
+
+    fn validate_homspace_rank(homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
+        if homspace.codomain().len() != NOUT {
+            return Err(CoreError::StructureRankMismatch {
+                expected: NOUT,
+                actual: homspace.codomain().len(),
+            });
+        }
+        if homspace.domain().len() != NIN {
+            return Err(CoreError::StructureRankMismatch {
+                expected: NIN,
+                actual: homspace.domain().len(),
+            });
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn dense_space(&self) -> &TensorMapSpace<NOUT, NIN> {
+        &self.dense_space
+    }
+
+    #[inline]
+    pub fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    #[inline]
+    pub fn subblock_structure(&self) -> &Arc<BlockStructure> {
+        &self.subblock_structure
+    }
+
+    pub fn required_len(&self) -> Result<usize, CoreError> {
+        self.subblock_structure.required_len()
+    }
+}
+
 pub trait FusionRule {
     fn fusion_style(&self) -> FusionStyleKind;
 
@@ -2679,6 +2777,7 @@ pub struct TensorMap<T, const NOUT: usize, const NIN: usize, S = Trivial, D = Ve
     storage: D,
     space: TensorMapSpace<NOUT, NIN>,
     structure: Arc<BlockStructure>,
+    fusion_space: Option<Arc<FusionTensorMapSpace<NOUT, NIN>>>,
     _marker: PhantomData<(T, S)>,
 }
 
@@ -2703,6 +2802,20 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         structure: Arc<BlockStructure>,
     ) -> Result<Self, CoreError> {
         Self::from_storage_with_shared_structure(data, space, structure)
+    }
+
+    pub fn from_vec_with_fusion_space(
+        data: Vec<T>,
+        fusion_space: FusionTensorMapSpace<NOUT, NIN>,
+    ) -> Result<Self, CoreError> {
+        Self::from_storage_with_fusion_space(data, fusion_space)
+    }
+
+    pub fn from_vec_with_shared_fusion_space(
+        data: Vec<T>,
+        fusion_space: Arc<FusionTensorMapSpace<NOUT, NIN>>,
+    ) -> Result<Self, CoreError> {
+        Self::from_storage_with_shared_fusion_space(data, fusion_space)
     }
 }
 
@@ -2729,6 +2842,34 @@ where
         space: TensorMapSpace<NOUT, NIN>,
         structure: Arc<BlockStructure>,
     ) -> Result<Self, CoreError> {
+        Self::from_storage_parts(storage, space, structure, None)
+    }
+
+    pub fn from_storage_with_fusion_space(
+        storage: D,
+        fusion_space: FusionTensorMapSpace<NOUT, NIN>,
+    ) -> Result<Self, CoreError> {
+        Self::from_storage_with_shared_fusion_space(storage, Arc::new(fusion_space))
+    }
+
+    pub fn from_storage_with_shared_fusion_space(
+        storage: D,
+        fusion_space: Arc<FusionTensorMapSpace<NOUT, NIN>>,
+    ) -> Result<Self, CoreError> {
+        Self::from_storage_parts(
+            storage,
+            fusion_space.dense_space().clone(),
+            Arc::clone(fusion_space.subblock_structure()),
+            Some(fusion_space),
+        )
+    }
+
+    fn from_storage_parts(
+        storage: D,
+        space: TensorMapSpace<NOUT, NIN>,
+        structure: Arc<BlockStructure>,
+        fusion_space: Option<Arc<FusionTensorMapSpace<NOUT, NIN>>>,
+    ) -> Result<Self, CoreError> {
         if structure.rank() != space.dims().len() {
             return Err(CoreError::StructureRankMismatch {
                 expected: space.dims().len(),
@@ -2746,6 +2887,7 @@ where
             storage,
             space,
             structure,
+            fusion_space,
             _marker: PhantomData,
         })
     }
@@ -2773,6 +2915,11 @@ where
     #[inline]
     pub fn structure(&self) -> &Arc<BlockStructure> {
         &self.structure
+    }
+
+    #[inline]
+    pub fn fusion_space(&self) -> Option<&Arc<FusionTensorMapSpace<NOUT, NIN>>> {
+        self.fusion_space.as_ref()
     }
 
     #[inline]
@@ -2851,6 +2998,24 @@ where
             block.offset(),
         )
     }
+
+    pub fn subblock_by_sectors<R>(
+        &self,
+        rule: &R,
+        sectors: &[SectorId],
+    ) -> Result<BlockView<'_, T>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let fusion_space = self
+            .fusion_space
+            .as_ref()
+            .ok_or(CoreError::MissingFusionSpace)?;
+        let key = fusion_space
+            .homspace()
+            .unique_fusion_tree_key_from_external_sectors(rule, sectors)?;
+        self.subblock_by_tree(&key)
+    }
 }
 
 impl<T, const NOUT: usize, const NIN: usize, S, D> TensorMap<T, NOUT, NIN, S, D>
@@ -2903,6 +3068,24 @@ where
             block.strides(),
             block.offset(),
         )
+    }
+
+    pub fn subblock_mut_by_sectors<R>(
+        &mut self,
+        rule: &R,
+        sectors: &[SectorId],
+    ) -> Result<BlockViewMut<'_, T>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let fusion_space = self
+            .fusion_space
+            .as_ref()
+            .ok_or(CoreError::MissingFusionSpace)?;
+        let key = fusion_space
+            .homspace()
+            .unique_fusion_tree_key_from_external_sectors(rule, sectors)?;
+        self.subblock_mut_by_tree(&key)
     }
 }
 
@@ -3130,6 +3313,7 @@ pub enum CoreError {
     MissingBlockKey {
         key: BlockKey,
     },
+    MissingFusionSpace,
     ElementCountOverflow,
     OffsetOverflow {
         value: usize,
@@ -3210,6 +3394,7 @@ impl fmt::Display for CoreError {
             Self::MissingBlockKey { key } => {
                 write!(f, "missing matching block for key {key:?}")
             }
+            Self::MissingFusionSpace => write!(f, "tensor does not carry a fusion-tree space"),
             Self::ElementCountOverflow => write!(f, "block element count overflow"),
             Self::OffsetOverflow { value } => {
                 write!(f, "block offset {value} overflows addressable layout")
@@ -3448,6 +3633,49 @@ mod tests {
     }
 
     impl MultiplicityFreeFusionRule for Z4PointedRule {}
+
+    #[derive(Clone, Copy, Debug)]
+    struct Z2xZ3PointedRule;
+
+    impl Z2xZ3PointedRule {
+        const fn encode(z2: usize, z3: usize) -> SectorId {
+            SectorId::new((z2 % 2) + 2 * (z3 % 3))
+        }
+
+        const fn decode(sector: SectorId) -> (usize, usize) {
+            (sector.id() % 2, (sector.id() / 2) % 3)
+        }
+    }
+
+    impl FusionRule for Z2xZ3PointedRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            Self::encode(0, 0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            let (z2, z3) = Self::decode(sector);
+            Self::encode((2 - z2) % 2, (3 - z3) % 3)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            let (left_z2, left_z3) = Self::decode(left);
+            let (right_z2, right_z3) = Self::decode(right);
+            vec![Self::encode(
+                (left_z2 + right_z2) % 2,
+                (left_z3 + right_z3) % 3,
+            )]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for Z2xZ3PointedRule {}
 
     #[derive(Clone, Copy, Debug)]
     struct PlanarZ2Rule;
@@ -4461,6 +4689,171 @@ mod tests {
                 key: BlockKey::from(missing),
             }
         );
+    }
+
+    #[test]
+    fn fusion_tensor_space_builds_subblockstructure_from_homspace() {
+        let rule = Z2MultiplicityFreeRule;
+        let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
+        );
+
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            dense,
+            hom,
+            &rule,
+            [vec![1, 2], vec![3, 1]],
+        )
+        .unwrap();
+
+        assert_eq!(fusion_space.subblock_structure().block_count(), 2);
+        assert_eq!(fusion_space.required_len().unwrap(), 5);
+        assert_eq!(
+            fusion_space.subblock_structure().block(0).unwrap().key(),
+            &BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+                [0],
+                [0],
+                Some(0),
+                [false],
+                [false],
+                [],
+                [],
+                [],
+                [],
+            ))
+        );
+        assert_eq!(
+            fusion_space.subblock_structure().block(1).unwrap().shape(),
+            &[3, 1]
+        );
+    }
+
+    #[test]
+    fn fusion_tensor_space_rejects_homspace_rank_mismatch() {
+        let rule = Z2MultiplicityFreeRule;
+        let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
+        let hom = FusionTreeHomSpace::from_sector_ids([0, 1], [0]);
+
+        let err = FusionTensorMapSpace::from_degeneracy_shapes(
+            dense,
+            hom,
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::StructureRankMismatch {
+                expected: 1,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn tensormap_subblock_by_sectors_matches_z2_unique() {
+        let rule = Z2MultiplicityFreeRule;
+        let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
+        );
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            dense,
+            hom,
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let tensor =
+            TensorMap::<i32, 1, 1>::from_vec_with_fusion_space(vec![10, 20], fusion_space).unwrap();
+
+        let block = tensor
+            .subblock_by_sectors(&rule, &[SectorId::new(1), SectorId::new(1)])
+            .unwrap();
+
+        assert_eq!(block.offset(), 1);
+        assert_eq!(block.data()[block.offset()], 20);
+    }
+
+    #[test]
+    fn tensormap_subblock_by_sectors_dualizes_z4_domain_sector() {
+        let rule = Z4PointedRule;
+        let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+        );
+        let fusion_space =
+            FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
+        let tensor =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![3.5], fusion_space).unwrap();
+
+        let block = tensor
+            .subblock_by_sectors(&rule, &[SectorId::new(1), SectorId::new(3)])
+            .unwrap();
+
+        assert_eq!(block.offset(), 0);
+        assert_eq!(block.data()[0], 3.5);
+    }
+
+    #[test]
+    fn tensormap_subblock_by_sectors_handles_fermionic_z2_key() {
+        let rule = FermionicZ2Rule;
+        let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
+        let fusion_space =
+            FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
+        let mut tensor =
+            TensorMap::<i32, 1, 1>::from_vec_with_fusion_space(vec![7], fusion_space).unwrap();
+
+        {
+            let mut block = tensor
+                .subblock_mut_by_sectors(&rule, &[SectorId::new(1), SectorId::new(1)])
+                .unwrap();
+            let offset = block.offset();
+            block.data_mut()[offset] = 11;
+        }
+
+        assert_eq!(tensor.data(), &[11]);
+    }
+
+    #[test]
+    fn tensormap_subblock_by_sectors_handles_product_pointed_rule() {
+        let rule = Z2xZ3PointedRule;
+        let codomain_sector = Z2xZ3PointedRule::encode(1, 2);
+        let domain_tree_sector = rule.dual(Z2xZ3PointedRule::encode(1, 1));
+        let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([codomain_sector], false)]),
+            FusionProductSpace::new([SectorLeg::new([domain_tree_sector], false)]),
+        );
+        let fusion_space =
+            FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
+        let tensor =
+            TensorMap::<i32, 1, 1>::from_vec_with_fusion_space(vec![42], fusion_space).unwrap();
+
+        let block = tensor
+            .subblock_by_sectors(&rule, &[codomain_sector, Z2xZ3PointedRule::encode(1, 1)])
+            .unwrap();
+
+        assert_eq!(block.data()[block.offset()], 42);
+    }
+
+    #[test]
+    fn subblock_by_sectors_requires_fusion_tensor_space() {
+        let rule = Z2MultiplicityFreeRule;
+        let space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let tensor = TensorMap::<f64, 1, 1>::from_vec(vec![1.0], space).unwrap();
+
+        let err = tensor
+            .subblock_by_sectors(&rule, &[SectorId::new(0), SectorId::new(0)])
+            .unwrap_err();
+
+        assert_eq!(err, CoreError::MissingFusionSpace);
     }
 
     #[test]
