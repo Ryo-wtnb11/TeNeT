@@ -158,6 +158,421 @@ impl From<usize> for SectorId {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct SectorLeg {
+    sectors: Vec<SectorId>,
+    is_dual: bool,
+}
+
+impl SectorLeg {
+    pub fn new<Sectors>(sectors: Sectors, is_dual: bool) -> Self
+    where
+        Sectors: IntoIterator<Item = SectorId>,
+    {
+        let mut sectors = sectors.into_iter().collect::<Vec<_>>();
+        sectors.sort_unstable();
+        sectors.dedup();
+        Self { sectors, is_dual }
+    }
+
+    pub fn from_sector_id(sector: usize) -> Self {
+        Self::new([SectorId::new(sector)], false)
+    }
+
+    #[inline]
+    pub fn sectors(&self) -> &[SectorId] {
+        &self.sectors
+    }
+
+    #[inline]
+    pub const fn is_dual(&self) -> bool {
+        self.is_dual
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct FusionTreeLeg {
+    sector: SectorId,
+    is_dual: bool,
+}
+
+impl FusionTreeLeg {
+    const fn new(sector: SectorId, is_dual: bool) -> Self {
+        Self { sector, is_dual }
+    }
+
+    const fn sector(self) -> SectorId {
+        self.sector
+    }
+
+    const fn is_dual(self) -> bool {
+        self.is_dual
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct FusionProductSpace {
+    legs: Vec<SectorLeg>,
+}
+
+impl FusionProductSpace {
+    pub fn new<Legs>(legs: Legs) -> Self
+    where
+        Legs: IntoIterator<Item = SectorLeg>,
+    {
+        Self {
+            legs: legs.into_iter().collect(),
+        }
+    }
+
+    pub fn from_sector_ids<Sectors>(sectors: Sectors) -> Self
+    where
+        Sectors: IntoIterator<Item = usize>,
+    {
+        Self::new(sectors.into_iter().map(SectorLeg::from_sector_id))
+    }
+
+    #[inline]
+    pub fn legs(&self) -> &[SectorLeg] {
+        &self.legs
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.legs.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.legs.is_empty()
+    }
+
+    fn selected_leg_tuples(&self) -> Vec<Vec<FusionTreeLeg>> {
+        let mut tuples = Vec::new();
+        collect_selected_leg_tuples(&self.legs, 0, Vec::new(), &mut tuples);
+        tuples
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct FusionTreeHomSpace {
+    codomain: FusionProductSpace,
+    domain: FusionProductSpace,
+}
+
+impl FusionTreeHomSpace {
+    pub fn new(codomain: FusionProductSpace, domain: FusionProductSpace) -> Self {
+        Self { codomain, domain }
+    }
+
+    pub fn from_sector_ids<Codomain, Domain>(codomain: Codomain, domain: Domain) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+    {
+        Self::new(
+            FusionProductSpace::from_sector_ids(codomain),
+            FusionProductSpace::from_sector_ids(domain),
+        )
+    }
+
+    #[inline]
+    pub fn codomain(&self) -> &FusionProductSpace {
+        &self.codomain
+    }
+
+    #[inline]
+    pub fn domain(&self) -> &FusionProductSpace {
+        &self.domain
+    }
+
+    pub fn fusion_tree_keys<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let codomain = fusion_trees_by_coupled_for_space(rule, &self.codomain);
+        let domain = fusion_trees_by_coupled_for_space(rule, &self.domain);
+        let coupled = common_coupled_sectors(&codomain, &domain);
+        let mut keys = Vec::new();
+        for sector in coupled {
+            let domain_trees = trees_for_coupled(&domain, sector);
+            let codomain_trees = trees_for_coupled(&codomain, sector);
+            for domain_tree in domain_trees {
+                for codomain_tree in codomain_trees {
+                    keys.push(FusionTreeBlockKey::pair(
+                        codomain_tree.clone(),
+                        domain_tree.clone(),
+                    ));
+                }
+            }
+        }
+        keys
+    }
+
+    pub fn sector_structure<R>(&self, rule: &R) -> Result<SectorStructure, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let rank = self.codomain.len() + self.domain.len();
+        SectorStructure::from_keys(rank, self.fusion_tree_keys(rule))
+    }
+
+    pub fn fusion_tree_groups<R>(&self, rule: &R) -> Result<Vec<FusionTreeBlockGroup>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let keys = self.fusion_tree_keys(rule);
+        let mut group_indices = HashMap::<FusionTreeGroupKey, Vec<usize>>::new();
+        for (index, key) in keys.iter().enumerate() {
+            group_indices
+                .entry(key.group_key())
+                .or_default()
+                .push(index);
+        }
+
+        let mut groups = Vec::new();
+        for domain_tuple in self.domain.selected_leg_tuples() {
+            for codomain_tuple in self.codomain.selected_leg_tuples() {
+                let group_key = fusion_tree_group_key_for_tuples(&codomain_tuple, &domain_tuple);
+                if let Some(indices) = group_indices.remove(&group_key) {
+                    groups.push(FusionTreeBlockGroup::new(group_key, indices));
+                }
+            }
+        }
+        Ok(groups)
+    }
+}
+
+pub trait MultiplicityFreeFusionRule {
+    fn vacuum(&self) -> SectorId;
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector
+    }
+
+    fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CoupledFusionTrees {
+    coupled: SectorId,
+    trees: Vec<FusionTreeKey>,
+}
+
+fn collect_selected_leg_tuples(
+    legs: &[SectorLeg],
+    index: usize,
+    current: Vec<FusionTreeLeg>,
+    tuples: &mut Vec<Vec<FusionTreeLeg>>,
+) {
+    if index == legs.len() {
+        tuples.push(current);
+        return;
+    }
+    for &sector in legs[index].sectors() {
+        let mut next = current.clone();
+        next.push(FusionTreeLeg::new(sector, legs[index].is_dual()));
+        collect_selected_leg_tuples(legs, index + 1, next, tuples);
+    }
+}
+
+fn fusion_trees_by_coupled_for_space<R>(
+    rule: &R,
+    space: &FusionProductSpace,
+) -> Vec<CoupledFusionTrees>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let mut grouped = Vec::<CoupledFusionTrees>::new();
+    for tuple in space.selected_leg_tuples() {
+        for coupled in possible_coupled_sectors(rule, &effective_sectors(rule, &tuple)) {
+            let trees = fusion_trees_for_coupled(rule, &tuple, coupled);
+            if let Some(group) = grouped.iter_mut().find(|group| group.coupled == coupled) {
+                group.trees.extend(trees);
+            } else {
+                grouped.push(CoupledFusionTrees { coupled, trees });
+            }
+        }
+    }
+    grouped.sort_by_key(|group| group.coupled);
+    grouped
+}
+
+fn fusion_trees_for_coupled<R>(
+    rule: &R,
+    legs: &[FusionTreeLeg],
+    coupled: SectorId,
+) -> Vec<FusionTreeKey>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let effective = effective_sectors(rule, legs);
+    let uncoupled = legs.iter().map(|leg| leg.sector()).collect::<Vec<_>>();
+    let is_dual = legs.iter().map(|leg| leg.is_dual()).collect::<Vec<_>>();
+    collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled)
+}
+
+fn collect_fusion_trees_for_coupled<R>(
+    rule: &R,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Vec<FusionTreeKey>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    match effective.len() {
+        0 if coupled == rule.vacuum() => vec![FusionTreeKey::new(
+            uncoupled.iter().copied(),
+            Some(coupled),
+            is_dual.iter().copied(),
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        )],
+        0 => Vec::new(),
+        1 if effective[0] == coupled => vec![FusionTreeKey::new(
+            uncoupled.iter().copied(),
+            Some(coupled),
+            is_dual.iter().copied(),
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        )],
+        1 => Vec::new(),
+        2 => {
+            if rule.fuse(effective[0], effective[1]).contains(&coupled) {
+                vec![FusionTreeKey::new(
+                    uncoupled.iter().copied(),
+                    Some(coupled),
+                    is_dual.iter().copied(),
+                    Vec::<SectorId>::new(),
+                    [SectorId::new(1)],
+                )]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => collect_nontrivial_fusion_trees_for_coupled(
+            rule, uncoupled, is_dual, effective, coupled,
+        ),
+    }
+}
+
+fn collect_nontrivial_fusion_trees_for_coupled<R>(
+    rule: &R,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Vec<FusionTreeKey>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let last = effective[effective.len() - 1];
+    let front_uncoupled = &uncoupled[..uncoupled.len() - 1];
+    let front_is_dual = &is_dual[..is_dual.len() - 1];
+    let front_effective = &effective[..effective.len() - 1];
+    let mut trees = Vec::new();
+    for front_coupled in possible_coupled_sectors(rule, front_effective) {
+        if !rule.fuse(front_coupled, last).contains(&coupled) {
+            continue;
+        }
+        for front_tree in collect_fusion_trees_for_coupled(
+            rule,
+            front_uncoupled,
+            front_is_dual,
+            front_effective,
+            front_coupled,
+        ) {
+            let mut innerlines = front_tree.innerlines().to_vec();
+            innerlines.push(front_coupled);
+            let mut vertices = front_tree.vertices().to_vec();
+            vertices.push(SectorId::new(1));
+            trees.push(FusionTreeKey::new(
+                uncoupled.iter().copied(),
+                Some(coupled),
+                is_dual.iter().copied(),
+                innerlines,
+                vertices,
+            ));
+        }
+    }
+    trees
+}
+
+fn possible_coupled_sectors<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let mut sectors = match effective.len() {
+        0 => vec![rule.vacuum()],
+        1 => vec![effective[0]],
+        _ => {
+            let last = effective[effective.len() - 1];
+            possible_coupled_sectors(rule, &effective[..effective.len() - 1])
+                .into_iter()
+                .flat_map(|front| rule.fuse(front, last))
+                .collect()
+        }
+    };
+    sectors.sort_unstable();
+    sectors.dedup();
+    sectors
+}
+
+fn effective_sectors<R>(rule: &R, legs: &[FusionTreeLeg]) -> Vec<SectorId>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    legs.iter()
+        .map(|leg| {
+            if leg.is_dual() {
+                rule.dual(leg.sector())
+            } else {
+                leg.sector()
+            }
+        })
+        .collect()
+}
+
+fn common_coupled_sectors(
+    left: &[CoupledFusionTrees],
+    right: &[CoupledFusionTrees],
+) -> Vec<SectorId> {
+    let mut sectors = left
+        .iter()
+        .filter(|left_group| {
+            right
+                .iter()
+                .any(|right_group| right_group.coupled == left_group.coupled)
+        })
+        .map(|group| group.coupled)
+        .collect::<Vec<_>>();
+    sectors.sort_unstable();
+    sectors.dedup();
+    sectors
+}
+
+fn trees_for_coupled(groups: &[CoupledFusionTrees], coupled: SectorId) -> &[FusionTreeKey] {
+    groups
+        .iter()
+        .find(|group| group.coupled == coupled)
+        .map(|group| group.trees.as_slice())
+        .unwrap_or(&[])
+}
+
+fn fusion_tree_group_key_for_tuples(
+    codomain: &[FusionTreeLeg],
+    domain: &[FusionTreeLeg],
+) -> FusionTreeGroupKey {
+    FusionTreeGroupKey::new(
+        codomain.iter().map(|leg| leg.sector()),
+        domain.iter().map(|leg| leg.sector()),
+        codomain.iter().map(|leg| leg.is_dual()),
+        domain.iter().map(|leg| leg.is_dual()),
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeGroupKey {
     codomain_uncoupled: Vec<SectorId>,
@@ -1729,6 +2144,32 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy, Debug)]
+    struct BranchingMultiplicityFreeRule;
+
+    impl MultiplicityFreeFusionRule for BranchingMultiplicityFreeRule {
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            match sector.id() {
+                3 => SectorId::new(1),
+                other => SectorId::new(other),
+            }
+        }
+
+        fn fuse(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => vec![SectorId::new(x)],
+                (1, 1) => vec![SectorId::new(0), SectorId::new(2)],
+                (1, 2) | (2, 1) => vec![SectorId::new(1), SectorId::new(3)],
+                (2, 2) => vec![SectorId::new(0)],
+                _ => Vec::new(),
+            }
+        }
+    }
+
     #[test]
     fn block_view_validates_column_major_layout() {
         let data = [0.0; 6];
@@ -1896,6 +2337,106 @@ mod tests {
         assert_eq!(group.domain_uncoupled(), key.domain_uncoupled());
         assert_eq!(group.codomain_is_dual(), key.codomain_is_dual());
         assert_eq!(group.domain_is_dual(), key.domain_is_dual());
+    }
+
+    #[test]
+    fn fusion_tree_homspace_generates_canonical_coupled_sector_order() {
+        let rule = BranchingMultiplicityFreeRule;
+        let hom = FusionTreeHomSpace::from_sector_ids([1, 1], [1, 1]);
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].coupled(), Some(SectorId::new(0)));
+        assert_eq!(keys[1].coupled(), Some(SectorId::new(2)));
+        assert_eq!(
+            keys[0].codomain_uncoupled(),
+            &[SectorId::new(1), SectorId::new(1)]
+        );
+        assert_eq!(
+            keys[0].domain_uncoupled(),
+            &[SectorId::new(1), SectorId::new(1)]
+        );
+        assert!(keys[0].codomain_innerlines().is_empty());
+        assert!(keys[0].domain_innerlines().is_empty());
+        assert_eq!(keys[0].codomain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(keys[0].domain_vertices(), &[SectorId::new(1)]);
+
+        let sector = hom.sector_structure(&rule).unwrap();
+        let groups = sector.fusion_tree_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].block_indices(), &[0, 1]);
+        assert_eq!(
+            groups[0].group_key(),
+            &FusionTreeGroupKey::from_sector_ids([1, 1], [1, 1], [false, false], [false, false])
+        );
+    }
+
+    #[test]
+    fn fusion_tree_homspace_generates_innerline_paths_for_simple_fusion() {
+        let rule = BranchingMultiplicityFreeRule;
+        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].coupled(), Some(SectorId::new(1)));
+        assert_eq!(keys[1].coupled(), Some(SectorId::new(1)));
+        assert_eq!(keys[0].codomain_innerlines(), &[SectorId::new(0)]);
+        assert_eq!(keys[1].codomain_innerlines(), &[SectorId::new(2)]);
+        assert_eq!(
+            keys[0].codomain_vertices(),
+            &[SectorId::new(1), SectorId::new(1)]
+        );
+        assert!(keys[0].domain_innerlines().is_empty());
+        assert!(keys[0].domain_vertices().is_empty());
+        assert_eq!(keys[0].domain_uncoupled(), &[SectorId::new(1)]);
+
+        let groups = hom.fusion_tree_groups(&rule).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].block_indices(), &[0, 1]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_uses_dualized_sector_for_matching_but_stores_original_leg() {
+        let rule = BranchingMultiplicityFreeRule;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(3)], true)]),
+            FusionProductSpace::from_sector_ids([1]),
+        );
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].coupled(), Some(SectorId::new(1)));
+        assert_eq!(keys[0].codomain_uncoupled(), &[SectorId::new(3)]);
+        assert_eq!(keys[0].codomain_is_dual(), &[true]);
+        assert_eq!(keys[0].domain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(keys[0].domain_is_dual(), &[false]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_fusionblocks_follow_domain_outer_codomain_inner_order() {
+        let rule = BranchingMultiplicityFreeRule;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([SectorId::new(1), SectorId::new(2)], false),
+                SectorLeg::new([SectorId::new(1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1), SectorId::new(2)], false)]),
+        );
+
+        let groups = hom.fusion_tree_groups(&rule).unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0].group_key(),
+            &FusionTreeGroupKey::from_sector_ids([2, 1], [1], [false, false], [false])
+        );
+        assert_eq!(
+            groups[1].group_key(),
+            &FusionTreeGroupKey::from_sector_ids([1, 1], [2], [false, false], [false])
+        );
     }
 
     #[test]
