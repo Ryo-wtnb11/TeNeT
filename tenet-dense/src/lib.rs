@@ -1,0 +1,849 @@
+#![forbid(unsafe_code)]
+
+//! Dense block execution boundary for TeNeT.
+//!
+//! Symmetric tensor algorithms should lower to this crate through TeNeT-owned
+//! view and executor types. Concrete dense runtimes such as tenferro stay behind
+//! the adapter boundary.
+
+use core::fmt;
+
+use num_complex::{Complex32, Complex64};
+use tenet_strided::{StridedError, StridedLayout};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DenseDType {
+    F32,
+    F64,
+    I32,
+    I64,
+    Bool,
+    C32,
+    C64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DenseBackend {
+    Tenferro,
+}
+
+#[derive(Debug)]
+pub struct DenseView<'a, T> {
+    data: &'a [T],
+    shape: &'a [usize],
+    strides: &'a [usize],
+    offset: usize,
+}
+
+impl<'a, T> Clone for DenseView<'a, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, T> Copy for DenseView<'a, T> {}
+
+impl<'a, T> DenseView<'a, T> {
+    pub fn new(
+        data: &'a [T],
+        shape: &'a [usize],
+        strides: &'a [usize],
+        offset: usize,
+    ) -> Result<Self, DenseError> {
+        StridedLayout::new(data.len(), offset, shape, strides)?;
+        Ok(Self {
+            data,
+            shape,
+            strides,
+            offset,
+        })
+    }
+
+    #[inline]
+    pub fn data(&self) -> &'a [T] {
+        self.data
+    }
+
+    #[inline]
+    pub fn shape(&self) -> &'a [usize] {
+        self.shape
+    }
+
+    #[inline]
+    pub fn strides(&self) -> &'a [usize] {
+        self.strides
+    }
+
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    #[inline]
+    pub fn layout(&self) -> Result<StridedLayout<'a>, DenseError> {
+        Ok(StridedLayout::new(
+            self.data.len(),
+            self.offset,
+            self.shape,
+            self.strides,
+        )?)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum DenseRead<'a> {
+    F32(DenseView<'a, f32>),
+    F64(DenseView<'a, f64>),
+    I32(DenseView<'a, i32>),
+    I64(DenseView<'a, i64>),
+    Bool(DenseView<'a, bool>),
+    C32(DenseView<'a, Complex32>),
+    C64(DenseView<'a, Complex64>),
+}
+
+impl DenseRead<'_> {
+    pub fn dtype(&self) -> DenseDType {
+        match self {
+            Self::F32(_) => DenseDType::F32,
+            Self::F64(_) => DenseDType::F64,
+            Self::I32(_) => DenseDType::I32,
+            Self::I64(_) => DenseDType::I64,
+            Self::Bool(_) => DenseDType::Bool,
+            Self::C32(_) => DenseDType::C32,
+            Self::C64(_) => DenseDType::C64,
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        match self {
+            Self::F32(view) => view.shape(),
+            Self::F64(view) => view.shape(),
+            Self::I32(view) => view.shape(),
+            Self::I64(view) => view.shape(),
+            Self::Bool(view) => view.shape(),
+            Self::C32(view) => view.shape(),
+            Self::C64(view) => view.shape(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DenseTensor {
+    backend: DenseBackend,
+    inner: DenseTensorInner,
+}
+
+#[derive(Clone, Debug)]
+enum DenseTensorInner {
+    #[cfg(feature = "tenferro")]
+    Tenferro(tenferro_tensor::Tensor),
+}
+
+impl DenseTensor {
+    #[inline]
+    pub fn backend(&self) -> DenseBackend {
+        self.backend
+    }
+
+    pub fn dtype(&self) -> DenseDType {
+        match &self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => dense_dtype_from_tenferro(tensor.dtype()),
+        }
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        match &self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => tensor.shape(),
+        }
+    }
+
+    pub fn as_f32_slice(&self) -> Result<&[f32], DenseError> {
+        match &self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => tensor
+                .as_slice::<f32>()
+                .map_err(|err| tenferro_error("DenseTensor::as_f32_slice", err)),
+        }
+    }
+
+    pub fn as_f64_slice(&self) -> Result<&[f64], DenseError> {
+        match &self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => tensor
+                .as_slice::<f64>()
+                .map_err(|err| tenferro_error("DenseTensor::as_f64_slice", err)),
+        }
+    }
+
+    pub fn as_c32_slice(&self) -> Result<&[Complex32], DenseError> {
+        match &self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => tensor
+                .as_slice::<Complex32>()
+                .map_err(|err| tenferro_error("DenseTensor::as_c32_slice", err)),
+        }
+    }
+
+    pub fn as_c64_slice(&self) -> Result<&[Complex64], DenseError> {
+        match &self.inner {
+            #[cfg(feature = "tenferro")]
+            DenseTensorInner::Tenferro(tensor) => tensor
+                .as_slice::<Complex64>()
+                .map_err(|err| tenferro_error("DenseTensor::as_c64_slice", err)),
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    fn from_tenferro(tensor: tenferro_tensor::Tensor) -> Self {
+        Self {
+            backend: DenseBackend::Tenferro,
+            inner: DenseTensorInner::Tenferro(tensor),
+        }
+    }
+}
+
+pub trait DenseExecutor {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DenseError {
+    Strided(StridedError),
+    StrideOverflow {
+        value: usize,
+    },
+    OffsetOverflow {
+        value: usize,
+    },
+    Backend {
+        backend: DenseBackend,
+        op: &'static str,
+        message: String,
+    },
+}
+
+impl fmt::Display for DenseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Strided(err) => err.fmt(f),
+            Self::StrideOverflow { value } => {
+                write!(f, "dense view stride {value} does not fit in isize")
+            }
+            Self::OffsetOverflow { value } => {
+                write!(f, "dense view offset {value} does not fit in isize")
+            }
+            Self::Backend {
+                backend,
+                op,
+                message,
+            } => {
+                write!(f, "{backend:?} backend error in {op}: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DenseError {}
+
+impl From<StridedError> for DenseError {
+    fn from(value: StridedError) -> Self {
+        Self::Strided(value)
+    }
+}
+
+#[cfg(feature = "tenferro")]
+pub use tenferro_adapter::DefaultDenseExecutor;
+
+#[cfg(feature = "tenferro")]
+mod tenferro_adapter {
+    use super::*;
+
+    use tenferro_cpu::CpuBackend;
+    use tenferro_linalg::LinalgBackend;
+    use tenferro_tensor::{Tensor, TensorView, TypedTensorView};
+
+    #[derive(Debug)]
+    pub struct DefaultDenseExecutor {
+        backend: CpuBackend,
+    }
+
+    impl DefaultDenseExecutor {
+        pub fn new() -> Self {
+            Self {
+                backend: CpuBackend::new(),
+            }
+        }
+    }
+
+    impl Default for DefaultDenseExecutor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DenseExecutor for DefaultDenseExecutor {
+        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            let input = tenferro_view(input)?;
+            self.backend
+                .svd_read(input)
+                .map(wrap_outputs)
+                .map_err(|err| tenferro_error("svd_read", err))
+        }
+
+        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            let input = tenferro_view(input)?;
+            self.backend
+                .qr_read(input)
+                .map(wrap_outputs)
+                .map_err(|err| tenferro_error("qr_read", err))
+        }
+
+        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            let input = tenferro_view(input)?;
+            self.backend
+                .eigh_read(input)
+                .map(wrap_outputs)
+                .map_err(|err| tenferro_error("eigh_read", err))
+        }
+    }
+
+    fn wrap_outputs(outputs: Vec<Tensor>) -> Vec<DenseTensor> {
+        outputs
+            .into_iter()
+            .map(DenseTensor::from_tenferro)
+            .collect()
+    }
+
+    fn tenferro_view(input: DenseRead<'_>) -> Result<TensorView<'_>, DenseError> {
+        match input {
+            DenseRead::F32(view) => typed_tenferro_view(view).map(TensorView::F32),
+            DenseRead::F64(view) => typed_tenferro_view(view).map(TensorView::F64),
+            DenseRead::I32(view) => typed_tenferro_view(view).map(TensorView::I32),
+            DenseRead::I64(view) => typed_tenferro_view(view).map(TensorView::I64),
+            DenseRead::Bool(view) => typed_tenferro_view(view).map(TensorView::Bool),
+            DenseRead::C32(view) => typed_tenferro_view(view).map(TensorView::C32),
+            DenseRead::C64(view) => typed_tenferro_view(view).map(TensorView::C64),
+        }
+    }
+
+    fn typed_tenferro_view<'a, T: 'static>(
+        view: DenseView<'a, T>,
+    ) -> Result<TypedTensorView<'a, T>, DenseError> {
+        let strides = strides_to_isize(view.strides())?;
+        let offset = isize::try_from(view.offset()).map_err(|_| DenseError::OffsetOverflow {
+            value: view.offset(),
+        })?;
+        TypedTensorView::from_slice(view.shape(), strides, offset, view.data())
+            .map_err(|err| tenferro_error("TypedTensorView::from_slice", err))
+    }
+}
+
+fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, DenseError> {
+    strides
+        .iter()
+        .map(|&stride| {
+            isize::try_from(stride).map_err(|_| DenseError::StrideOverflow { value: stride })
+        })
+        .collect()
+}
+
+#[cfg(feature = "tenferro")]
+fn dense_dtype_from_tenferro(dtype: tenferro_tensor::DType) -> DenseDType {
+    match dtype {
+        tenferro_tensor::DType::F32 => DenseDType::F32,
+        tenferro_tensor::DType::F64 => DenseDType::F64,
+        tenferro_tensor::DType::I32 => DenseDType::I32,
+        tenferro_tensor::DType::I64 => DenseDType::I64,
+        tenferro_tensor::DType::Bool => DenseDType::Bool,
+        tenferro_tensor::DType::C32 => DenseDType::C32,
+        tenferro_tensor::DType::C64 => DenseDType::C64,
+    }
+}
+
+#[cfg(feature = "tenferro")]
+fn tenferro_error(op: &'static str, err: tenferro_tensor::Error) -> DenseError {
+    DenseError::Backend {
+        backend: DenseBackend::Tenferro,
+        op,
+        message: err.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
+        assert!(
+            (actual - expected).abs() <= tol,
+            "expected {expected}, got {actual}, tol={tol}"
+        );
+    }
+
+    fn assert_f32_close(actual: f32, expected: f32, tol: f32) {
+        assert!(
+            (actual - expected).abs() <= tol,
+            "expected {expected}, got {actual}, tol={tol}"
+        );
+    }
+
+    fn assert_c32_close(actual: Complex32, expected: Complex32, tol: f32) {
+        assert_f32_close(actual.re, expected.re, tol);
+        assert_f32_close(actual.im, expected.im, tol);
+    }
+
+    fn assert_c64_close(actual: Complex64, expected: Complex64, tol: f64) {
+        assert_f64_close(actual.re, expected.re, tol);
+        assert_f64_close(actual.im, expected.im, tol);
+    }
+
+    fn col_major_index(rows: usize, row: usize, col: usize) -> usize {
+        row + col * rows
+    }
+
+    fn transpose_f32(mat: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0; rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
+            }
+        }
+        out
+    }
+
+    fn transpose_f64(mat: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+        let mut out = vec![0.0; rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
+            }
+        }
+        out
+    }
+
+    fn transpose_c32(mat: &[Complex32], rows: usize, cols: usize) -> Vec<Complex32> {
+        let mut out = vec![Complex32::new(0.0, 0.0); rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
+            }
+        }
+        out
+    }
+
+    fn transpose_c64(mat: &[Complex64], rows: usize, cols: usize) -> Vec<Complex64> {
+        let mut out = vec![Complex64::new(0.0, 0.0); rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)];
+            }
+        }
+        out
+    }
+
+    fn conjugate_transpose_c32(mat: &[Complex32], rows: usize, cols: usize) -> Vec<Complex32> {
+        let mut out = vec![Complex32::new(0.0, 0.0); rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)].conj();
+            }
+        }
+        out
+    }
+
+    fn conjugate_transpose_c64(mat: &[Complex64], rows: usize, cols: usize) -> Vec<Complex64> {
+        let mut out = vec![Complex64::new(0.0, 0.0); rows * cols];
+        for j in 0..cols {
+            for i in 0..rows {
+                out[col_major_index(cols, j, i)] = mat[col_major_index(rows, i, j)].conj();
+            }
+        }
+        out
+    }
+
+    fn matmul_f32(lhs: &[f32], rhs: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0; m * n];
+        for j in 0..n {
+            for p in 0..k {
+                let rhs_pj = rhs[col_major_index(k, p, j)];
+                for i in 0..m {
+                    out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
+                }
+            }
+        }
+        out
+    }
+
+    fn matmul_f64(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+        let mut out = vec![0.0; m * n];
+        for j in 0..n {
+            for p in 0..k {
+                let rhs_pj = rhs[col_major_index(k, p, j)];
+                for i in 0..m {
+                    out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
+                }
+            }
+        }
+        out
+    }
+
+    fn matmul_c32(
+        lhs: &[Complex32],
+        rhs: &[Complex32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<Complex32> {
+        let mut out = vec![Complex32::new(0.0, 0.0); m * n];
+        for j in 0..n {
+            for p in 0..k {
+                let rhs_pj = rhs[col_major_index(k, p, j)];
+                for i in 0..m {
+                    out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
+                }
+            }
+        }
+        out
+    }
+
+    fn matmul_c64(
+        lhs: &[Complex64],
+        rhs: &[Complex64],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<Complex64> {
+        let mut out = vec![Complex64::new(0.0, 0.0); m * n];
+        for j in 0..n {
+            for p in 0..k {
+                let rhs_pj = rhs[col_major_index(k, p, j)];
+                for i in 0..m {
+                    out[col_major_index(m, i, j)] += lhs[col_major_index(m, i, p)] * rhs_pj;
+                }
+            }
+        }
+        out
+    }
+
+    fn diag_f32(values: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0; values.len() * values.len()];
+        for (i, value) in values.iter().enumerate() {
+            out[col_major_index(values.len(), i, i)] = *value;
+        }
+        out
+    }
+
+    fn diag_f64(values: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; values.len() * values.len()];
+        for (i, value) in values.iter().enumerate() {
+            out[col_major_index(values.len(), i, i)] = *value;
+        }
+        out
+    }
+
+    fn diag_c32_from_real(values: &[f32]) -> Vec<Complex32> {
+        let mut out = vec![Complex32::new(0.0, 0.0); values.len() * values.len()];
+        for (i, value) in values.iter().enumerate() {
+            out[col_major_index(values.len(), i, i)] = Complex32::new(*value, 0.0);
+        }
+        out
+    }
+
+    fn diag_c64_from_real(values: &[f64]) -> Vec<Complex64> {
+        let mut out = vec![Complex64::new(0.0, 0.0); values.len() * values.len()];
+        for (i, value) in values.iter().enumerate() {
+            out[col_major_index(values.len(), i, i)] = Complex64::new(*value, 0.0);
+        }
+        out
+    }
+
+    #[test]
+    fn dense_view_rejects_out_of_bounds_layout() {
+        let data = [0.0; 6];
+        let shape = [2, 3];
+        let strides = [1, 4];
+        let err = DenseView::new(&data, &shape, &strides, 0).unwrap_err();
+        assert_eq!(err, DenseError::Strided(StridedError::OutOfBounds));
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_qr_reads_transposed_views_for_all_linalg_dtypes() {
+        let f32_data = vec![1.0_f32, -2.0, 3.0, 0.5, -1.0, 4.0];
+        let f64_data = vec![1.0_f64, -2.0, 3.0, 0.5, -1.0, 4.0];
+        let c32_data = vec![
+            Complex32::new(1.0, 0.5),
+            Complex32::new(-2.0, 1.0),
+            Complex32::new(3.0, -0.25),
+            Complex32::new(0.5, -1.0),
+            Complex32::new(-1.0, 0.75),
+            Complex32::new(4.0, 1.5),
+        ];
+        let c64_data = vec![
+            Complex64::new(1.0, 0.5),
+            Complex64::new(-2.0, 1.0),
+            Complex64::new(3.0, -0.25),
+            Complex64::new(0.5, -1.0),
+            Complex64::new(-1.0, 0.75),
+            Complex64::new(4.0, 1.5),
+        ];
+        let shape = [3, 2];
+        let strides = [2, 1];
+        let mut executor = DefaultDenseExecutor::new();
+
+        let outputs = executor
+            .qr(DenseRead::F32(
+                DenseView::new(&f32_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::F32);
+        let recon = matmul_f32(
+            outputs[0].as_f32_slice().unwrap(),
+            outputs[1].as_f32_slice().unwrap(),
+            3,
+            2,
+            2,
+        );
+        let expected = transpose_f32(&f32_data, 2, 3);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_f32_close(*actual, *expected, 1.0e-5);
+        }
+
+        let outputs = executor
+            .qr(DenseRead::F64(
+                DenseView::new(&f64_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::F64);
+        let recon = matmul_f64(
+            outputs[0].as_f64_slice().unwrap(),
+            outputs[1].as_f64_slice().unwrap(),
+            3,
+            2,
+            2,
+        );
+        let expected = transpose_f64(&f64_data, 2, 3);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_f64_close(*actual, *expected, 1.0e-9);
+        }
+
+        let outputs = executor
+            .qr(DenseRead::C32(
+                DenseView::new(&c32_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::C32);
+        let recon = matmul_c32(
+            outputs[0].as_c32_slice().unwrap(),
+            outputs[1].as_c32_slice().unwrap(),
+            3,
+            2,
+            2,
+        );
+        let expected = transpose_c32(&c32_data, 2, 3);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_c32_close(*actual, *expected, 1.0e-5);
+        }
+
+        let outputs = executor
+            .qr(DenseRead::C64(
+                DenseView::new(&c64_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::C64);
+        let recon = matmul_c64(
+            outputs[0].as_c64_slice().unwrap(),
+            outputs[1].as_c64_slice().unwrap(),
+            3,
+            2,
+            2,
+        );
+        let expected = transpose_c64(&c64_data, 2, 3);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_c64_close(*actual, *expected, 1.0e-9);
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_eigh_reads_transposed_views_for_all_linalg_dtypes() {
+        let f32_data = vec![4.0_f32, 1.0, 1.0, 3.0];
+        let f64_data = vec![4.0_f64, 1.0, 1.0, 3.0];
+        let c32_data = vec![
+            Complex32::new(4.0, 0.0),
+            Complex32::new(1.0, -0.5),
+            Complex32::new(1.0, 0.5),
+            Complex32::new(3.0, 0.0),
+        ];
+        let c64_data = vec![
+            Complex64::new(4.0, 0.0),
+            Complex64::new(1.0, -0.5),
+            Complex64::new(1.0, 0.5),
+            Complex64::new(3.0, 0.0),
+        ];
+        let shape = [2, 2];
+        let strides = [2, 1];
+        let mut executor = DefaultDenseExecutor::new();
+
+        let outputs = executor
+            .eigh(DenseRead::F32(
+                DenseView::new(&f32_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::F32);
+        assert_eq!(outputs[1].dtype(), DenseDType::F32);
+        let values = outputs[0].as_f32_slice().unwrap();
+        let vectors = outputs[1].as_f32_slice().unwrap();
+        let recon = matmul_f32(
+            &matmul_f32(vectors, &diag_f32(values), 2, 2, 2),
+            &transpose_f32(vectors, 2, 2),
+            2,
+            2,
+            2,
+        );
+        let expected = transpose_f32(&f32_data, 2, 2);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_f32_close(*actual, *expected, 1.0e-5);
+        }
+
+        let outputs = executor
+            .eigh(DenseRead::F64(
+                DenseView::new(&f64_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::F64);
+        assert_eq!(outputs[1].dtype(), DenseDType::F64);
+        let values = outputs[0].as_f64_slice().unwrap();
+        let vectors = outputs[1].as_f64_slice().unwrap();
+        let recon = matmul_f64(
+            &matmul_f64(vectors, &diag_f64(values), 2, 2, 2),
+            &transpose_f64(vectors, 2, 2),
+            2,
+            2,
+            2,
+        );
+        let expected = transpose_f64(&f64_data, 2, 2);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_f64_close(*actual, *expected, 1.0e-10);
+        }
+
+        let outputs = executor
+            .eigh(DenseRead::C32(
+                DenseView::new(&c32_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::F32);
+        assert_eq!(outputs[1].dtype(), DenseDType::C32);
+        let values = outputs[0].as_f32_slice().unwrap();
+        let vectors = outputs[1].as_c32_slice().unwrap();
+        let recon = matmul_c32(
+            &matmul_c32(vectors, &diag_c32_from_real(values), 2, 2, 2),
+            &conjugate_transpose_c32(vectors, 2, 2),
+            2,
+            2,
+            2,
+        );
+        let expected = transpose_c32(&c32_data, 2, 2);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_c32_close(*actual, *expected, 1.0e-5);
+        }
+
+        let outputs = executor
+            .eigh(DenseRead::C64(
+                DenseView::new(&c64_data, &shape, &strides, 0).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(outputs[0].dtype(), DenseDType::F64);
+        assert_eq!(outputs[1].dtype(), DenseDType::C64);
+        let values = outputs[0].as_f64_slice().unwrap();
+        let vectors = outputs[1].as_c64_slice().unwrap();
+        let recon = matmul_c64(
+            &matmul_c64(vectors, &diag_c64_from_real(values), 2, 2, 2),
+            &conjugate_transpose_c64(vectors, 2, 2),
+            2,
+            2,
+            2,
+        );
+        let expected = transpose_c64(&c64_data, 2, 2);
+        for (actual, expected) in recon.iter().zip(expected.iter()) {
+            assert_c64_close(*actual, *expected, 1.0e-10);
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_svd_accepts_all_supported_linalg_dtypes() {
+        let f32_data = [1.0_f32, -2.0, 0.5, 4.0];
+        let f64_data = [1.0_f64, -2.0, 0.5, 4.0];
+        let c32_data = [
+            Complex32::new(1.0, 0.5),
+            Complex32::new(-2.0, 1.0),
+            Complex32::new(0.5, -0.25),
+            Complex32::new(4.0, 1.5),
+        ];
+        let c64_data = [
+            Complex64::new(1.0, 0.5),
+            Complex64::new(-2.0, 1.0),
+            Complex64::new(0.5, -0.25),
+            Complex64::new(4.0, 1.5),
+        ];
+        let shape = [2, 2];
+        let strides = [2, 1];
+
+        let mut executor = DefaultDenseExecutor::new();
+        for (input, dtype) in [
+            (
+                DenseRead::F32(DenseView::new(&f32_data, &shape, &strides, 0).unwrap()),
+                DenseDType::F32,
+            ),
+            (
+                DenseRead::F64(DenseView::new(&f64_data, &shape, &strides, 0).unwrap()),
+                DenseDType::F64,
+            ),
+            (
+                DenseRead::C32(DenseView::new(&c32_data, &shape, &strides, 0).unwrap()),
+                DenseDType::C32,
+            ),
+            (
+                DenseRead::C64(DenseView::new(&c64_data, &shape, &strides, 0).unwrap()),
+                DenseDType::C64,
+            ),
+        ] {
+            let outputs = executor.svd(input).unwrap();
+            assert_eq!(outputs[0].dtype(), dtype);
+            assert!(matches!(
+                (dtype, outputs[1].dtype()),
+                (DenseDType::F32, DenseDType::F32)
+                    | (DenseDType::F64, DenseDType::F64)
+                    | (DenseDType::C32, DenseDType::F32)
+                    | (DenseDType::C64, DenseDType::F64)
+            ));
+            assert_eq!(outputs[2].dtype(), dtype);
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_rejects_integer_linalg_view() {
+        let data = [1_i32, 0, 0, 1];
+        let shape = [2, 2];
+        let strides = [1, 2];
+        let view = DenseView::new(&data, &shape, &strides, 0).unwrap();
+
+        let mut executor = DefaultDenseExecutor::new();
+        let err = executor.qr(DenseRead::I32(view)).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "qr_read",
+                ref message,
+            } if message.contains("unsupported dtype")
+        ));
+    }
+}

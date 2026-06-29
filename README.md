@@ -17,6 +17,7 @@ Implementation policy:
 
 Initial crate layout:
 
+- `tenet-dense`: dense block executor boundary. The default executor currently
+  adapts tenferro while keeping tenferro types out of higher tensor algorithms.
 - `tenet-strided`: low-level strided adapter boundary.
 - `tenet`: public facade crate.
-

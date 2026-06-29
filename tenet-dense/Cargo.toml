@@ -1,0 +1,27 @@
+[package]
+name = "tenet-dense"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tenet_dense"
+path = "src/lib.rs"
+
+[features]
+default = ["tenferro"]
+tenferro = [
+    "dep:tenferro-cpu",
+    "dep:tenferro-linalg",
+    "dep:tenferro-tensor",
+    "tenferro-cpu/cpu-faer",
+    "tenferro-linalg/cpu-faer",
+]
+
+[dependencies]
+num-complex = "0.4"
+tenet-strided = { path = "../tenet-strided" }
+tenferro-cpu = { path = "../../tenferro-rs/crates/tenferro-cpu", default-features = false, optional = true }
+tenferro-linalg = { path = "../../tenferro-rs/crates/tenferro-linalg", default-features = false, optional = true }
+tenferro-tensor = { path = "../../tenferro-rs/crates/tenferro-tensor", default-features = false, optional = true }
