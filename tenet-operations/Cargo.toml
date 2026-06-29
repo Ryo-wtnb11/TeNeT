@@ -12,3 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 tenet-core = { path = "../tenet-core" }
 strided-kernel = { git = "https://github.com/tensor4all/strided-rs", rev = "71bdd913158a87437e51f4f9b69cba4cac6f5082", version = "0.1.0", features = ["parallel"] }
+num-traits = "0.2"
+
+[dev-dependencies]
+num-complex = "0.4"

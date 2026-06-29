@@ -8,16 +8,993 @@
 
 use core::fmt;
 use core::ops::{Add, Mul};
+use std::sync::Arc;
 
-use tenet_core::{BlockLayout, BlockView, BlockViewMut, CoreError};
+use num_traits::{One, Zero};
+use tenet_core::{
+    BlockKey, BlockLayout, BlockStructure, BlockView, BlockViewMut, CoreError, TensorMap,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisPermutation<'a> {
+    Identity,
+    Axes(&'a [usize]),
+}
+
+impl<'a> AxisPermutation<'a> {
+    #[inline]
+    pub fn identity() -> Self {
+        Self::Identity
+    }
+
+    #[inline]
+    pub fn from_axes(axes: &'a [usize]) -> Self {
+        Self::Axes(axes)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TensorAddStructure {
+    rank: usize,
+    axes: Vec<usize>,
+    terms: Vec<TensorAddStructureTerm>,
+    descriptor: TensorAddDescriptor,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+}
+
+pub fn tensoradd_structure<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+    dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+    src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    permutation: AxisPermutation<'_>,
+) -> Result<TensorAddStructure, OperationError> {
+    TensorAddStructure::compile(dst, src, permutation)
+}
+
+impl TensorAddStructure {
+    pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+        permutation: AxisPermutation<'_>,
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures(
+            Arc::clone(dst.structure()),
+            Arc::clone(src.structure()),
+            permutation,
+        )
+    }
+
+    pub fn compile_structures(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        permutation: AxisPermutation<'_>,
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures(
+            Arc::new(dst_structure.clone()),
+            Arc::new(src_structure.clone()),
+            permutation,
+        )
+    }
+
+    fn compile_shared_structures(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        permutation: AxisPermutation<'_>,
+    ) -> Result<Self, OperationError> {
+        if dst_structure.block_count() != src_structure.block_count() {
+            return Err(OperationError::BlockCountMismatch {
+                dst: dst_structure.block_count(),
+                src: src_structure.block_count(),
+            });
+        }
+
+        let rank = dst_structure.rank();
+        if src_structure.rank() != rank {
+            return Err(OperationError::StructureRankMismatch {
+                expected: rank,
+                actual: src_structure.rank(),
+            });
+        }
+        let axes = permutation_axes(permutation, rank)?;
+        let src_for_dst = dst_structure
+            .pair_block_indices_from(&src_structure)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let mut terms = Vec::with_capacity(dst_structure.block_count());
+
+        for dst_index in 0..dst_structure.block_count() {
+            let dst_block = dst_structure.block(dst_index)?;
+            if dst_block.shape().len() != rank {
+                return Err(OperationError::RankMismatch {
+                    expected: rank,
+                    actual: dst_block.shape().len(),
+                });
+            }
+            let src_index = src_for_dst[dst_index];
+            let src_block = src_structure.block(src_index)?;
+            if src_block.shape().len() != rank {
+                return Err(OperationError::RankMismatch {
+                    expected: rank,
+                    actual: src_block.shape().len(),
+                });
+            }
+
+            terms.push(TensorAddStructureTerm {
+                key: dst_block.key().clone(),
+                dst_block: dst_index,
+                src_block: src_index,
+            });
+        }
+
+        let descriptor =
+            TensorAddDescriptor::compile(rank, &axes, &terms, &dst_structure, &src_structure)?;
+
+        Ok(Self {
+            rank,
+            axes,
+            terms,
+            descriptor,
+            dst_structure,
+            src_structure,
+        })
+    }
+
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[inline]
+    pub fn axes(&self) -> &[usize] {
+        &self.axes
+    }
+
+    #[inline]
+    pub fn terms(&self) -> &[TensorAddStructureTerm] {
+        &self.terms
+    }
+
+    #[inline]
+    fn descriptor(&self) -> &TensorAddDescriptor {
+        &self.descriptor
+    }
+
+    fn validate_replay_structures(
+        &self,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+    ) -> Result<(), OperationError> {
+        validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
+        validate_structure_identity("src", &self.src_structure, src_structure)
+    }
+
+    pub fn execute_with<B, T, const NOUT: usize, const NIN: usize, S>(
+        &self,
+        backend: &mut B,
+        allocator: &mut B::Allocator,
+        dst: &mut TensorMap<T, NOUT, NIN, S>,
+        src: &TensorMap<T, NOUT, NIN, S>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        B: TensorOperationsBackend,
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        backend.tensoradd_structure_into(allocator, self, dst, src, alpha, beta)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TensorAddStructureTerm {
+    key: BlockKey,
+    dst_block: usize,
+    src_block: usize,
+}
+
+impl TensorAddStructureTerm {
+    #[inline]
+    pub fn key(&self) -> &BlockKey {
+        &self.key
+    }
+
+    #[inline]
+    pub fn dst_block(&self) -> usize {
+        self.dst_block
+    }
+
+    #[inline]
+    pub fn src_block(&self) -> usize {
+        self.src_block
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TensorAddDescriptor {
+    terms: Vec<TensorAddDescriptorTerm>,
+    shapes: Vec<usize>,
+    dst_strides: Vec<isize>,
+    src_strides: Vec<isize>,
+}
+
+impl TensorAddDescriptor {
+    #[inline]
+    pub fn terms(&self) -> &[TensorAddDescriptorTerm] {
+        &self.terms
+    }
+
+    fn reserve(&mut self, term_count: usize, rank: usize) {
+        self.terms.reserve(term_count);
+        let entry_count = term_count.saturating_mul(rank);
+        self.shapes.reserve(entry_count);
+        self.dst_strides.reserve(entry_count);
+        self.src_strides.reserve(entry_count);
+    }
+
+    fn shape(&self, term: &TensorAddDescriptorTerm) -> &[usize] {
+        &self.shapes[term.layout_start..term.layout_start + term.rank]
+    }
+
+    fn dst_strides(&self, term: &TensorAddDescriptorTerm) -> &[isize] {
+        &self.dst_strides[term.layout_start..term.layout_start + term.rank]
+    }
+
+    fn src_strides(&self, term: &TensorAddDescriptorTerm) -> &[isize] {
+        &self.src_strides[term.layout_start..term.layout_start + term.rank]
+    }
+
+    fn compile(
+        rank: usize,
+        axes: &[usize],
+        terms: &[TensorAddStructureTerm],
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<Self, OperationError> {
+        let mut descriptor = Self::default();
+        descriptor.reserve(terms.len(), rank);
+
+        for term in terms {
+            let dst_block = dst_structure.block(term.dst_block())?;
+            let src_block = src_structure.block(term.src_block())?;
+            if dst_block.shape().len() != rank {
+                return Err(OperationError::RankMismatch {
+                    expected: rank,
+                    actual: dst_block.shape().len(),
+                });
+            }
+            if src_block.shape().len() != rank {
+                return Err(OperationError::RankMismatch {
+                    expected: rank,
+                    actual: src_block.shape().len(),
+                });
+            }
+
+            let layout_start = descriptor.shapes.len();
+            for (dst_axis, &src_axis) in axes.iter().enumerate() {
+                let dst_dim = dst_block.shape()[dst_axis];
+                let src_dim = src_block.shape()[src_axis];
+                if dst_dim != src_dim {
+                    let src_shape = axes
+                        .iter()
+                        .map(|&axis| src_block.shape()[axis])
+                        .collect::<Vec<_>>();
+                    return Err(OperationError::ShapeMismatch {
+                        dst: dst_block.shape().to_vec(),
+                        src: src_shape,
+                    });
+                }
+                descriptor.shapes.push(dst_dim);
+                descriptor.dst_strides.push(
+                    isize::try_from(dst_block.strides()[dst_axis]).map_err(|_| {
+                        OperationError::StrideOverflow {
+                            value: dst_block.strides()[dst_axis],
+                        }
+                    })?,
+                );
+                descriptor.src_strides.push(
+                    isize::try_from(src_block.strides()[src_axis]).map_err(|_| {
+                        OperationError::StrideOverflow {
+                            value: src_block.strides()[src_axis],
+                        }
+                    })?,
+                );
+            }
+
+            descriptor.terms.push(TensorAddDescriptorTerm {
+                dst_block: term.dst_block(),
+                src_block: term.src_block(),
+                layout_start,
+                rank,
+                element_count: element_count(dst_block.shape())?,
+                dst_offset: offset_to_isize(dst_block.offset())?,
+                src_offset: offset_to_isize(src_block.offset())?,
+            });
+        }
+
+        Ok(descriptor)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TensorAddDescriptorTerm {
+    dst_block: usize,
+    src_block: usize,
+    layout_start: usize,
+    rank: usize,
+    element_count: usize,
+    dst_offset: isize,
+    src_offset: isize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeTransformBlockSpec<T> {
+    dst_blocks: Vec<usize>,
+    src_blocks: Vec<usize>,
+    coefficients_src_by_dst: Vec<T>,
+}
+
+impl<T> TreeTransformBlockSpec<T> {
+    pub fn single(dst_block: usize, src_block: usize, coefficient: T) -> Self {
+        Self {
+            dst_blocks: vec![dst_block],
+            src_blocks: vec![src_block],
+            coefficients_src_by_dst: vec![coefficient],
+        }
+    }
+
+    pub fn multi(
+        dst_blocks: Vec<usize>,
+        src_blocks: Vec<usize>,
+        coefficients_src_by_dst: Vec<T>,
+    ) -> Self {
+        Self {
+            dst_blocks,
+            src_blocks,
+            coefficients_src_by_dst,
+        }
+    }
+
+    #[inline]
+    pub fn dst_blocks(&self) -> &[usize] {
+        &self.dst_blocks
+    }
+
+    #[inline]
+    pub fn src_blocks(&self) -> &[usize] {
+        &self.src_blocks
+    }
+
+    /// Matrix coefficients stored as `coeff[src + dst * src_count]`.
+    #[inline]
+    pub fn coefficients_src_by_dst(&self) -> &[T] {
+        &self.coefficients_src_by_dst
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeTransformStructure<T> {
+    rank: usize,
+    blocks: Vec<TreeTransformBlock>,
+    layouts: TreeTransformLayoutTable,
+    coefficients_src_by_dst: Vec<T>,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+}
+
+impl<T: Copy> TreeTransformStructure<T> {
+    pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+        specs: &[TreeTransformBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures(
+            Arc::clone(dst.structure()),
+            Arc::clone(src.structure()),
+            specs,
+        )
+    }
+
+    pub fn compile_structures(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        specs: &[TreeTransformBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures(
+            Arc::new(dst_structure.clone()),
+            Arc::new(src_structure.clone()),
+            specs,
+        )
+    }
+
+    fn compile_shared_structures(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[TreeTransformBlockSpec<T>],
+    ) -> Result<Self, OperationError> {
+        let rank = dst_structure.rank();
+        if src_structure.rank() != rank {
+            return Err(OperationError::StructureRankMismatch {
+                expected: rank,
+                actual: src_structure.rank(),
+            });
+        }
+
+        let mut layouts = TreeTransformLayoutTable::default();
+        let mut blocks = Vec::with_capacity(specs.len());
+        let mut coefficients_src_by_dst = Vec::new();
+        let mut touched_dst_blocks = vec![false; dst_structure.block_count()];
+
+        for spec in specs {
+            if spec.dst_blocks.is_empty() || spec.src_blocks.is_empty() {
+                return Err(OperationError::EmptyTransformBlock);
+            }
+            let src_count = spec.src_blocks.len();
+            let dst_count = spec.dst_blocks.len();
+            let expected_coefficients = src_count
+                .checked_mul(dst_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            if spec.coefficients_src_by_dst.len() != expected_coefficients {
+                return Err(OperationError::CoefficientCountMismatch {
+                    expected: expected_coefficients,
+                    actual: spec.coefficients_src_by_dst.len(),
+                });
+            }
+
+            for &dst_block in &spec.dst_blocks {
+                let touched = touched_dst_blocks.get_mut(dst_block).ok_or(
+                    OperationError::BlockIndexOutOfBounds {
+                        tensor: "dst",
+                        index: dst_block,
+                        count: dst_structure.block_count(),
+                    },
+                )?;
+                if *touched {
+                    return Err(OperationError::DuplicateTransformDestination { dst_block });
+                }
+                *touched = true;
+            }
+
+            let dst_layout_start = layouts.entry_count();
+            let mut element_count = None;
+            for &dst_block in &spec.dst_blocks {
+                let block = dst_structure.block(dst_block)?;
+                let layout_element_count =
+                    layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+                match element_count {
+                    Some(expected) if expected != layout_element_count => {
+                        return Err(OperationError::ElementCountMismatch {
+                            expected,
+                            actual: layout_element_count,
+                        });
+                    }
+                    Some(_) => {}
+                    None => element_count = Some(layout_element_count),
+                }
+            }
+
+            let src_layout_start = layouts.entry_count();
+            for &src_block in &spec.src_blocks {
+                let block = src_structure.block(src_block)?;
+                let layout_element_count =
+                    layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+                match element_count {
+                    Some(expected) if expected != layout_element_count => {
+                        return Err(OperationError::ElementCountMismatch {
+                            expected,
+                            actual: layout_element_count,
+                        });
+                    }
+                    Some(_) => {}
+                    None => element_count = Some(layout_element_count),
+                }
+            }
+            let element_count = element_count.expect("validated non-empty block");
+            let coefficient_start = coefficients_src_by_dst.len();
+            coefficients_src_by_dst.extend_from_slice(&spec.coefficients_src_by_dst);
+
+            if src_count == 1 && dst_count == 1 {
+                let dst_layout = layouts.entry(dst_layout_start);
+                let src_layout = layouts.entry(src_layout_start);
+                if layouts.shape(dst_layout) != layouts.shape(src_layout) {
+                    return Err(OperationError::ShapeMismatch {
+                        dst: layouts.shape(dst_layout).to_vec(),
+                        src: layouts.shape(src_layout).to_vec(),
+                    });
+                }
+                blocks.push(TreeTransformBlock::Single {
+                    dst_layout: dst_layout_start,
+                    src_layout: src_layout_start,
+                    coefficient: coefficient_start,
+                });
+            } else {
+                blocks.push(TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    coefficient_start,
+                    element_count,
+                });
+            }
+        }
+
+        Ok(Self {
+            rank,
+            blocks,
+            layouts,
+            coefficients_src_by_dst,
+            dst_structure,
+            src_structure,
+        })
+    }
+
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn workspace_lens(&self) -> (usize, usize) {
+        self.blocks
+            .iter()
+            .fold((0, 0), |(max_src, max_dst), block| match block {
+                TreeTransformBlock::Single { .. } => (max_src, max_dst),
+                TreeTransformBlock::Multi {
+                    dst_count,
+                    src_count,
+                    element_count,
+                    ..
+                } => (
+                    max_src.max(element_count.saturating_mul(*src_count)),
+                    max_dst.max(element_count.saturating_mul(*dst_count)),
+                ),
+            })
+    }
+
+    pub fn workspace_len(&self) -> usize {
+        let (source, destination) = self.workspace_lens();
+        source.max(destination)
+    }
+
+    pub fn has_pack_gemm_scatter_blocks(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
+    }
+
+    fn coefficient(&self, index: usize) -> T {
+        self.coefficients_src_by_dst[index]
+    }
+
+    fn validate_replay_structures(
+        &self,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+    ) -> Result<(), OperationError> {
+        validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
+        validate_structure_identity("src", &self.src_structure, src_structure)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TreeTransformBlock {
+    Single {
+        dst_layout: usize,
+        src_layout: usize,
+        coefficient: usize,
+    },
+    Multi {
+        dst_layout_start: usize,
+        dst_count: usize,
+        src_layout_start: usize,
+        src_count: usize,
+        coefficient_start: usize,
+        element_count: usize,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TreeTransformLayoutTable {
+    entries: Vec<TreeTransformLayout>,
+    shapes: Vec<usize>,
+    strides: Vec<isize>,
+    packed_strides: Vec<isize>,
+}
+
+impl TreeTransformLayoutTable {
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn entry(&self, index: usize) -> &TreeTransformLayout {
+        &self.entries[index]
+    }
+
+    fn shape(&self, layout: &TreeTransformLayout) -> &[usize] {
+        &self.shapes[layout.layout_start..layout.layout_start + layout.rank]
+    }
+
+    fn strides(&self, layout: &TreeTransformLayout) -> &[isize] {
+        &self.strides[layout.layout_start..layout.layout_start + layout.rank]
+    }
+
+    fn packed_strides(&self, layout: &TreeTransformLayout) -> &[isize] {
+        &self.packed_strides[layout.layout_start..layout.layout_start + layout.rank]
+    }
+
+    fn push_block(
+        &mut self,
+        rank: usize,
+        shape: &[usize],
+        strides: &[usize],
+        offset: usize,
+    ) -> Result<usize, OperationError> {
+        if shape.len() != rank {
+            return Err(OperationError::RankMismatch {
+                expected: rank,
+                actual: shape.len(),
+            });
+        }
+        if strides.len() != rank {
+            return Err(OperationError::RankMismatch {
+                expected: rank,
+                actual: strides.len(),
+            });
+        }
+        let element_count = element_count(shape)?;
+        let layout_start = self.shapes.len();
+        let packed_strides = column_major_strides_isize(shape)?;
+        self.shapes.extend_from_slice(shape);
+        self.strides.extend(
+            strides
+                .iter()
+                .map(|&stride| {
+                    isize::try_from(stride)
+                        .map_err(|_| OperationError::StrideOverflow { value: stride })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        self.packed_strides.extend_from_slice(&packed_strides);
+        self.entries.push(TreeTransformLayout {
+            layout_start,
+            rank,
+            offset: offset_to_isize(offset)?,
+            element_count,
+        });
+        Ok(element_count)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TreeTransformLayout {
+    layout_start: usize,
+    rank: usize,
+    offset: isize,
+    element_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeTransformWorkspace<T> {
+    zero_strides: Vec<isize>,
+    source: Vec<T>,
+    destination: Vec<T>,
+}
+
+impl<T> Default for TreeTransformWorkspace<T> {
+    fn default() -> Self {
+        Self {
+            zero_strides: Vec::new(),
+            source: Vec::new(),
+            destination: Vec::new(),
+        }
+    }
+}
+
+impl<T> TreeTransformWorkspace<T> {
+    pub fn source_len(&self) -> usize {
+        self.source.len()
+    }
+
+    pub fn destination_len(&self) -> usize {
+        self.destination.len()
+    }
+}
+
+pub trait TreeTransformBackend<T>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    type Workspace;
+
+    fn tree_transform_structure_into<const NOUT: usize, const NIN: usize, S>(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<T>,
+        dst: &mut TensorMap<T, NOUT, NIN, S>,
+        src: &TensorMap<T, NOUT, NIN, S>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>;
+}
+
+pub trait TensorOperationsBackend {
+    type Allocator;
+
+    fn copy_block_into<T>(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        dst: BlockViewMut<'_, T>,
+        src: BlockView<'_, T>,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy + strided_kernel::MaybeSendSync;
+
+    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S>(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        structure: &TensorAddStructure,
+        dst: &mut TensorMap<T, NOUT, NIN, S>,
+        src: &TensorMap<T, NOUT, NIN, S>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HostAllocator {
+    zero_strides: Vec<isize>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostTensorOperations;
+
+impl TensorOperationsBackend for HostTensorOperations {
+    type Allocator = HostAllocator;
+
+    fn copy_block_into<T>(
+        &mut self,
+        _allocator: &mut Self::Allocator,
+        dst: BlockViewMut<'_, T>,
+        src: BlockView<'_, T>,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy + strided_kernel::MaybeSendSync,
+    {
+        copy_block_with_strided_kernel(dst, src)
+    }
+
+    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S>(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        structure: &TensorAddStructure,
+        dst: &mut TensorMap<T, NOUT, NIN, S>,
+        src: &TensorMap<T, NOUT, NIN, S>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        tensoradd_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
+    }
+}
+
+impl<T> TreeTransformBackend<T> for HostTensorOperations
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    type Workspace = TreeTransformWorkspace<T>;
+
+    fn tree_transform_structure_into<const NOUT: usize, const NIN: usize, S>(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<T>,
+        dst: &mut TensorMap<T, NOUT, NIN, S>,
+        src: &TensorMap<T, NOUT, NIN, S>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError> {
+        tree_transform_structure_with_strided_kernel(workspace, structure, dst, src, alpha, beta)
+    }
+}
+
+pub fn tensorcopy_into<T, const NOUT: usize, const NIN: usize, S>(
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+) -> Result<(), OperationError>
+where
+    T: Copy + strided_kernel::MaybeSendSync,
+{
+    let mut backend = HostTensorOperations;
+    let mut allocator = HostAllocator::default();
+    tensorcopy_into_with(&mut backend, &mut allocator, dst, src)
+}
+
+pub fn tensorcopy_into_with<B, T, const NOUT: usize, const NIN: usize, S>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    T: Copy + strided_kernel::MaybeSendSync,
+{
+    backend.copy_block_into(allocator, dst.subblock_mut()?, src.subblock()?)
+}
+
+pub fn tensoradd_into<T, const NOUT: usize, const NIN: usize, S>(
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    permutation: AxisPermutation<'_>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let mut backend = HostTensorOperations;
+    let mut allocator = HostAllocator::default();
+    tensoradd_into_with(
+        &mut backend,
+        &mut allocator,
+        dst,
+        src,
+        permutation,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensoradd_into_with<B, T, const NOUT: usize, const NIN: usize, S>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    permutation: AxisPermutation<'_>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = tensoradd_structure(dst, src, permutation)?;
+    tensoradd_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
+}
+
+pub fn tensoradd_execute_with<B, T, const NOUT: usize, const NIN: usize, S>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    structure: &TensorAddStructure,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    structure.execute_with(backend, allocator, dst, src, alpha, beta)
+}
+
+pub fn tree_transform_execute_with<B, T, const NOUT: usize, const NIN: usize, S>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    structure: &TreeTransformStructure<T>,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<T>,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+}
+
+pub fn tensoradd_assign_into<T, const NOUT: usize, const NIN: usize, S>(
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::zero())
+}
+
+pub fn tensoradd_add_into<T, const NOUT: usize, const NIN: usize, S>(
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::one())
+}
 
 pub fn copy_into<T>(dst: BlockViewMut<'_, T>, src: BlockView<'_, T>) -> Result<(), OperationError>
 where
     T: Copy + strided_kernel::MaybeSendSync,
 {
-    let mut dst = strided_write(dst)?;
-    let src = strided_read(src)?;
-    strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+    let mut backend = HostTensorOperations;
+    let mut allocator = HostAllocator::default();
+    backend.copy_block_into(&mut allocator, dst, src)
 }
 
 pub fn scaled_assign_into<T>(
@@ -26,11 +1003,16 @@ pub fn scaled_assign_into<T>(
     alpha: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Mul<T, Output = T> + strided_kernel::MaybeSendSync,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
 {
-    let mut dst = strided_write(dst)?;
-    let src = strided_read(src)?;
-    strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
+    let mut allocator = HostAllocator::default();
+    tensoradd_block_with_strided_kernel(&mut allocator, dst, src, alpha, T::zero())
 }
 
 pub fn scaled_add_into<T>(
@@ -39,25 +1021,636 @@ pub fn scaled_add_into<T>(
     alpha: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + strided_kernel::MaybeSendSync,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let mut allocator = HostAllocator::default();
+    tensoradd_block_with_strided_kernel(&mut allocator, dst, src, alpha, T::one())
+}
+
+fn copy_block_with_strided_kernel<T>(
+    dst: BlockViewMut<'_, T>,
+    src: BlockView<'_, T>,
+) -> Result<(), OperationError>
+where
+    T: Copy + strided_kernel::MaybeSendSync,
 {
     let mut dst = strided_write(dst)?;
     let src = strided_read(src)?;
-    strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
+    strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+}
+
+fn tensoradd_structure_with_strided_kernel<T, const NOUT: usize, const NIN: usize, S>(
+    allocator: &mut HostAllocator,
+    structure: &TensorAddStructure,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let descriptor = structure.descriptor();
+    structure.validate_replay_structures(dst.structure(), src.structure())?;
+    if dst.structure().block_count() != descriptor.terms().len() {
+        return Err(OperationError::BlockCountMismatch {
+            dst: dst.structure().block_count(),
+            src: descriptor.terms().len(),
+        });
+    }
+    if src.structure().block_count() != descriptor.terms().len() {
+        return Err(OperationError::BlockCountMismatch {
+            dst: descriptor.terms().len(),
+            src: src.structure().block_count(),
+        });
+    }
+
+    let zero_strides = &mut allocator.zero_strides;
+    let dst_data = dst.data_mut();
+    let src_data = src.data();
+    for term in descriptor.terms() {
+        tensoradd_prepared_block_with_strided_kernel(
+            zero_strides,
+            descriptor,
+            term,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
+fn tree_transform_structure_with_strided_kernel<T, const NOUT: usize, const NIN: usize, S>(
+    workspace: &mut TreeTransformWorkspace<T>,
+    structure: &TreeTransformStructure<T>,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    structure.validate_replay_structures(dst.structure(), src.structure())?;
+    let dst_data = dst.data_mut();
+    let src_data = src.data();
+
+    for block in &structure.blocks {
+        match *block {
+            TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } => tree_transform_single_with_strided_kernel(
+                &mut workspace.zero_strides,
+                &structure.layouts,
+                structure.layouts.entry(dst_layout),
+                structure.layouts.entry(src_layout),
+                structure.coefficient(coefficient),
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )?,
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+            } => tree_transform_multi_with_pack_gemm_scatter(
+                workspace,
+                &structure.layouts,
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+                &structure.coefficients_src_by_dst,
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn tensoradd_block_with_strided_kernel<T>(
+    allocator: &mut HostAllocator,
+    dst: BlockViewMut<'_, T>,
+    src: BlockView<'_, T>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let mut dst = strided_write(dst)?;
+    let src = strided_read(src)?;
+
+    if dst.dims() != src.dims() {
+        return Err(OperationError::ShapeMismatch {
+            dst: dst.dims().to_vec(),
+            src: src.dims().to_vec(),
+        });
+    }
+
+    if beta.is_zero() {
+        strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
+    } else {
+        if !beta.is_one() {
+            scale_destination(&mut allocator.zero_strides, &mut dst, beta)?;
+        }
+        strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
+    }
+}
+
+fn tensoradd_prepared_block_with_strided_kernel<T>(
+    zero_strides: &mut Vec<isize>,
+    descriptor: &TensorAddDescriptor,
+    term: &TensorAddDescriptorTerm,
+    dst_data: &mut [T],
+    src_data: &[T],
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let shape = descriptor.shape(term);
+    if term.element_count == 1 {
+        let dst_index = prepared_offset_to_usize(term.dst_offset)?;
+        let src_index = prepared_offset_to_usize(term.src_offset)?;
+        tensoradd_scalar_into(&mut dst_data[dst_index], src_data[src_index], alpha, beta);
+        return Ok(());
+    }
+
+    let dst_strides = descriptor.dst_strides(term);
+    let src_strides = descriptor.src_strides(term);
+    let mut dst =
+        strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, term.dst_offset)
+            .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, term.src_offset)
+        .map_err(strided_error)?;
+
+    if beta.is_zero() {
+        strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
+    } else {
+        if !beta.is_one() {
+            scale_destination(zero_strides, &mut dst, beta)?;
+        }
+        strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
+    }
+}
+
+fn tree_transform_single_with_strided_kernel<T>(
+    zero_strides: &mut Vec<isize>,
+    layouts: &TreeTransformLayoutTable,
+    dst_layout: &TreeTransformLayout,
+    src_layout: &TreeTransformLayout,
+    coefficient: T,
+    dst_data: &mut [T],
+    src_data: &[T],
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    if dst_layout.element_count == 1 {
+        let dst_index = prepared_offset_to_usize(dst_layout.offset)?;
+        let src_index = prepared_offset_to_usize(src_layout.offset)?;
+        tensoradd_scalar_into(
+            &mut dst_data[dst_index],
+            src_data[src_index],
+            alpha * coefficient,
+            beta,
+        );
+        return Ok(());
+    }
+
+    let shape = layouts.shape(dst_layout);
+    let mut dst = strided_kernel::StridedViewMut::new(
+        dst_data,
+        shape,
+        layouts.strides(dst_layout),
+        dst_layout.offset,
+    )
+    .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(
+        src_data,
+        shape,
+        layouts.strides(src_layout),
+        src_layout.offset,
+    )
+    .map_err(strided_error)?;
+    let scale = alpha * coefficient;
+    if beta.is_zero() {
+        strided_kernel::copy_scale(&mut dst, &src, scale).map_err(strided_error)
+    } else {
+        if !beta.is_one() {
+            scale_destination(zero_strides, &mut dst, beta)?;
+        }
+        strided_kernel::axpy(&mut dst, &src, scale).map_err(strided_error)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_multi_with_pack_gemm_scatter<T>(
+    workspace: &mut TreeTransformWorkspace<T>,
+    layouts: &TreeTransformLayoutTable,
+    dst_layout_start: usize,
+    dst_count: usize,
+    src_layout_start: usize,
+    src_count: usize,
+    coefficient_start: usize,
+    element_count: usize,
+    coefficients_src_by_dst: &[T],
+    dst_data: &mut [T],
+    src_data: &[T],
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    if element_count == 1 {
+        return tree_transform_scalar_multi(
+            layouts,
+            dst_layout_start,
+            dst_count,
+            src_layout_start,
+            src_count,
+            coefficient_start,
+            coefficients_src_by_dst,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        );
+    }
+
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    workspace.source.resize(source_len, T::zero());
+    workspace.destination.resize(destination_len, T::zero());
+
+    for src_index in 0..src_count {
+        let layout = layouts.entry(src_layout_start + src_index);
+        pack_layout_into_column(
+            layouts,
+            layout,
+            src_data,
+            &mut workspace.source,
+            src_index * element_count,
+        )?;
+    }
+
+    for dst_index in 0..dst_count {
+        let dst_column_start = dst_index * element_count;
+        for element in 0..element_count {
+            let mut sum = T::zero();
+            for src_index in 0..src_count {
+                let coeff =
+                    coefficients_src_by_dst[coefficient_start + src_index + dst_index * src_count];
+                let src_value = workspace.source[element + src_index * element_count];
+                sum = sum + src_value * coeff;
+            }
+            workspace.destination[dst_column_start + element] = alpha * sum;
+        }
+    }
+
+    for dst_index in 0..dst_count {
+        let layout = layouts.entry(dst_layout_start + dst_index);
+        scatter_column_into_layout(
+            &mut workspace.zero_strides,
+            layouts,
+            layout,
+            &workspace.destination,
+            dst_index * element_count,
+            dst_data,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_scalar_multi<T>(
+    layouts: &TreeTransformLayoutTable,
+    dst_layout_start: usize,
+    dst_count: usize,
+    src_layout_start: usize,
+    src_count: usize,
+    coefficient_start: usize,
+    coefficients_src_by_dst: &[T],
+    dst_data: &mut [T],
+    src_data: &[T],
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One,
+{
+    for dst_index in 0..dst_count {
+        let mut sum = T::zero();
+        for src_index in 0..src_count {
+            let src_layout = layouts.entry(src_layout_start + src_index);
+            let src_offset = prepared_offset_to_usize(src_layout.offset)?;
+            let coefficient =
+                coefficients_src_by_dst[coefficient_start + src_index + dst_index * src_count];
+            sum = sum + src_data[src_offset] * coefficient;
+        }
+        let dst_layout = layouts.entry(dst_layout_start + dst_index);
+        let dst_offset = prepared_offset_to_usize(dst_layout.offset)?;
+        tensoradd_scalar_into(&mut dst_data[dst_offset], sum, alpha, beta);
+    }
+    Ok(())
+}
+
+#[inline]
+fn tensoradd_scalar_into<T>(dst: &mut T, src: T, alpha: T, beta: T)
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One,
+{
+    let scaled_src = alpha * src;
+    if beta.is_zero() {
+        *dst = scaled_src;
+    } else if beta.is_one() {
+        *dst = *dst + scaled_src;
+    } else {
+        *dst = *dst * beta + scaled_src;
+    }
+}
+
+fn pack_layout_into_column<T>(
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    src_data: &[T],
+    packed: &mut [T],
+    packed_offset: usize,
+) -> Result<(), OperationError>
+where
+    T: Copy + strided_kernel::MaybeSendSync,
+{
+    let shape = layouts.shape(layout);
+    let mut dst = strided_kernel::StridedViewMut::new(
+        packed,
+        shape,
+        layouts.packed_strides(layout),
+        offset_to_isize(packed_offset)?,
+    )
+    .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(
+        src_data,
+        shape,
+        layouts.strides(layout),
+        layout.offset,
+    )
+    .map_err(strided_error)?;
+    strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+}
+
+fn scatter_column_into_layout<T>(
+    zero_strides: &mut Vec<isize>,
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    packed: &[T],
+    packed_offset: usize,
+    dst_data: &mut [T],
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let shape = layouts.shape(layout);
+    let mut dst = strided_kernel::StridedViewMut::new(
+        dst_data,
+        shape,
+        layouts.strides(layout),
+        layout.offset,
+    )
+    .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(
+        packed,
+        shape,
+        layouts.packed_strides(layout),
+        offset_to_isize(packed_offset)?,
+    )
+    .map_err(strided_error)?;
+
+    if beta.is_zero() {
+        strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+    } else {
+        if !beta.is_one() {
+            scale_destination(zero_strides, &mut dst, beta)?;
+        }
+        strided_kernel::axpy(&mut dst, &src, T::one()).map_err(strided_error)
+    }
+}
+
+fn scale_destination<T>(
+    zero_strides: &mut Vec<isize>,
+    dst: &mut strided_kernel::StridedViewMut<'_, T>,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Mul<T, Output = T> + strided_kernel::MaybeSendSync,
+{
+    let scalar = [beta];
+    zero_strides.clear();
+    zero_strides.resize(dst.ndim(), 0);
+    let beta_view =
+        strided_kernel::StridedView::<T>::new(&scalar, dst.dims(), zero_strides.as_slice(), 0)
+            .map_err(strided_error)?;
+    strided_kernel::mul(dst, &beta_view).map_err(strided_error)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationError {
     Core(CoreError),
-    StrideOverflow { value: usize },
-    OffsetOverflow { value: usize },
-    StridedKernel { message: String },
+    BlockIndexOutOfBounds {
+        tensor: &'static str,
+        index: usize,
+        count: usize,
+    },
+    BlockCountMismatch {
+        dst: usize,
+        src: usize,
+    },
+    CoefficientCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    DuplicateTransformDestination {
+        dst_block: usize,
+    },
+    ElementCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    ElementCountOverflow,
+    EmptyTransformBlock,
+    InvalidPermutation {
+        axes: Vec<usize>,
+        rank: usize,
+    },
+    InvalidPreparedOffset {
+        offset: isize,
+    },
+    RankMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    StructureMismatch {
+        tensor: &'static str,
+    },
+    StructureRankMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    MissingBlockKey {
+        key: BlockKey,
+    },
+    ShapeMismatch {
+        dst: Vec<usize>,
+        src: Vec<usize>,
+    },
+    StrideOverflow {
+        value: usize,
+    },
+    OffsetOverflow {
+        value: usize,
+    },
+    StridedKernel {
+        message: String,
+    },
 }
 
 impl fmt::Display for OperationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Core(err) => err.fmt(f),
+            Self::BlockIndexOutOfBounds {
+                tensor,
+                index,
+                count,
+            } => {
+                write!(
+                    f,
+                    "{tensor} block index {index} is out of bounds for {count} blocks"
+                )
+            }
+            Self::BlockCountMismatch { dst, src } => {
+                write!(f, "block count mismatch: dst {dst}, src {src}")
+            }
+            Self::CoefficientCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "coefficient count mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::DuplicateTransformDestination { dst_block } => {
+                write!(
+                    f,
+                    "tree transform destination block {dst_block} appears in more than one block"
+                )
+            }
+            Self::ElementCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "element count mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::ElementCountOverflow => write!(f, "element count overflow"),
+            Self::EmptyTransformBlock => {
+                write!(f, "tree transform block has no source or destination")
+            }
+            Self::InvalidPermutation { axes, rank } => {
+                write!(f, "invalid axis permutation {axes:?} for rank {rank}")
+            }
+            Self::InvalidPreparedOffset { offset } => {
+                write!(f, "invalid prepared tensor offset {offset}")
+            }
+            Self::RankMismatch { expected, actual } => {
+                write!(f, "rank mismatch: expected {expected}, got {actual}")
+            }
+            Self::StructureMismatch { tensor } => {
+                write!(
+                    f,
+                    "{tensor} tensor structure does not match compiled structure"
+                )
+            }
+            Self::StructureRankMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "block structure rank mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::MissingBlockKey { key } => {
+                write!(f, "missing matching block for key {key:?}")
+            }
+            Self::ShapeMismatch { dst, src } => {
+                write!(f, "shape mismatch: dst {dst:?}, src {src:?}")
+            }
             Self::StrideOverflow { value } => {
                 write!(f, "stride {value} does not fit in strided-rs isize")
             }
@@ -74,6 +1667,15 @@ impl std::error::Error for OperationError {}
 impl From<CoreError> for OperationError {
     fn from(value: CoreError) -> Self {
         Self::Core(value)
+    }
+}
+
+impl OperationError {
+    fn from_core_preserving_context(value: CoreError) -> Self {
+        match value {
+            CoreError::MissingBlockKey { key } => Self::MissingBlockKey { key },
+            other => Self::Core(other),
+        }
     }
 }
 
@@ -110,6 +1712,72 @@ fn offset_to_isize(offset: usize) -> Result<isize, OperationError> {
     isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
 }
 
+fn prepared_offset_to_usize(offset: isize) -> Result<usize, OperationError> {
+    usize::try_from(offset).map_err(|_| OperationError::InvalidPreparedOffset { offset })
+}
+
+fn element_count(shape: &[usize]) -> Result<usize, OperationError> {
+    shape.iter().try_fold(1usize, |acc, &dim| {
+        acc.checked_mul(dim)
+            .ok_or(OperationError::ElementCountOverflow)
+    })
+}
+
+fn column_major_strides_isize(shape: &[usize]) -> Result<Vec<isize>, OperationError> {
+    let mut stride = 1usize;
+    let mut strides = Vec::with_capacity(shape.len());
+    for &dim in shape {
+        strides.push(
+            isize::try_from(stride)
+                .map_err(|_| OperationError::StrideOverflow { value: stride })?,
+        );
+        stride = stride
+            .checked_mul(dim)
+            .ok_or(OperationError::ElementCountOverflow)?;
+    }
+    Ok(strides)
+}
+
+fn validate_structure_identity(
+    tensor: &'static str,
+    expected: &Arc<BlockStructure>,
+    actual: &Arc<BlockStructure>,
+) -> Result<(), OperationError> {
+    if Arc::ptr_eq(expected, actual) || expected.as_ref() == actual.as_ref() {
+        Ok(())
+    } else {
+        Err(OperationError::StructureMismatch { tensor })
+    }
+}
+
+fn permutation_axes(
+    permutation: AxisPermutation<'_>,
+    rank: usize,
+) -> Result<Vec<usize>, OperationError> {
+    match permutation {
+        AxisPermutation::Identity => Ok((0..rank).collect()),
+        AxisPermutation::Axes(axes) => {
+            if axes.len() != rank {
+                return Err(OperationError::InvalidPermutation {
+                    axes: axes.to_vec(),
+                    rank,
+                });
+            }
+            let mut seen = vec![false; rank];
+            for &axis in axes {
+                if axis >= rank || seen[axis] {
+                    return Err(OperationError::InvalidPermutation {
+                        axes: axes.to_vec(),
+                        rank,
+                    });
+                }
+                seen[axis] = true;
+            }
+            Ok(axes.to_vec())
+        }
+    }
+}
+
 fn strided_error(err: strided_kernel::StridedError) -> OperationError {
     OperationError::StridedKernel {
         message: err.to_string(),
@@ -122,6 +1790,9 @@ fn _assert_layout_owned_by_tenet(_layout: BlockLayout<'_>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::{Complex32, Complex64};
+    use std::fmt::Debug;
+    use tenet_core::TensorMapSpace;
 
     #[test]
     fn copy_into_uses_strided_kernel_for_transposed_views() {
@@ -166,5 +1837,1026 @@ mod tests {
         scaled_add_into(dst, src, 3.0).unwrap();
 
         assert_eq!(dst_data, [13.0, 26.0, 39.0, 52.0]);
+    }
+
+    fn assert_tensorcopy_dtype<T>(values: Vec<T>, fill: T)
+    where
+        T: Copy + Clone + Debug + PartialEq + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec(values.clone(), space.clone()).unwrap();
+        let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
+
+        tensorcopy_into(&mut dst, &src).unwrap();
+
+        assert_eq!(dst.data(), values.as_slice());
+    }
+
+    fn assert_tensoradd_dtype<T>(
+        values: Vec<T>,
+        fill: T,
+        alpha: T,
+        assign_expected: Vec<T>,
+        add_expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec(values.clone(), space.clone()).unwrap();
+
+        let mut assign_dst = TensorMap::<T, 2, 0>::filled(fill, space.clone()).unwrap();
+        tensoradd_assign_into(&mut assign_dst, &src, alpha).unwrap();
+        assert_eq!(assign_dst.data(), assign_expected.as_slice());
+
+        let mut add_dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
+        tensoradd_add_into(&mut add_dst, &src, alpha).unwrap();
+        assert_eq!(add_dst.data(), add_expected.as_slice());
+    }
+
+    fn assert_tensoradd_general_dtype<T>(
+        values: Vec<T>,
+        fill: T,
+        alpha: T,
+        beta: T,
+        expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec(values, space.clone()).unwrap();
+        let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
+
+        tensoradd_into(&mut dst, &src, AxisPermutation::identity(), alpha, beta).unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+    }
+
+    fn assert_tensoradd_scalar_dtype<T>(src_value: T, fill: T, alpha: T, beta: T, expected: T)
+    where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec(vec![src_value], space.clone()).unwrap();
+        let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
+        let structure =
+            TensorAddStructure::compile(&dst, &src, AxisPermutation::identity()).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[expected]);
+    }
+
+    fn assert_tree_single_dtype<T>(
+        values: Vec<T>,
+        fill: T,
+        coefficient: T,
+        alpha: T,
+        beta: T,
+        expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec(values, space.clone()).unwrap();
+        let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::single(0, 0, coefficient)],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+    }
+
+    fn assert_tree_multi_dtype<T>(
+        coefficients: Vec<T>,
+        alpha: T,
+        beta: T,
+        fill: T,
+        expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![4, 1], vec![4, 1]]).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec_with_structure(
+            vec![
+                T::one(),
+                T::one() + T::one(),
+                T::one() + T::one() + T::one(),
+                T::one() + T::one() + T::one() + T::one(),
+                T::one() + T::one() + T::one() + T::one() + T::one(),
+                T::one() + T::one() + T::one() + T::one() + T::one() + T::one(),
+                T::one() + T::one() + T::one() + T::one() + T::one() + T::one() + T::one(),
+                T::one()
+                    + T::one()
+                    + T::one()
+                    + T::one()
+                    + T::one()
+                    + T::one()
+                    + T::one()
+                    + T::one(),
+            ],
+            space.clone(),
+            src_structure,
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 8], space, dst_structure)
+                .unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                coefficients,
+            )],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+        assert_eq!(workspace.source_len(), 8);
+        assert_eq!(workspace.destination_len(), 8);
+    }
+
+    fn assert_tree_multi_scalar_dtype<T>(
+        coefficients: Vec<T>,
+        alpha: T,
+        beta: T,
+        fill: T,
+        expected: Vec<T>,
+    ) where
+        T: Copy
+            + Clone
+            + Debug
+            + PartialEq
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + Zero
+            + One
+            + strided_kernel::MaybeSendSync,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 1], []).unwrap();
+        let structure = BlockStructure::packed_column_major(2, [vec![1, 1], vec![1, 1]]).unwrap();
+        let src = TensorMap::<T, 2, 0>::from_vec_with_structure(
+            vec![T::one(), T::one() + T::one()],
+            space.clone(),
+            structure.clone(),
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<T, 2, 0>::from_vec_with_structure(vec![fill; 2], space, structure).unwrap();
+        let transform = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                coefficients,
+            )],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &transform,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+        assert_eq!(workspace.source_len(), 0);
+        assert_eq!(workspace.destination_len(), 0);
+    }
+
+    #[test]
+    fn tensorcopy_supports_all_storage_dtypes() {
+        assert_tensorcopy_dtype(vec![1.0_f32, 2.0, 3.0, 4.0], 0.0);
+        assert_tensorcopy_dtype(vec![1.0_f64, 2.0, 3.0, 4.0], 0.0);
+        assert_tensorcopy_dtype(vec![1_i32, 2, 3, 4], 0);
+        assert_tensorcopy_dtype(vec![1_i64, 2, 3, 4], 0);
+        assert_tensorcopy_dtype(vec![true, false, true, false], false);
+        assert_tensorcopy_dtype(
+            vec![
+                Complex32::new(1.0, 1.0),
+                Complex32::new(2.0, -1.0),
+                Complex32::new(3.0, 0.5),
+                Complex32::new(4.0, -0.5),
+            ],
+            Complex32::new(0.0, 0.0),
+        );
+        assert_tensorcopy_dtype(
+            vec![
+                Complex64::new(1.0, 1.0),
+                Complex64::new(2.0, -1.0),
+                Complex64::new(3.0, 0.5),
+                Complex64::new(4.0, -0.5),
+            ],
+            Complex64::new(0.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn tensoradd_assign_and_add_support_all_numeric_dtypes() {
+        assert_tensoradd_dtype(
+            vec![1.0_f32, 2.0, 3.0, 4.0],
+            10.0,
+            2.0,
+            vec![2.0, 4.0, 6.0, 8.0],
+            vec![12.0, 14.0, 16.0, 18.0],
+        );
+        assert_tensoradd_dtype(
+            vec![1.0_f64, 2.0, 3.0, 4.0],
+            10.0,
+            2.0,
+            vec![2.0, 4.0, 6.0, 8.0],
+            vec![12.0, 14.0, 16.0, 18.0],
+        );
+        assert_tensoradd_dtype(
+            vec![1_i32, 2, 3, 4],
+            10,
+            2,
+            vec![2, 4, 6, 8],
+            vec![12, 14, 16, 18],
+        );
+        assert_tensoradd_dtype(
+            vec![1_i64, 2, 3, 4],
+            10,
+            2,
+            vec![2, 4, 6, 8],
+            vec![12, 14, 16, 18],
+        );
+        assert_tensoradd_dtype(
+            vec![
+                Complex32::new(1.0, 1.0),
+                Complex32::new(2.0, -1.0),
+                Complex32::new(3.0, 0.5),
+                Complex32::new(4.0, -0.5),
+            ],
+            Complex32::new(10.0, 0.0),
+            Complex32::new(2.0, 0.0),
+            vec![
+                Complex32::new(2.0, 2.0),
+                Complex32::new(4.0, -2.0),
+                Complex32::new(6.0, 1.0),
+                Complex32::new(8.0, -1.0),
+            ],
+            vec![
+                Complex32::new(12.0, 2.0),
+                Complex32::new(14.0, -2.0),
+                Complex32::new(16.0, 1.0),
+                Complex32::new(18.0, -1.0),
+            ],
+        );
+        assert_tensoradd_dtype(
+            vec![
+                Complex64::new(1.0, 1.0),
+                Complex64::new(2.0, -1.0),
+                Complex64::new(3.0, 0.5),
+                Complex64::new(4.0, -0.5),
+            ],
+            Complex64::new(10.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            vec![
+                Complex64::new(2.0, 2.0),
+                Complex64::new(4.0, -2.0),
+                Complex64::new(6.0, 1.0),
+                Complex64::new(8.0, -1.0),
+            ],
+            vec![
+                Complex64::new(12.0, 2.0),
+                Complex64::new(14.0, -2.0),
+                Complex64::new(16.0, 1.0),
+                Complex64::new(18.0, -1.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tensoradd_general_beta_supports_all_numeric_dtypes() {
+        assert_tensoradd_general_dtype(
+            vec![1.0_f32, 2.0, 3.0, 4.0],
+            10.0,
+            2.0,
+            3.0,
+            vec![32.0, 34.0, 36.0, 38.0],
+        );
+        assert_tensoradd_general_dtype(
+            vec![1.0_f64, 2.0, 3.0, 4.0],
+            10.0,
+            2.0,
+            3.0,
+            vec![32.0, 34.0, 36.0, 38.0],
+        );
+        assert_tensoradd_general_dtype(vec![1_i32, 2, 3, 4], 10, 2, 3, vec![32, 34, 36, 38]);
+        assert_tensoradd_general_dtype(vec![1_i64, 2, 3, 4], 10, 2, 3, vec![32, 34, 36, 38]);
+        assert_tensoradd_general_dtype(
+            vec![
+                Complex32::new(1.0, 1.0),
+                Complex32::new(2.0, -1.0),
+                Complex32::new(3.0, 0.5),
+                Complex32::new(4.0, -0.5),
+            ],
+            Complex32::new(10.0, 1.0),
+            Complex32::new(2.0, 0.0),
+            Complex32::new(3.0, 0.0),
+            vec![
+                Complex32::new(32.0, 5.0),
+                Complex32::new(34.0, 1.0),
+                Complex32::new(36.0, 4.0),
+                Complex32::new(38.0, 2.0),
+            ],
+        );
+        assert_tensoradd_general_dtype(
+            vec![
+                Complex64::new(1.0, 1.0),
+                Complex64::new(2.0, -1.0),
+                Complex64::new(3.0, 0.5),
+                Complex64::new(4.0, -0.5),
+            ],
+            Complex64::new(10.0, 1.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(3.0, 0.0),
+            vec![
+                Complex64::new(32.0, 5.0),
+                Complex64::new(34.0, 1.0),
+                Complex64::new(36.0, 4.0),
+                Complex64::new(38.0, 2.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tensoradd_scalar_replay_supports_all_numeric_dtypes() {
+        assert_tensoradd_scalar_dtype(2.0_f32, 10.0, 3.0, 5.0, 56.0);
+        assert_tensoradd_scalar_dtype(2.0_f64, 10.0, 3.0, 5.0, 56.0);
+        assert_tensoradd_scalar_dtype(2_i32, 10, 3, 5, 56);
+        assert_tensoradd_scalar_dtype(2_i64, 10, 3, 5, 56);
+        assert_tensoradd_scalar_dtype(
+            Complex32::new(2.0, 1.0),
+            Complex32::new(10.0, 1.0),
+            Complex32::new(3.0, 0.0),
+            Complex32::new(5.0, 0.0),
+            Complex32::new(56.0, 8.0),
+        );
+        assert_tensoradd_scalar_dtype(
+            Complex64::new(2.0, 1.0),
+            Complex64::new(10.0, 1.0),
+            Complex64::new(3.0, 0.0),
+            Complex64::new(5.0, 0.0),
+            Complex64::new(56.0, 8.0),
+        );
+    }
+
+    #[test]
+    fn tree_transform_single_replay_supports_all_numeric_dtypes() {
+        assert_tree_single_dtype(
+            vec![1.0_f32, 2.0, 3.0, 4.0],
+            10.0,
+            3.0,
+            2.0,
+            4.0,
+            vec![46.0, 52.0, 58.0, 64.0],
+        );
+        assert_tree_single_dtype(
+            vec![1.0_f64, 2.0, 3.0, 4.0],
+            10.0,
+            3.0,
+            2.0,
+            4.0,
+            vec![46.0, 52.0, 58.0, 64.0],
+        );
+        assert_tree_single_dtype(vec![1_i32, 2, 3, 4], 10, 3, 2, 4, vec![46, 52, 58, 64]);
+        assert_tree_single_dtype(vec![1_i64, 2, 3, 4], 10, 3, 2, 4, vec![46, 52, 58, 64]);
+        assert_tree_single_dtype(
+            vec![
+                Complex32::new(1.0, 1.0),
+                Complex32::new(2.0, -1.0),
+                Complex32::new(3.0, 0.5),
+                Complex32::new(4.0, -0.5),
+            ],
+            Complex32::new(10.0, 1.0),
+            Complex32::new(3.0, 0.0),
+            Complex32::new(2.0, 0.0),
+            Complex32::new(4.0, 0.0),
+            vec![
+                Complex32::new(46.0, 10.0),
+                Complex32::new(52.0, -2.0),
+                Complex32::new(58.0, 7.0),
+                Complex32::new(64.0, 1.0),
+            ],
+        );
+        assert_tree_single_dtype(
+            vec![
+                Complex64::new(1.0, 1.0),
+                Complex64::new(2.0, -1.0),
+                Complex64::new(3.0, 0.5),
+                Complex64::new(4.0, -0.5),
+            ],
+            Complex64::new(10.0, 1.0),
+            Complex64::new(3.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(4.0, 0.0),
+            vec![
+                Complex64::new(46.0, 10.0),
+                Complex64::new(52.0, -2.0),
+                Complex64::new(58.0, 7.0),
+                Complex64::new(64.0, 1.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tree_transform_multi_scalar_replay_supports_all_numeric_dtypes_without_workspace() {
+        assert_tree_multi_scalar_dtype(
+            vec![2.0_f32, 3.0, 5.0, 7.0],
+            2.0,
+            10.0,
+            1.0,
+            vec![26.0, 48.0],
+        );
+        assert_tree_multi_scalar_dtype(
+            vec![2.0_f64, 3.0, 5.0, 7.0],
+            2.0,
+            10.0,
+            1.0,
+            vec![26.0, 48.0],
+        );
+        assert_tree_multi_scalar_dtype(vec![2_i32, 3, 5, 7], 2, 10, 1, vec![26, 48]);
+        assert_tree_multi_scalar_dtype(vec![2_i64, 3, 5, 7], 2, 10, 1, vec![26, 48]);
+        assert_tree_multi_scalar_dtype(
+            vec![
+                Complex32::new(2.0, 0.0),
+                Complex32::new(3.0, 0.0),
+                Complex32::new(5.0, 0.0),
+                Complex32::new(7.0, 0.0),
+            ],
+            Complex32::new(2.0, 0.0),
+            Complex32::new(10.0, 0.0),
+            Complex32::new(1.0, 1.0),
+            vec![Complex32::new(26.0, 10.0), Complex32::new(48.0, 10.0)],
+        );
+        assert_tree_multi_scalar_dtype(
+            vec![
+                Complex64::new(2.0, 0.0),
+                Complex64::new(3.0, 0.0),
+                Complex64::new(5.0, 0.0),
+                Complex64::new(7.0, 0.0),
+            ],
+            Complex64::new(2.0, 0.0),
+            Complex64::new(10.0, 0.0),
+            Complex64::new(1.0, 1.0),
+            vec![Complex64::new(26.0, 10.0), Complex64::new(48.0, 10.0)],
+        );
+    }
+
+    #[test]
+    fn tree_transform_multi_pack_gemm_scatter_supports_all_numeric_dtypes() {
+        assert_tree_multi_dtype(
+            vec![2.0_f32, 3.0, 5.0, 7.0],
+            2.0,
+            10.0,
+            1.0,
+            vec![44.0, 54.0, 64.0, 74.0, 90.0, 114.0, 138.0, 162.0],
+        );
+        assert_tree_multi_dtype(
+            vec![2.0_f64, 3.0, 5.0, 7.0],
+            2.0,
+            10.0,
+            1.0,
+            vec![44.0, 54.0, 64.0, 74.0, 90.0, 114.0, 138.0, 162.0],
+        );
+        assert_tree_multi_dtype(
+            vec![2_i32, 3, 5, 7],
+            2,
+            10,
+            1,
+            vec![44, 54, 64, 74, 90, 114, 138, 162],
+        );
+        assert_tree_multi_dtype(
+            vec![2_i64, 3, 5, 7],
+            2,
+            10,
+            1,
+            vec![44, 54, 64, 74, 90, 114, 138, 162],
+        );
+        assert_tree_multi_dtype(
+            vec![
+                Complex32::new(2.0, 0.0),
+                Complex32::new(3.0, 0.0),
+                Complex32::new(5.0, 0.0),
+                Complex32::new(7.0, 0.0),
+            ],
+            Complex32::new(2.0, 0.0),
+            Complex32::new(10.0, 0.0),
+            Complex32::new(1.0, 1.0),
+            vec![
+                Complex32::new(44.0, 10.0),
+                Complex32::new(54.0, 10.0),
+                Complex32::new(64.0, 10.0),
+                Complex32::new(74.0, 10.0),
+                Complex32::new(90.0, 10.0),
+                Complex32::new(114.0, 10.0),
+                Complex32::new(138.0, 10.0),
+                Complex32::new(162.0, 10.0),
+            ],
+        );
+        assert_tree_multi_dtype(
+            vec![
+                Complex64::new(2.0, 0.0),
+                Complex64::new(3.0, 0.0),
+                Complex64::new(5.0, 0.0),
+                Complex64::new(7.0, 0.0),
+            ],
+            Complex64::new(2.0, 0.0),
+            Complex64::new(10.0, 0.0),
+            Complex64::new(1.0, 1.0),
+            vec![
+                Complex64::new(44.0, 10.0),
+                Complex64::new(54.0, 10.0),
+                Complex64::new(64.0, 10.0),
+                Complex64::new(74.0, 10.0),
+                Complex64::new(90.0, 10.0),
+                Complex64::new(114.0, 10.0),
+                Complex64::new(138.0, 10.0),
+                Complex64::new(162.0, 10.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tensoradd_with_backend_allocator_applies_axis_permutation() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], src_space)
+            .unwrap();
+        let mut dst = TensorMap::<f64, 2, 0>::filled(10.0, dst_space).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        tensoradd_into_with(
+            &mut backend,
+            &mut allocator,
+            &mut dst,
+            &src,
+            AxisPermutation::from_axes(&[1, 0]),
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[32.0, 36.0, 40.0, 34.0, 38.0, 42.0]);
+    }
+
+    #[test]
+    fn tensoradd_structure_precomputes_permutation_pairing_and_descriptor() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec(vec![1.0; 6], src_space).unwrap();
+        let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+
+        let structure =
+            TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+
+        assert_eq!(structure.rank(), 2);
+        assert_eq!(structure.axes(), &[1, 0]);
+        assert_eq!(structure.terms().len(), 1);
+        assert_eq!(structure.terms()[0].key(), &BlockKey::trivial());
+        assert_eq!(structure.terms()[0].dst_block(), 0);
+        assert_eq!(structure.terms()[0].src_block(), 0);
+    }
+
+    #[test]
+    fn tensoradd_structure_replays_without_recompiling() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], src_space)
+            .unwrap();
+        let mut dst = TensorMap::<f64, 2, 0>::filled(10.0, dst_space).unwrap();
+        let structure =
+            TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            0.0,
+        )
+        .unwrap();
+        tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            1.0,
+            1.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[3.0, 9.0, 15.0, 6.0, 12.0, 18.0]);
+    }
+
+    #[test]
+    fn tensoradd_structure_compiles_concrete_shape_and_replays_it() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([4, 5], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([5, 4], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec((1..=20).map(|x| x as f64).collect(), src_space)
+            .unwrap();
+        let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+        let structure =
+            TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dst.data(),
+            &[
+                2.0, 10.0, 18.0, 26.0, 34.0, 4.0, 12.0, 20.0, 28.0, 36.0, 6.0, 14.0, 22.0, 30.0,
+                38.0, 8.0, 16.0, 24.0, 32.0, 40.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn tensoradd_structure_replays_multiple_packed_blocks() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([4, 4], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 4], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 3], vec![1, 4]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![3, 2], vec![4, 1]]).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            (1..=10).map(|x| x as f64).collect(),
+            src_space,
+            src_structure,
+        )
+        .unwrap();
+        let mut dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            vec![0.0; 10],
+            dst_space,
+            dst_structure,
+        )
+        .unwrap();
+        let structure =
+            TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dst.data(),
+            &[2.0, 6.0, 10.0, 4.0, 8.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn tensoradd_structure_pairs_blocks_by_key_not_index() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([4, 4], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 4], []).unwrap();
+        let src_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (BlockKey::sector_ids([10]), vec![2, 3]),
+                (BlockKey::sector_ids([20]), vec![1, 4]),
+            ],
+        )
+        .unwrap();
+        let dst_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (BlockKey::sector_ids([20]), vec![4, 1]),
+                (BlockKey::sector_ids([10]), vec![3, 2]),
+            ],
+        )
+        .unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            (1..=10).map(|x| x as f64).collect(),
+            src_space,
+            src_structure,
+        )
+        .unwrap();
+        let mut dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            vec![0.0; 10],
+            dst_space,
+            dst_structure,
+        )
+        .unwrap();
+        let structure =
+            TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        assert_eq!(structure.terms()[0].key(), &BlockKey::sector_ids([20]));
+        assert_eq!(structure.terms()[0].dst_block(), 0);
+        assert_eq!(structure.terms()[0].src_block(), 1);
+        assert_eq!(structure.terms()[1].key(), &BlockKey::sector_ids([10]));
+        assert_eq!(structure.terms()[1].dst_block(), 1);
+        assert_eq!(structure.terms()[1].src_block(), 0);
+
+        tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dst.data(),
+            &[14.0, 16.0, 18.0, 20.0, 2.0, 6.0, 10.0, 4.0, 8.0, 12.0]
+        );
+    }
+
+    #[test]
+    fn tensoradd_structure_rejects_invalid_permutation_at_compile_time() {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::filled(1.0, space.clone()).unwrap();
+        let dst = TensorMap::<f64, 2, 0>::filled(0.0, space).unwrap();
+
+        let err = TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[0, 0]))
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::InvalidPermutation {
+                axes: vec![0, 0],
+                rank: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn tensoradd_structure_rejects_incompatible_shape_at_compile_time() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([4, 5], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 5], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::filled(1.0, src_space).unwrap();
+        let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+
+        let err = TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0]))
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::ShapeMismatch {
+                dst: vec![4, 5],
+                src: vec![5, 4],
+            }
+        );
+    }
+
+    #[test]
+    fn tensoradd_structure_rejects_incompatible_replay_structure() {
+        let compile_src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+        let compile_dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+        let compile_src = TensorMap::<f64, 2, 0>::filled(1.0, compile_src_space).unwrap();
+        let compile_dst = TensorMap::<f64, 2, 0>::filled(0.0, compile_dst_space).unwrap();
+        let structure = TensorAddStructure::compile(
+            &compile_dst,
+            &compile_src,
+            AxisPermutation::from_axes(&[1, 0]),
+        )
+        .unwrap();
+
+        let src_space = TensorMapSpace::<2, 0>::from_dims([4, 5], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([5, 4], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::filled(1.0, src_space).unwrap();
+        let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+        let mut backend = HostTensorOperations;
+        let mut allocator = HostAllocator::default();
+
+        let err = tensoradd_execute_with(
+            &mut backend,
+            &mut allocator,
+            &structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, OperationError::StructureMismatch { tensor: "dst" });
+    }
+
+    #[test]
+    fn tree_transform_rejects_invalid_block_specs_at_compile_time() {
+        let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+        let structure = BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            vec![1.0; 8],
+            space.clone(),
+            structure.clone(),
+        )
+        .unwrap();
+        let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 8], space, structure)
+            .unwrap();
+
+        let err = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0, 2.0],
+            )],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            OperationError::CoefficientCountMismatch {
+                expected: 4,
+                actual: 2,
+            }
+        );
+
+        let err = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 1.0),
+                TreeTransformBlockSpec::single(0, 1, 1.0),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            OperationError::DuplicateTransformDestination { dst_block: 0 }
+        );
+    }
+
+    #[test]
+    fn tree_transform_rejects_incompatible_single_tree_shapes() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+        let src = TensorMap::<f64, 2, 0>::from_vec(vec![1.0; 4], src_space).unwrap();
+        let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+
+        let err = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::ShapeMismatch {
+                dst: vec![4, 1],
+                src: vec![2, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn tree_transform_rejects_mismatched_multi_tree_element_count() {
+        let src_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![3, 1], vec![3, 1]]).unwrap();
+        let src =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 8], src_space, src_structure)
+                .unwrap();
+        let dst =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 6], dst_space, dst_structure)
+                .unwrap();
+
+        let err = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::ElementCountMismatch {
+                expected: 3,
+                actual: 4,
+            }
+        );
     }
 }
