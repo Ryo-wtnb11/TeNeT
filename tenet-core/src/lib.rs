@@ -1307,11 +1307,7 @@ where
             message: "fusion tree sectors and duality flags must have matching length",
         });
     }
-    let mut effective =
-        uncoupled
-            .iter()
-            .zip(is_dual)
-            .map(|(&sector, &dual)| if dual { rule.dual(sector) } else { sector });
+    let mut effective = uncoupled.iter().copied();
     let Some(mut coupled) = effective.next() else {
         return Ok(rule.vacuum());
     };
@@ -1424,18 +1420,12 @@ where
     sectors
 }
 
-fn effective_sectors<R>(rule: &R, legs: &[FusionTreeLeg]) -> Vec<SectorId>
+fn effective_sectors<R>(_rule: &R, legs: &[FusionTreeLeg]) -> Vec<SectorId>
 where
     R: MultiplicityFreeFusionRule,
 {
     legs.iter()
-        .map(|leg| {
-            if leg.is_dual() {
-                rule.dual(leg.sector())
-            } else {
-                leg.sector()
-            }
-        })
+        .map(|leg| leg.sector())
         .collect()
 }
 
@@ -2920,7 +2910,7 @@ fn coupled_or_vacuum_for_tree(tree: &FusionTreeKey) -> Result<SectorId, CoreErro
 }
 
 fn effective_sectors_for_uncoupled<R>(
-    rule: &R,
+    _rule: &R,
     uncoupled: &[SectorId],
     is_dual: &[bool],
 ) -> Result<Vec<SectorId>, CoreError>
@@ -2932,11 +2922,7 @@ where
             message: "fusion tree sectors and duality flags must have matching length",
         });
     }
-    Ok(uncoupled
-        .iter()
-        .zip(is_dual)
-        .map(|(&sector, &dual)| if dual { rule.dual(sector) } else { sector })
-        .collect())
+    Ok(uncoupled.to_vec())
 }
 
 fn fusion_tree_keys_match_with_empty_vacuum<R>(
@@ -3312,11 +3298,7 @@ where
             message: "fusion tree sectors and duality flags must have matching length",
         });
     }
-    let effective = uncoupled
-        .iter()
-        .zip(is_dual)
-        .map(|(&sector, &dual)| if dual { rule.dual(sector) } else { sector })
-        .collect::<Vec<_>>();
+    let effective = uncoupled.to_vec();
     let trees = collect_fusion_trees_for_coupled(rule, uncoupled, is_dual, &effective, coupled);
     match trees.as_slice() {
         [tree] => Ok(tree.clone()),
@@ -6769,10 +6751,32 @@ mod tests {
     }
 
     #[test]
-    fn fusion_tree_homspace_uses_dualized_sector_for_matching_but_stores_original_leg() {
+    fn fusion_tree_homspace_uses_visible_dual_space_sector_label_like_tensorkit() {
+        let rule = U1FusionRule;
+        let minus_one = U1Irrep::new(-1);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([minus_one], true)]),
+            FusionProductSpace::new([SectorLeg::new([minus_one], false)]),
+        );
+
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // TensorKit:
+        // collect(sectors(Vect[U1Irrep](1=>1)')) == [U1Irrep(-1)]
+        // fusiontrees((U1Irrep(-1),), U1Irrep(-1), (true,)) keeps uncoupled = -1.
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].coupled(), Some(minus_one.into()));
+        assert_eq!(keys[0].codomain_uncoupled(), &[minus_one.into()]);
+        assert_eq!(keys[0].codomain_is_dual(), &[true]);
+        assert_eq!(keys[0].domain_uncoupled(), &[minus_one.into()]);
+        assert_eq!(keys[0].domain_is_dual(), &[false]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_does_not_dualize_selected_dual_leg_again() {
         let rule = BranchingMultiplicityFreeRule;
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(3)], true)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], true)]),
             FusionProductSpace::from_sector_ids([1]),
         );
 
@@ -6780,7 +6784,7 @@ mod tests {
 
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].coupled(), Some(SectorId::new(1)));
-        assert_eq!(keys[0].codomain_uncoupled(), &[SectorId::new(3)]);
+        assert_eq!(keys[0].codomain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(keys[0].codomain_is_dual(), &[true]);
         assert_eq!(keys[0].domain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(keys[0].domain_is_dual(), &[false]);
