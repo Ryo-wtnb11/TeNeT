@@ -8,7 +8,9 @@
 
 use core::fmt;
 use core::ops::{Add, Mul};
+use std::any::TypeId;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 
 use num_complex::{Complex32, Complex64};
@@ -17,9 +19,10 @@ use tenet_core::{
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
     multiplicity_free_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView,
-    BlockViewMut, BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
-    FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, TensorMap,
+    BlockViewMut, BraidingStyleKind, CoreError, FermionParityFusionRule, FusionRule,
+    FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductFusionRule,
+    ProductSectorCodec, SU2FusionRule, TensorMap, U1FusionRule, Z2FusionRule,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -1256,12 +1259,225 @@ impl TreeTransformOperationKey {
     }
 }
 
+pub trait TreeTransformRuleCacheKey {
+    type Key: Clone + Eq + Hash;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum TreeTransformBuiltinRuleCacheKey {
+    Z2,
+    FermionParity,
+    U1,
+    SU2,
+}
+
+impl TreeTransformRuleCacheKey for Z2FusionRule {
+    type Key = TreeTransformBuiltinRuleCacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        TreeTransformBuiltinRuleCacheKey::Z2
+    }
+}
+
+impl TreeTransformRuleCacheKey for FermionParityFusionRule {
+    type Key = TreeTransformBuiltinRuleCacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        TreeTransformBuiltinRuleCacheKey::FermionParity
+    }
+}
+
+impl TreeTransformRuleCacheKey for U1FusionRule {
+    type Key = TreeTransformBuiltinRuleCacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        TreeTransformBuiltinRuleCacheKey::U1
+    }
+}
+
+impl TreeTransformRuleCacheKey for SU2FusionRule {
+    type Key = TreeTransformBuiltinRuleCacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        TreeTransformBuiltinRuleCacheKey::SU2
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformProductRuleCacheKey<LeftKey, RightKey> {
+    left: LeftKey,
+    right: RightKey,
+    codec: TypeId,
+}
+
+impl<LeftKey, RightKey> TreeTransformProductRuleCacheKey<LeftKey, RightKey> {
+    pub fn new<Codec>(left: LeftKey, right: RightKey) -> Self
+    where
+        Codec: 'static,
+    {
+        Self {
+            left,
+            right,
+            codec: TypeId::of::<Codec>(),
+        }
+    }
+
+    #[inline]
+    pub fn left(&self) -> &LeftKey {
+        &self.left
+    }
+
+    #[inline]
+    pub fn right(&self) -> &RightKey {
+        &self.right
+    }
+}
+
+impl<LeftRule, RightRule, Codec> TreeTransformRuleCacheKey
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: TreeTransformRuleCacheKey,
+    RightRule: TreeTransformRuleCacheKey,
+    Codec: ProductSectorCodec + 'static,
+{
+    type Key = TreeTransformProductRuleCacheKey<LeftRule::Key, RightRule::Key>;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        TreeTransformProductRuleCacheKey::new::<Codec>(
+            self.left_rule().tree_transform_rule_cache_key(),
+            self.right_rule().tree_transform_rule_cache_key(),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum TreeTransformPlanScope {
+    AllCodomain,
+    TreePair,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformSectorPlanKey<RuleKey> {
+    rule: RuleKey,
+    scope: TreeTransformPlanScope,
+    operation: TreeTransformOperationKey,
+    source_groups: Vec<TreeTransformSourceGroupKey>,
+}
+
+impl<RuleKey> TreeTransformSectorPlanKey<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    pub fn tree_pair<R>(
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        src_structure: &BlockStructure,
+    ) -> Result<Self, OperationError>
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        Self::new(
+            rule.tree_transform_rule_cache_key(),
+            TreeTransformPlanScope::TreePair,
+            operation,
+            src_structure,
+        )
+    }
+
+    pub fn all_codomain<R>(
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        src_structure: &BlockStructure,
+    ) -> Result<Self, OperationError>
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        Self::new(
+            rule.tree_transform_rule_cache_key(),
+            TreeTransformPlanScope::AllCodomain,
+            operation,
+            src_structure,
+        )
+    }
+
+    fn new(
+        rule: RuleKey,
+        scope: TreeTransformPlanScope,
+        operation: TreeTransformOperationKey,
+        src_structure: &BlockStructure,
+    ) -> Result<Self, OperationError> {
+        let source_groups = src_structure
+            .fusion_tree_groups()
+            .into_iter()
+            .map(|group| TreeTransformSourceGroupKey::from_group(src_structure, &group))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            rule,
+            scope,
+            operation,
+            source_groups,
+        })
+    }
+
+    #[inline]
+    pub fn rule(&self) -> &RuleKey {
+        &self.rule
+    }
+
+    #[inline]
+    pub fn scope(&self) -> TreeTransformPlanScope {
+        self.scope
+    }
+
+    #[inline]
+    pub fn operation(&self) -> &TreeTransformOperationKey {
+        &self.operation
+    }
+
+    #[inline]
+    pub fn source_groups(&self) -> &[TreeTransformSourceGroupKey] {
+        &self.source_groups
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformSourceGroupKey {
+    group_key: FusionTreeGroupKey,
+    src_keys: Vec<BlockKey>,
+}
+
+impl TreeTransformSourceGroupKey {
+    fn from_group(
+        structure: &BlockStructure,
+        group: &FusionTreeBlockGroup,
+    ) -> Result<Self, OperationError> {
+        Ok(Self {
+            group_key: group.group_key().clone(),
+            src_keys: fusion_tree_group_block_keys(structure, group, "src")?,
+        })
+    }
+
+    #[inline]
+    pub fn group_key(&self) -> &FusionTreeGroupKey {
+        &self.group_key
+    }
+
+    #[inline]
+    pub fn src_keys(&self) -> &[BlockKey] {
+        &self.src_keys
+    }
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformGroupPlanKey {
     operation: TreeTransformOperationKey,
     groups: Vec<TreeTransformCachedGroupKey>,
 }
 
+#[cfg(test)]
 impl TreeTransformGroupPlanKey {
     pub fn new<Groups>(operation: TreeTransformOperationKey, groups: Groups) -> Self
     where
@@ -1296,6 +1512,7 @@ impl TreeTransformGroupPlanKey {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformCachedGroupKey {
     group_key: FusionTreeGroupKey,
@@ -1303,6 +1520,7 @@ pub struct TreeTransformCachedGroupKey {
     src_keys: Vec<BlockKey>,
 }
 
+#[cfg(test)]
 impl TreeTransformCachedGroupKey {
     pub fn new<DstKeys, SrcKeys, KDst, KSrc>(
         group_key: FusionTreeGroupKey,
@@ -1346,11 +1564,13 @@ impl TreeTransformCachedGroupKey {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct TreeTransformGroupPlanCache<T> {
     plans: HashMap<TreeTransformGroupPlanKey, TreeTransformGroupPlan<T>>,
 }
 
+#[cfg(test)]
 impl<T> Default for TreeTransformGroupPlanCache<T> {
     fn default() -> Self {
         Self {
@@ -1359,6 +1579,7 @@ impl<T> Default for TreeTransformGroupPlanCache<T> {
     }
 }
 
+#[cfg(test)]
 impl<T> TreeTransformGroupPlanCache<T> {
     pub fn new() -> Self {
         Self::default()
@@ -1393,6 +1614,296 @@ impl<T> TreeTransformGroupPlanCache<T> {
         F: FnOnce() -> TreeTransformGroupPlan<T>,
     {
         self.plans.entry(key).or_insert_with(build)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BlockStructureCacheKey {
+    rank: usize,
+    blocks: Vec<BlockStructureCacheBlockKey>,
+}
+
+impl BlockStructureCacheKey {
+    pub fn from_structure(structure: &BlockStructure) -> Result<Self, OperationError> {
+        let mut blocks = Vec::with_capacity(structure.block_count());
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            blocks.push(BlockStructureCacheBlockKey {
+                key: block.key().clone(),
+                shape: block.shape().to_vec(),
+                strides: block.strides().to_vec(),
+                offset: block.offset(),
+            });
+        }
+        Ok(Self {
+            rank: structure.rank(),
+            blocks,
+        })
+    }
+
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[inline]
+    pub fn blocks(&self) -> &[BlockStructureCacheBlockKey] {
+        &self.blocks
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BlockStructureCacheBlockKey {
+    key: BlockKey,
+    shape: Vec<usize>,
+    strides: Vec<usize>,
+    offset: usize,
+}
+
+impl BlockStructureCacheBlockKey {
+    #[inline]
+    pub fn key(&self) -> &BlockKey {
+        &self.key
+    }
+
+    #[inline]
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    #[inline]
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformStructureCacheKey<PlanKey> {
+    plan: PlanKey,
+    dst: BlockStructureCacheKey,
+    src: BlockStructureCacheKey,
+}
+
+impl<PlanKey> TreeTransformStructureCacheKey<PlanKey>
+where
+    PlanKey: Clone,
+{
+    pub fn from_structures(
+        plan: PlanKey,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<Self, OperationError> {
+        Ok(Self {
+            plan,
+            dst: BlockStructureCacheKey::from_structure(dst_structure)?,
+            src: BlockStructureCacheKey::from_structure(src_structure)?,
+        })
+    }
+
+    #[inline]
+    pub fn plan(&self) -> &PlanKey {
+        &self.plan
+    }
+
+    #[inline]
+    pub fn dst(&self) -> &BlockStructureCacheKey {
+        &self.dst
+    }
+
+    #[inline]
+    pub fn src(&self) -> &BlockStructureCacheKey {
+        &self.src
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeTransformStructureCache<T, PlanKey> {
+    structures: HashMap<TreeTransformStructureCacheKey<PlanKey>, TreeTransformStructure<T>>,
+}
+
+impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey> {
+    fn default() -> Self {
+        Self {
+            structures: HashMap::new(),
+        }
+    }
+}
+
+impl<T, PlanKey> TreeTransformStructureCache<T, PlanKey>
+where
+    PlanKey: Clone + Eq + Hash,
+{
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.structures.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.structures.is_empty()
+    }
+
+    pub fn get(
+        &self,
+        key: &TreeTransformStructureCacheKey<PlanKey>,
+    ) -> Option<&TreeTransformStructure<T>> {
+        self.structures.get(key)
+    }
+
+    pub fn insert(
+        &mut self,
+        key: TreeTransformStructureCacheKey<PlanKey>,
+        structure: TreeTransformStructure<T>,
+    ) -> Option<TreeTransformStructure<T>> {
+        self.structures.insert(key, structure)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeTransformCache<T, RuleKey> {
+    plans: HashMap<TreeTransformSectorPlanKey<RuleKey>, TreeTransformGroupPlan<T>>,
+    structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
+}
+
+pub type TreePairTransformCache<T, RuleKey> = TreeTransformCache<T, RuleKey>;
+
+impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
+    fn default() -> Self {
+        Self {
+            plans: HashMap::new(),
+            structures: TreeTransformStructureCache::default(),
+        }
+    }
+}
+
+impl<T, RuleKey> TreeTransformCache<T, RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    pub fn plan_len(&self) -> usize {
+        self.plans.len()
+    }
+
+    #[inline]
+    pub fn structure_len(&self) -> usize {
+        self.structures.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.plans.is_empty() && self.structures.is_empty()
+    }
+
+    pub fn get_or_compile_tree_pair<
+        R,
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
+    {
+        let plan_key =
+            TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src.structure())?;
+        if !self.plans.contains_key(&plan_key) {
+            let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+            self.plans.insert(plan_key.clone(), plan);
+        }
+        self.get_or_compile_structure(plan_key, dst, src)
+    }
+
+    pub fn get_or_compile_all_codomain<
+        R,
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
+    {
+        let plan_key =
+            TreeTransformSectorPlanKey::all_codomain(rule, operation.clone(), src.structure())?;
+        if !self.plans.contains_key(&plan_key) {
+            let plan =
+                build_all_codomain_tree_transform_group_plan(rule, operation, src.structure())?;
+            self.plans.insert(plan_key.clone(), plan);
+        }
+        self.get_or_compile_structure(plan_key, dst, src)
+    }
+
+    fn get_or_compile_structure<
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        plan_key: TreeTransformSectorPlanKey<RuleKey>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        T: Copy,
+    {
+        let structure_key = TreeTransformStructureCacheKey::from_structures(
+            plan_key.clone(),
+            dst.structure(),
+            src.structure(),
+        )?;
+        if self.structures.get(&structure_key).is_none() {
+            let plan = self
+                .plans
+                .get(&plan_key)
+                .expect("tree transform plan inserted before structure compile");
+            let structure = plan.compile(dst, src)?;
+            self.structures.insert(structure_key.clone(), structure);
+        }
+        Ok(self
+            .structures
+            .get(&structure_key)
+            .expect("tree transform structure inserted before return"))
     }
 }
 
@@ -3439,8 +3950,8 @@ mod tests {
     use num_complex::{Complex32, Complex64};
     use std::fmt::Debug;
     use tenet_core::{
-        BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
-        FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
+        BlockSpec, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace,
+        FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
         MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
         SectorLeg, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
     };
@@ -3606,6 +4117,15 @@ mod tests {
                 alpha * spec.coefficients_src_by_dst()[0] * src_data[src_offset];
         }
         expected
+    }
+
+    fn column_major_structure_like(
+        structure: &BlockStructure,
+        shape: Vec<usize>,
+    ) -> BlockStructure {
+        let blocks = (0..structure.block_count())
+            .map(|index| (structure.block(index).unwrap().key().clone(), shape.clone()));
+        BlockStructure::packed_column_major_with_keys(structure.rank(), blocks).unwrap()
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -5639,6 +6159,195 @@ mod tests {
     }
 
     #[test]
+    fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let block_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            src_space,
+            block_structure.clone(),
+        )
+        .unwrap();
+        let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![0.0, 0.0],
+            dst_space,
+            block_structure,
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+        let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+        {
+            let structure = cache
+                .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst, &src)
+                .unwrap();
+            assert!(structure.has_pack_gemm_scatter_blocks());
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 1);
+
+        {
+            let structure = cache
+                .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst, &src)
+                .unwrap();
+            assert!(structure.has_pack_gemm_scatter_blocks());
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 1);
+
+        let structure = cache
+            .get_or_compile_tree_pair(&SU2FusionRule, operation, &dst, &src)
+            .unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
+        assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let small_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let large_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [(src_key0, vec![2, 1, 1, 1]), (src_key1, vec![2, 1, 1, 1])],
+        )
+        .unwrap();
+        let small_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let large_space = TensorMapSpace::<4, 0>::from_dims([2, 1, 1, 1], []).unwrap();
+        let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            small_space.clone(),
+            small_structure.clone(),
+        )
+        .unwrap();
+        let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![0.0, 0.0],
+            small_space,
+            small_structure,
+        )
+        .unwrap();
+        let src_large = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![1.0, 2.0, 3.0, 4.0],
+            large_space.clone(),
+            large_structure.clone(),
+        )
+        .unwrap();
+        let dst_large = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![0.0, 0.0, 0.0, 0.0],
+            large_space,
+            large_structure,
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+        let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+        {
+            let structure = cache
+                .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
+                .unwrap();
+            assert!(structure.has_pack_gemm_scatter_blocks());
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 1);
+
+        {
+            let structure = cache
+                .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
+                .unwrap();
+            assert!(structure.has_pack_gemm_scatter_blocks());
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 1);
+
+        {
+            let structure = cache
+                .get_or_compile_all_codomain(
+                    &SU2FusionRule,
+                    operation.clone(),
+                    &dst_large,
+                    &src_large,
+                )
+                .unwrap();
+            assert!(structure.has_pack_gemm_scatter_blocks());
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 2);
+
+        let structure = cache
+            .get_or_compile_all_codomain(&SU2FusionRule, operation, &dst, &src)
+            .unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
+        assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
             [1],
@@ -5975,6 +6684,106 @@ mod tests {
         )
         .unwrap();
         for (actual, expected) in dst.data().iter().zip(expected_second) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} != expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
+        let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+        type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+        let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+        let src =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let src_large_structure =
+            column_major_structure_like(src_space.subblock_structure(), vec![2, 1, 1]);
+        let dst_large_structure =
+            column_major_structure_like(dst_space.subblock_structure(), vec![2, 1, 1]);
+        let large_space = TensorMapSpace::<2, 1>::from_dims([2, 1], [1]).unwrap();
+        let src_large = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+            vec![1.0, 2.0, 3.0, 4.0],
+            large_space.clone(),
+            src_large_structure,
+        )
+        .unwrap();
+        let dst_large = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+            vec![0.0, 0.0, 0.0, 0.0],
+            large_space,
+            dst_large_structure,
+        )
+        .unwrap();
+        let mut cache = TreeTransformCache::<f64, RuleKey>::new();
+
+        {
+            let structure = cache
+                .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
+                .unwrap();
+            assert_eq!(structure.block_count(), 2);
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 1);
+
+        {
+            let structure = cache
+                .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
+                .unwrap();
+            assert_eq!(structure.block_count(), 2);
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 1);
+
+        {
+            let structure = cache
+                .get_or_compile_tree_pair(&rule, operation, &dst_large, &src_large)
+                .unwrap();
+            assert_eq!(structure.block_count(), 2);
+        }
+        assert_eq!(cache.plan_len(), 1);
+        assert_eq!(cache.structure_len(), 2);
+
+        let structure = cache
+            .get_or_compile_tree_pair(
+                &rule,
+                TreeTransformOperationKey::permute([1, 0], [2]),
+                &dst,
+                &src,
+            )
+            .unwrap();
+        let plan = build_tree_pair_transform_group_plan(
+            &rule,
+            TreeTransformOperationKey::permute([1, 0], [2]),
+            src.structure(),
+        )
+        .unwrap();
+        let expected = expected_single_tree_pair_replay(
+            &plan,
+            dst.structure(),
+            src.structure(),
+            dst.data(),
+            src.data(),
+            2.0,
+            3.0,
+        );
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            structure,
+            &mut dst,
+            &src,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+        for (actual, expected) in dst.data().iter().zip(expected) {
             assert!(
                 (actual - expected).abs() < 1.0e-12,
                 "actual {actual} != expected {expected}"
@@ -6583,6 +7392,98 @@ mod tests {
         assert_eq!(transpose, same_operation_different_coefficients);
         assert_ne!(transpose, different_permutation);
         assert_ne!(transpose, braid);
+    }
+
+    #[test]
+    fn tree_transform_sector_plan_key_is_rule_scope_and_source_sector_only() {
+        let src_key1 = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
+        let src_key2 = fusion_tree_test_key([10, 20], [30], 6, [false, true], [true]);
+        let src_small = BlockStructure::packed_column_major_with_keys(
+            2,
+            [
+                (src_key1.clone(), vec![2, 1]),
+                (src_key2.clone(), vec![2, 1]),
+            ],
+        )
+        .unwrap();
+        let src_large = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(src_key1, vec![3, 1]), (src_key2, vec![3, 1])],
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::transpose([1, 0], [0]);
+
+        let z2_small =
+            TreeTransformSectorPlanKey::tree_pair(&Z2FusionRule, operation.clone(), &src_small)
+                .unwrap();
+        let z2_large =
+            TreeTransformSectorPlanKey::tree_pair(&Z2FusionRule, operation.clone(), &src_large)
+                .unwrap();
+        let fermion = TreeTransformSectorPlanKey::tree_pair(
+            &FermionParityFusionRule,
+            operation.clone(),
+            &src_small,
+        )
+        .unwrap();
+        let all_codomain =
+            TreeTransformSectorPlanKey::all_codomain(&Z2FusionRule, operation, &src_small).unwrap();
+
+        assert_eq!(z2_small, z2_large);
+        assert_ne!(z2_small, fermion);
+        assert_ne!(z2_small, all_codomain);
+    }
+
+    #[test]
+    fn tree_transform_structure_cache_key_tracks_concrete_layout() {
+        let key = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
+        let src = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(key.clone(), vec![2, 3], vec![1, 2], 0).unwrap()],
+        )
+        .unwrap();
+        let shape_changed = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(key.clone(), vec![3, 2], vec![1, 3], 0).unwrap()],
+        )
+        .unwrap();
+        let stride_changed = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(key.clone(), vec![2, 3], vec![2, 1], 0).unwrap()],
+        )
+        .unwrap();
+        let offset_changed = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(key.clone(), vec![2, 3], vec![1, 2], 1).unwrap()],
+        )
+        .unwrap();
+        let plan_key = TreeTransformSectorPlanKey::tree_pair(
+            &Z2FusionRule,
+            TreeTransformOperationKey::transpose([1, 0], [0]),
+            &src,
+        )
+        .unwrap();
+        let base =
+            TreeTransformStructureCacheKey::from_structures(plan_key.clone(), &src, &src).unwrap();
+
+        assert_ne!(
+            base,
+            TreeTransformStructureCacheKey::from_structures(plan_key.clone(), &shape_changed, &src)
+                .unwrap()
+        );
+        assert_ne!(
+            base,
+            TreeTransformStructureCacheKey::from_structures(
+                plan_key.clone(),
+                &stride_changed,
+                &src
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            base,
+            TreeTransformStructureCacheKey::from_structures(plan_key, &offset_changed, &src)
+                .unwrap()
+        );
     }
 
     #[test]
