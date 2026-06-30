@@ -717,6 +717,10 @@ impl<Left, Right> ProductSector<Left, Right> {
     }
 }
 
+pub const fn product_sector<Left, Right>(left: Left, right: Right) -> ProductSector<Left, Right> {
+    ProductSector::new(left, right)
+}
+
 pub trait ProductSectorCodec {
     fn try_encode(left: SectorId, right: SectorId) -> Option<SectorId>;
 
@@ -825,6 +829,31 @@ impl<LeftRule, RightRule, Codec> ProductFusionRule<LeftRule, RightRule, Codec> {
             .expect("product fusion rule received an invalid product sector")
     }
 }
+
+pub const fn product_fusion_rule<LeftRule, RightRule>(
+    left: LeftRule,
+    right: RightRule,
+) -> ProductFusionRule<LeftRule, RightRule> {
+    ProductFusionRule::new(left, right)
+}
+
+pub const fn product_fusion_rule_with_codec<LeftRule, RightRule, Codec>(
+    left: LeftRule,
+    right: RightRule,
+) -> ProductFusionRule<LeftRule, RightRule, Codec> {
+    ProductFusionRule::new(left, right)
+}
+
+pub trait ProductFusionRuleExt: FusionRule + Sized {
+    fn product<RightRule>(self, right: RightRule) -> ProductFusionRule<Self, RightRule>
+    where
+        RightRule: FusionRule,
+    {
+        ProductFusionRule::new(self, right)
+    }
+}
+
+impl<Rule> ProductFusionRuleExt for Rule where Rule: FusionRule + Sized {}
 
 impl<LeftRule, RightRule, Codec> Default for ProductFusionRule<LeftRule, RightRule, Codec>
 where
@@ -6512,6 +6541,33 @@ mod tests {
                 Some((SectorId::new(left), SectorId::new(right)))
             );
         }
+    }
+
+    #[test]
+    fn product_sector_api_exposes_only_generic_composition() {
+        let pair = product_sector(z2_odd(), u1(2));
+        let encoded = pair.sector_id_with::<TensorKitProductCodec>();
+        assert_eq!(encoded, TensorKitProductCodec::encode(z2_odd(), u1(2)));
+        assert_eq!(pair.left(), &z2_odd());
+        assert_eq!(pair.right(), &u1(2));
+
+        let left_rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+        let chained_rule = FermionParityFusionRule
+            .product(U1FusionRule)
+            .product(SU2FusionRule);
+        let left_sector = |parity, charge| left_rule.encode_sector(parity, u1(charge));
+        let chained_sector = |parity, charge, twice_spin| {
+            chained_rule.encode_sector(left_sector(parity, charge), su2(twice_spin))
+        };
+
+        let a = chained_sector(z2_odd(), 1, 1);
+        let b = chained_sector(z2_odd(), -1, 1);
+        let c0 = chained_sector(z2_even(), 0, 0);
+        let c2 = chained_sector(z2_even(), 0, 2);
+
+        assert_eq!(chained_rule.fusion_style(), FusionStyleKind::Simple);
+        assert_eq!(chained_rule.braiding_style(), BraidingStyleKind::Fermionic);
+        assert_eq!(chained_rule.fusion_channels(a, b), vec![c0, c2]);
     }
 
     #[test]

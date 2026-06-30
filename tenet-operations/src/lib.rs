@@ -3418,8 +3418,8 @@ mod tests {
     use tenet_core::{
         BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
         FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
-        MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SectorId, SectorLeg,
-        TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+        MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
+        SectorLeg, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
     };
 
     fn fusion_tree_test_key<
@@ -3504,7 +3504,10 @@ mod tests {
         let left_sector =
             |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
         let sector = |parity, charge, twice_spin| {
-            rule.encode_sector(left_sector(parity, charge), SectorId::new(twice_spin))
+            rule.encode_sector(
+                left_sector(parity, charge),
+                SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+            )
         };
 
         let a = sector(odd, 1, 1);
