@@ -558,6 +558,13 @@ where
             ) {
                 continue;
             }
+            if !contracted_fusion_tree_basis_matches(
+                rule,
+                lhs_key.domain_tree(),
+                rhs_key.codomain_tree(),
+            ) {
+                continue;
+            }
             let dst_key = FusionTreeBlockKey::pair(
                 lhs_key.codomain_tree().clone(),
                 rhs_key.domain_tree().clone(),
@@ -8708,6 +8715,121 @@ mod tests {
 
         assert!((dst.data()[0] - 53.0).abs() < 1.0e-12);
         assert!((dst.data()[1] - 92.602_540_378_443_86).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
+        let rule = SU2FusionRule;
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
+        let rhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let lhs_keys = lhs_hom.fusion_tree_keys(&rule);
+        let rhs_keys = rhs_hom.fusion_tree_keys(&rule);
+        assert_eq!(lhs_keys.len(), 2);
+        assert_eq!(rhs_keys.len(), 2);
+        assert_ne!(
+            lhs_keys[0].domain_tree().innerlines()[0],
+            lhs_keys[1].domain_tree().innerlines()[0]
+        );
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+            lhs_hom,
+            &rule,
+            [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+            rhs_hom,
+            &rule,
+            [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
+        )
+        .unwrap();
+        let dst_hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
+        let dst_keys = dst_hom.fusion_tree_keys(&rule);
+        assert_eq!(dst_keys.len(), 1);
+        let dst_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            dst_hom,
+            BlockStructure::packed_column_major_with_keys(
+                2,
+                [(dst_keys[0].clone(), vec![2, 2])],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let lhs_data = (0..32)
+            .map(|index| 0.25 + index as f64)
+            .collect::<Vec<_>>();
+        let rhs_data = (0..32)
+            .map(|index| 10.0 - 0.5 * index as f64)
+            .collect::<Vec<_>>();
+        let initial_dst = vec![1.0, -2.0, 3.0, -4.0];
+        let lhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+        let rhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
+                .unwrap();
+        let axes = TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]);
+        let specs = tensorcontract_fusion_block_specs(
+            &rule,
+            dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap();
+
+        assert_eq!(specs.len(), 2);
+        for spec in &specs {
+            let lhs_key = match lhs.structure().block(spec.lhs_block()).unwrap().key() {
+                BlockKey::FusionTree(key) => key,
+                BlockKey::Dense => panic!("expected lhs fusion-tree block"),
+            };
+            let rhs_key = match rhs.structure().block(spec.rhs_block()).unwrap().key() {
+                BlockKey::FusionTree(key) => key,
+                BlockKey::Dense => panic!("expected rhs fusion-tree block"),
+            };
+            assert_eq!(
+                lhs_key.domain_tree().innerlines()[0],
+                rhs_key.codomain_tree().innerlines()[0],
+                "contracted SU2 tree basis must not cross-contract"
+            );
+        }
+
+        let alpha = 1.25;
+        let beta = -0.5;
+        let mut expected = initial_dst
+            .into_iter()
+            .map(|value| beta * value)
+            .collect::<Vec<_>>();
+        for spec in &specs {
+            let lhs_offset = lhs.structure().block(spec.lhs_block()).unwrap().offset();
+            let rhs_offset = rhs.structure().block(spec.rhs_block()).unwrap().offset();
+            for lhs_open in 0..2 {
+                for rhs_open in 0..2 {
+                    let mut sum = 0.0;
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            for c in 0..2 {
+                                let lhs_index = lhs_offset + lhs_open + 2 * a + 4 * b + 8 * c;
+                                let rhs_index = rhs_offset + a + 2 * b + 4 * c + 8 * rhs_open;
+                                sum += lhs.data()[lhs_index] * rhs.data()[rhs_index];
+                            }
+                        }
+                    }
+                    expected[lhs_open + 2 * rhs_open] += alpha * spec.coefficient() * sum;
+                }
+            }
+        }
+
+        tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+
+        for (&actual, expected) in dst.data().iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-10,
+                "actual {actual} expected {expected}"
+            );
+        }
     }
 
     #[test]
