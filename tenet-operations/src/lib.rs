@@ -393,6 +393,99 @@ impl<'a> TensorContractAxisSpec<'a> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedTensorContractAxisSpec {
+    lhs_contracting_axes: Vec<usize>,
+    rhs_contracting_axes: Vec<usize>,
+    output_axes: Vec<usize>,
+}
+
+impl OwnedTensorContractAxisSpec {
+    pub fn new(
+        lhs_contracting_axes: Vec<usize>,
+        rhs_contracting_axes: Vec<usize>,
+        output_axes: Vec<usize>,
+    ) -> Self {
+        Self {
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+        }
+    }
+
+    #[inline]
+    pub fn as_spec(&self) -> TensorContractAxisSpec<'_> {
+        TensorContractAxisSpec::new(
+            self.lhs_contracting_axes.as_slice(),
+            self.rhs_contracting_axes.as_slice(),
+            AxisPermutation::from_axes(self.output_axes.as_slice()),
+        )
+    }
+
+    #[inline]
+    pub fn lhs_contracting_axes(&self) -> &[usize] {
+        self.lhs_contracting_axes.as_slice()
+    }
+
+    #[inline]
+    pub fn rhs_contracting_axes(&self) -> &[usize] {
+        self.rhs_contracting_axes.as_slice()
+    }
+
+    #[inline]
+    pub fn output_axes(&self) -> &[usize] {
+        self.output_axes.as_slice()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TensorContractFusionExplicitPlan {
+    lhs_transform: TreeTransformOperationKey,
+    rhs_transform: TreeTransformOperationKey,
+    canonical_axes: OwnedTensorContractAxisSpec,
+    lhs_canonical_nout: usize,
+    lhs_canonical_nin: usize,
+    rhs_canonical_nout: usize,
+    rhs_canonical_nin: usize,
+}
+
+impl TensorContractFusionExplicitPlan {
+    #[inline]
+    pub fn lhs_transform(&self) -> &TreeTransformOperationKey {
+        &self.lhs_transform
+    }
+
+    #[inline]
+    pub fn rhs_transform(&self) -> &TreeTransformOperationKey {
+        &self.rhs_transform
+    }
+
+    #[inline]
+    pub fn canonical_axes(&self) -> &OwnedTensorContractAxisSpec {
+        &self.canonical_axes
+    }
+
+    #[inline]
+    pub fn lhs_canonical_nout(&self) -> usize {
+        self.lhs_canonical_nout
+    }
+
+    #[inline]
+    pub fn lhs_canonical_nin(&self) -> usize {
+        self.lhs_canonical_nin
+    }
+
+    #[inline]
+    pub fn rhs_canonical_nout(&self) -> usize {
+        self.rhs_canonical_nout
+    }
+
+    #[inline]
+    pub fn rhs_canonical_nin(&self) -> usize {
+        self.rhs_canonical_nin
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorContractStructure<C = f64> {
     dst_rank: usize,
@@ -527,6 +620,69 @@ where
     }
 
     tensorcontract_transformed_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan, DST_NOUT)
+}
+
+pub fn tensorcontract_fusion_explicit_plan<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<TensorContractFusionExplicitPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let axis_plan = TensorContractAxisPlan::compile(
+        lhs.subblock_structure().rank(),
+        rhs.subblock_structure().rank(),
+        dst.subblock_structure().rank(),
+        axes,
+    )?;
+    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs.homspace(),
+        rhs.homspace(),
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axis_plan.output_axes.as_slice(),
+        DST_NOUT,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    if &expected_homspace != dst.homspace() {
+        return Err(OperationError::StructureMismatch { tensor: "dst" });
+    }
+
+    let lhs_canonical_nout = axis_plan.lhs_open_axes.len();
+    let lhs_canonical_nin = axis_plan.lhs_contracting_axes.len();
+    let rhs_canonical_nout = axis_plan.rhs_contracting_axes.len();
+    let rhs_canonical_nin = axis_plan.rhs_open_axes.len();
+    Ok(TensorContractFusionExplicitPlan {
+        lhs_transform: TreeTransformOperationKey::permute(
+            axis_plan.lhs_open_axes,
+            axis_plan.lhs_contracting_axes,
+        ),
+        rhs_transform: TreeTransformOperationKey::permute(
+            axis_plan.rhs_contracting_axes,
+            axis_plan.rhs_open_axes,
+        ),
+        canonical_axes: OwnedTensorContractAxisSpec::new(
+            (lhs_canonical_nout..lhs_canonical_nout + lhs_canonical_nin).collect(),
+            (0..rhs_canonical_nout).collect(),
+            axis_plan.output_axes,
+        ),
+        lhs_canonical_nout,
+        lhs_canonical_nin,
+        rhs_canonical_nout,
+        rhs_canonical_nin,
+    })
 }
 
 fn tensorcontract_canonical_fusion_block_specs<
@@ -4232,6 +4388,223 @@ where
         lhs,
         rhs,
         axes,
+        alpha,
+        beta,
+    )
+}
+
+/// Execute a TensorKit-style fusion contraction through explicit source
+/// tree-pair transforms.
+///
+/// This is the reference-safe path for contractions whose source operands are
+/// not already in canonical compose form. The caller provides the canonical
+/// temporary tensors because their ranks are determined by the chosen
+/// contraction axes and therefore cannot be constructed generically from the
+/// original const-generic tensor ranks.
+///
+/// The sequence is:
+///
+/// 1. transform `lhs` to `(lhs open) <- (lhs contracted)`;
+/// 2. transform `rhs` to `(rhs contracted) <- (rhs open)`;
+/// 3. run the fusion contraction from those canonical operands into `dst`.
+///
+/// The final contraction keeps the caller's output permutation, so output
+/// recoupling still follows the normal fusion contraction lowering.
+pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    const LHS_CAN_NOUT: usize,
+    const LHS_CAN_NIN: usize,
+    const RHS_CAN_NOUT: usize,
+    const RHS_CAN_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    SLhsCan,
+    SRhsCan,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
+    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    axes: TensorContractAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let plan = tensorcontract_fusion_explicit_plan(
+        rule,
+        dst.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        lhs.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        rhs.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        axes,
+    )?;
+    tensorcontract_fusion_explicit_plan_into(
+        rule,
+        &plan,
+        dst,
+        lhs_canonical,
+        rhs_canonical,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorcontract_fusion_explicit_plan_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    const LHS_CAN_NOUT: usize,
+    const LHS_CAN_NIN: usize,
+    const RHS_CAN_NOUT: usize,
+    const RHS_CAN_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    SLhsCan,
+    SRhsCan,
+>(
+    rule: &R,
+    plan: &TensorContractFusionExplicitPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
+    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let mut tree_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_explicit_plan_into_with(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        rule,
+        plan,
+        dst,
+        lhs_canonical,
+        rhs_canonical,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorcontract_fusion_explicit_plan_into_with<
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    const LHS_CAN_NOUT: usize,
+    const LHS_CAN_NIN: usize,
+    const RHS_CAN_NOUT: usize,
+    const RHS_CAN_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    SLhsCan,
+    SRhsCan,
+>(
+    tree_backend: &mut BT,
+    tree_workspace: &mut BT::Workspace,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    rule: &R,
+    plan: &TensorContractFusionExplicitPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
+    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    if LHS_CAN_NOUT != plan.lhs_canonical_nout() || LHS_CAN_NIN != plan.lhs_canonical_nin() {
+        return Err(OperationError::StructureRankMismatch {
+            expected: plan.lhs_canonical_nout() + plan.lhs_canonical_nin(),
+            actual: LHS_CAN_NOUT + LHS_CAN_NIN,
+        });
+    }
+    if RHS_CAN_NOUT != plan.rhs_canonical_nout() || RHS_CAN_NIN != plan.rhs_canonical_nin() {
+        return Err(OperationError::StructureRankMismatch {
+            expected: plan.rhs_canonical_nout() + plan.rhs_canonical_nin(),
+            actual: RHS_CAN_NOUT + RHS_CAN_NIN,
+        });
+    }
+
+    lhs_canonical.data_mut().fill(D::zero());
+    rhs_canonical.data_mut().fill(D::zero());
+    tree_pair_transform_into_with(
+        tree_backend,
+        tree_workspace,
+        rule,
+        plan.lhs_transform().clone(),
+        lhs_canonical,
+        lhs,
+        D::one(),
+        D::zero(),
+    )?;
+    tree_pair_transform_into_with(
+        tree_backend,
+        tree_workspace,
+        rule,
+        plan.rhs_transform().clone(),
+        rhs_canonical,
+        rhs,
+        D::one(),
+        D::zero(),
+    )?;
+
+    tensorcontract_fusion_into_with(
+        contract_backend,
+        contract_workspace,
+        rule,
+        dst,
+        lhs_canonical,
+        rhs_canonical,
+        plan.canonical_axes().as_spec(),
         alpha,
         beta,
     )
@@ -8971,6 +9344,7 @@ mod tests {
             .map(|index| -3.0 + 0.25 * index as f64)
             .collect::<Vec<_>>();
         let initial_dst = vec![2.0, -1.0, 4.0, -3.0];
+        let initial_dst_for_explicit = initial_dst.clone();
         let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
         let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
         let mut direct_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -8979,17 +9353,38 @@ mod tests {
         )
         .unwrap();
         let mut expected_dst =
-            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space.clone())
+                .unwrap();
         let mut lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
             vec![0.0; lhs_canonical_space.required_len().unwrap()],
-            lhs_canonical_space,
+            lhs_canonical_space.clone(),
         )
         .unwrap();
         let mut rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
             vec![0.0; rhs_canonical_space.required_len().unwrap()],
-            rhs_canonical_space,
+            rhs_canonical_space.clone(),
         )
         .unwrap();
+        let plan = tensorcontract_fusion_explicit_plan(
+            &rule,
+            direct_dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.lhs_transform(),
+            &TreeTransformOperationKey::permute([3], [0, 1, 2])
+        );
+        assert_eq!(
+            plan.rhs_transform(),
+            &TreeTransformOperationKey::permute([1, 2, 3], [0])
+        );
+        assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[1, 2, 3]);
+        assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[0, 1, 2]);
+        assert_eq!(plan.canonical_axes().output_axes(), &[0, 1]);
+
         let err = tensorcontract_fusion_block_specs(
             &rule,
             direct_dst.fusion_space().unwrap(),
@@ -9056,6 +9451,28 @@ mod tests {
 
         assert_eq!(direct_dst.data(), &[2.0, -1.0, 4.0, -3.0]);
         assert_ne!(expected_dst.data(), direct_dst.data());
+
+        let mut explicit_dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst_for_explicit, dst_space)
+                .unwrap();
+        tensorcontract_fusion_explicit_plan_into(
+            &rule,
+            &plan,
+            &mut explicit_dst,
+            &mut lhs_canonical,
+            &mut rhs_canonical,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+        for (&actual, &expected) in explicit_dst.data().iter().zip(expected_dst.data()) {
+            assert!(
+                (actual - expected).abs() < 1.0e-10,
+                "actual {actual} expected {expected}"
+            );
+        }
     }
 
     #[test]
