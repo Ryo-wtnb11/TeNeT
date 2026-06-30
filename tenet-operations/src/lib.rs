@@ -16,12 +16,15 @@ use num_traits::{One, Zero};
 use tenet_core::{
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
-    multiplicity_free_transpose_tree_pair, unique_braid_tree, unique_braid_tree_pair,
-    unique_permute_tree, unique_permute_tree_pair, unique_transpose_tree_pair, BlockKey,
-    BlockLayout, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError, FusionRule,
-    FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
-    MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols,
-    TensorMap,
+    multiplicity_free_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView,
+    BlockViewMut, BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
+    FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, TensorMap,
+};
+#[cfg(test)]
+use tenet_core::{
+    unique_braid_tree, unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
+    unique_transpose_tree_pair, MultiplicityFreePivotalSymbols,
 };
 use tenet_dense::{
     DefaultDenseExecutor, DenseError, DenseExecutor, DenseRead, DenseView, DenseViewMut, DenseWrite,
@@ -602,10 +605,19 @@ impl<T> TreeTransformGroupPlan<T> {
 }
 
 impl<T: Copy> TreeTransformGroupPlan<T> {
-    pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+    pub fn compile<
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
         &self,
-        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
     ) -> Result<TreeTransformStructure<T>, OperationError> {
         TreeTransformStructure::compile_grouped(dst, src, &self.specs)
     }
@@ -732,7 +744,8 @@ where
     build_multiplicity_free_tree_pair_transform_group_plan(rule, operation, src_structure)
 }
 
-pub(crate) fn build_unique_tree_transform_group_plan<T, R, F>(
+#[cfg(test)]
+fn build_unique_tree_transform_group_plan<T, R, F>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -771,7 +784,8 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-pub(crate) fn build_unique_all_codomain_tree_transform_group_plan<R>(
+#[cfg(test)]
+fn build_unique_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -1032,7 +1046,8 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-pub(crate) fn build_unique_tree_pair_transform_group_plan<R>(
+#[cfg(test)]
+fn build_unique_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -1430,9 +1445,18 @@ pub struct TreeTransformStructure<T> {
 }
 
 impl<T: Copy> TreeTransformStructure<T> {
-    pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
-        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    pub fn compile<
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
         specs: &[TreeTransformBlockSpec<T>],
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures(
@@ -1454,9 +1478,18 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    pub fn compile_keyed<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
-        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    pub fn compile_keyed<
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
         specs: &[TreeTransformKeyBlockSpec<T>],
     ) -> Result<Self, OperationError> {
         Self::compile_keyed_shared_structures(
@@ -1478,9 +1511,18 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    pub fn compile_grouped<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
-        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    pub fn compile_grouped<
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
         specs: &[TreeTransformGroupBlockSpec<T>],
     ) -> Result<Self, OperationError> {
         Self::compile_grouped_shared_structures(
@@ -1836,12 +1878,19 @@ where
 {
     type Workspace;
 
-    fn tree_transform_structure_into<const NOUT: usize, const NIN: usize, S>(
+    fn tree_transform_structure_into<
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TreeTransformStructure<T>,
-        dst: &mut TensorMap<T, NOUT, NIN, S>,
-        src: &TensorMap<T, NOUT, NIN, S>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>;
@@ -1968,12 +2017,19 @@ where
 {
     type Workspace = TreeTransformWorkspace<T>;
 
-    fn tree_transform_structure_into<const NOUT: usize, const NIN: usize, S>(
+    fn tree_transform_structure_into<
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TreeTransformStructure<T>,
-        dst: &mut TensorMap<T, NOUT, NIN, S>,
-        src: &TensorMap<T, NOUT, NIN, S>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
@@ -2022,12 +2078,19 @@ where
 {
     type Workspace = TreeTransformWorkspace<T>;
 
-    fn tree_transform_structure_into<const NOUT: usize, const NIN: usize, S>(
+    fn tree_transform_structure_into<
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TreeTransformStructure<T>,
-        dst: &mut TensorMap<T, NOUT, NIN, S>,
-        src: &TensorMap<T, NOUT, NIN, S>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
@@ -2142,12 +2205,21 @@ where
     structure.execute_with(backend, allocator, dst, src, alpha, beta)
 }
 
-pub fn tree_transform_execute_with<B, T, const NOUT: usize, const NIN: usize, S>(
+pub fn tree_transform_execute_with<
+    B,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TreeTransformStructure<T>,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -2162,6 +2234,98 @@ where
         + strided_kernel::MaybeSendSync,
 {
     backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+}
+
+pub fn tree_pair_transform_structure<
+    R,
+    TDst,
+    TSrc,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+    plan.compile(dst, src)
+}
+
+pub fn tree_pair_transform_into<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: R::Scalar,
+    beta: R::Scalar,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: DenseRecouplingScalar,
+{
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_pair_transform_into_with(
+        &mut backend,
+        &mut workspace,
+        rule,
+        operation,
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tree_pair_transform_into_with<
+    B,
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: R::Scalar,
+    beta: R::Scalar,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = tree_pair_transform_structure(rule, operation, dst, src)?;
+    tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
 }
 
 pub fn tensoradd_assign_into<T, const NOUT: usize, const NIN: usize, S>(
@@ -2304,11 +2468,19 @@ where
     Ok(())
 }
 
-fn tree_transform_structure_with_strided_kernel<T, const NOUT: usize, const NIN: usize, S>(
+fn tree_transform_structure_with_strided_kernel<
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
     workspace: &mut TreeTransformWorkspace<T>,
     structure: &TreeTransformStructure<T>,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -2369,12 +2541,21 @@ where
     Ok(())
 }
 
-fn tree_transform_structure_with_dense_recoupling<E, T, const NOUT: usize, const NIN: usize, S>(
+fn tree_transform_structure_with_dense_recoupling<
+    E,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<T>,
     structure: &TreeTransformStructure<T>,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -5282,6 +5463,89 @@ mod tests {
             &src_structure,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn tree_pair_transform_public_helper_executes_split_changing_permute() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [0, 1],
+            Some(1),
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        ));
+        let src_tree = expect_tree_key(&src_key);
+        let operation = TreeTransformOperationKey::permute([0, 2], [1]);
+        let (dst_tree, coefficient) =
+            unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
+        let dst_key = BlockKey::from(dst_tree);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(dst_key.clone(), vec![1, 1, 1])])
+                .unwrap();
+        let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
+        let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+        let src =
+            TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
+                .unwrap();
+
+        tree_pair_transform_into(&Z2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
+
+        assert_eq!(dst.structure().block(0).unwrap().key(), &dst_key);
+        assert_eq!(dst.data(), &[3.0 * coefficient * 7.0 + 5.0 * 2.0]);
+    }
+
+    #[test]
+    fn tree_pair_transform_public_helper_compiles_against_actual_destination_structure() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [0, 1],
+            Some(1),
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        ));
+        let src_tree = expect_tree_key(&src_key);
+        let operation = TreeTransformOperationKey::permute([0, 2], [1]);
+        let (dst_tree, _) =
+            unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
+        let expected_missing = BlockKey::from(dst_tree);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key.clone(), vec![1, 1, 1])])
+                .unwrap();
+        let wrong_dst_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+        let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
+        let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+        let src =
+            TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
+                .unwrap();
+        let dst = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+            vec![0.0],
+            dst_space,
+            wrong_dst_structure,
+        )
+        .unwrap();
+
+        let err = tree_pair_transform_structure(&Z2FusionRule, operation, &dst, &src).unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::MissingBlockKey {
+                key: expected_missing,
+            }
+        );
     }
 
     #[test]
