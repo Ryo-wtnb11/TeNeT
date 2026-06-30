@@ -1,5 +1,6 @@
 mod api;
 mod backend;
+mod context;
 mod fusion;
 mod structure;
 
@@ -12,6 +13,10 @@ pub use api::{
     tensorcontract_into, tensorcontract_into_with,
 };
 pub use backend::{TensorContractBackend, TensorContractWorkspace};
+pub use context::{
+    tensorcontract_into_with_context, TensorContractCache, TensorContractCacheStats,
+    TensorContractExecutionContext, TensorContractPlanKey,
+};
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,

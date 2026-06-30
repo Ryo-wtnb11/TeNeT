@@ -62,7 +62,7 @@ impl<'a> TensorContractAxisSpec<'a> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct OwnedTensorContractAxisSpec {
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,

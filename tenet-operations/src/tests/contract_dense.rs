@@ -55,6 +55,52 @@ fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
 }
 
 #[test]
+fn tensorcontract_execution_context_replays_without_recompiling() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
+    let mut context = TensorContractExecutionContext::<f64>::default();
+
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().structure_hits(), 0);
+    assert_eq!(context.cache().stats().structure_misses(), 1);
+
+    dst.data_mut().fill(1.0);
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().structure_hits(), 1);
+    assert_eq!(context.cache().stats().structure_misses(), 1);
+}
+
+#[test]
 fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
