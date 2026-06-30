@@ -1191,7 +1191,7 @@ where
         beta: D,
     ) -> Result<(), OperationError> {
         tensorcontract_structure_with_dense_executor(
-            &mut self.dense,
+            self.dense_mut(),
             workspace,
             structure,
             dst,
