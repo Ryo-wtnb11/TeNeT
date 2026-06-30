@@ -1434,6 +1434,13 @@ fn block_indices_for_keys(
         .collect()
 }
 
+/// Replay-ready tree-transform descriptor.
+///
+/// This is the TensorKit-style transformer-build boundary: construction resolves
+/// tree keys, coefficients, block layouts, offsets, and pack/scatter descriptors
+/// against concrete source and destination structures. Hot paths should build
+/// this once and replay it with [`tree_transform_execute_with`] while reusing a
+/// backend and workspace.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
@@ -2236,6 +2243,12 @@ where
     backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
 }
 
+/// Build a replay-ready tree-pair transform structure.
+///
+/// This is the hot-path API. It performs the categorical tree-pair lowering and
+/// compiles the result against the actual `dst` and `src` block structures. The
+/// returned structure can be reused with [`tree_transform_execute_with`] as long
+/// as replay tensors have matching structures.
 pub fn tree_pair_transform_structure<
     R,
     TDst,
@@ -2260,6 +2273,11 @@ where
     plan.compile(dst, src)
 }
 
+/// Compile and execute a tree-pair transform in one call.
+///
+/// This is a convenience API. It rebuilds the transform structure on every call;
+/// hot tensor-network loops should call [`tree_pair_transform_structure`] once
+/// and replay the returned structure with [`tree_transform_execute_with`].
 pub fn tree_pair_transform_into<
     R,
     const DST_NOUT: usize,
@@ -2294,6 +2312,11 @@ where
     )
 }
 
+/// Compile and execute a tree-pair transform with caller-owned backend/workspace.
+///
+/// The backend and workspace are reused, but the transform structure is still
+/// rebuilt on every call. Use [`tree_pair_transform_structure`] plus
+/// [`tree_transform_execute_with`] when the transform itself is reused.
 pub fn tree_pair_transform_into_with<
     B,
     R,
@@ -3556,6 +3579,33 @@ mod tests {
             }
         }
         found.unwrap_or_else(|| panic!("missing coefficient for {coupled:?}"))
+    }
+
+    fn expected_single_tree_pair_replay(
+        plan: &TreeTransformGroupPlan<f64>,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        initial_dst: &[f64],
+        src_data: &[f64],
+        alpha: f64,
+        beta: f64,
+    ) -> Vec<f64> {
+        let mut expected = initial_dst
+            .iter()
+            .map(|value| beta * value)
+            .collect::<Vec<_>>();
+        for spec in plan.specs() {
+            assert_eq!(spec.src_keys().len(), 1);
+            assert_eq!(spec.dst_keys().len(), 1);
+            assert_eq!(spec.coefficients_src_by_dst().len(), 1);
+            let src_key = &spec.src_keys()[0];
+            let dst_key = &spec.dst_keys()[0];
+            let src_offset = src_structure.block_by_key(src_key).unwrap().offset();
+            let dst_offset = dst_structure.block_by_key(dst_key).unwrap().offset();
+            expected[dst_offset] +=
+                alpha * spec.coefficients_src_by_dst()[0] * src_data[src_offset];
+        }
+        expected
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -5504,6 +5554,91 @@ mod tests {
     }
 
     #[test]
+    fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let block_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let mut src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            src_space,
+            block_structure.clone(),
+        )
+        .unwrap();
+        let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![0.0, 0.0],
+            dst_space,
+            block_structure,
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+        let structure =
+            tree_pair_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+        let expected = |initial: [f64; 2], source: [f64; 2], alpha: f64, beta: f64| {
+            let c = 0.866_025_403_784_438_6;
+            [
+                beta * initial[0] + alpha * (0.5 * source[0] + c * source[1]),
+                beta * initial[1] + alpha * (c * source[0] - 0.5 * source[1]),
+            ]
+        };
+
+        assert!(structure.has_pack_gemm_scatter_blocks());
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        let expected_first = expected([0.0, 0.0], [10.0, 20.0], 1.0, 0.0);
+        assert!((dst.data()[0] - expected_first[0]).abs() < 1.0e-12);
+        assert!((dst.data()[1] - expected_first[1]).abs() < 1.0e-12);
+        assert_eq!(workspace.source_len(), 2);
+        assert_eq!(workspace.destination_len(), 2);
+
+        src.data_mut().copy_from_slice(&[3.0, -4.0]);
+        dst.data_mut().copy_from_slice(&[1.0, 2.0]);
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            -1.0,
+        )
+        .unwrap();
+        let expected_second = expected([1.0, 2.0], [3.0, -4.0], 2.0, -1.0);
+        assert!((dst.data()[0] - expected_second[0]).abs() < 1.0e-12);
+        assert!((dst.data()[1] - expected_second[1]).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
             [1],
@@ -5763,6 +5898,83 @@ mod tests {
 
         assert_eq!(dst.structure(), dst_space.subblock_structure());
         for (actual, expected) in dst.data().iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} != expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_pair_transform_structure_replays_product_without_recompiling() {
+        let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
+        let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+        let mut src =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let plan = build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure())
+            .unwrap();
+        let structure = tree_pair_transform_structure(&rule, operation, &dst, &src).unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+
+        assert!((single_transform_coefficient_for_coupled(&plan, c0) - 1.0).abs() < 1.0e-12);
+        assert!((single_transform_coefficient_for_coupled(&plan, c1) + 1.0).abs() < 1.0e-12);
+        assert_eq!(structure.block_count(), 2);
+        assert!(!structure.has_pack_gemm_scatter_blocks());
+        let expected_first = expected_single_tree_pair_replay(
+            &plan,
+            dst.structure(),
+            src.structure(),
+            dst.data(),
+            src.data(),
+            2.0,
+            3.0,
+        );
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+        for (actual, expected) in dst.data().iter().zip(expected_first) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} != expected {expected}"
+            );
+        }
+        assert_eq!(workspace.source_len(), 0);
+        assert_eq!(workspace.destination_len(), 0);
+
+        src.data_mut().copy_from_slice(&[4.0, 5.0]);
+        dst.data_mut().copy_from_slice(&[6.0, 7.0]);
+        let expected_second = expected_single_tree_pair_replay(
+            &plan,
+            dst.structure(),
+            src.structure(),
+            dst.data(),
+            src.data(),
+            -1.0,
+            0.5,
+        );
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            -1.0,
+            0.5,
+        )
+        .unwrap();
+        for (actual, expected) in dst.data().iter().zip(expected_second) {
             assert!(
                 (actual - expected).abs() < 1.0e-12,
                 "actual {actual} != expected {expected}"
