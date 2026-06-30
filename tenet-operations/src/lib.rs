@@ -1772,15 +1772,47 @@ where
 pub struct TreeTransformCache<T, RuleKey> {
     plans: HashMap<TreeTransformSectorPlanKey<RuleKey>, TreeTransformGroupPlan<T>>,
     structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
+    stats: TreeTransformCacheStats,
 }
 
 pub type TreePairTransformCache<T, RuleKey> = TreeTransformCache<T, RuleKey>;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TreeTransformCacheStats {
+    plan_hits: usize,
+    plan_misses: usize,
+    structure_hits: usize,
+    structure_misses: usize,
+}
+
+impl TreeTransformCacheStats {
+    #[inline]
+    pub fn plan_hits(self) -> usize {
+        self.plan_hits
+    }
+
+    #[inline]
+    pub fn plan_misses(self) -> usize {
+        self.plan_misses
+    }
+
+    #[inline]
+    pub fn structure_hits(self) -> usize {
+        self.structure_hits
+    }
+
+    #[inline]
+    pub fn structure_misses(self) -> usize {
+        self.structure_misses
+    }
+}
 
 impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
     fn default() -> Self {
         Self {
             plans: HashMap::new(),
             structures: TreeTransformStructureCache::default(),
+            stats: TreeTransformCacheStats::default(),
         }
     }
 }
@@ -1808,6 +1840,15 @@ where
         self.plans.is_empty() && self.structures.is_empty()
     }
 
+    #[inline]
+    pub fn stats(&self) -> TreeTransformCacheStats {
+        self.stats
+    }
+
+    pub fn reset_stats(&mut self) {
+        self.stats = TreeTransformCacheStats::default();
+    }
+
     pub fn get_or_compile_tree_pair<
         R,
         TDst,
@@ -1831,7 +1872,10 @@ where
     {
         let plan_key =
             TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src.structure())?;
-        if !self.plans.contains_key(&plan_key) {
+        if self.plans.contains_key(&plan_key) {
+            self.stats.plan_hits += 1;
+        } else {
+            self.stats.plan_misses += 1;
             let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
             self.plans.insert(plan_key.clone(), plan);
         }
@@ -1861,7 +1905,10 @@ where
     {
         let plan_key =
             TreeTransformSectorPlanKey::all_codomain(rule, operation.clone(), src.structure())?;
-        if !self.plans.contains_key(&plan_key) {
+        if self.plans.contains_key(&plan_key) {
+            self.stats.plan_hits += 1;
+        } else {
+            self.stats.plan_misses += 1;
             let plan =
                 build_all_codomain_tree_transform_group_plan(rule, operation, src.structure())?;
             self.plans.insert(plan_key.clone(), plan);
@@ -1892,7 +1939,10 @@ where
             dst.structure(),
             src.structure(),
         )?;
-        if self.structures.get(&structure_key).is_none() {
+        if self.structures.get(&structure_key).is_some() {
+            self.stats.structure_hits += 1;
+        } else {
+            self.stats.structure_misses += 1;
             let plan = self
                 .plans
                 .get(&plan_key)
@@ -6949,6 +6999,7 @@ mod tests {
         let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
 
         all_codomain_tree_transform_into_with_context(
             &mut context,
@@ -6963,6 +7014,10 @@ mod tests {
 
         assert_eq!(context.cache().plan_len(), 1);
         assert_eq!(context.cache().structure_len(), 1);
+        assert_eq!(context.cache().stats().plan_hits(), 0);
+        assert_eq!(context.cache().stats().plan_misses(), 1);
+        assert_eq!(context.cache().stats().structure_hits(), 0);
+        assert_eq!(context.cache().stats().structure_misses(), 1);
         assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
         assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
 
@@ -6974,9 +7029,15 @@ mod tests {
 
         assert_eq!(context.cache().plan_len(), 1);
         assert_eq!(context.cache().structure_len(), 1);
+        assert_eq!(context.cache().stats().plan_hits(), 1);
+        assert_eq!(context.cache().stats().plan_misses(), 1);
+        assert_eq!(context.cache().stats().structure_hits(), 1);
+        assert_eq!(context.cache().stats().structure_misses(), 1);
         let c = 0.866_025_403_784_438_6;
         assert!((dst.data()[0] - (-1.0 + 2.0 * (0.5 * 3.0 + c * -4.0))).abs() < 1.0e-12);
         assert!((dst.data()[1] - (-2.0 + 2.0 * (c * 3.0 - 0.5 * -4.0))).abs() < 1.0e-12);
+        context.cache_mut().reset_stats();
+        assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
     }
 
     #[test]
