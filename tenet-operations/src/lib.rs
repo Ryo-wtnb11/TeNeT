@@ -2362,6 +2362,7 @@ pub struct TreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     source: Vec<T>,
     destination: Vec<T>,
+    coefficients: Vec<T>,
 }
 
 impl<T> Default for TreeTransformWorkspace<T> {
@@ -2370,6 +2371,7 @@ impl<T> Default for TreeTransformWorkspace<T> {
             zero_strides: Vec::new(),
             source: Vec::new(),
             destination: Vec::new(),
+            coefficients: Vec::new(),
         }
     }
 }
@@ -2406,9 +2408,111 @@ impl<T> TreeTransformScalar for T where
 {
 }
 
-pub trait TreeTransformBackend<T>
+/// Action of a categorical recoupling coefficient on tensor storage data.
+///
+/// TensorKit allows, for example, real SU(2) coefficients to act on complex
+/// tensor blocks. Rust needs that conversion boundary to be explicit.
+pub trait RecouplingCoefficientAction<C>: Copy {
+    fn scale_by_coefficient(self, coefficient: C) -> Self;
+    fn coefficient_as_data(coefficient: C) -> Self;
+}
+
+macro_rules! impl_same_recoupling_coefficient_action {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl RecouplingCoefficientAction<$ty> for $ty {
+                #[inline]
+                fn scale_by_coefficient(self, coefficient: $ty) -> Self {
+                    self * coefficient
+                }
+
+                #[inline]
+                fn coefficient_as_data(coefficient: $ty) -> Self {
+                    coefficient
+                }
+            }
+        )+
+    };
+}
+
+impl_same_recoupling_coefficient_action!(f32, f64, i32, i64, Complex32, Complex64);
+
+impl RecouplingCoefficientAction<f64> for f32 {
+    #[inline]
+    fn scale_by_coefficient(self, coefficient: f64) -> Self {
+        self * coefficient as f32
+    }
+
+    #[inline]
+    fn coefficient_as_data(coefficient: f64) -> Self {
+        coefficient as f32
+    }
+}
+
+impl RecouplingCoefficientAction<f32> for f64 {
+    #[inline]
+    fn scale_by_coefficient(self, coefficient: f32) -> Self {
+        self * f64::from(coefficient)
+    }
+
+    #[inline]
+    fn coefficient_as_data(coefficient: f32) -> Self {
+        f64::from(coefficient)
+    }
+}
+
+impl RecouplingCoefficientAction<f32> for Complex32 {
+    #[inline]
+    fn scale_by_coefficient(self, coefficient: f32) -> Self {
+        self * coefficient
+    }
+
+    #[inline]
+    fn coefficient_as_data(coefficient: f32) -> Self {
+        Self::new(coefficient, 0.0)
+    }
+}
+
+impl RecouplingCoefficientAction<f64> for Complex32 {
+    #[inline]
+    fn scale_by_coefficient(self, coefficient: f64) -> Self {
+        self * coefficient as f32
+    }
+
+    #[inline]
+    fn coefficient_as_data(coefficient: f64) -> Self {
+        Self::new(coefficient as f32, 0.0)
+    }
+}
+
+impl RecouplingCoefficientAction<f32> for Complex64 {
+    #[inline]
+    fn scale_by_coefficient(self, coefficient: f32) -> Self {
+        self * f64::from(coefficient)
+    }
+
+    #[inline]
+    fn coefficient_as_data(coefficient: f32) -> Self {
+        Self::new(f64::from(coefficient), 0.0)
+    }
+}
+
+impl RecouplingCoefficientAction<f64> for Complex64 {
+    #[inline]
+    fn scale_by_coefficient(self, coefficient: f64) -> Self {
+        self * coefficient
+    }
+
+    #[inline]
+    fn coefficient_as_data(coefficient: f64) -> Self {
+        Self::new(coefficient, 0.0)
+    }
+}
+
+pub trait TreeTransformBackend<D, C>
 where
-    T: TreeTransformScalar,
+    D: TreeTransformScalar,
+    C: Copy,
 {
     type Workspace;
 
@@ -2422,11 +2526,11 @@ where
     >(
         &mut self,
         workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<T>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-        alpha: T,
-        beta: T,
+        structure: &TreeTransformStructure<C>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError>;
 }
 
@@ -2503,25 +2607,27 @@ impl Default for DenseTreeTransformOperations<DefaultDenseExecutor> {
 }
 
 #[derive(Debug)]
-pub struct TreeTransformExecutionContext<T, RuleKey, B = DenseTreeTransformOperations>
+pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
 where
-    T: TreeTransformScalar,
-    B: TreeTransformBackend<T>,
+    D: TreeTransformScalar,
+    C: Copy,
+    B: TreeTransformBackend<D, C>,
 {
     backend: B,
     workspace: B::Workspace,
-    cache: TreeTransformCache<T, RuleKey>,
+    cache: TreeTransformCache<C, RuleKey>,
 }
 
-impl<T, RuleKey, B> TreeTransformExecutionContext<T, RuleKey, B>
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
 where
-    T: TreeTransformScalar,
-    B: TreeTransformBackend<T>,
+    D: TreeTransformScalar,
+    C: Copy,
+    B: TreeTransformBackend<D, C>,
 {
     pub fn with_parts(
         backend: B,
         workspace: B::Workspace,
-        cache: TreeTransformCache<T, RuleKey>,
+        cache: TreeTransformCache<C, RuleKey>,
     ) -> Self {
         Self {
             backend,
@@ -2551,25 +2657,26 @@ where
     }
 
     #[inline]
-    pub fn cache(&self) -> &TreeTransformCache<T, RuleKey> {
+    pub fn cache(&self) -> &TreeTransformCache<C, RuleKey> {
         &self.cache
     }
 
     #[inline]
-    pub fn cache_mut(&mut self) -> &mut TreeTransformCache<T, RuleKey> {
+    pub fn cache_mut(&mut self) -> &mut TreeTransformCache<C, RuleKey> {
         &mut self.cache
     }
 
-    pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<T, RuleKey>) {
+    pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<C, RuleKey>) {
         (self.backend, self.workspace, self.cache)
     }
 }
 
-impl<T, RuleKey, B> TreeTransformExecutionContext<T, RuleKey, B>
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
 where
-    T: TreeTransformScalar,
+    D: TreeTransformScalar,
+    C: Copy,
     RuleKey: Clone + Eq + Hash,
-    B: TreeTransformBackend<T>,
+    B: TreeTransformBackend<D, C>,
     B::Workspace: Default,
 {
     pub fn new(backend: B) -> Self {
@@ -2577,11 +2684,12 @@ where
     }
 }
 
-impl<T, RuleKey, B> Default for TreeTransformExecutionContext<T, RuleKey, B>
+impl<D, RuleKey, C, B> Default for TreeTransformExecutionContext<D, RuleKey, C, B>
 where
-    T: TreeTransformScalar,
+    D: TreeTransformScalar,
+    C: Copy,
     RuleKey: Clone + Eq + Hash,
-    B: TreeTransformBackend<T> + Default,
+    B: TreeTransformBackend<D, C> + Default,
     B::Workspace: Default,
 {
     fn default() -> Self {
@@ -2589,11 +2697,12 @@ where
     }
 }
 
-impl<T, RuleKey, B> TreeTransformExecutionContext<T, RuleKey, B>
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
 where
-    T: TreeTransformScalar,
+    D: TreeTransformScalar,
+    C: Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero,
     RuleKey: Clone + Eq + Hash,
-    B: TreeTransformBackend<T>,
+    B: TreeTransformBackend<D, C>,
 {
     pub fn tree_pair_transform_into<
         R,
@@ -2607,13 +2716,13 @@ where
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-        alpha: T,
-        beta: T,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let Self {
             backend,
@@ -2636,13 +2745,13 @@ where
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-        alpha: T,
-        beta: T,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeFusionSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let Self {
             backend,
@@ -2691,17 +2800,19 @@ impl TensorOperationsBackend for HostTensorOperations {
     }
 }
 
-impl<T> TreeTransformBackend<T> for HostTensorOperations
+impl<D, C> TreeTransformBackend<D, C> for HostTensorOperations
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
         + PartialEq
         + Zero
         + One
-        + strided_kernel::MaybeSendSync,
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
-    type Workspace = TreeTransformWorkspace<T>;
+    type Workspace = TreeTransformWorkspace<D>;
 
     fn tree_transform_structure_into<
         const DST_NOUT: usize,
@@ -2713,11 +2824,11 @@ where
     >(
         &mut self,
         workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<T>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-        alpha: T,
-        beta: T,
+        structure: &TreeTransformStructure<C>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError> {
         tree_transform_structure_with_strided_kernel(workspace, structure, dst, src, alpha, beta)
     }
@@ -2731,6 +2842,7 @@ pub trait DenseRecouplingScalar:
     + PartialEq
     + Zero
     + One
+    + RecouplingCoefficientAction<Self>
     + strided_kernel::MaybeSendSync
     + 'static
 {
@@ -2757,12 +2869,13 @@ impl_dense_recoupling_scalar!(f64, F64, F64);
 impl_dense_recoupling_scalar!(Complex32, C32, C32);
 impl_dense_recoupling_scalar!(Complex64, C64, C64);
 
-impl<E, T> TreeTransformBackend<T> for DenseTreeTransformOperations<E>
+impl<E, D, C> TreeTransformBackend<D, C> for DenseTreeTransformOperations<E>
 where
     E: DenseExecutor,
-    T: DenseRecouplingScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
-    type Workspace = TreeTransformWorkspace<T>;
+    type Workspace = TreeTransformWorkspace<D>;
 
     fn tree_transform_structure_into<
         const DST_NOUT: usize,
@@ -2774,11 +2887,11 @@ where
     >(
         &mut self,
         workspace: &mut Self::Workspace,
-        structure: &TreeTransformStructure<T>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-        alpha: T,
-        beta: T,
+        structure: &TreeTransformStructure<C>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError> {
         tree_transform_structure_with_dense_recoupling(
             &mut self.dense,
@@ -2893,7 +3006,8 @@ where
 
 pub fn tree_transform_execute_with<
     B,
-    T,
+    D,
+    C,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const SRC_NOUT: usize,
@@ -2903,21 +3017,22 @@ pub fn tree_transform_execute_with<
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
-    structure: &TreeTransformStructure<T>,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: T,
-    beta: T,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TreeTransformBackend<T>,
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
+    B: TreeTransformBackend<D, C>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
         + PartialEq
         + Zero
         + One
         + strided_kernel::MaybeSendSync,
+    C: Copy,
 {
     backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
 }
@@ -2960,6 +3075,7 @@ where
 /// and replay the returned structure with [`tree_transform_execute_with`].
 pub fn tree_pair_transform_into<
     R,
+    D,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const SRC_NOUT: usize,
@@ -2969,14 +3085,15 @@ pub fn tree_pair_transform_into<
 >(
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: R::Scalar,
-    beta: R::Scalar,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: DenseRecouplingScalar,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
 {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
@@ -3004,6 +3121,7 @@ where
 pub fn tree_pair_transform_into_with<
     B,
     R,
+    D,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const SRC_NOUT: usize,
@@ -3015,21 +3133,16 @@ pub fn tree_pair_transform_into_with<
     workspace: &mut B::Workspace,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: R::Scalar,
-    beta: R::Scalar,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TreeTransformBackend<R::Scalar>,
+    B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Copy
-        + Add<Output = R::Scalar>
-        + Mul<Output = R::Scalar>
-        + PartialEq
-        + Zero
-        + One
-        + strided_kernel::MaybeSendSync,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
 {
     let structure = tree_pair_transform_structure(rule, operation, dst, src)?;
     tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
@@ -3038,6 +3151,7 @@ where
 pub fn tree_pair_transform_into_with_context<
     B,
     R,
+    D,
     RuleKey,
     const DST_NOUT: usize,
     const DST_NIN: usize,
@@ -3046,19 +3160,20 @@ pub fn tree_pair_transform_into_with_context<
     SDst,
     SSrc,
 >(
-    context: &mut TreeTransformExecutionContext<R::Scalar, RuleKey, B>,
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: R::Scalar,
-    beta: R::Scalar,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TreeTransformBackend<R::Scalar>,
+    B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
     RuleKey: Clone + Eq + Hash,
-    R::Scalar: TreeTransformScalar,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
 {
     context.tree_pair_transform_into(rule, operation, dst, src, alpha, beta)
 }
@@ -3066,6 +3181,7 @@ where
 pub fn all_codomain_tree_transform_into_with_context<
     B,
     R,
+    D,
     RuleKey,
     const DST_NOUT: usize,
     const DST_NIN: usize,
@@ -3074,19 +3190,20 @@ pub fn all_codomain_tree_transform_into_with_context<
     SDst,
     SSrc,
 >(
-    context: &mut TreeTransformExecutionContext<R::Scalar, RuleKey, B>,
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: R::Scalar,
-    beta: R::Scalar,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TreeTransformBackend<R::Scalar>,
+    B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeFusionSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
     RuleKey: Clone + Eq + Hash,
-    R::Scalar: TreeTransformScalar,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
 {
     context.all_codomain_tree_transform_into(rule, operation, dst, src, alpha, beta)
 }
@@ -3232,7 +3349,8 @@ where
 }
 
 fn tree_transform_structure_with_strided_kernel<
-    T,
+    D,
+    C,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const SRC_NOUT: usize,
@@ -3240,21 +3358,23 @@ fn tree_transform_structure_with_strided_kernel<
     SDst,
     SSrc,
 >(
-    workspace: &mut TreeTransformWorkspace<T>,
-    structure: &TreeTransformStructure<T>,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: T,
-    beta: T,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
         + PartialEq
         + Zero
         + One
-        + strided_kernel::MaybeSendSync,
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     structure.validate_replay_structures(dst.structure(), src.structure())?;
     let dst_data = dst.data_mut();
@@ -3306,7 +3426,8 @@ where
 
 fn tree_transform_structure_with_dense_recoupling<
     E,
-    T,
+    D,
+    C,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const SRC_NOUT: usize,
@@ -3315,16 +3436,17 @@ fn tree_transform_structure_with_dense_recoupling<
     SSrc,
 >(
     dense: &mut E,
-    workspace: &mut TreeTransformWorkspace<T>,
-    structure: &TreeTransformStructure<T>,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
-    alpha: T,
-    beta: T,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    T: DenseRecouplingScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     structure.validate_replay_structures(dst.structure(), src.structure())?;
     let dst_data = dst.data_mut();
@@ -3448,25 +3570,27 @@ where
     }
 }
 
-fn tree_transform_single_with_strided_kernel<T>(
+fn tree_transform_single_with_strided_kernel<D, C>(
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
     dst_layout: &TreeTransformLayout,
     src_layout: &TreeTransformLayout,
-    coefficient: T,
-    dst_data: &mut [T],
-    src_data: &[T],
-    alpha: T,
-    beta: T,
+    coefficient: C,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
         + PartialEq
         + Zero
         + One
-        + strided_kernel::MaybeSendSync,
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     let shape = layouts.shape(dst_layout);
     let mut dst = strided_kernel::StridedViewMut::new(
@@ -3476,14 +3600,14 @@ where
         dst_layout.offset,
     )
     .map_err(strided_error)?;
-    let src = strided_kernel::StridedView::<T>::new(
+    let src = strided_kernel::StridedView::<D>::new(
         src_data,
         shape,
         layouts.strides(src_layout),
         src_layout.offset,
     )
     .map_err(strided_error)?;
-    let scale = alpha * coefficient;
+    let scale = alpha.scale_by_coefficient(coefficient);
     if beta.is_zero() {
         strided_kernel::copy_scale(&mut dst, &src, scale).map_err(strided_error)
     } else {
@@ -3495,8 +3619,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_pack_gemm_scatter<T>(
-    workspace: &mut TreeTransformWorkspace<T>,
+fn tree_transform_multi_with_pack_gemm_scatter<D, C>(
+    workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
     dst_count: usize,
@@ -3504,20 +3628,22 @@ fn tree_transform_multi_with_pack_gemm_scatter<T>(
     src_count: usize,
     coefficient_start: usize,
     element_count: usize,
-    coefficients_src_by_dst: &[T],
-    dst_data: &mut [T],
-    src_data: &[T],
-    alpha: T,
-    beta: T,
+    coefficients_src_by_dst: &[C],
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
         + PartialEq
         + Zero
         + One
-        + strided_kernel::MaybeSendSync,
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     let source_len = element_count
         .checked_mul(src_count)
@@ -3525,8 +3651,8 @@ where
     let destination_len = element_count
         .checked_mul(dst_count)
         .ok_or(OperationError::ElementCountOverflow)?;
-    workspace.source.resize(source_len, T::zero());
-    workspace.destination.resize(destination_len, T::zero());
+    workspace.source.resize(source_len, D::zero());
+    workspace.destination.resize(destination_len, D::zero());
 
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
@@ -3566,9 +3692,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_dense_recoupling<E, T>(
+fn tree_transform_multi_with_dense_recoupling<E, D, C>(
     dense: &mut E,
-    workspace: &mut TreeTransformWorkspace<T>,
+    workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
     dst_count: usize,
@@ -3576,15 +3702,16 @@ fn tree_transform_multi_with_dense_recoupling<E, T>(
     src_count: usize,
     coefficient_start: usize,
     element_count: usize,
-    coefficients_src_by_dst: &[T],
-    dst_data: &mut [T],
-    src_data: &[T],
-    alpha: T,
-    beta: T,
+    coefficients_src_by_dst: &[C],
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    T: DenseRecouplingScalar,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     let source_len = element_count
         .checked_mul(src_count)
@@ -3592,8 +3719,8 @@ where
     let destination_len = element_count
         .checked_mul(dst_count)
         .ok_or(OperationError::ElementCountOverflow)?;
-    workspace.source.resize(source_len, T::zero());
-    workspace.destination.resize(destination_len, T::zero());
+    workspace.source.resize(source_len, D::zero());
+    workspace.destination.resize(destination_len, D::zero());
 
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
@@ -3606,12 +3733,32 @@ where
         )?;
     }
 
+    let coefficient_count = src_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_end = coefficient_start
+        .checked_add(coefficient_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if coefficients_src_by_dst.len() < coefficient_end {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: coefficient_end,
+            actual: coefficients_src_by_dst.len(),
+        });
+    }
+    workspace.coefficients.clear();
+    workspace.coefficients.extend(
+        coefficients_src_by_dst[coefficient_start..coefficient_end]
+            .iter()
+            .copied()
+            .map(D::coefficient_as_data),
+    );
+
     apply_recoupling_matrix_with_dense_executor(
         dense,
         &mut workspace.destination,
         &workspace.source,
-        coefficients_src_by_dst,
-        coefficient_start,
+        &workspace.coefficients,
+        0,
         element_count,
         src_count,
         dst_count,
@@ -3634,17 +3781,18 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_recoupling_matrix_src_times_u_transpose<T>(
-    destination: &mut [T],
-    source: &[T],
-    coefficients_src_by_dst: &[T],
+fn apply_recoupling_matrix_src_times_u_transpose<D, C>(
+    destination: &mut [D],
+    source: &[D],
+    coefficients_src_by_dst: &[C],
     coefficient_start: usize,
     element_count: usize,
     src_count: usize,
     dst_count: usize,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero,
+    D: Copy + Add<D, Output = D> + Zero + RecouplingCoefficientAction<C>,
+    C: Copy,
 {
     let source_len = element_count
         .checked_mul(src_count)
@@ -3685,11 +3833,11 @@ where
         let dst_column_start = dst_index * element_count;
         let coefficient_row_start = coefficient_start + dst_index * src_count;
         for element in 0..element_count {
-            let mut sum = T::zero();
+            let mut sum = D::zero();
             for src_index in 0..src_count {
                 let coeff = coefficients_src_by_dst[coefficient_row_start + src_index];
                 let src_value = source[element + src_index * element_count];
-                sum = sum + src_value * coeff;
+                sum = sum + src_value.scale_by_coefficient(coeff);
             }
             destination[dst_column_start + element] = sum;
         }
@@ -4722,7 +4870,8 @@ mod tests {
             + Mul<T, Output = T>
             + Zero
             + One
-            + strided_kernel::MaybeSendSync,
+            + strided_kernel::MaybeSendSync
+            + RecouplingCoefficientAction<T>,
     {
         let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
         let src = TensorMap::<T, 2, 0>::from_vec(values, space.clone()).unwrap();
@@ -4765,7 +4914,8 @@ mod tests {
             + Mul<T, Output = T>
             + Zero
             + One
-            + strided_kernel::MaybeSendSync,
+            + strided_kernel::MaybeSendSync
+            + RecouplingCoefficientAction<T>,
     {
         let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
         let src_structure =
@@ -4826,6 +4976,94 @@ mod tests {
         assert_eq!(workspace.destination_len(), 8);
     }
 
+    fn assert_tree_single_mixed_dtype<D, C>(
+        values: Vec<D>,
+        fill: D,
+        coefficient: C,
+        alpha: D,
+        beta: D,
+        expected: Vec<D>,
+    ) where
+        D: TreeTransformScalar + RecouplingCoefficientAction<C> + Clone + Debug,
+        C: Copy,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+        let src = TensorMap::<D, 2, 0>::from_vec(values, space.clone()).unwrap();
+        let mut dst = TensorMap::<D, 2, 0>::filled(fill, space).unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::single(0, 0, coefficient)],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+    }
+
+    fn assert_tree_multi_mixed_dtype<D, C>(
+        src_values: Vec<D>,
+        coefficients_src_by_dst: Vec<C>,
+        alpha: D,
+        beta: D,
+        fill: D,
+        expected: Vec<D>,
+    ) where
+        D: TreeTransformScalar + RecouplingCoefficientAction<C> + Clone + Debug,
+        C: Copy,
+    {
+        let space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+        let src_structure =
+            BlockStructure::packed_column_major(2, [vec![2, 2], vec![2, 2]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(2, [vec![4, 1], vec![4, 1]]).unwrap();
+        let src =
+            TensorMap::<D, 2, 0>::from_vec_with_structure(src_values, space.clone(), src_structure)
+                .unwrap();
+        let mut dst =
+            TensorMap::<D, 2, 0>::from_vec_with_structure(vec![fill; 8], space, dst_structure)
+                .unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                coefficients_src_by_dst,
+            )],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected.as_slice());
+        assert_eq!(workspace.source_len(), 8);
+        assert_eq!(workspace.destination_len(), 8);
+    }
+
     fn assert_tree_multi_tensorkit_orientation_dtype<T>(
         src_values: Vec<T>,
         coefficients_src_by_dst: Vec<T>,
@@ -4842,7 +5080,8 @@ mod tests {
             + Mul<T, Output = T>
             + Zero
             + One
-            + strided_kernel::MaybeSendSync,
+            + strided_kernel::MaybeSendSync
+            + RecouplingCoefficientAction<T>,
     {
         let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
         let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
@@ -4949,7 +5188,8 @@ mod tests {
             + Mul<T, Output = T>
             + Zero
             + One
-            + strided_kernel::MaybeSendSync,
+            + strided_kernel::MaybeSendSync
+            + RecouplingCoefficientAction<T>,
     {
         let key10 = BlockKey::sector_ids([10]);
         let key20 = BlockKey::sector_ids([20]);
@@ -5300,6 +5540,46 @@ mod tests {
     }
 
     #[test]
+    fn tree_transform_single_replay_supports_complex_data_with_real_coefficients() {
+        assert_tree_single_mixed_dtype(
+            vec![
+                Complex32::new(1.0, 1.0),
+                Complex32::new(2.0, -1.0),
+                Complex32::new(3.0, 0.5),
+                Complex32::new(4.0, -0.5),
+            ],
+            Complex32::new(10.0, 1.0),
+            3.0_f64,
+            Complex32::new(2.0, 0.0),
+            Complex32::new(4.0, 0.0),
+            vec![
+                Complex32::new(46.0, 10.0),
+                Complex32::new(52.0, -2.0),
+                Complex32::new(58.0, 7.0),
+                Complex32::new(64.0, 1.0),
+            ],
+        );
+        assert_tree_single_mixed_dtype(
+            vec![
+                Complex64::new(1.0, 1.0),
+                Complex64::new(2.0, -1.0),
+                Complex64::new(3.0, 0.5),
+                Complex64::new(4.0, -0.5),
+            ],
+            Complex64::new(10.0, 1.0),
+            3.0_f64,
+            Complex64::new(2.0, 0.0),
+            Complex64::new(4.0, 0.0),
+            vec![
+                Complex64::new(46.0, 10.0),
+                Complex64::new(52.0, -2.0),
+                Complex64::new(58.0, 7.0),
+                Complex64::new(64.0, 1.0),
+            ],
+        );
+    }
+
+    #[test]
     fn tree_transform_multi_pack_gemm_scatter_supports_all_numeric_dtypes() {
         assert_tree_multi_dtype(
             vec![2.0_f32, 3.0, 5.0, 7.0],
@@ -5357,6 +5637,62 @@ mod tests {
                 Complex64::new(5.0, 0.0),
                 Complex64::new(7.0, 0.0),
             ],
+            Complex64::new(2.0, 0.0),
+            Complex64::new(10.0, 0.0),
+            Complex64::new(1.0, 1.0),
+            vec![
+                Complex64::new(44.0, 10.0),
+                Complex64::new(54.0, 10.0),
+                Complex64::new(64.0, 10.0),
+                Complex64::new(74.0, 10.0),
+                Complex64::new(90.0, 10.0),
+                Complex64::new(114.0, 10.0),
+                Complex64::new(138.0, 10.0),
+                Complex64::new(162.0, 10.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn tree_transform_multi_pack_gemm_scatter_supports_complex_data_with_real_coefficients() {
+        assert_tree_multi_mixed_dtype(
+            vec![
+                Complex32::new(1.0, 0.0),
+                Complex32::new(2.0, 0.0),
+                Complex32::new(3.0, 0.0),
+                Complex32::new(4.0, 0.0),
+                Complex32::new(5.0, 0.0),
+                Complex32::new(6.0, 0.0),
+                Complex32::new(7.0, 0.0),
+                Complex32::new(8.0, 0.0),
+            ],
+            vec![2.0_f64, 3.0, 5.0, 7.0],
+            Complex32::new(2.0, 0.0),
+            Complex32::new(10.0, 0.0),
+            Complex32::new(1.0, 1.0),
+            vec![
+                Complex32::new(44.0, 10.0),
+                Complex32::new(54.0, 10.0),
+                Complex32::new(64.0, 10.0),
+                Complex32::new(74.0, 10.0),
+                Complex32::new(90.0, 10.0),
+                Complex32::new(114.0, 10.0),
+                Complex32::new(138.0, 10.0),
+                Complex32::new(162.0, 10.0),
+            ],
+        );
+        assert_tree_multi_mixed_dtype(
+            vec![
+                Complex64::new(1.0, 0.0),
+                Complex64::new(2.0, 0.0),
+                Complex64::new(3.0, 0.0),
+                Complex64::new(4.0, 0.0),
+                Complex64::new(5.0, 0.0),
+                Complex64::new(6.0, 0.0),
+                Complex64::new(7.0, 0.0),
+                Complex64::new(8.0, 0.0),
+            ],
+            vec![2.0_f64, 3.0, 5.0, 7.0],
             Complex64::new(2.0, 0.0),
             Complex64::new(10.0, 0.0),
             Complex64::new(1.0, 1.0),
@@ -6796,6 +7132,67 @@ mod tests {
     }
 
     #[test]
+    fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [true],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+        let dst_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(expected_dst_key.clone(), vec![1, 1])],
+        )
+        .unwrap();
+        let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let dst_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let src = TensorMap::<Complex64, 1, 1>::from_vec_with_structure(
+            vec![Complex64::new(7.0, 1.0)],
+            src_space,
+            src_structure,
+        )
+        .unwrap();
+        let mut dst = TensorMap::<Complex64, 1, 1>::from_vec_with_structure(
+            vec![Complex64::new(2.0, -3.0)],
+            dst_space,
+            dst_structure,
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::permute([1], [0]);
+
+        tree_pair_transform_into(
+            &SU2FusionRule,
+            operation,
+            &mut dst,
+            &src,
+            Complex64::new(3.0, 0.0),
+            Complex64::new(5.0, 0.0),
+        )
+        .unwrap();
+
+        assert_eq!(dst.structure().block(0).unwrap().key(), &expected_dst_key);
+        assert!((dst.data()[0] - Complex64::new(31.0, -12.0)).norm() < 1.0e-12);
+    }
+
+    #[test]
     fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
         let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
         let src_structure =
@@ -6963,6 +7360,47 @@ mod tests {
                 "actual {actual} != expected {expected}"
             );
         }
+    }
+
+    #[test]
+    fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
+        let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
+        let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+        let src = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+            vec![Complex64::new(10.0, 1.0), Complex64::new(20.0, -2.0)],
+            src_space.clone(),
+        )
+        .unwrap();
+        let mut dst = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+            vec![Complex64::new(1.0, 3.0), Complex64::new(2.0, -4.0)],
+            dst_space.clone(),
+        )
+        .unwrap();
+        let initial_dst = dst.data().to_vec();
+        let plan = build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure())
+            .unwrap();
+        assert!((single_transform_coefficient_for_coupled(&plan, c0) - 1.0).abs() < 1.0e-12);
+        assert!((single_transform_coefficient_for_coupled(&plan, c1) + 1.0).abs() < 1.0e-12);
+        let alpha = Complex64::new(2.0, 0.0);
+        let beta = Complex64::new(3.0, 0.0);
+        let mut expected = initial_dst
+            .iter()
+            .map(|value| *value * beta)
+            .collect::<Vec<_>>();
+        for spec in plan.specs() {
+            let src_key = &spec.src_keys()[0];
+            let dst_key = &spec.dst_keys()[0];
+            let src_offset = src.structure().block_by_key(src_key).unwrap().offset();
+            let dst_offset = dst.structure().block_by_key(dst_key).unwrap().offset();
+            expected[dst_offset] = expected[dst_offset]
+                + src.data()[src_offset].scale_by_coefficient(spec.coefficients_src_by_dst()[0])
+                    * alpha;
+        }
+
+        tree_pair_transform_into(&rule, operation, &mut dst, &src, alpha, beta).unwrap();
+
+        assert_eq!(dst.structure(), dst_space.subblock_structure());
+        assert_eq!(dst.data(), expected.as_slice());
     }
 
     #[test]
