@@ -8,26 +8,30 @@ use tenet_core::{
     U1FusionRule, U1Irrep,
 };
 use tenet_operations::{
-    tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_structure,
-    tree_transform_execute_with, DenseTreeTransformOperations, TreeTransformOperationKey,
-    TreeTransformWorkspace,
+    tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
+    tree_pair_transform_structure, tree_transform_execute_with, DenseTreeTransformOperations,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext, TreeTransformOperationKey,
+    TreeTransformRuleCacheKey, TreeTransformWorkspace,
 };
 
 fn main() {
     const BUILD_ITERS: usize = 100_000;
     const REPLAY_ITERS: usize = 1_000_000;
+    const CONTEXT_ITERS: usize = 1_000_000;
     const REBUILD_EXECUTE_ITERS: usize = 100_000;
     const ONESHOT_ITERS: usize = 10_000;
 
     let product = bench_product(
         BUILD_ITERS,
         REPLAY_ITERS,
+        CONTEXT_ITERS,
         REBUILD_EXECUTE_ITERS,
         ONESHOT_ITERS,
     );
     let su2 = bench_su2(
         BUILD_ITERS,
         REPLAY_ITERS,
+        CONTEXT_ITERS,
         REBUILD_EXECUTE_ITERS,
         ONESHOT_ITERS,
     );
@@ -38,6 +42,7 @@ fn main() {
         product,
         BUILD_ITERS,
         REPLAY_ITERS,
+        CONTEXT_ITERS,
         REBUILD_EXECUTE_ITERS,
         ONESHOT_ITERS,
     );
@@ -46,6 +51,7 @@ fn main() {
         su2,
         BUILD_ITERS,
         REPLAY_ITERS,
+        CONTEXT_ITERS,
         REBUILD_EXECUTE_ITERS,
         ONESHOT_ITERS,
     );
@@ -55,6 +61,7 @@ fn main() {
 struct Timings {
     compile: Duration,
     replay: Duration,
+    context_hit_execute: Duration,
     rebuild_execute: Duration,
     oneshot: Duration,
 }
@@ -68,15 +75,21 @@ fn print_fixture(
     timings: Timings,
     build_iters: usize,
     replay_iters: usize,
+    context_iters: usize,
     rebuild_execute_iters: usize,
     oneshot_iters: usize,
 ) {
     let compile_ns = nanos_per(timings.compile, build_iters);
     let replay_ns = nanos_per(timings.replay, replay_iters);
+    let context_hit_execute_ns = nanos_per(timings.context_hit_execute, context_iters);
     let rebuild_execute_ns = nanos_per(timings.rebuild_execute, rebuild_execute_iters);
     let oneshot_ns = nanos_per(timings.oneshot, oneshot_iters);
     println!("{name} compile avg: {:>10.3} ns", compile_ns);
     println!("{name} replay  avg: {:>10.3} ns", replay_ns);
+    println!(
+        "{name} context cache-hit+execute avg: {:>10.3} ns",
+        context_hit_execute_ns
+    );
     println!(
         "{name} rebuild+execute avg: {:>10.3} ns",
         rebuild_execute_ns
@@ -87,6 +100,10 @@ fn print_fixture(
         compile_ns / replay_ns
     );
     println!(
+        "{name} context/replay ratio: {:>8.2}x",
+        context_hit_execute_ns / replay_ns
+    );
+    println!(
         "{name} rebuild+execute/replay ratio: {:>8.2}x",
         rebuild_execute_ns / replay_ns
     );
@@ -95,6 +112,7 @@ fn print_fixture(
 fn bench_product(
     build_iters: usize,
     replay_iters: usize,
+    context_iters: usize,
     rebuild_execute_iters: usize,
     oneshot_iters: usize,
 ) -> Timings {
@@ -148,6 +166,33 @@ fn bench_product(
         black_box(dst.data()[0]);
     });
 
+    type ProductRuleKey = <ProductRule as TreeTransformRuleCacheKey>::Key;
+    let mut context = TreeTransformExecutionContext::<f64, ProductRuleKey>::default();
+    tree_pair_transform_into_with_context(
+        &mut context,
+        &rule,
+        operation.clone(),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    let context_hit_execute = time_loop(context_iters, || {
+        src.data_mut().copy_from_slice(&[10.0, 20.0]);
+        tree_pair_transform_into_with_context(
+            &mut context,
+            &rule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            black_box(1.0),
+            black_box(0.0),
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
     let oneshot = time_loop(oneshot_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
         tree_pair_transform_into(
@@ -165,6 +210,7 @@ fn bench_product(
     Timings {
         compile,
         replay,
+        context_hit_execute,
         rebuild_execute,
         oneshot,
     }
@@ -173,6 +219,7 @@ fn bench_product(
 fn bench_su2(
     build_iters: usize,
     replay_iters: usize,
+    context_iters: usize,
     rebuild_execute_iters: usize,
     oneshot_iters: usize,
 ) -> Timings {
@@ -233,6 +280,33 @@ fn bench_su2(
         black_box(dst.data()[0]);
     });
 
+    let mut context =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    tree_pair_transform_into_with_context(
+        &mut context,
+        &SU2FusionRule,
+        operation.clone(),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    let context_hit_execute = time_loop(context_iters, || {
+        src.data_mut().copy_from_slice(&[10.0, 20.0]);
+        tree_pair_transform_into_with_context(
+            &mut context,
+            &SU2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            black_box(1.0),
+            black_box(0.0),
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
     let oneshot = time_loop(oneshot_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
         tree_pair_transform_into(
@@ -250,6 +324,7 @@ fn bench_su2(
     Timings {
         compile,
         replay,
+        context_hit_execute,
         rebuild_execute,
         oneshot,
     }
@@ -266,8 +341,11 @@ fn time_loop(iterations: usize, mut f: impl FnMut()) -> Duration {
     start.elapsed()
 }
 
+type FpU1Rule = tenet_core::ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+type ProductRule = tenet_core::ProductFusionRule<FpU1Rule, SU2FusionRule>;
+
 fn product_fixture() -> (
-    impl tenet_core::MultiplicityFreeRigidSymbols<Scalar = f64>,
+    ProductRule,
     FusionTensorMapSpace<2, 1>,
     FusionTensorMapSpace<2, 1>,
 ) {

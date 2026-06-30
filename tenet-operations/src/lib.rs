@@ -2924,10 +2924,11 @@ where
 
 /// Build a replay-ready tree-pair transform structure.
 ///
-/// This is the hot-path API. It performs the categorical tree-pair lowering and
-/// compiles the result against the actual `dst` and `src` block structures. The
-/// returned structure can be reused with [`tree_transform_execute_with`] as long
-/// as replay tensors have matching structures.
+/// This builds the replay-ready descriptor used by hot paths. It performs the
+/// categorical tree-pair lowering and compiles the result against the actual
+/// `dst` and `src` block structures. The returned structure can be reused with
+/// [`tree_transform_execute_with`] as long as replay tensors have matching
+/// structures.
 pub fn tree_pair_transform_structure<
     R,
     TDst,
@@ -2994,8 +2995,12 @@ where
 /// Compile and execute a tree-pair transform with caller-owned backend/workspace.
 ///
 /// The backend and workspace are reused, but the transform structure is still
-/// rebuilt on every call. Use [`tree_pair_transform_structure`] plus
-/// [`tree_transform_execute_with`] when the transform itself is reused.
+/// rebuilt on every call. This mirrors a TensorKit-style one-call transformer
+/// application with explicit execution resources, not a cached transformer.
+/// Use [`tree_pair_transform_into_with_context`] when the categorical plan and
+/// replay descriptor should be cached behind a caller-owned context. Use
+/// [`tree_pair_transform_structure`] plus [`tree_transform_execute_with`] for
+/// the tightest loop when the exact replay descriptor is already known.
 pub fn tree_pair_transform_into_with<
     B,
     R,
