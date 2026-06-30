@@ -384,6 +384,47 @@ impl FusionTreeHomSpace {
         self.codomain.len() + self.domain.len()
     }
 
+    pub fn select<R>(
+        &self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+    {
+        validate_axis_selection(codomain_axes, domain_axes, self.rank())?;
+
+        let codomain = codomain_axes
+            .iter()
+            .map(|&axis| self.external_axis_leg(rule, axis))
+            .collect::<Vec<_>>();
+        let domain = domain_axes
+            .iter()
+            .map(|&axis| dual_sector_leg(rule, &self.external_axis_leg(rule, axis)))
+            .collect::<Vec<_>>();
+        Ok(Self::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new(domain),
+        ))
+    }
+
+    pub fn permute<R>(
+        &self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+    {
+        let mut axes = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
+        axes.extend_from_slice(codomain_axes);
+        axes.extend_from_slice(domain_axes);
+        validate_permutation(&axes, self.rank())?;
+        self.select(rule, codomain_axes, domain_axes)
+    }
+
     pub fn compose<R>(rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
     where
         R: FusionRule,
@@ -412,40 +453,38 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        let lhs_rank = lhs.rank();
-        let rhs_rank = rhs.rank();
-        let lhs_domain_axes =
-            (lhs.codomain.len()..lhs.codomain.len() + lhs.domain.len()).collect::<Vec<_>>();
-        let rhs_codomain_axes = (0..rhs.codomain.len()).collect::<Vec<_>>();
-        if lhs_contracting_axes != lhs_domain_axes.as_slice() {
-            return Err(CoreError::InvalidPermutation {
-                permutation: lhs_contracting_axes.to_vec(),
-                rank: lhs_rank,
-            });
-        }
-        if rhs_contracting_axes != rhs_codomain_axes.as_slice() {
-            return Err(CoreError::InvalidPermutation {
-                permutation: rhs_contracting_axes.to_vec(),
-                rank: rhs_rank,
+        if lhs_contracting_axes.len() != rhs_contracting_axes.len() {
+            return Err(CoreError::DimensionMismatch {
+                expected: lhs_contracting_axes.len(),
+                actual: rhs_contracting_axes.len(),
             });
         }
 
-        let output_rank = lhs.codomain.len() + rhs.domain.len();
-        let canonical_output_axes = (0..output_rank).collect::<Vec<_>>();
-        if output_axes != canonical_output_axes.as_slice() {
-            return Err(CoreError::InvalidPermutation {
-                permutation: output_axes.to_vec(),
-                rank: output_rank,
-            });
-        }
-        if dst_codomain_rank != lhs.codomain.len() {
+        let lhs_seen = validate_axis_subset(lhs_contracting_axes, lhs.rank())?;
+        let rhs_seen = validate_axis_subset(rhs_contracting_axes, rhs.rank())?;
+        let lhs_open_axes = (0..lhs.rank())
+            .filter(|&axis| !lhs_seen[axis])
+            .collect::<Vec<_>>();
+        let rhs_open_axes = (0..rhs.rank())
+            .filter(|&axis| !rhs_seen[axis])
+            .collect::<Vec<_>>();
+        let output_rank = lhs_open_axes.len() + rhs_open_axes.len();
+        validate_permutation(output_axes, output_rank)?;
+        if dst_codomain_rank > output_rank {
             return Err(CoreError::StructureRankMismatch {
-                expected: lhs.codomain.len(),
+                expected: output_rank,
                 actual: dst_codomain_rank,
             });
         }
 
-        Self::compose(rule, lhs, rhs)
+        let lhs = lhs.permute(rule, &lhs_open_axes, lhs_contracting_axes)?;
+        let rhs = rhs.permute(rule, rhs_contracting_axes, &rhs_open_axes)?;
+        let composed = Self::compose(rule, &lhs, &rhs)?;
+        composed.permute(
+            rule,
+            &output_axes[..dst_codomain_rank],
+            &output_axes[dst_codomain_rank..],
+        )
     }
 
     pub fn fusion_tree_keys<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
@@ -569,6 +608,63 @@ impl FusionTreeHomSpace {
         self.sector_structure(rule)
             .map(|structure| structure.fusion_tree_groups())
     }
+
+    fn external_axis_leg<R>(&self, rule: &R, axis: usize) -> SectorLeg
+    where
+        R: FusionRule,
+    {
+        if axis < self.codomain.len() {
+            self.codomain.legs()[axis].clone()
+        } else {
+            dual_sector_leg(rule, &self.domain.legs()[axis - self.codomain.len()])
+        }
+    }
+}
+
+fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
+where
+    R: FusionRule,
+{
+    SectorLeg::new(
+        leg.sectors()
+            .iter()
+            .copied()
+            .map(|sector| rule.dual(sector)),
+        !leg.is_dual(),
+    )
+}
+
+fn validate_axis_subset(axes: &[usize], rank: usize) -> Result<Vec<bool>, CoreError> {
+    let mut seen = vec![false; rank];
+    for &axis in axes {
+        if axis >= rank || seen[axis] {
+            return Err(CoreError::InvalidPermutation {
+                permutation: axes.to_vec(),
+                rank,
+            });
+        }
+        seen[axis] = true;
+    }
+    Ok(seen)
+}
+
+fn validate_axis_selection(
+    codomain_axes: &[usize],
+    domain_axes: &[usize],
+    rank: usize,
+) -> Result<(), CoreError> {
+    for &axis in codomain_axes.iter().chain(domain_axes) {
+        if axis >= rank {
+            let mut axes = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
+            axes.extend_from_slice(codomain_axes);
+            axes.extend_from_slice(domain_axes);
+            return Err(CoreError::InvalidPermutation {
+                permutation: axes,
+                rank,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_composed_leg<R>(
@@ -7606,38 +7702,125 @@ mod tests {
     }
 
     #[test]
-    fn fusion_tree_homspace_tensorcontract_accepts_only_canonical_compose_shape_for_now() {
-        let rule = Z2FusionRule;
-        let lhs = FusionTreeHomSpace::from_sector_ids([0], [0]);
-        let rhs = FusionTreeHomSpace::from_sector_ids([0], [0]);
+    fn fusion_tree_homspace_select_dualizes_axes_like_tensorkit() {
+        let rule = U1FusionRule;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([u1(1)], false),
+                SectorLeg::new([u1(2)], true),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([u1(3)], false),
+                SectorLeg::new([u1(-5)], true),
+            ]),
+        );
+
+        let selected = hom.select(&rule, &[2, 0], &[1, 3]).unwrap();
+
+        assert_eq!(selected.codomain().legs()[0].sectors(), &[u1(-3)]);
+        assert!(selected.codomain().legs()[0].is_dual());
+        assert_eq!(selected.codomain().legs()[1].sectors(), &[u1(1)]);
+        assert!(!selected.codomain().legs()[1].is_dual());
+        assert_eq!(selected.domain().legs()[0].sectors(), &[u1(-2)]);
+        assert!(!selected.domain().legs()[0].is_dual());
+        assert_eq!(selected.domain().legs()[1].sectors(), &[u1(-5)]);
+        assert!(selected.domain().legs()[1].is_dual());
+    }
+
+    #[test]
+    fn fusion_tree_homspace_permute_requires_full_axis_permutation() {
+        let rule = U1FusionRule;
+        let hom = FusionTreeHomSpace::from_sectors([u1(0), u1(1)], [u1(2)]);
+
+        let err = hom.permute(&rule, &[0], &[2]).unwrap_err();
+        assert_eq!(
+            err,
+            CoreError::InvalidPermutation {
+                permutation: vec![0, 2],
+                rank: 3,
+            }
+        );
+
+        let err = hom.permute(&rule, &[0, 0], &[2]).unwrap_err();
+        assert_eq!(
+            err,
+            CoreError::InvalidPermutation {
+                permutation: vec![0, 0, 2],
+                rank: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn fusion_tree_homspace_tensorcontract_preserves_canonical_compose() {
+        let rule = U1FusionRule;
+        let lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(-1)], false)]),
+        );
+        let rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(3)], false)]),
+        );
+
+        let expected = FusionTreeHomSpace::compose(&rule, &lhs, &rhs).unwrap();
+        let actual =
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[1], &[0], &[0, 1], 1)
+                .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_tensorcontract_matches_tensorkit_structural_formula() {
+        let rule = U1FusionRule;
+        let lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(5)], false)]),
+        );
+        let rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(7)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(-1)], false)]),
+        );
+
+        let lhs_permuted = lhs.permute(&rule, &[1], &[0]).unwrap();
+        let rhs_permuted = rhs.permute(&rule, &[1], &[0]).unwrap();
+        let expected = FusionTreeHomSpace::compose(&rule, &lhs_permuted, &rhs_permuted)
+            .unwrap()
+            .permute(&rule, &[0], &[1])
+            .unwrap();
+        let actual =
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[0], &[1], &[0, 1], 1)
+                .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.codomain().legs()[0].sectors(), &[u1(-5)]);
+        assert!(actual.codomain().legs()[0].is_dual());
+        assert_eq!(actual.domain().legs()[0].sectors(), &[u1(-7)]);
+        assert!(actual.domain().legs()[0].is_dual());
+    }
+
+    #[test]
+    fn fusion_tree_homspace_tensorcontract_accepts_output_permutation_structurally() {
+        let rule = U1FusionRule;
+        let lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(-1)], false)]),
+        );
+        let rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(3)], false)]),
+        );
 
         let composed =
-            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[1], &[0], &[0, 1], 1)
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[1], &[0], &[1, 0], 1)
                 .unwrap();
         assert_eq!(composed.codomain().len(), 1);
         assert_eq!(composed.domain().len(), 1);
-
-        let noncanonical_lhs =
-            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[0], &[0], &[0, 1], 1)
-                .unwrap_err();
-        assert_eq!(
-            noncanonical_lhs,
-            CoreError::InvalidPermutation {
-                permutation: vec![0],
-                rank: 2,
-            }
-        );
-
-        let output_permute =
-            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[1], &[0], &[1, 0], 1)
-                .unwrap_err();
-        assert_eq!(
-            output_permute,
-            CoreError::InvalidPermutation {
-                permutation: vec![1, 0],
-                rank: 2,
-            }
-        );
+        assert_eq!(composed.codomain().legs()[0].sectors(), &[u1(-3)]);
+        assert!(composed.codomain().legs()[0].is_dual());
+        assert_eq!(composed.domain().legs()[0].sectors(), &[u1(-2)]);
+        assert!(composed.domain().legs()[0].is_dual());
     }
 
     #[test]

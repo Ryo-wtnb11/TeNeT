@@ -505,6 +505,18 @@ where
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
+    if !is_canonical_fusion_compose_contract(
+        lhs.homspace(),
+        rhs.homspace(),
+        axis_plan.lhs_contracting_axes.as_slice(),
+        axis_plan.rhs_contracting_axes.as_slice(),
+        axis_plan.output_axes.as_slice(),
+        DST_NOUT,
+    ) {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "arbitrary-axis fusion contraction block enumeration requires tree transforms",
+        });
+    }
 
     let mut specs = Vec::new();
     for lhs_index in 0..lhs.subblock_structure().block_count() {
@@ -5584,6 +5596,25 @@ fn contracted_output_external_sectors(
         .collect()
 }
 
+fn is_canonical_fusion_compose_contract(
+    lhs: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+    output_axes: &[usize],
+    dst_codomain_rank: usize,
+) -> bool {
+    let lhs_domain_axes =
+        (lhs.codomain().len()..lhs.codomain().len() + lhs.domain().len()).collect::<Vec<_>>();
+    let rhs_codomain_axes = (0..rhs.codomain().len()).collect::<Vec<_>>();
+    let canonical_output_rank = lhs.codomain().len() + rhs.domain().len();
+    let canonical_output_axes = (0..canonical_output_rank).collect::<Vec<_>>();
+    lhs_contracting_axes == lhs_domain_axes.as_slice()
+        && rhs_contracting_axes == rhs_codomain_axes.as_slice()
+        && output_axes == canonical_output_axes.as_slice()
+        && dst_codomain_rank == lhs.codomain().len()
+}
+
 fn validate_block_index(
     tensor: &'static str,
     index: usize,
@@ -8260,12 +8291,22 @@ mod tests {
     #[test]
     fn tensorcontract_fusion_block_specs_rejects_noncanonical_axes_until_recoupling_is_wired() {
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0)], false);
+        let leg = |is_dual| SectorLeg::new([SectorId::new(0)], is_dual);
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
             TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
             FusionTreeHomSpace::new(
-                FusionProductSpace::new([leg()]),
-                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg(false)]),
+                FusionProductSpace::new([leg(false)]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let transformed_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg(true)]),
+                FusionProductSpace::new([leg(true)]),
             ),
             &rule,
             [vec![1, 1]],
@@ -8274,19 +8315,36 @@ mod tests {
 
         let err = tensorcontract_fusion_block_specs(
             &rule,
+            &transformed_dst_space,
             &fusion_space,
             &fusion_space,
-            &fusion_space,
-            TensorContractAxisSpec::canonical(&[0], &[0]),
+            TensorContractAxisSpec::canonical(&[0], &[1]),
         )
         .unwrap_err();
 
         assert_eq!(
             err,
-            OperationError::Core(CoreError::InvalidPermutation {
-                permutation: vec![0],
-                rank: 2,
-            })
+            OperationError::UnsupportedTensorContractScope {
+                message:
+                    "arbitrary-axis fusion contraction block enumeration requires tree transforms",
+            }
+        );
+
+        let err = tensorcontract_fusion_block_specs(
+            &rule,
+            &transformed_dst_space,
+            &fusion_space,
+            &fusion_space,
+            TensorContractAxisSpec::new(&[1], &[0], AxisPermutation::from_axes(&[1, 0])),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message:
+                    "arbitrary-axis fusion contraction block enumeration requires tree transforms",
+            }
         );
     }
 
