@@ -3488,6 +3488,73 @@ mod tests {
         ))
     }
 
+    type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+    type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+
+    fn fz2_u1_su2_tree_pair_fixture() -> (
+        FpU1Su2Rule,
+        FusionTensorMapSpace<2, 1>,
+        FusionTensorMapSpace<2, 1>,
+        [SectorId; 2],
+    ) {
+        let left_rule = FpU1Rule::default();
+        let rule = FpU1Su2Rule::default();
+        let even = SectorId::new(0);
+        let odd = SectorId::new(1);
+        let left_sector =
+            |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+        let sector = |parity, charge, twice_spin| {
+            rule.encode_sector(left_sector(parity, charge), SectorId::new(twice_spin))
+        };
+
+        let a = sector(odd, 1, 1);
+        let b = sector(odd, -1, 1);
+        let c0 = sector(even, 0, 0);
+        let c1 = sector(even, 0, 2);
+        let src_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
+            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        );
+        let dst_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([b], false), SectorLeg::new([a], false)]),
+            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        );
+        let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+            src_hom,
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+            dst_hom,
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+
+        (rule, src_space, dst_space, [c0, c1])
+    }
+
+    fn single_transform_coefficient_for_coupled(
+        plan: &TreeTransformGroupPlan<f64>,
+        coupled: SectorId,
+    ) -> f64 {
+        let mut found = None;
+        for spec in plan.specs() {
+            assert_eq!(spec.src_keys().len(), 1);
+            assert_eq!(spec.dst_keys().len(), 1);
+            assert_eq!(spec.coefficients_src_by_dst().len(), 1);
+            let dst_coupled = expect_tree_key(&spec.dst_keys()[0]).coupled().unwrap();
+            if dst_coupled == coupled {
+                assert!(found.is_none(), "duplicate coefficient for {coupled:?}");
+                found = Some(spec.coefficients_src_by_dst()[0]);
+            }
+        }
+        found.unwrap_or_else(|| panic!("missing coefficient for {coupled:?}"))
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct UniqueZ2Rule;
 
@@ -5388,6 +5455,52 @@ mod tests {
     }
 
     #[test]
+    fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            src_space,
+            structure.clone(),
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, structure)
+                .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+
+        let compiled =
+            tree_pair_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
+        assert!(compiled.has_pack_gemm_scatter_blocks());
+        tree_pair_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0).unwrap();
+
+        assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
+        assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
             [1],
@@ -5435,6 +5548,53 @@ mod tests {
         assert!((spec.coefficients_src_by_dst()[0] - 1.0).abs() < 1.0e-12);
         plan.compile_structures(&dst_structure, &src_structure)
             .unwrap();
+    }
+
+    #[test]
+    fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [true],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+        let dst_structure = BlockStructure::packed_column_major_with_keys(
+            2,
+            [(expected_dst_key.clone(), vec![1, 1])],
+        )
+        .unwrap();
+        let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let dst_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
+        let src =
+            TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![7.0], src_space, src_structure)
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
+                .unwrap();
+        let operation = TreeTransformOperationKey::permute([1], [0]);
+
+        tree_pair_transform_into(&SU2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
+
+        assert_eq!(dst.structure().block(0).unwrap().key(), &expected_dst_key);
+        assert!((dst.data()[0] - 31.0).abs() < 1.0e-12);
     }
 
     #[test]
@@ -5550,44 +5710,7 @@ mod tests {
 
     #[test]
     fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() {
-        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
-        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
-        let left_rule = FpU1Rule::default();
-        let rule = FpU1Su2Rule::default();
-        let even = SectorId::new(0);
-        let odd = SectorId::new(1);
-        let left_sector =
-            |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
-        let sector = |parity, charge, twice_spin| {
-            rule.encode_sector(left_sector(parity, charge), SectorId::new(twice_spin))
-        };
-
-        let a = sector(odd, 1, 1);
-        let b = sector(odd, -1, 1);
-        let c0 = sector(even, 0, 0);
-        let c1 = sector(even, 0, 2);
-        let src_hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
-            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
-        );
-        let dst_hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([b], false), SectorLeg::new([a], false)]),
-            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
-        );
-        let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
-            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
-            src_hom,
-            &rule,
-            [vec![1, 1, 1], vec![1, 1, 1]],
-        )
-        .unwrap();
-        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
-            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
-            dst_hom,
-            &rule,
-            [vec![1, 1, 1], vec![1, 1, 1]],
-        )
-        .unwrap();
+        let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
         let src_structure = src_space.subblock_structure();
         let dst_structure = dst_space.subblock_structure();
 
@@ -5599,19 +5722,49 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.specs().len(), 2);
-        let expected_coefficients = [1.0, -1.0];
-        for (spec, expected) in plan.specs().iter().zip(expected_coefficients) {
-            assert_eq!(spec.src_keys().len(), 1);
-            assert_eq!(spec.dst_keys().len(), 1);
-            assert_eq!(spec.coefficients_src_by_dst().len(), 1);
-            assert!(
-                (spec.coefficients_src_by_dst()[0] - expected).abs() < 1.0e-12,
-                "coefficient {} != {expected}",
-                spec.coefficients_src_by_dst()[0]
-            );
-        }
+        assert!((single_transform_coefficient_for_coupled(&plan, c0) - 1.0).abs() < 1.0e-12);
+        assert!((single_transform_coefficient_for_coupled(&plan, c1) + 1.0).abs() < 1.0e-12);
         plan.compile_structures(dst_structure, src_structure)
             .unwrap();
+    }
+
+    #[test]
+    fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
+        let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
+        let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+        let src =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let initial_dst = dst.data().to_vec();
+        let plan = build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure())
+            .unwrap();
+        assert!((single_transform_coefficient_for_coupled(&plan, c0) - 1.0).abs() < 1.0e-12);
+        assert!((single_transform_coefficient_for_coupled(&plan, c1) + 1.0).abs() < 1.0e-12);
+        let mut expected = initial_dst
+            .iter()
+            .map(|value| 3.0 * value)
+            .collect::<Vec<_>>();
+        for spec in plan.specs() {
+            let src_key = &spec.src_keys()[0];
+            let dst_key = &spec.dst_keys()[0];
+            let src_offset = src.structure().block_by_key(src_key).unwrap().offset();
+            let dst_offset = dst.structure().block_by_key(dst_key).unwrap().offset();
+            expected[dst_offset] +=
+                2.0 * spec.coefficients_src_by_dst()[0] * src.data()[src_offset];
+        }
+
+        tree_pair_transform_into(&rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
+
+        assert_eq!(dst.structure(), dst_space.subblock_structure());
+        for (actual, expected) in dst.data().iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} != expected {expected}"
+            );
+        }
     }
 
     #[test]
