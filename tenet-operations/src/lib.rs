@@ -1158,6 +1158,14 @@ pub enum TreeTransformOperationKey {
 }
 
 impl TreeTransformOperationKey {
+    /// Build a planar transpose operation.
+    ///
+    /// The two permutations follow TensorKit's `Index2Tuple` convention:
+    /// both `codomain_permutation` and `domain_permutation` contain source
+    /// tensor axis numbers in the full `0..numind` range. They are not local
+    /// permutations within the old codomain/domain parts. For example, for a
+    /// `(NOUT, NIN) = (2, 1)` tensor, keeping the domain leg in the domain uses
+    /// `domain_permutation = [2]`, not `[0]`.
     pub fn transpose<Codomain, Domain>(
         codomain_permutation: Codomain,
         domain_permutation: Domain,
@@ -1172,6 +1180,10 @@ impl TreeTransformOperationKey {
         }
     }
 
+    /// Build a symmetric-braiding permutation operation.
+    ///
+    /// Axis numbering follows TensorKit's `Index2Tuple` convention; see
+    /// [`Self::transpose`].
     pub fn permute<Codomain, Domain>(
         codomain_permutation: Codomain,
         domain_permutation: Domain,
@@ -1186,6 +1198,11 @@ impl TreeTransformOperationKey {
         }
     }
 
+    /// Build an explicit braid operation with source-axis permutations and levels.
+    ///
+    /// Axis numbering follows TensorKit's `Index2Tuple` convention; see
+    /// [`Self::transpose`]. `codomain_levels` and `domain_levels` are the
+    /// levels of the source axes selected by each output tuple.
     pub fn braid<Codomain, Domain, CodomainLevels, DomainLevels>(
         codomain_permutation: Codomain,
         domain_permutation: Domain,
@@ -3221,7 +3238,7 @@ mod tests {
         BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
         FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
         MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SectorId, SectorLeg,
-        TensorMapSpace, U1FusionRule, U1Irrep,
+        TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
     };
 
     fn fusion_tree_test_key<
@@ -5237,6 +5254,34 @@ mod tests {
         assert!((spec.coefficients_src_by_dst()[0] - 1.0).abs() < 1.0e-12);
         plan.compile_structures(&dst_structure, &src_structure)
             .unwrap();
+    }
+
+    #[test]
+    fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
+        let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+
+        let local_domain_identity = build_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            TreeTransformOperationKey::permute([1, 0], [0]),
+            &src_structure,
+        )
+        .unwrap_err();
+        assert_eq!(
+            local_domain_identity,
+            OperationError::Core(CoreError::InvalidPermutation {
+                permutation: vec![1, 0, 0],
+                rank: 3,
+            })
+        );
+
+        build_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            TreeTransformOperationKey::permute([1, 0], [2]),
+            &src_structure,
+        )
+        .unwrap();
     }
 
     #[test]
