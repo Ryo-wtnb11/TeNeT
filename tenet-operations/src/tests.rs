@@ -2,10 +2,11 @@ use super::*;
 use num_complex::{Complex32, Complex64};
 use std::fmt::Debug;
 use tenet_core::{
-    BlockSpec, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    unique_permute_tree_pair, BlockSpec, BraidingStyleKind, FermionParityFusionRule,
+    FusionProductSpace, FusionStyleKind, FusionTensorMapSpace, FusionTreeGroupKey,
+    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreePivotalSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::DenseError;
 
