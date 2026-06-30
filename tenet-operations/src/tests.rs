@@ -1,13 +1,15 @@
 use super::*;
 use num_complex::{Complex32, Complex64};
+use num_traits::{One, Zero};
 use std::fmt::Debug;
+use std::ops::{Add, Mul};
 use tenet_core::{
-    unique_permute_tree_pair, BlockKey, BlockSpec, BraidingStyleKind, CoreError,
-    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeBlockKey, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols,
-    ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMapSpace, U1FusionRule,
-    U1Irrep, Z2FusionRule,
+    unique_permute_tree_pair, BlockKey, BlockSpec, BlockStructure, BlockView, BlockViewMut,
+    BraidingStyleKind, CoreError, FermionParityFusionRule, FusionProductSpace, FusionRule,
+    FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeGroupKey,
+    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreePivotalSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 

@@ -1,0 +1,169 @@
+use core::ops::{Add, Mul};
+use std::hash::Hash;
+
+use num_traits::Zero;
+use tenet_core::{MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap};
+
+use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
+use crate::error::OperationError;
+use crate::scalar::TreeTransformScalar;
+use crate::tree_transform::{
+    TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
+};
+
+#[derive(Debug)]
+pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+    B: TreeTransformBackend<D, C>,
+{
+    backend: B,
+    workspace: B::Workspace,
+    cache: TreeTransformCache<C, RuleKey>,
+}
+
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+    B: TreeTransformBackend<D, C>,
+{
+    pub fn with_parts(
+        backend: B,
+        workspace: B::Workspace,
+        cache: TreeTransformCache<C, RuleKey>,
+    ) -> Self {
+        Self {
+            backend,
+            workspace,
+            cache,
+        }
+    }
+
+    #[inline]
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    #[inline]
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
+    #[inline]
+    pub fn workspace(&self) -> &B::Workspace {
+        &self.workspace
+    }
+
+    #[inline]
+    pub fn workspace_mut(&mut self) -> &mut B::Workspace {
+        &mut self.workspace
+    }
+
+    #[inline]
+    pub fn cache(&self) -> &TreeTransformCache<C, RuleKey> {
+        &self.cache
+    }
+
+    #[inline]
+    pub fn cache_mut(&mut self) -> &mut TreeTransformCache<C, RuleKey> {
+        &mut self.cache
+    }
+
+    pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<C, RuleKey>) {
+        (self.backend, self.workspace, self.cache)
+    }
+}
+
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+    RuleKey: Clone + Eq + Hash,
+    B: TreeTransformBackend<D, C>,
+    B::Workspace: Default,
+{
+    pub fn new(backend: B) -> Self {
+        Self::with_parts(backend, B::Workspace::default(), TreeTransformCache::new())
+    }
+}
+
+impl<D, RuleKey, C, B> Default for TreeTransformExecutionContext<D, RuleKey, C, B>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+    RuleKey: Clone + Eq + Hash,
+    B: TreeTransformBackend<D, C> + Default,
+    B::Workspace: Default,
+{
+    fn default() -> Self {
+        Self::new(B::default())
+    }
+}
+
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
+where
+    D: TreeTransformScalar,
+    C: Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero,
+    RuleKey: Clone + Eq + Hash,
+    B: TreeTransformBackend<D, C>,
+{
+    pub fn tree_pair_transform_into<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
+        backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+    }
+
+    pub fn all_codomain_tree_transform_into<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeFusionSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        let structure = cache.get_or_compile_all_codomain(rule, operation, dst, src)?;
+        backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+    }
+}
