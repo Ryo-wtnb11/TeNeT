@@ -1,4 +1,3 @@
-
 use super::*;
 use num_complex::{Complex32, Complex64};
 use std::fmt::Debug;
