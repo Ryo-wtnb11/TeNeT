@@ -4013,6 +4013,79 @@ where
     tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)
 }
 
+pub fn tensorcontract_fusion_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    axes: TensorContractAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeFusionRule,
+    D: DenseBlockScalar,
+{
+    let mut backend = DenseTreeTransformOperations::default_executor();
+    let mut workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_into_with(
+        &mut backend,
+        &mut workspace,
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorcontract_fusion_into_with<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    axes: TensorContractAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TensorContractBackend<D>,
+    R: MultiplicityFreeFusionRule,
+    D: DenseBlockScalar,
+{
+    let structure = tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes)?;
+    tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)
+}
+
 pub fn tensorcontract_execute_with<
     B,
     D,
@@ -8062,21 +8135,12 @@ mod tests {
             ]
         );
 
-        let structure = tensorcontract_fusion_structure(
+        tensorcontract_fusion_into(
             &rule,
-            &dst,
-            &lhs,
-            &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
-        )
-        .unwrap();
-        tensorcontract_execute_with(
-            &mut DenseTreeTransformOperations::default_executor(),
-            &mut TensorContractWorkspace::default(),
-            &structure,
             &mut dst,
             &lhs,
             &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
             2.0,
             3.0,
         )
