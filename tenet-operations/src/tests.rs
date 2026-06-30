@@ -7,6 +7,7 @@ use tenet_core::{
     MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
     TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
+use tenet_dense::DenseError;
 
 fn fusion_tree_test_key<
     const COD: usize,
