@@ -14,7 +14,7 @@ use super::context::{TensorContractBlockPlanKey, TensorContractCache};
 use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
 use super::scratch::{
     tensorcontract_dynamic_canonical_fusion_block_specs, DynamicFusionMapSpace,
-    DynamicFusionScratch, DynamicFusionScratchWorkspace,
+    DynamicFusionScratch, DynamicFusionScratchWorkspace, DynamicFusionSpaceCache,
 };
 use super::structure::TensorContractStructure;
 
@@ -227,6 +227,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     contract_workspace: &mut BC::Workspace,
     contract_cache: &mut TensorContractCache<TensorContractBlockPlanKey>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
+    space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
     rule: &R,
     plan: &TensorContractFusionExplicitPlan,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -242,13 +243,13 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let lhs_space = DynamicFusionMapSpace::transformed_from_typed(
+    let lhs_space = space_cache.transformed_from_typed(
         rule,
         lhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         plan.lhs_transform(),
     )?;
-    let rhs_space = DynamicFusionMapSpace::transformed_from_typed(
+    let rhs_space = space_cache.transformed_from_typed(
         rule,
         rhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
@@ -302,7 +303,7 @@ where
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
     let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
-    let canonical_dst_space = DynamicFusionMapSpace::canonical_dst(
+    let canonical_dst_space = space_cache.canonical_dst(
         rule,
         lhs_canonical.space(),
         rhs_canonical.space(),

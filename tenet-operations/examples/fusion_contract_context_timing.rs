@@ -97,6 +97,14 @@ fn bench_su2_noncanonical_source() {
         context.fusion_plan_cache_len()
     );
     println!(
+        "fusion_space_cache,transformed_hits={},transformed_misses={},canonical_dst_hits={},canonical_dst_misses={},len={}",
+        context.fusion_space_cache_stats().transformed_hits(),
+        context.fusion_space_cache_stats().transformed_misses(),
+        context.fusion_space_cache_stats().canonical_dst_hits(),
+        context.fusion_space_cache_stats().canonical_dst_misses(),
+        context.fusion_space_cache_len()
+    );
+    println!(
         "contract_structure_cache,hits={},misses={},len={}",
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
@@ -144,6 +152,14 @@ fn bench_su2_output_scratch() {
         context.fusion_plan_cache_len()
     );
     println!(
+        "fusion_space_cache,transformed_hits={},transformed_misses={},canonical_dst_hits={},canonical_dst_misses={},len={}",
+        context.fusion_space_cache_stats().transformed_hits(),
+        context.fusion_space_cache_stats().transformed_misses(),
+        context.fusion_space_cache_stats().canonical_dst_hits(),
+        context.fusion_space_cache_stats().canonical_dst_misses(),
+        context.fusion_space_cache_len()
+    );
+    println!(
         "contract_structure_cache,hits={},misses={},len={}",
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
@@ -188,6 +204,14 @@ fn bench_product_complex() {
         context.fusion_plan_cache_stats().hits(),
         context.fusion_plan_cache_stats().misses(),
         context.fusion_plan_cache_len()
+    );
+    println!(
+        "fusion_space_cache,transformed_hits={},transformed_misses={},canonical_dst_hits={},canonical_dst_misses={},len={}",
+        context.fusion_space_cache_stats().transformed_hits(),
+        context.fusion_space_cache_stats().transformed_misses(),
+        context.fusion_space_cache_stats().canonical_dst_hits(),
+        context.fusion_space_cache_stats().canonical_dst_misses(),
+        context.fusion_space_cache_len()
     );
     println!(
         "contract_structure_cache,hits={},misses={},len={}",

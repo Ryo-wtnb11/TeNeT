@@ -1111,6 +1111,21 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(automatic_context.fusion_plan_cache_len(), 1);
     assert_eq!(automatic_context.fusion_plan_cache_stats().hits(), 0);
     assert_eq!(automatic_context.fusion_plan_cache_stats().misses(), 1);
+    assert_eq!(automatic_context.fusion_space_cache_len(), 2);
+    assert_eq!(automatic_context.fusion_transformed_space_cache_len(), 2);
+    assert_eq!(automatic_context.fusion_canonical_dst_space_cache_len(), 0);
+    assert_eq!(
+        automatic_context
+            .fusion_space_cache_stats()
+            .transformed_hits(),
+        0
+    );
+    assert_eq!(
+        automatic_context
+            .fusion_space_cache_stats()
+            .transformed_misses(),
+        2
+    );
     assert_eq!(
         automatic_context.contract_cache().stats().structure_hits(),
         0
@@ -1165,6 +1180,19 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(automatic_context.fusion_plan_cache_len(), 1);
     assert_eq!(automatic_context.fusion_plan_cache_stats().hits(), 1);
     assert_eq!(automatic_context.fusion_plan_cache_stats().misses(), 1);
+    assert_eq!(automatic_context.fusion_space_cache_len(), 2);
+    assert_eq!(
+        automatic_context
+            .fusion_space_cache_stats()
+            .transformed_hits(),
+        2
+    );
+    assert_eq!(
+        automatic_context
+            .fusion_space_cache_stats()
+            .transformed_misses(),
+        2
+    );
     assert_eq!(
         automatic_context
             .contract_cache()
@@ -1319,6 +1347,13 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     assert_eq!(context.fusion_plan_cache_len(), 1);
     assert_eq!(context.fusion_plan_cache_stats().hits(), 0);
     assert_eq!(context.fusion_plan_cache_stats().misses(), 1);
+    assert_eq!(context.fusion_space_cache_len(), 3);
+    assert_eq!(context.fusion_transformed_space_cache_len(), 2);
+    assert_eq!(context.fusion_canonical_dst_space_cache_len(), 1);
+    assert_eq!(context.fusion_space_cache_stats().transformed_hits(), 0);
+    assert_eq!(context.fusion_space_cache_stats().transformed_misses(), 2);
+    assert_eq!(context.fusion_space_cache_stats().canonical_dst_hits(), 0);
+    assert_eq!(context.fusion_space_cache_stats().canonical_dst_misses(), 1);
 
     context_dst
         .data_mut()
@@ -1328,4 +1363,9 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         .unwrap();
     assert_eq!(context.contract_cache().stats().structure_hits(), 1);
     assert_eq!(context.fusion_plan_cache_stats().hits(), 1);
+    assert_eq!(context.fusion_space_cache_len(), 3);
+    assert_eq!(context.fusion_space_cache_stats().transformed_hits(), 2);
+    assert_eq!(context.fusion_space_cache_stats().transformed_misses(), 2);
+    assert_eq!(context.fusion_space_cache_stats().canonical_dst_hits(), 1);
+    assert_eq!(context.fusion_space_cache_stats().canonical_dst_misses(), 1);
 }

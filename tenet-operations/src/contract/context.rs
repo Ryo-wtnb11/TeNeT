@@ -23,7 +23,9 @@ use super::fusion::{
     TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
     SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
-use super::scratch::DynamicFusionScratchWorkspace;
+use super::scratch::{
+    DynamicFusionScratchWorkspace, DynamicFusionSpaceCache, TensorContractFusionSpaceCacheStats,
+};
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -224,6 +226,10 @@ where
         self.plans.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
+
     fn stats(&self) -> TensorContractFusionPlanCacheStats {
         self.stats
     }
@@ -261,6 +267,42 @@ where
             .get(&key)
             .expect("fusion plan inserted before replay"))
     }
+
+    fn get_cached_by_key(
+        &mut self,
+        key: &TensorContractFusionPlanCacheKey<RuleKey>,
+    ) -> Option<&TensorContractFusionExplicitPlan> {
+        let plan = self.plans.get(key)?;
+        self.stats.hits += 1;
+        Some(plan)
+    }
+
+    fn contains_key(&self, key: &TensorContractFusionPlanCacheKey<RuleKey>) -> bool {
+        self.plans.contains_key(key)
+    }
+}
+
+fn fusion_plan_cache_key<
+    RuleKey,
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<TensorContractFusionPlanCacheKey<RuleKey>, OperationError>
+where
+    RuleKey: Clone + Eq + Hash,
+    R: TreeTransformRuleCacheKey<Key = RuleKey>,
+{
+    TensorContractFusionPlanCacheKey::from_spaces(rule, dst, lhs, rhs, axes)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -627,6 +669,7 @@ pub struct TensorContractFusionExecutionContext<
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
     fusion_plan_cache: TensorContractFusionPlanCache<RuleKey>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
+    fusion_space_cache: DynamicFusionSpaceCache<RuleKey>,
 }
 
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
@@ -649,6 +692,7 @@ where
             contract_cache,
             fusion_plan_cache: TensorContractFusionPlanCache::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
+            fusion_space_cache: DynamicFusionSpaceCache::default(),
         }
     }
 
@@ -700,6 +744,26 @@ where
     #[inline]
     pub fn fusion_plan_cache_stats(&self) -> TensorContractFusionPlanCacheStats {
         self.fusion_plan_cache.stats()
+    }
+
+    #[inline]
+    pub fn fusion_space_cache_len(&self) -> usize {
+        self.fusion_space_cache.len()
+    }
+
+    #[inline]
+    pub fn fusion_transformed_space_cache_len(&self) -> usize {
+        self.fusion_space_cache.transformed_len()
+    }
+
+    #[inline]
+    pub fn fusion_canonical_dst_space_cache_len(&self) -> usize {
+        self.fusion_space_cache.canonical_dst_len()
+    }
+
+    #[inline]
+    pub fn fusion_space_cache_stats(&self) -> TensorContractFusionSpaceCacheStats {
+        self.fusion_space_cache.stats()
     }
 
     pub fn into_parts(
@@ -794,6 +858,39 @@ where
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
 
+        if !self.fusion_plan_cache.is_empty() {
+            let plan_key = fusion_plan_cache_key(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+            if self.fusion_plan_cache.contains_key(&plan_key) {
+                let Self {
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    contract_cache,
+                    fusion_plan_cache,
+                    fusion_scratch,
+                    fusion_space_cache,
+                } = self;
+                let plan = fusion_plan_cache
+                    .get_cached_by_key(&plan_key)
+                    .expect("fusion plan cache key was present before replay");
+                return tensorcontract_fusion_dynamic_plan_into_context(
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    contract_cache,
+                    fusion_scratch,
+                    fusion_space_cache,
+                    rule,
+                    plan,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                );
+            }
+        }
+
         match tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes) {
             Ok(block_specs) => {
                 let structure = self.contract_cache.get_or_compile_with_block_specs(
@@ -823,15 +920,17 @@ where
                     contract_cache,
                     fusion_plan_cache,
                     fusion_scratch,
+                    fusion_space_cache,
                 } = self;
                 let plan = fusion_plan_cache
                     .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
-                tensorcontract_fusion_dynamic_plan_into_context(
+                return tensorcontract_fusion_dynamic_plan_into_context(
                     tree_context,
                     contract_backend,
                     contract_workspace,
                     contract_cache,
                     fusion_scratch,
+                    fusion_space_cache,
                     rule,
                     plan,
                     dst,
@@ -839,7 +938,7 @@ where
                     rhs,
                     alpha,
                     beta,
-                )
+                );
             }
             Err(err) => Err(err),
         }

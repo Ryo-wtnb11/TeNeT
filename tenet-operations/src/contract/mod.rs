@@ -29,6 +29,7 @@ pub use fusion::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
     tensorcontract_fusion_structure, TensorContractFusionExplicitPlan,
 };
+pub use scratch::TensorContractFusionSpaceCacheStats;
 pub use structure::{
     tensorcontract_structure, TensorContractBlockSpec, TensorContractStructure,
     TensorContractStructureTerm,

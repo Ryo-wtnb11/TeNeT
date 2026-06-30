@@ -46,8 +46,9 @@ pub use contract::{
     TensorContractBackend, TensorContractBlockPlanKey, TensorContractBlockPlanTerm,
     TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
     TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractFusionExplicitPlan, TensorContractFusionPlanCacheStats, TensorContractPlanKey,
-    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+    TensorContractFusionExplicitPlan, TensorContractFusionPlanCacheStats,
+    TensorContractFusionSpaceCacheStats, TensorContractPlanKey, TensorContractStructure,
+    TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use error::OperationError;
 pub use facade::{
