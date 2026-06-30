@@ -9,7 +9,7 @@ use tenet_core::{
     ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMapSpace, U1FusionRule,
     U1Irrep, Z2FusionRule,
 };
-use tenet_dense::{DenseDotConfig, DenseError, DenseRead, DenseWrite};
+use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 
 fn fusion_tree_test_key<
     const COD: usize,
