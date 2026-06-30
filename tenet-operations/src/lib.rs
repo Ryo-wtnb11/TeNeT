@@ -442,7 +442,10 @@ impl OwnedTensorContractAxisSpec {
 pub struct TensorContractFusionExplicitPlan {
     lhs_transform: TreeTransformOperationKey,
     rhs_transform: TreeTransformOperationKey,
+    output_transform: TreeTransformOperationKey,
     canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_dst_nout: usize,
+    canonical_dst_nin: usize,
     lhs_canonical_nout: usize,
     lhs_canonical_nin: usize,
     rhs_canonical_nout: usize,
@@ -461,8 +464,43 @@ impl TensorContractFusionExplicitPlan {
     }
 
     #[inline]
+    pub fn output_transform(&self) -> &TreeTransformOperationKey {
+        &self.output_transform
+    }
+
+    #[inline]
     pub fn canonical_axes(&self) -> &OwnedTensorContractAxisSpec {
         &self.canonical_axes
+    }
+
+    #[inline]
+    pub fn canonical_dst_nout(&self) -> usize {
+        self.canonical_dst_nout
+    }
+
+    #[inline]
+    pub fn canonical_dst_nin(&self) -> usize {
+        self.canonical_dst_nin
+    }
+
+    fn output_transform_is_identity(&self) -> bool {
+        let canonical_rank = self.canonical_dst_nout + self.canonical_dst_nin;
+        match &self.output_transform {
+            TreeTransformOperationKey::Permute {
+                codomain_permutation,
+                domain_permutation,
+            } => {
+                codomain_permutation
+                    .iter()
+                    .copied()
+                    .eq(0..self.canonical_dst_nout)
+                    && domain_permutation
+                        .iter()
+                        .copied()
+                        .eq(self.canonical_dst_nout..canonical_rank)
+            }
+            _ => false,
+        }
     }
 
     #[inline]
@@ -664,6 +702,13 @@ where
     let lhs_canonical_nin = axis_plan.lhs_contracting_axes.len();
     let rhs_canonical_nout = axis_plan.rhs_contracting_axes.len();
     let rhs_canonical_nin = axis_plan.rhs_open_axes.len();
+    let canonical_dst_nout = lhs_canonical_nout;
+    let canonical_dst_nin = rhs_canonical_nin;
+    let canonical_output_rank = canonical_dst_nout + canonical_dst_nin;
+    let output_transform = TreeTransformOperationKey::permute(
+        axis_plan.output_axes[..DST_NOUT].to_vec(),
+        axis_plan.output_axes[DST_NOUT..].to_vec(),
+    );
     Ok(TensorContractFusionExplicitPlan {
         lhs_transform: TreeTransformOperationKey::permute(
             axis_plan.lhs_open_axes,
@@ -676,8 +721,11 @@ where
         canonical_axes: OwnedTensorContractAxisSpec::new(
             (lhs_canonical_nout..lhs_canonical_nout + lhs_canonical_nin).collect(),
             (0..rhs_canonical_nout).collect(),
-            axis_plan.output_axes,
+            (0..canonical_output_rank).collect(),
         ),
+        output_transform,
+        canonical_dst_nout,
+        canonical_dst_nin,
         lhs_canonical_nout,
         lhs_canonical_nin,
         rhs_canonical_nout,
@@ -1952,7 +2000,7 @@ where
                 index,
             });
         };
-        validate_all_codomain_fusion_tree_block(index, src_key)?;
+        validate_all_codomain_fusion_tree_block(rule, index, src_key)?;
 
         let (dst_codomain_tree, coefficient) = match &operation {
             TreeTransformOperationKey::Permute {
@@ -2019,7 +2067,7 @@ where
                     index: src_block_index,
                 });
             };
-            validate_all_codomain_fusion_tree_block(src_block_index, src_key)?;
+            validate_all_codomain_fusion_tree_block(rule, src_block_index, src_key)?;
             src_keys.push(BlockKey::from(src_key.clone()));
 
             let transformed = match &operation {
@@ -2278,13 +2326,20 @@ fn validate_all_codomain_operation_scope(
     }
 }
 
-fn validate_all_codomain_fusion_tree_block(
+fn validate_all_codomain_fusion_tree_block<R>(
+    rule: &R,
     index: usize,
     key: &FusionTreeBlockKey,
-) -> Result<(), OperationError> {
+) -> Result<(), OperationError>
+where
+    R: FusionRule,
+{
     let domain = key.domain_tree();
+    let empty_domain_coupled_is_valid = domain
+        .coupled()
+        .map_or(true, |coupled| coupled == rule.vacuum());
     if domain.uncoupled().is_empty()
-        && domain.coupled().is_none()
+        && empty_domain_coupled_is_valid
         && domain.is_dual().is_empty()
         && domain.innerlines().is_empty()
         && domain.vertices().is_empty()
@@ -4406,10 +4461,11 @@ where
 ///
 /// 1. transform `lhs` to `(lhs open) <- (lhs contracted)`;
 /// 2. transform `rhs` to `(rhs contracted) <- (rhs open)`;
-/// 3. run the fusion contraction from those canonical operands into `dst`.
+/// 3. run the fusion contraction from those canonical operands into `dst`,
+///    which must already be the canonical output tree-pair shape.
 ///
-/// The final contraction keeps the caller's output permutation, so output
-/// recoupling still follows the normal fusion contraction lowering.
+/// Use [`tensorcontract_fusion_explicit_plan_into_canonical_dst`] when the
+/// requested output permutation needs a final tree-pair transform.
 pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
     R,
     D,
@@ -4466,6 +4522,9 @@ where
     )
 }
 
+const EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST: &str =
+    "explicit fusion contraction with output tree-pair transform requires caller-owned canonical_dst";
+
 pub fn tensorcontract_fusion_explicit_plan_into<
     R,
     D,
@@ -4520,6 +4579,65 @@ where
     )
 }
 
+pub fn tensorcontract_fusion_explicit_plan_into_canonical_dst<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const DST_CAN_NOUT: usize,
+    const DST_CAN_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    const LHS_CAN_NOUT: usize,
+    const LHS_CAN_NIN: usize,
+    const RHS_CAN_NOUT: usize,
+    const RHS_CAN_NIN: usize,
+    SDst,
+    SDstCan,
+    SLhs,
+    SRhs,
+    SLhsCan,
+    SRhsCan,
+>(
+    rule: &R,
+    plan: &TensorContractFusionExplicitPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    canonical_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan>,
+    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
+    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let mut tree_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_explicit_plan_into_canonical_dst_with(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        rule,
+        plan,
+        dst,
+        canonical_dst,
+        lhs_canonical,
+        rhs_canonical,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )
+}
+
 pub fn tensorcontract_fusion_explicit_plan_into_with<
     BT,
     BC,
@@ -4561,6 +4679,14 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
+    if !plan.output_transform_is_identity()
+        || DST_NOUT != plan.canonical_dst_nout()
+        || DST_NIN != plan.canonical_dst_nin()
+    {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+        });
+    }
     if LHS_CAN_NOUT != plan.lhs_canonical_nout() || LHS_CAN_NIN != plan.lhs_canonical_nin() {
         return Err(OperationError::StructureRankMismatch {
             expected: plan.lhs_canonical_nout() + plan.lhs_canonical_nin(),
@@ -4606,6 +4732,118 @@ where
         rhs_canonical,
         plan.canonical_axes().as_spec(),
         alpha,
+        beta,
+    )
+}
+
+pub fn tensorcontract_fusion_explicit_plan_into_canonical_dst_with<
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const DST_CAN_NOUT: usize,
+    const DST_CAN_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    const LHS_CAN_NOUT: usize,
+    const LHS_CAN_NIN: usize,
+    const RHS_CAN_NOUT: usize,
+    const RHS_CAN_NIN: usize,
+    SDst,
+    SDstCan,
+    SLhs,
+    SRhs,
+    SLhsCan,
+    SRhsCan,
+>(
+    tree_backend: &mut BT,
+    tree_workspace: &mut BT::Workspace,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    rule: &R,
+    plan: &TensorContractFusionExplicitPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    canonical_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan>,
+    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan>,
+    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    if DST_CAN_NOUT != plan.canonical_dst_nout() || DST_CAN_NIN != plan.canonical_dst_nin() {
+        return Err(OperationError::StructureRankMismatch {
+            expected: plan.canonical_dst_nout() + plan.canonical_dst_nin(),
+            actual: DST_CAN_NOUT + DST_CAN_NIN,
+        });
+    }
+    if LHS_CAN_NOUT != plan.lhs_canonical_nout() || LHS_CAN_NIN != plan.lhs_canonical_nin() {
+        return Err(OperationError::StructureRankMismatch {
+            expected: plan.lhs_canonical_nout() + plan.lhs_canonical_nin(),
+            actual: LHS_CAN_NOUT + LHS_CAN_NIN,
+        });
+    }
+    if RHS_CAN_NOUT != plan.rhs_canonical_nout() || RHS_CAN_NIN != plan.rhs_canonical_nin() {
+        return Err(OperationError::StructureRankMismatch {
+            expected: plan.rhs_canonical_nout() + plan.rhs_canonical_nin(),
+            actual: RHS_CAN_NOUT + RHS_CAN_NIN,
+        });
+    }
+
+    lhs_canonical.data_mut().fill(D::zero());
+    rhs_canonical.data_mut().fill(D::zero());
+    canonical_dst.data_mut().fill(D::zero());
+    tree_pair_transform_into_with(
+        tree_backend,
+        tree_workspace,
+        rule,
+        plan.lhs_transform().clone(),
+        lhs_canonical,
+        lhs,
+        D::one(),
+        D::zero(),
+    )?;
+    tree_pair_transform_into_with(
+        tree_backend,
+        tree_workspace,
+        rule,
+        plan.rhs_transform().clone(),
+        rhs_canonical,
+        rhs,
+        D::one(),
+        D::zero(),
+    )?;
+
+    tensorcontract_fusion_into_with(
+        contract_backend,
+        contract_workspace,
+        rule,
+        canonical_dst,
+        lhs_canonical,
+        rhs_canonical,
+        plan.canonical_axes().as_spec(),
+        alpha,
+        D::zero(),
+    )?;
+
+    tree_pair_transform_into_with(
+        tree_backend,
+        tree_workspace,
+        rule,
+        plan.output_transform().clone(),
+        dst,
+        canonical_dst,
+        D::one(),
         beta,
     )
 }
@@ -6312,9 +6550,13 @@ mod tests {
     }
 
     fn empty_fusion_tree() -> FusionTreeKey {
+        empty_fusion_tree_with_coupled(None)
+    }
+
+    fn empty_fusion_tree_with_coupled(coupled: Option<usize>) -> FusionTreeKey {
         FusionTreeKey::new(
             Vec::<SectorId>::new(),
-            None,
+            coupled.map(SectorId::new),
             Vec::<bool>::new(),
             Vec::<SectorId>::new(),
             Vec::<SectorId>::new(),
@@ -9117,6 +9359,189 @@ mod tests {
     }
 
     #[test]
+    fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() {
+        let rule = SU2FusionRule;
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []);
+        let lhs_keys = lhs_hom.fusion_tree_keys(&rule);
+        assert_eq!(lhs_keys.len(), 2);
+        let src_tree = lhs_keys
+            .iter()
+            .find(|key| key.codomain_tree().innerlines() == [SectorId::new(0), SectorId::new(1)])
+            .expect("SU2 fixture should contain the reference source tree")
+            .clone();
+        let recoupled_tree = lhs_keys
+            .iter()
+            .find(|key| **key != src_tree)
+            .expect("SU2 fixture should contain the recoupled output tree")
+            .clone();
+        let src_key = BlockKey::from(src_tree.clone());
+        let dst_key0 = BlockKey::from(src_tree);
+        let dst_key1 = BlockKey::from(recoupled_tree);
+        let lhs_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+            lhs_hom.clone(),
+            BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])])
+                .unwrap(),
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([], []),
+            &rule,
+            [vec![]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+            lhs_hom,
+            BlockStructure::packed_column_major_with_keys(
+                4,
+                [(dst_key0, vec![1, 1, 1, 1]), (dst_key1, vec![1, 1, 1, 1])],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let lhs_canonical_space = lhs_space.clone();
+        let canonical_dst_space = lhs_space.clone();
+        let rhs_canonical_space = rhs_space.clone();
+        let lhs =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![10.0], lhs_space).unwrap();
+        let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
+        let mut expected_dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let mut explicit_dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let mut canonical_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
+            vec![999.0],
+            canonical_dst_space.clone(),
+        )
+        .unwrap();
+        let mut expected_canonical_dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![-77.0], canonical_dst_space)
+                .unwrap();
+        let mut lhs_canonical = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
+            vec![123.0],
+            lhs_canonical_space.clone(),
+        )
+        .unwrap();
+        let mut rhs_canonical = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
+            vec![456.0],
+            rhs_canonical_space.clone(),
+        )
+        .unwrap();
+        let mut expected_lhs_canonical =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![0.0], lhs_canonical_space)
+                .unwrap();
+        let mut expected_rhs_canonical =
+            TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], rhs_canonical_space)
+                .unwrap();
+        let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3]));
+        let plan = tensorcontract_fusion_explicit_plan(
+            &rule,
+            explicit_dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap();
+        assert_eq!(plan.canonical_dst_nout(), 4);
+        assert_eq!(plan.canonical_dst_nin(), 0);
+        assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[]);
+        assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[]);
+        assert_eq!(plan.canonical_axes().output_axes(), &[0, 1, 2, 3]);
+        assert_eq!(
+            plan.output_transform(),
+            &TreeTransformOperationKey::permute([0, 2, 1, 3], Vec::<usize>::new())
+        );
+
+        let alpha = 2.0;
+        let beta = 3.0;
+        let err = tensorcontract_fusion_explicit_plan_into(
+            &rule,
+            &plan,
+            &mut expected_dst,
+            &mut expected_lhs_canonical,
+            &mut expected_rhs_canonical,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+            }
+        );
+
+        tree_pair_transform_into(
+            &rule,
+            plan.lhs_transform().clone(),
+            &mut expected_lhs_canonical,
+            &lhs,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        tree_pair_transform_into(
+            &rule,
+            plan.rhs_transform().clone(),
+            &mut expected_rhs_canonical,
+            &rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        tensorcontract_fusion_into(
+            &rule,
+            &mut expected_canonical_dst,
+            &expected_lhs_canonical,
+            &expected_rhs_canonical,
+            plan.canonical_axes().as_spec(),
+            alpha,
+            0.0,
+        )
+        .unwrap();
+        tree_pair_transform_into(
+            &rule,
+            plan.output_transform().clone(),
+            &mut expected_dst,
+            &expected_canonical_dst,
+            1.0,
+            beta,
+        )
+        .unwrap();
+
+        tensorcontract_fusion_explicit_plan_into_canonical_dst(
+            &rule,
+            &plan,
+            &mut explicit_dst,
+            &mut canonical_dst,
+            &mut lhs_canonical,
+            &mut rhs_canonical,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(canonical_dst.data(), expected_canonical_dst.data());
+        assert_eq!(canonical_dst.data(), &[100.0]);
+        for (&actual, &expected) in explicit_dst.data().iter().zip(expected_dst.data()) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} expected {expected}"
+            );
+        }
+        assert!((explicit_dst.data()[0] - 53.0).abs() < 1.0e-12);
+        assert!((explicit_dst.data()[1] - 92.602_540_378_443_86).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
         let rule = SU2FusionRule;
         let lhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
@@ -9381,9 +9806,15 @@ mod tests {
             plan.rhs_transform(),
             &TreeTransformOperationKey::permute([1, 2, 3], [0])
         );
+        assert_eq!(plan.canonical_dst_nout(), 1);
+        assert_eq!(plan.canonical_dst_nin(), 1);
         assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[1, 2, 3]);
         assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[0, 1, 2]);
         assert_eq!(plan.canonical_axes().output_axes(), &[0, 1]);
+        assert_eq!(
+            plan.output_transform(),
+            &TreeTransformOperationKey::permute([0], [1])
+        );
 
         let err = tensorcontract_fusion_block_specs(
             &rule,
@@ -11119,6 +11550,55 @@ mod tests {
                 operation,
                 message: "all-codomain UniqueFusion lowering requires an empty domain operation",
             }
+        );
+    }
+
+    #[test]
+    fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]),
+            empty_fusion_tree_with_coupled(Some(0)),
+        ));
+        let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]),
+            empty_fusion_tree_with_coupled(Some(0)),
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])])
+                .unwrap();
+
+        let plan = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueZ2Rule,
+            TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+            &src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
+        assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+        assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    }
+
+    #[test]
+    fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
+        let src_key = BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids([1, 0], Some(1), [false, false], [], [1]),
+            empty_fusion_tree_with_coupled(Some(1)),
+        ));
+        let src_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+
+        let err = build_unique_all_codomain_tree_transform_group_plan(
+            &UniqueZ2Rule,
+            TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+            &src_structure,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::ExpectedAllCodomainFusionTree { index: 0 }
         );
     }
 
