@@ -1,0 +1,429 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use num_traits::Zero;
+use tenet_core::{
+    BlockKey, BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeBlockKey,
+    FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
+};
+
+use crate::axis::TensorContractAxisSpec;
+use crate::tree_transform::build_tree_pair_transform_group_plan;
+use crate::{OperationError, TreeTransformOperationKey};
+
+use super::fusion::{contracted_fusion_tree_basis_matches, TensorContractFusionExplicitPlan};
+use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec};
+
+/// Internal dynamic-rank fusion space used for TensorKit-style temporary
+/// materialization. Public tensors remain const-generic; source/output tree
+/// transforms that change the codomain/domain split are absorbed here.
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicFusionMapSpace {
+    nout: usize,
+    nin: usize,
+    homspace: FusionTreeHomSpace,
+    subblock_structure: Arc<BlockStructure>,
+}
+
+impl DynamicFusionMapSpace {
+    pub(crate) fn from_typed<const NOUT: usize, const NIN: usize>(
+        space: &FusionTensorMapSpace<NOUT, NIN>,
+    ) -> Self {
+        Self {
+            nout: NOUT,
+            nin: NIN,
+            homspace: space.homspace().clone(),
+            subblock_structure: Arc::clone(space.subblock_structure()),
+        }
+    }
+
+    pub(crate) fn transformed_from_typed<R, const NOUT: usize, const NIN: usize>(
+        rule: &R,
+        source: &FusionTensorMapSpace<NOUT, NIN>,
+        operation: &TreeTransformOperationKey,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let nout = codomain_axes.len();
+        let nin = domain_axes.len();
+        let homspace = source
+            .homspace()
+            .permute(rule, codomain_axes, domain_axes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let plan = build_tree_pair_transform_group_plan(
+            rule,
+            operation.clone(),
+            source.subblock_structure(),
+        )?;
+        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::new();
+        for spec in plan.specs() {
+            let src_count = spec.src_keys().len();
+            for (dst_row, dst_key) in spec.dst_keys().iter().enumerate() {
+                let mut dst_shape = None::<Vec<usize>>;
+                for (src_column, src_key) in spec.src_keys().iter().enumerate() {
+                    let coefficient =
+                        spec.coefficients_src_by_dst()[src_column + dst_row * src_count];
+                    if coefficient == 0.0 {
+                        continue;
+                    }
+                    let src_block = source
+                        .subblock_structure()
+                        .block_by_key(src_key)
+                        .map_err(OperationError::from_core_preserving_context)?;
+                    let candidate = selected_shape(src_block.shape(), codomain_axes, domain_axes)?;
+                    if let Some(existing) = &dst_shape {
+                        if existing != &candidate {
+                            return Err(OperationError::ShapeMismatch {
+                                dst: existing.clone(),
+                                src: candidate,
+                            });
+                        }
+                    } else {
+                        dst_shape = Some(candidate);
+                    }
+                }
+                let dst_shape = dst_shape.ok_or(OperationError::EmptyTransformBlock)?;
+                blocks.push((dst_key.clone(), dst_shape));
+            }
+        }
+        let subblock_structure = Arc::new(BlockStructure::packed_column_major_with_keys(
+            nout + nin,
+            blocks,
+        )?);
+        Ok(Self {
+            nout,
+            nin,
+            homspace,
+            subblock_structure,
+        })
+    }
+
+    pub(crate) fn canonical_dst<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        plan: &TensorContractFusionExplicitPlan,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let nout = plan.canonical_dst_nout();
+        let nin = plan.canonical_dst_nin();
+        let axes = plan.canonical_axes().as_spec();
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        let output_axes = (0..nout + nin).collect::<Vec<_>>();
+        let homspace = FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs.homspace(),
+            rhs.homspace(),
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            &output_axes,
+            nout,
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+
+        let inferred_shapes = infer_canonical_dst_shapes(rule, lhs, rhs, &axis_plan)?;
+        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::new();
+        for key in homspace.fusion_tree_keys(rule) {
+            let shape = inferred_shapes.get(&key).cloned().ok_or_else(|| {
+                OperationError::MissingBlockKey {
+                    key: BlockKey::from(key.clone()),
+                }
+            })?;
+            blocks.push((BlockKey::from(key), shape));
+        }
+        let subblock_structure = Arc::new(BlockStructure::packed_column_major_with_keys(
+            nout + nin,
+            blocks,
+        )?);
+        Ok(Self {
+            nout,
+            nin,
+            homspace,
+            subblock_structure,
+        })
+    }
+
+    #[inline]
+    pub(crate) fn nout(&self) -> usize {
+        self.nout
+    }
+
+    #[inline]
+    pub(crate) fn rank(&self) -> usize {
+        self.nout + self.nin
+    }
+
+    #[inline]
+    pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    #[inline]
+    pub(crate) fn structure(&self) -> &Arc<BlockStructure> {
+        &self.subblock_structure
+    }
+
+    pub(crate) fn required_len(&self) -> Result<usize, CoreError> {
+        self.subblock_structure.required_len()
+    }
+
+    pub(crate) fn find_subblock_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {
+        self.subblock_structure
+            .find_block_index_by_fusion_tree_key(key)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicFusionScratch<T> {
+    space: DynamicFusionMapSpace,
+    data: Vec<T>,
+}
+
+impl<T> DynamicFusionScratch<T>
+where
+    T: Clone + Zero,
+{
+    pub(crate) fn zeroed(space: DynamicFusionMapSpace) -> Result<Self, OperationError> {
+        let len = space.required_len()?;
+        Ok(Self {
+            space,
+            data: vec![T::zero(); len],
+        })
+    }
+
+    pub(crate) fn fill_zero(&mut self) {
+        self.data.fill(T::zero());
+    }
+}
+
+impl<T> DynamicFusionScratch<T> {
+    #[inline]
+    pub(crate) fn space(&self) -> &DynamicFusionMapSpace {
+        &self.space
+    }
+
+    #[inline]
+    pub(crate) fn data(&self) -> &[T] {
+        &self.data
+    }
+
+    #[inline]
+    pub(crate) fn data_mut(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+pub(crate) fn tensorcontract_dynamic_canonical_fusion_block_specs<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs.homspace(),
+        rhs.homspace(),
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axis_plan.output_axes.as_slice(),
+        dst.nout(),
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    if expected_homspace != *dst.homspace() {
+        return Err(OperationError::StructureMismatch { tensor: "dst" });
+    }
+    if !is_canonical_dynamic_source_contract(lhs, rhs, &axis_plan) {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "dynamic fusion contraction expects canonical source tree-pair transforms",
+        });
+    }
+
+    let mut specs = Vec::new();
+    for lhs_index in 0..lhs.structure().block_count() {
+        let lhs_block = lhs.structure().block(lhs_index)?;
+        let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
+            continue;
+        };
+        let lhs_external = lhs_key.external_sectors(rule);
+        for rhs_index in 0..rhs.structure().block_count() {
+            let rhs_block = rhs.structure().block(rhs_index)?;
+            let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
+                continue;
+            };
+            let rhs_external = rhs_key.external_sectors(rule);
+            if !contracted_external_sectors_match(
+                &lhs_external,
+                &rhs_external,
+                axis_plan.lhs_contracting_axes.as_slice(),
+                axis_plan.rhs_contracting_axes.as_slice(),
+            ) {
+                continue;
+            }
+            if !contracted_fusion_tree_basis_matches(
+                rule,
+                lhs_key.domain_tree(),
+                rhs_key.codomain_tree(),
+            ) {
+                continue;
+            }
+            let dst_key = FusionTreeBlockKey::pair(
+                lhs_key.codomain_tree().clone(),
+                rhs_key.domain_tree().clone(),
+            );
+            let dst_index = dst.find_subblock_index(&dst_key).ok_or_else(|| {
+                OperationError::MissingBlockKey {
+                    key: BlockKey::from(dst_key.clone()),
+                }
+            })?;
+            specs.push(TensorContractBlockSpec::with_coefficient(
+                dst_index,
+                lhs_index,
+                rhs_index,
+                rule.scalar_one(),
+            ));
+        }
+    }
+    Ok(specs)
+}
+
+fn infer_canonical_dst_shapes<R>(
+    rule: &R,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axis_plan: &TensorContractAxisPlan,
+) -> Result<HashMap<FusionTreeBlockKey, Vec<usize>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let mut shapes = HashMap::<FusionTreeBlockKey, Vec<usize>>::new();
+    for lhs_index in 0..lhs.structure().block_count() {
+        let lhs_block = lhs.structure().block(lhs_index)?;
+        let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
+            continue;
+        };
+        let lhs_external = lhs_key.external_sectors(rule);
+        for rhs_index in 0..rhs.structure().block_count() {
+            let rhs_block = rhs.structure().block(rhs_index)?;
+            let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
+                continue;
+            };
+            let rhs_external = rhs_key.external_sectors(rule);
+            if !contracted_external_sectors_match(
+                &lhs_external,
+                &rhs_external,
+                axis_plan.lhs_contracting_axes.as_slice(),
+                axis_plan.rhs_contracting_axes.as_slice(),
+            ) {
+                continue;
+            }
+            if !contracted_fusion_tree_basis_matches(
+                rule,
+                lhs_key.domain_tree(),
+                rhs_key.codomain_tree(),
+            ) {
+                continue;
+            }
+            let dst_key = FusionTreeBlockKey::pair(
+                lhs_key.codomain_tree().clone(),
+                rhs_key.domain_tree().clone(),
+            );
+            let shape = axis_plan
+                .lhs_open_axes
+                .iter()
+                .map(|&axis| lhs_block.shape()[axis])
+                .chain(
+                    axis_plan
+                        .rhs_open_axes
+                        .iter()
+                        .map(|&axis| rhs_block.shape()[axis]),
+                )
+                .collect::<Vec<_>>();
+            if let Some(existing) = shapes.get(&dst_key) {
+                if existing != &shape {
+                    return Err(OperationError::ShapeMismatch {
+                        dst: existing.clone(),
+                        src: shape,
+                    });
+                }
+            } else {
+                shapes.insert(dst_key, shape);
+            }
+        }
+    }
+    Ok(shapes)
+}
+
+fn is_canonical_dynamic_source_contract(
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axis_plan: &TensorContractAxisPlan,
+) -> bool {
+    let lhs_domain_axes = (lhs.nout()..lhs.rank()).collect::<Vec<_>>();
+    let rhs_codomain_axes = (0..rhs.nout()).collect::<Vec<_>>();
+    axis_plan.lhs_contracting_axes == lhs_domain_axes
+        && axis_plan.rhs_contracting_axes == rhs_codomain_axes
+}
+
+fn contracted_external_sectors_match(
+    lhs_external: &[tenet_core::SectorId],
+    rhs_external: &[tenet_core::SectorId],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+) -> bool {
+    lhs_axes
+        .iter()
+        .zip(rhs_axes)
+        .all(|(&lhs_axis, &rhs_axis)| lhs_external[lhs_axis] == rhs_external[rhs_axis])
+}
+
+fn tree_transform_operation_axes(operation: &TreeTransformOperationKey) -> (&[usize], &[usize]) {
+    match operation {
+        TreeTransformOperationKey::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        }
+        | TreeTransformOperationKey::Permute {
+            codomain_permutation,
+            domain_permutation,
+        }
+        | TreeTransformOperationKey::Braid {
+            codomain_permutation,
+            domain_permutation,
+            ..
+        } => (
+            codomain_permutation.as_slice(),
+            domain_permutation.as_slice(),
+        ),
+    }
+}
+
+fn selected_shape(
+    shape: &[usize],
+    codomain_axes: &[usize],
+    domain_axes: &[usize],
+) -> Result<Vec<usize>, OperationError> {
+    let mut selected = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
+    for &axis in codomain_axes.iter().chain(domain_axes) {
+        let dim = shape.get(axis).copied().ok_or_else(|| {
+            let mut axes = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
+            axes.extend_from_slice(codomain_axes);
+            axes.extend_from_slice(domain_axes);
+            OperationError::InvalidAxisSet {
+                tensor: "src",
+                axes,
+                rank: shape.len(),
+            }
+        })?;
+        selected.push(dim);
+    }
+    Ok(selected)
+}

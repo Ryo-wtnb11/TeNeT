@@ -177,7 +177,7 @@ where
         axis_plan.rhs_contracting_axes.as_slice(),
     ) {
         return Err(OperationError::UnsupportedTensorContractScope {
-            message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
         });
     }
     if is_canonical_fusion_compose_contract(
@@ -437,6 +437,8 @@ where
 
 pub(crate) const EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST: &str =
     "explicit fusion contraction with output tree-pair transform requires caller-owned canonical_dst";
+pub(crate) const SOURCE_TRANSFORM_REQUIRES_EXPLICIT: &str =
+    "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly";
 
 fn contracted_external_sectors_match(
     lhs_external: &[SectorId],

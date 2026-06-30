@@ -1,7 +1,8 @@
 use core::ops::{Add, Mul};
+use std::sync::Arc;
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockView, BlockViewMut, TensorMap};
+use tenet_core::{BlockStructure, BlockView, BlockViewMut, TensorMap};
 use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
 
 use crate::{
@@ -31,6 +32,18 @@ where
         structure: &TreeTransformStructure<C>,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>;
+
+    fn tree_transform_structure_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>;
@@ -177,6 +190,29 @@ where
     ) -> Result<(), OperationError> {
         tree_transform_structure_with_strided_kernel(workspace, structure, dst, src, alpha, beta)
     }
+
+    fn tree_transform_structure_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        crate::tree_transform_structure_with_strided_kernel_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
+    }
 }
 
 impl<E, D, C> TreeTransformBackend<D, C> for DenseTreeTransformOperations<E>
@@ -209,6 +245,30 @@ where
             structure,
             dst,
             src,
+            alpha,
+            beta,
+        )
+    }
+
+    fn tree_transform_structure_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        crate::tree_transform_structure_with_dense_recoupling_raw(
+            &mut self.dense,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
             alpha,
             beta,
         )

@@ -1,7 +1,8 @@
 use core::ops::{Add, Mul};
+use std::sync::Arc;
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockView, BlockViewMut, TensorMap};
+use tenet_core::{BlockStructure, BlockView, BlockViewMut, TensorMap};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::strided::{
@@ -132,10 +133,42 @@ where
         + RecouplingCoefficientAction<C>,
     C: Copy,
 {
-    structure.validate_replay_structures(dst.structure(), src.structure())?;
-    let dst_data = dst.data_mut();
-    let src_data = src.data();
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    tree_transform_structure_with_strided_kernel_raw(
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
 
+pub(crate) fn tree_transform_structure_with_strided_kernel_raw<D, C>(
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    structure.validate_replay_structures(dst_structure, src_structure)?;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -204,10 +237,38 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
     C: Copy,
 {
-    structure.validate_replay_structures(dst.structure(), src.structure())?;
-    let dst_data = dst.data_mut();
-    let src_data = src.data();
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    tree_transform_structure_with_dense_recoupling_raw(
+        dense,
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        beta,
+    )
+}
 
+pub(crate) fn tree_transform_structure_with_dense_recoupling_raw<E, D, C>(
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    structure.validate_replay_structures(dst_structure, src_structure)?;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {

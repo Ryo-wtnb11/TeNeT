@@ -2,6 +2,7 @@ mod api;
 mod backend;
 mod context;
 mod fusion;
+mod scratch;
 mod structure;
 
 pub use api::{

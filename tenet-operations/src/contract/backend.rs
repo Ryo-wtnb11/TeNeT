@@ -1,5 +1,6 @@
 use num_traits::One;
-use tenet_core::TensorMap;
+use std::sync::Arc;
+use tenet_core::{BlockStructure, TensorMap};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::{
@@ -33,6 +34,20 @@ where
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>;
+
+    fn tensorcontract_structure_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TensorContractStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        rhs_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>;
@@ -99,6 +114,34 @@ where
             beta,
         )
     }
+
+    fn tensorcontract_structure_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TensorContractStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        rhs_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        tensorcontract_structure_with_dense_executor_raw(
+            self.dense_mut(),
+            workspace,
+            structure,
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            dst_data,
+            lhs_data,
+            rhs_data,
+            alpha,
+            beta,
+        )
+    }
 }
 
 fn tensorcontract_structure_with_dense_executor<
@@ -129,12 +172,45 @@ where
     D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     C: Copy + One,
 {
-    structure.validate_replay_structures(dst.structure(), lhs.structure(), rhs.structure())?;
-    let descriptor = structure.descriptor();
-    let lhs_data = lhs.data();
-    let rhs_data = rhs.data();
-    let dst_data = dst.data_mut();
+    let dst_structure = Arc::clone(dst.structure());
+    let lhs_structure = Arc::clone(lhs.structure());
+    let rhs_structure = Arc::clone(rhs.structure());
+    tensorcontract_structure_with_dense_executor_raw(
+        dense,
+        workspace,
+        structure,
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+        dst.data_mut(),
+        lhs.data(),
+        rhs.data(),
+        alpha,
+        beta,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_structure_with_dense_executor_raw<E, D, C>(
+    dense: &mut E,
+    workspace: &mut TensorContractWorkspace<D>,
+    structure: &TensorContractStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    lhs_structure: &Arc<BlockStructure>,
+    rhs_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
+{
+    structure.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+    let descriptor = structure.descriptor();
     for term in descriptor.terms() {
         workspace.output.resize(term.workspace_len, D::zero());
         let lhs = D::dense_read(

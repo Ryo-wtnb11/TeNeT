@@ -61,7 +61,8 @@ pub use host_kernels::TreeTransformWorkspace;
 pub(crate) use host_kernels::{
     copy_block_with_strided_kernel, tensoradd_raw_strided_kernel,
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_dense_recoupling,
-    tree_transform_structure_with_strided_kernel,
+    tree_transform_structure_with_dense_recoupling_raw,
+    tree_transform_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel_raw,
 };
 pub use scalar::{
     DenseBlockScalar, DenseRecouplingScalar, RecouplingCoefficientAction, TreeTransformScalar,
