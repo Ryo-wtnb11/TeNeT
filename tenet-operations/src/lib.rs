@@ -3109,8 +3109,10 @@ mod tests {
     use num_complex::{Complex32, Complex64};
     use std::fmt::Debug;
     use tenet_core::{
-        BraidingStyleKind, FusionTreeKey, MultiplicityFreeFusionRule,
-        MultiplicityFreeFusionSymbols, SU2FusionRule, SectorId, TensorMapSpace,
+        BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
+        FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
+        MultiplicityFreeFusionSymbols, ProductFusionRule, SU2FusionRule, SectorId, SectorLeg,
+        TensorMapSpace, U1FusionRule, U1Irrep,
     };
 
     fn fusion_tree_test_key<
@@ -4988,6 +4990,41 @@ mod tests {
                 "coefficient {actual} != {expected}"
             );
         }
+
+        let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            src_space,
+            src_structure.clone(),
+        )
+        .unwrap();
+        let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![0.0, 0.0],
+            dst_space,
+            src_structure.clone(),
+        )
+        .unwrap();
+        let structure = plan
+            .compile_structures(&src_structure, &src_structure)
+            .unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert!(structure.has_pack_gemm_scatter_blocks());
+        assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
+        assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
     }
 
     #[test]
@@ -5037,6 +5074,72 @@ mod tests {
         assert_eq!(spec.coefficients_src_by_dst().len(), 1);
         assert!((spec.coefficients_src_by_dst()[0] - 1.0).abs() < 1.0e-12);
         plan.compile_structures(&dst_structure, &src_structure)
+            .unwrap();
+    }
+
+    #[test]
+    fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = FpU1Su2Rule::default();
+        let even = SectorId::new(0);
+        let odd = SectorId::new(1);
+        let left_sector =
+            |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+        let sector = |parity, charge, twice_spin| {
+            rule.encode_sector(left_sector(parity, charge), SectorId::new(twice_spin))
+        };
+
+        let a = sector(odd, 1, 1);
+        let b = sector(odd, -1, 1);
+        let c0 = sector(even, 0, 0);
+        let c1 = sector(even, 0, 2);
+        let src_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
+            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        );
+        let dst_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([b], false), SectorLeg::new([a], false)]),
+            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        );
+        let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+            src_hom,
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+            dst_hom,
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        let src_structure = src_space.subblock_structure();
+        let dst_structure = dst_space.subblock_structure();
+
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan(
+            &rule,
+            TreeTransformOperationKey::permute([1, 0], [2]),
+            src_structure,
+        )
+        .unwrap();
+
+        assert_eq!(plan.specs().len(), 2);
+        let expected_coefficients = [1.0, -1.0];
+        for (spec, expected) in plan.specs().iter().zip(expected_coefficients) {
+            assert_eq!(spec.src_keys().len(), 1);
+            assert_eq!(spec.dst_keys().len(), 1);
+            assert_eq!(spec.coefficients_src_by_dst().len(), 1);
+            assert!(
+                (spec.coefficients_src_by_dst()[0] - expected).abs() < 1.0e-12,
+                "coefficient {} != {expected}",
+                spec.coefficients_src_by_dst()[0]
+            );
+        }
+        plan.compile_structures(dst_structure, src_structure)
             .unwrap();
     }
 
