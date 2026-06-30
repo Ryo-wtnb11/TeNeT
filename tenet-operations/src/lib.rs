@@ -21,9 +21,9 @@ use tenet_core::{
     multiplicity_free_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView,
     BlockViewMut, BraidingStyleKind, CoreError, FermionParityFusionRule, FusionRule,
     FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockGroup, FusionTreeBlockKey,
-    FusionTreeGroupKey, FusionTreeHomSpace, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductFusionRule,
-    ProductSectorCodec, SU2FusionRule, SectorId, TensorMap, U1FusionRule, Z2FusionRule,
+    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, ProductFusionRule, ProductSectorCodec, SU2FusionRule, SectorId,
+    TensorMap, U1FusionRule, Z2FusionRule,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -393,16 +393,16 @@ impl<'a> TensorContractAxisSpec<'a> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TensorContractStructure {
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorContractStructure<C = f64> {
     dst_rank: usize,
     lhs_rank: usize,
     rhs_rank: usize,
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,
     output_axes: Vec<usize>,
-    terms: Vec<TensorContractStructureTerm>,
-    descriptor: TensorContractDescriptor,
+    terms: Vec<TensorContractStructureTerm<C>>,
+    descriptor: TensorContractDescriptor<C>,
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
@@ -452,7 +452,7 @@ pub fn tensorcontract_fusion_structure<
     axes: TensorContractAxisSpec<'_>,
 ) -> Result<TensorContractStructure, OperationError>
 where
-    R: MultiplicityFreeFusionRule,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let dst_fusion = dst
         .fusion_space()
@@ -484,7 +484,7 @@ pub fn tensorcontract_fusion_block_specs<
     axes: TensorContractAxisSpec<'_>,
 ) -> Result<Vec<TensorContractBlockSpec>, OperationError>
 where
-    R: MultiplicityFreeFusionRule,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let axis_plan = TensorContractAxisPlan::compile(
         lhs.subblock_structure().rank(),
@@ -505,7 +505,7 @@ where
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
-    if !is_canonical_fusion_compose_contract(
+    if is_canonical_fusion_compose_contract(
         lhs.homspace(),
         rhs.homspace(),
         axis_plan.lhs_contracting_axes.as_slice(),
@@ -513,11 +513,30 @@ where
         axis_plan.output_axes.as_slice(),
         DST_NOUT,
     ) {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "arbitrary-axis fusion contraction block enumeration requires tree transforms",
-        });
+        return tensorcontract_canonical_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan);
     }
 
+    tensorcontract_transformed_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan, DST_NOUT)
+}
+
+fn tensorcontract_canonical_fusion_block_specs<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axis_plan: &TensorContractAxisPlan,
+) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     let mut specs = Vec::new();
     for lhs_index in 0..lhs.subblock_structure().block_count() {
         let lhs_block = lhs.subblock_structure().block(lhs_index)?;
@@ -563,9 +582,99 @@ where
                     key: BlockKey::from(dst_key.clone()),
                 }
             })?;
-            specs.push(TensorContractBlockSpec::new(
-                dst_index, lhs_index, rhs_index,
+            specs.push(TensorContractBlockSpec::with_coefficient(
+                dst_index,
+                lhs_index,
+                rhs_index,
+                rule.scalar_one(),
             ));
+        }
+    }
+    Ok(specs)
+}
+
+fn tensorcontract_transformed_fusion_block_specs<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axis_plan: &TensorContractAxisPlan,
+    dst_codomain_rank: usize,
+) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let output_codomain_axes = &axis_plan.output_axes[..dst_codomain_rank];
+    let output_domain_axes = &axis_plan.output_axes[dst_codomain_rank..];
+    let mut specs = Vec::new();
+    for lhs_index in 0..lhs.subblock_structure().block_count() {
+        let lhs_block = lhs.subblock_structure().block(lhs_index)?;
+        let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
+            continue;
+        };
+        let lhs_terms = multiplicity_free_permute_tree_pair(
+            rule,
+            lhs_key,
+            axis_plan.lhs_open_axes.as_slice(),
+            axis_plan.lhs_contracting_axes.as_slice(),
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+        for rhs_index in 0..rhs.subblock_structure().block_count() {
+            let rhs_block = rhs.subblock_structure().block(rhs_index)?;
+            let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
+                continue;
+            };
+            let rhs_terms = multiplicity_free_permute_tree_pair(
+                rule,
+                rhs_key,
+                axis_plan.rhs_contracting_axes.as_slice(),
+                axis_plan.rhs_open_axes.as_slice(),
+            )
+            .map_err(OperationError::from_core_preserving_context)?;
+
+            for (lhs_canonical, lhs_coeff) in &lhs_terms {
+                for (rhs_canonical, rhs_coeff) in &rhs_terms {
+                    if !contracted_fusion_tree_basis_matches(
+                        rule,
+                        lhs_canonical.domain_tree(),
+                        rhs_canonical.codomain_tree(),
+                    ) {
+                        continue;
+                    }
+                    let canonical_dst_key = FusionTreeBlockKey::pair(
+                        lhs_canonical.codomain_tree().clone(),
+                        rhs_canonical.domain_tree().clone(),
+                    );
+                    let dst_terms = multiplicity_free_permute_tree_pair(
+                        rule,
+                        &canonical_dst_key,
+                        output_codomain_axes,
+                        output_domain_axes,
+                    )
+                    .map_err(OperationError::from_core_preserving_context)?;
+                    for (dst_key, dst_coeff) in dst_terms {
+                        let dst_index = dst.find_subblock_index(&dst_key).ok_or_else(|| {
+                            OperationError::MissingBlockKey {
+                                key: BlockKey::from(dst_key.clone()),
+                            }
+                        })?;
+                        specs.push(TensorContractBlockSpec::with_coefficient(
+                            dst_index,
+                            lhs_index,
+                            rhs_index,
+                            *lhs_coeff * *rhs_coeff * dst_coeff,
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(specs)
@@ -705,6 +814,7 @@ impl TensorContractStructure {
                 dst_block: spec.dst_block(),
                 lhs_block: spec.lhs_block(),
                 rhs_block: spec.rhs_block(),
+                coefficient: spec.coefficient(),
             });
         }
         let descriptor = TensorContractDescriptor::compile(
@@ -729,7 +839,12 @@ impl TensorContractStructure {
             rhs_structure,
         })
     }
+}
 
+impl<C> TensorContractStructure<C>
+where
+    C: Copy + One,
+{
     #[inline]
     pub fn dst_rank(&self) -> usize {
         self.dst_rank
@@ -763,12 +878,12 @@ impl TensorContractStructure {
     }
 
     #[inline]
-    pub fn terms(&self) -> &[TensorContractStructureTerm] {
+    pub fn terms(&self) -> &[TensorContractStructureTerm<C>] {
         &self.terms
     }
 
     #[inline]
-    fn descriptor(&self) -> &TensorContractDescriptor {
+    fn descriptor(&self) -> &TensorContractDescriptor<C> {
         &self.descriptor
     }
 
@@ -806,26 +921,42 @@ impl TensorContractStructure {
         beta: D,
     ) -> Result<(), OperationError>
     where
-        B: TensorContractBackend<D>,
-        D: DenseBlockScalar,
+        B: TensorContractBackend<D, C>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     {
         backend.tensorcontract_structure_into(workspace, self, dst, lhs, rhs, alpha, beta)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TensorContractBlockSpec {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TensorContractBlockSpec<C = f64> {
     dst_block: usize,
     lhs_block: usize,
     rhs_block: usize,
+    coefficient: C,
 }
 
-impl TensorContractBlockSpec {
-    pub const fn new(dst_block: usize, lhs_block: usize, rhs_block: usize) -> Self {
+impl<C> TensorContractBlockSpec<C>
+where
+    C: One,
+{
+    pub fn new(dst_block: usize, lhs_block: usize, rhs_block: usize) -> Self {
+        Self::with_coefficient(dst_block, lhs_block, rhs_block, C::one())
+    }
+}
+
+impl<C> TensorContractBlockSpec<C> {
+    pub const fn with_coefficient(
+        dst_block: usize,
+        lhs_block: usize,
+        rhs_block: usize,
+        coefficient: C,
+    ) -> Self {
         Self {
             dst_block,
             lhs_block,
             rhs_block,
+            coefficient,
         }
     }
 
@@ -843,17 +974,26 @@ impl TensorContractBlockSpec {
     pub fn rhs_block(&self) -> usize {
         self.rhs_block
     }
+
+    #[inline]
+    pub fn coefficient(&self) -> C
+    where
+        C: Copy,
+    {
+        self.coefficient
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TensorContractStructureTerm {
+#[derive(Clone, Debug, PartialEq)]
+pub struct TensorContractStructureTerm<C = f64> {
     key: BlockKey,
     dst_block: usize,
     lhs_block: usize,
     rhs_block: usize,
+    coefficient: C,
 }
 
-impl TensorContractStructureTerm {
+impl<C> TensorContractStructureTerm<C> {
     #[inline]
     pub fn key(&self) -> &BlockKey {
         &self.key
@@ -872,6 +1012,14 @@ impl TensorContractStructureTerm {
     #[inline]
     pub fn rhs_block(&self) -> usize {
         self.rhs_block
+    }
+
+    #[inline]
+    pub fn coefficient(&self) -> C
+    where
+        C: Copy,
+    {
+        self.coefficient
     }
 }
 
@@ -926,10 +1074,10 @@ impl TensorContractAxisPlan {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TensorContractDescriptor {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TensorContractDescriptor<C = f64> {
     dot_config: DenseDotConfig,
-    terms: Vec<TensorContractDescriptorTerm>,
+    terms: Vec<TensorContractDescriptorTerm<C>>,
     lhs_shapes: Vec<usize>,
     lhs_strides: Vec<usize>,
     rhs_shapes: Vec<usize>,
@@ -941,9 +1089,12 @@ pub(crate) struct TensorContractDescriptor {
     workspace_strides: Vec<isize>,
 }
 
-impl TensorContractDescriptor {
+impl<C> TensorContractDescriptor<C>
+where
+    C: Copy + One,
+{
     #[inline]
-    pub fn terms(&self) -> &[TensorContractDescriptorTerm] {
+    pub fn terms(&self) -> &[TensorContractDescriptorTerm<C>] {
         &self.terms
     }
 
@@ -952,47 +1103,47 @@ impl TensorContractDescriptor {
         &self.dot_config
     }
 
-    fn lhs_shape(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn lhs_shape(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.lhs_shapes[term.lhs_layout_start..term.lhs_layout_start + term.lhs_rank]
     }
 
-    fn lhs_strides(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn lhs_strides(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.lhs_strides[term.lhs_layout_start..term.lhs_layout_start + term.lhs_rank]
     }
 
-    fn rhs_shape(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn rhs_shape(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.rhs_shapes[term.rhs_layout_start..term.rhs_layout_start + term.rhs_rank]
     }
 
-    fn rhs_strides(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn rhs_strides(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.rhs_strides[term.rhs_layout_start..term.rhs_layout_start + term.rhs_rank]
     }
 
-    fn output_shape(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn output_shape(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.output_shapes[term.output_layout_start..term.output_layout_start + term.output_rank]
     }
 
-    fn output_strides(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn output_strides(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.output_strides[term.output_layout_start..term.output_layout_start + term.output_rank]
     }
 
-    fn scatter_shape(&self, term: &TensorContractDescriptorTerm) -> &[usize] {
+    fn scatter_shape(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
         &self.scatter_shapes
             [term.scatter_layout_start..term.scatter_layout_start + term.output_rank]
     }
 
-    fn dst_strides(&self, term: &TensorContractDescriptorTerm) -> &[isize] {
+    fn dst_strides(&self, term: &TensorContractDescriptorTerm<C>) -> &[isize] {
         &self.dst_strides[term.scatter_layout_start..term.scatter_layout_start + term.output_rank]
     }
 
-    fn workspace_strides(&self, term: &TensorContractDescriptorTerm) -> &[isize] {
+    fn workspace_strides(&self, term: &TensorContractDescriptorTerm<C>) -> &[isize] {
         &self.workspace_strides
             [term.scatter_layout_start..term.scatter_layout_start + term.output_rank]
     }
 
     fn compile(
         axis_plan: &TensorContractAxisPlan,
-        terms: &[TensorContractStructureTerm],
+        terms: &[TensorContractStructureTerm<C>],
         dst_structure: &BlockStructure,
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
@@ -1132,6 +1283,7 @@ impl TensorContractDescriptor {
                 dst_offset: offset_to_isize(dst_block.offset())?,
                 workspace_len,
                 apply_beta,
+                coefficient: term.coefficient(),
             });
         }
 
@@ -1139,8 +1291,8 @@ impl TensorContractDescriptor {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TensorContractDescriptorTerm {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TensorContractDescriptorTerm<C = f64> {
     dst_block: usize,
     lhs_block: usize,
     rhs_block: usize,
@@ -1156,6 +1308,7 @@ pub(crate) struct TensorContractDescriptorTerm {
     dst_offset: isize,
     workspace_len: usize,
     apply_beta: bool,
+    coefficient: C,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3395,9 +3548,10 @@ where
     ) -> Result<(), OperationError>;
 }
 
-pub trait TensorContractBackend<D>
+pub trait TensorContractBackend<D, C = f64>
 where
-    D: DenseBlockScalar,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
 {
     type Workspace;
 
@@ -3414,7 +3568,7 @@ where
     >(
         &mut self,
         workspace: &mut Self::Workspace,
-        structure: &TensorContractStructure,
+        structure: &TensorContractStructure<C>,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
@@ -3820,10 +3974,11 @@ where
     }
 }
 
-impl<E, D> TensorContractBackend<D> for DenseTreeTransformOperations<E>
+impl<E, D, C> TensorContractBackend<D, C> for DenseTreeTransformOperations<E>
 where
     E: DenseExecutor,
-    D: DenseBlockScalar,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
 {
     type Workspace = TensorContractWorkspace<D>;
 
@@ -3840,7 +3995,7 @@ where
     >(
         &mut self,
         workspace: &mut Self::Workspace,
-        structure: &TensorContractStructure,
+        structure: &TensorContractStructure<C>,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
@@ -3979,7 +4134,7 @@ pub fn tensorcontract_into<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    D: DenseBlockScalar,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
     let mut backend = DenseTreeTransformOperations::default_executor();
     let mut workspace = TensorContractWorkspace::default();
@@ -4018,8 +4173,8 @@ pub fn tensorcontract_into_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TensorContractBackend<D>,
-    D: DenseBlockScalar,
+    B: TensorContractBackend<D, f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
     let structure = tensorcontract_structure(dst, lhs, rhs, axes)?;
     tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)
@@ -4047,8 +4202,8 @@ pub fn tensorcontract_fusion_into<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeFusionRule,
-    D: DenseBlockScalar,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
     let mut backend = DenseTreeTransformOperations::default_executor();
     let mut workspace = TensorContractWorkspace::default();
@@ -4090,9 +4245,9 @@ pub fn tensorcontract_fusion_into_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TensorContractBackend<D>,
-    R: MultiplicityFreeFusionRule,
-    D: DenseBlockScalar,
+    B: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
     let structure = tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes)?;
     tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)
@@ -4101,6 +4256,7 @@ where
 pub fn tensorcontract_execute_with<
     B,
     D,
+    C,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const LHS_NOUT: usize,
@@ -4113,7 +4269,7 @@ pub fn tensorcontract_execute_with<
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
-    structure: &TensorContractStructure,
+    structure: &TensorContractStructure<C>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
@@ -4121,8 +4277,9 @@ pub fn tensorcontract_execute_with<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    B: TensorContractBackend<D>,
-    D: DenseBlockScalar,
+    B: TensorContractBackend<D, C>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
 {
     structure.execute_with(backend, workspace, dst, lhs, rhs, alpha, beta)
 }
@@ -4474,6 +4631,7 @@ where
 fn tensorcontract_structure_with_dense_executor<
     E,
     D,
+    C,
     const DST_NOUT: usize,
     const DST_NIN: usize,
     const LHS_NOUT: usize,
@@ -4486,7 +4644,7 @@ fn tensorcontract_structure_with_dense_executor<
 >(
     dense: &mut E,
     workspace: &mut TensorContractWorkspace<D>,
-    structure: &TensorContractStructure,
+    structure: &TensorContractStructure<C>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
@@ -4495,7 +4653,8 @@ fn tensorcontract_structure_with_dense_executor<
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    D: DenseBlockScalar,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
 {
     structure.validate_replay_structures(dst.structure(), lhs.structure(), rhs.structure())?;
     let descriptor = structure.descriptor();
@@ -4536,6 +4695,7 @@ where
             .dot_general_into(output, lhs, rhs, descriptor.dot_config())
             .map_err(OperationError::Dense)?;
 
+        let term_alpha = alpha.scale_by_coefficient(term.coefficient);
         let term_beta = if term.apply_beta { beta } else { D::one() };
         tensoradd_raw_strided_kernel(
             &mut workspace.zero_strides,
@@ -4546,7 +4706,7 @@ where
             descriptor.workspace_strides(term),
             term.dst_offset,
             0,
-            alpha,
+            term_alpha,
             term_beta,
         )?;
     }
@@ -5571,6 +5731,34 @@ fn contracted_external_sectors_match(
         .iter()
         .zip(rhs_axes)
         .all(|(&lhs_axis, &rhs_axis)| lhs_external[lhs_axis] == rhs_external[rhs_axis])
+}
+
+fn contracted_fusion_tree_basis_matches<R>(
+    rule: &R,
+    lhs_domain: &FusionTreeKey,
+    rhs_codomain: &FusionTreeKey,
+) -> bool
+where
+    R: FusionRule,
+{
+    lhs_domain.uncoupled().len() == rhs_codomain.uncoupled().len()
+        && lhs_domain.innerlines().len() == rhs_codomain.innerlines().len()
+        && lhs_domain.vertices() == rhs_codomain.vertices()
+        && lhs_domain.is_dual() == rhs_codomain.is_dual()
+        && lhs_domain
+            .uncoupled()
+            .iter()
+            .copied()
+            .map(|sector| rule.dual(sector))
+            .eq(rhs_codomain.uncoupled().iter().copied())
+        && lhs_domain
+            .innerlines()
+            .iter()
+            .copied()
+            .map(|sector| rule.dual(sector))
+            .eq(rhs_codomain.innerlines().iter().copied())
+        && rule.dual(lhs_domain.coupled().unwrap_or_else(|| rule.vacuum()))
+            == rhs_codomain.coupled().unwrap_or_else(|| rule.vacuum())
 }
 
 fn contracted_output_external_sectors(
@@ -7797,7 +7985,7 @@ mod tests {
 
     fn assert_tensorcontract_scalar_dtype<D>(lhs_value: D, rhs_value: D, fill: D, expected: D)
     where
-        D: DenseBlockScalar + Clone + Debug,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64> + Clone + Debug,
     {
         let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
         let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -7811,6 +7999,44 @@ mod tests {
             &lhs,
             &rhs,
             TensorContractAxisSpec::canonical(&[1], &[0]),
+            D::one() + D::one(),
+            D::one() + D::one() + D::one(),
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[expected]);
+    }
+
+    fn assert_weighted_tensorcontract_scalar_dtype<D>(
+        lhs_value: D,
+        rhs_value: D,
+        fill: D,
+        expected: D,
+    ) where
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64> + Clone + Debug,
+    {
+        let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+        let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+        let lhs = TensorMap::<D, 2, 0>::from_vec(vec![lhs_value], lhs_space).unwrap();
+        let rhs = TensorMap::<D, 2, 0>::from_vec(vec![rhs_value], rhs_space).unwrap();
+        let mut dst = TensorMap::<D, 2, 0>::from_vec(vec![fill], dst_space).unwrap();
+        let structure = TensorContractStructure::compile_with_block_specs(
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+            &[TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5)],
+        )
+        .unwrap();
+
+        tensorcontract_execute_with(
+            &mut DenseTreeTransformOperations::default_executor(),
+            &mut TensorContractWorkspace::default(),
+            &structure,
+            &mut dst,
+            &lhs,
+            &rhs,
             D::one() + D::one(),
             D::one() + D::one() + D::one(),
         )
@@ -7834,6 +8060,24 @@ mod tests {
             Complex64::new(3.0, 0.0),
             Complex64::new(5.0, 0.0),
             Complex64::new(27.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn tensorcontract_weighted_terms_support_all_gemm_dtypes() {
+        assert_weighted_tensorcontract_scalar_dtype(2.0_f32, 3.0_f32, 5.0_f32, 21.0_f32);
+        assert_weighted_tensorcontract_scalar_dtype(2.0_f64, 3.0_f64, 5.0_f64, 21.0_f64);
+        assert_weighted_tensorcontract_scalar_dtype(
+            Complex32::new(2.0, 1.0),
+            Complex32::new(3.0, -1.0),
+            Complex32::new(5.0, 2.0),
+            Complex32::new(22.0, 7.0),
+        );
+        assert_weighted_tensorcontract_scalar_dtype(
+            Complex64::new(2.0, 1.0),
+            Complex64::new(3.0, -1.0),
+            Complex64::new(5.0, 2.0),
+            Complex64::new(22.0, 7.0),
         );
     }
 
@@ -8063,8 +8307,8 @@ mod tests {
             &rhs,
             TensorContractAxisSpec::canonical(&[1], &[0]),
             &[
-                TensorContractBlockSpec::new(0, 0, 0),
-                TensorContractBlockSpec::new(0, 1, 1),
+                TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5),
+                TensorContractBlockSpec::with_coefficient(0, 1, 1, 2.0),
             ],
         )
         .unwrap();
@@ -8082,7 +8326,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(structure.terms().len(), 2);
-        assert_eq!(dst.data(), &[170.0]);
+        assert_eq!(dst.data(), &[259.0]);
     }
 
     #[test]
@@ -8289,7 +8533,7 @@ mod tests {
     }
 
     #[test]
-    fn tensorcontract_fusion_block_specs_rejects_noncanonical_axes_until_recoupling_is_wired() {
+    fn tensorcontract_fusion_block_specs_enumerates_noncanonical_tree_transform_terms() {
         let rule = Z2FusionRule;
         let leg = |is_dual| SectorLeg::new([SectorId::new(0)], is_dual);
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
@@ -8313,39 +8557,230 @@ mod tests {
         )
         .unwrap();
 
-        let err = tensorcontract_fusion_block_specs(
+        let specs = tensorcontract_fusion_block_specs(
             &rule,
             &transformed_dst_space,
             &fusion_space,
             &fusion_space,
             TensorContractAxisSpec::canonical(&[0], &[1]),
         )
-        .unwrap_err();
+        .unwrap();
 
         assert_eq!(
-            err,
-            OperationError::UnsupportedTensorContractScope {
-                message:
-                    "arbitrary-axis fusion contraction block enumeration requires tree transforms",
-            }
+            specs,
+            vec![TensorContractBlockSpec::with_coefficient(0, 0, 0, 1.0)]
         );
 
-        let err = tensorcontract_fusion_block_specs(
+        let specs = tensorcontract_fusion_block_specs(
             &rule,
             &transformed_dst_space,
             &fusion_space,
             &fusion_space,
             TensorContractAxisSpec::new(&[1], &[0], AxisPermutation::from_axes(&[1, 0])),
         )
-        .unwrap_err();
+        .unwrap();
 
         assert_eq!(
-            err,
-            OperationError::UnsupportedTensorContractScope {
-                message:
-                    "arbitrary-axis fusion contraction block enumeration requires tree transforms",
-            }
+            specs,
+            vec![TensorContractBlockSpec::with_coefficient(0, 0, 0, 1.0)]
         );
+    }
+
+    #[test]
+    fn tensorcontract_fusion_noncanonical_replays_transformed_product_block() {
+        let rule = Z2FusionRule;
+        let leg = |is_dual| SectorLeg::new([SectorId::new(0)], is_dual);
+        let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg(false)]),
+                FusionProductSpace::new([leg(false)]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg(true)]),
+                FusionProductSpace::new([leg(true)]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], src_space.clone())
+            .unwrap();
+        let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0], src_space).unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![7.0], dst_space).unwrap();
+
+        tensorcontract_fusion_into(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[0], &[1]),
+            3.0,
+            11.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[107.0]);
+    }
+
+    #[test]
+    fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
+        let rule = SU2FusionRule;
+        let src_key = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let dst_key0 = src_key.clone();
+        let dst_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let scalar_key = BlockKey::from(FusionTreeBlockKey::pair(
+            empty_fusion_tree(),
+            empty_fusion_tree(),
+        ));
+        let lhs_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []),
+            BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])])
+                .unwrap(),
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([], []),
+            BlockStructure::packed_column_major_with_keys(0, [(scalar_key, vec![])]).unwrap(),
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []),
+            BlockStructure::packed_column_major_with_keys(
+                4,
+                [(dst_key0, vec![1, 1, 1, 1]), (dst_key1, vec![1, 1, 1, 1])],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let lhs =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![10.0], lhs_space).unwrap();
+        let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
+        let mut dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
+
+        let specs = tensorcontract_fusion_block_specs(
+            &rule,
+            dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3])),
+        )
+        .unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].dst_block(), 0);
+        assert_eq!(specs[1].dst_block(), 1);
+        assert!((specs[0].coefficient() - 0.5).abs() < 1.0e-12);
+        assert!((specs[1].coefficient() - 0.866_025_403_784_438_6).abs() < 1.0e-12);
+
+        tensorcontract_fusion_into(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3])),
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert!((dst.data()[0] - 53.0).abs() < 1.0e-12);
+        assert!((dst.data()[1] - 92.602_540_378_443_86).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn tensorcontract_fusion_product_noncanonical_supports_complex_data() {
+        let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+        let scalar_key = BlockKey::from(FusionTreeBlockKey::pair(
+            empty_fusion_tree(),
+            empty_fusion_tree(),
+        ));
+        let rhs_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([], []),
+            BlockStructure::packed_column_major_with_keys(0, [(scalar_key, vec![])]).unwrap(),
+        )
+        .unwrap();
+        let lhs = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+            vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)],
+            src_space,
+        )
+        .unwrap();
+        let rhs = TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(
+            vec![Complex64::new(2.0, 0.5)],
+            rhs_space,
+        )
+        .unwrap();
+        let mut dst = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+            vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)],
+            dst_space,
+        )
+        .unwrap();
+        let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[1, 0, 2]));
+        let specs = tensorcontract_fusion_block_specs(
+            &rule,
+            dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap();
+        assert!(!specs.is_empty());
+
+        let mut expected = dst
+            .data()
+            .iter()
+            .map(|&value| Complex64::new(3.0, 0.0) * value)
+            .collect::<Vec<_>>();
+        let lhs_structure = lhs.structure();
+        let rhs_structure = rhs.structure();
+        let dst_structure = dst.structure();
+        for spec in &specs {
+            let lhs_offset = lhs_structure.block(spec.lhs_block()).unwrap().offset();
+            let rhs_offset = rhs_structure.block(spec.rhs_block()).unwrap().offset();
+            let dst_offset = dst_structure.block(spec.dst_block()).unwrap().offset();
+            expected[dst_offset] += Complex64::new(2.0 * spec.coefficient(), 0.0)
+                * lhs.data()[lhs_offset]
+                * rhs.data()[rhs_offset];
+        }
+
+        tensorcontract_fusion_into(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            axes,
+            Complex64::new(2.0, 0.0),
+            Complex64::new(3.0, 0.0),
+        )
+        .unwrap();
+
+        for (&actual, expected) in dst.data().iter().zip(expected) {
+            let delta = actual - expected;
+            assert!(delta.re.abs() < 1.0e-12 && delta.im.abs() < 1.0e-12);
+        }
     }
 
     #[test]
