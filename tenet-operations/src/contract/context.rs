@@ -18,14 +18,13 @@ use crate::{
 
 use super::backend::TensorContractBackend;
 use super::dynamic::tensorcontract_fusion_dynamic_plan_into_context;
+use super::dynamic_space_cache::{DynamicFusionSpaceCache, TensorContractFusionSpaceCacheStats};
 use super::fusion::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
     TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
     SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
-use super::scratch::{
-    DynamicFusionScratchWorkspace, DynamicFusionSpaceCache, TensorContractFusionSpaceCacheStats,
-};
+use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

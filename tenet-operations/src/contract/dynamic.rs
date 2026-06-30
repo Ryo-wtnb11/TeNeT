@@ -11,11 +11,12 @@ use crate::{
 
 use super::backend::TensorContractBackend;
 use super::context::{TensorContractBlockPlanKey, TensorContractCache};
-use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
-use super::scratch::{
+use super::dynamic_space::{
     tensorcontract_dynamic_canonical_fusion_block_specs, DynamicFusionMapSpace,
-    DynamicFusionScratch, DynamicFusionScratchWorkspace, DynamicFusionSpaceCache,
 };
+use super::dynamic_space_cache::DynamicFusionSpaceCache;
+use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
+use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
 use super::structure::TensorContractStructure;
 
 #[allow(clippy::too_many_arguments)]
