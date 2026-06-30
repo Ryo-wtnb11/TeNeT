@@ -4,10 +4,11 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{BlockKey, BlockStructure, TensorMap};
 
-use crate::{
-    offset_to_isize, permutation_axes, validate_structure_identity, AxisPermutation,
-    OperationError, TensorOperationsBackend,
-};
+use crate::axis::{permutation_axes, AxisPermutation};
+use crate::error::OperationError;
+use crate::strided::offset_to_isize;
+use crate::structure_identity::validate_structure_identity;
+use crate::TensorOperationsBackend;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorAddStructure {

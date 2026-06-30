@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tenet_core::{BlockStructure, TensorMap};
 
 use crate::strided::{column_major_strides_isize, element_count, offset_to_isize};
+use crate::structure_identity::validate_structure_identity;
 use crate::{
-    validate_structure_identity, OperationError, TreeTransformBlockSpec,
-    TreeTransformGroupBlockSpec, TreeTransformKeyBlockSpec,
+    OperationError, TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformKeyBlockSpec,
 };
 
 /// Replay-ready tree-transform descriptor.

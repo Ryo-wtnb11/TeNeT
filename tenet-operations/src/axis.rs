@@ -1,3 +1,5 @@
+use crate::error::OperationError;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AxisPermutation<'a> {
     Identity,
@@ -102,5 +104,33 @@ impl OwnedTensorContractAxisSpec {
     #[inline]
     pub fn output_axes(&self) -> &[usize] {
         self.output_axes.as_slice()
+    }
+}
+
+pub(crate) fn permutation_axes(
+    permutation: AxisPermutation<'_>,
+    rank: usize,
+) -> Result<Vec<usize>, OperationError> {
+    match permutation {
+        AxisPermutation::Identity => Ok((0..rank).collect()),
+        AxisPermutation::Axes(axes) => {
+            if axes.len() != rank {
+                return Err(OperationError::InvalidPermutation {
+                    axes: axes.to_vec(),
+                    rank,
+                });
+            }
+            let mut seen = vec![false; rank];
+            for &axis in axes {
+                if axis >= rank || seen[axis] {
+                    return Err(OperationError::InvalidPermutation {
+                        axes: axes.to_vec(),
+                        rank,
+                    });
+                }
+                seen[axis] = true;
+            }
+            Ok(axes.to_vec())
+        }
     }
 }

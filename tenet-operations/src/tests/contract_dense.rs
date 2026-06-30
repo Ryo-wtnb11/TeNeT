@@ -1,0 +1,368 @@
+use super::*;
+
+#[test]
+fn tensorcontract_structure_precomputes_canonical_dense_descriptor() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs = TensorMap::<f64, 2, 0>::from_vec(vec![1.0; 6], lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 2, 0>::from_vec(vec![1.0; 6], rhs_space).unwrap();
+    let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+
+    let structure = TensorContractStructure::compile(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+    )
+    .unwrap();
+
+    assert_eq!(structure.dst_rank(), 2);
+    assert_eq!(structure.lhs_rank(), 2);
+    assert_eq!(structure.rhs_rank(), 2);
+    assert_eq!(structure.lhs_contracting_axes(), &[1]);
+    assert_eq!(structure.rhs_contracting_axes(), &[0]);
+    assert_eq!(structure.output_axes(), &[0, 1]);
+    assert_eq!(structure.terms().len(), 1);
+    assert_eq!(structure.terms()[0].key(), &BlockKey::trivial());
+    assert_eq!(structure.terms()[0].dst_block(), 0);
+    assert_eq!(structure.terms()[0].lhs_block(), 0);
+    assert_eq!(structure.terms()[0].rhs_block(), 0);
+}
+
+#[test]
+fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
+
+    tensorcontract_into(
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
+}
+
+#[test]
+fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0>::from_vec((7..=18).map(|value| value as f64).collect(), rhs_space)
+            .unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let structure = TensorContractStructure::compile(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::new(&[1], &[1], AxisPermutation::from_axes(&[1, 0])),
+    )
+    .unwrap();
+    let mut backend =
+        DenseTreeTransformOperations::new(ContractLayoutCheckingDenseExecutor::default());
+    let mut workspace = TensorContractWorkspace::default();
+
+    tensorcontract_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &lhs,
+        &rhs,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(backend.dense().dot_general_into_calls, 1);
+    assert_eq!(
+        dst.data(),
+        &[115.0, 124.0, 133.0, 142.0, 148.0, 160.0, 172.0, 184.0]
+    );
+    assert_eq!(workspace.output_len(), 8);
+}
+
+#[test]
+fn tensorcontract_dense_backend_covers_all_gemm_dtypes() {
+    assert_tensorcontract_scalar_dtype(2.0_f32, 3.0_f32, 5.0_f32, 27.0_f32);
+    assert_tensorcontract_scalar_dtype(2.0_f64, 3.0_f64, 5.0_f64, 27.0_f64);
+    assert_tensorcontract_scalar_dtype(
+        Complex32::new(2.0, 0.0),
+        Complex32::new(3.0, 0.0),
+        Complex32::new(5.0, 0.0),
+        Complex32::new(27.0, 0.0),
+    );
+    assert_tensorcontract_scalar_dtype(
+        Complex64::new(2.0, 0.0),
+        Complex64::new(3.0, 0.0),
+        Complex64::new(5.0, 0.0),
+        Complex64::new(27.0, 0.0),
+    );
+}
+
+#[test]
+fn tensorcontract_weighted_terms_support_all_gemm_dtypes() {
+    assert_weighted_tensorcontract_scalar_dtype(2.0_f32, 3.0_f32, 5.0_f32, 21.0_f32);
+    assert_weighted_tensorcontract_scalar_dtype(2.0_f64, 3.0_f64, 5.0_f64, 21.0_f64);
+    assert_weighted_tensorcontract_scalar_dtype(
+        Complex32::new(2.0, 1.0),
+        Complex32::new(3.0, -1.0),
+        Complex32::new(5.0, 2.0),
+        Complex32::new(22.0, 7.0),
+    );
+    assert_weighted_tensorcontract_scalar_dtype(
+        Complex64::new(2.0, 1.0),
+        Complex64::new(3.0, -1.0),
+        Complex64::new(5.0, 2.0),
+        Complex64::new(22.0, 7.0),
+    );
+}
+
+#[test]
+fn tensorcontract_structure_rejects_invalid_axes_at_compile_time() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs = TensorMap::<f64, 2, 0>::filled(1.0, lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 2, 0>::filled(1.0, rhs_space).unwrap();
+    let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+
+    let duplicate = TensorContractStructure::compile(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1, 1], &[0, 1]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        duplicate,
+        OperationError::InvalidAxisSet {
+            tensor: "lhs",
+            axes: vec![1, 1],
+            rank: 2,
+        }
+    );
+
+    let count = TensorContractStructure::compile(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0, 1]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        count,
+        OperationError::ContractAxisCountMismatch { lhs: 1, rhs: 2 }
+    );
+}
+
+#[test]
+fn tensorcontract_structure_rejects_dimension_and_output_mismatch_at_compile_time() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 4], []).unwrap();
+    let lhs = TensorMap::<f64, 2, 0>::filled(1.0, lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 2, 0>::filled(1.0, rhs_space).unwrap();
+    let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+
+    let contracted_dim = TensorContractStructure::compile(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[1]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        contracted_dim,
+        OperationError::ShapeMismatch {
+            dst: vec![3],
+            src: vec![2],
+        }
+    );
+
+    let wrong_dst_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let wrong_dst = TensorMap::<f64, 2, 0>::filled(0.0, wrong_dst_space).unwrap();
+    let valid_rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let valid_rhs = TensorMap::<f64, 2, 0>::filled(1.0, valid_rhs_space).unwrap();
+    let output = TensorContractStructure::compile(
+        &wrong_dst,
+        &lhs,
+        &valid_rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+    )
+    .unwrap_err();
+    assert_eq!(
+        output,
+        OperationError::ShapeMismatch {
+            dst: vec![4, 2],
+            src: vec![2, 2],
+        }
+    );
+}
+
+#[test]
+fn tensorcontract_structure_rejects_incompatible_replay_structure_before_dense_execution() {
+    let compile_lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let compile_rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let compile_dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let compile_lhs = TensorMap::<f64, 2, 0>::filled(1.0, compile_lhs_space).unwrap();
+    let compile_rhs = TensorMap::<f64, 2, 0>::filled(1.0, compile_rhs_space).unwrap();
+    let compile_dst = TensorMap::<f64, 2, 0>::filled(0.0, compile_dst_space).unwrap();
+    let structure = TensorContractStructure::compile(
+        &compile_dst,
+        &compile_lhs,
+        &compile_rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+    )
+    .unwrap();
+
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 2], []).unwrap();
+    let lhs = TensorMap::<f64, 2, 0>::filled(1.0, lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 2, 0>::filled(1.0, rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let mut backend = DenseTreeTransformOperations::new(PanicDenseExecutor);
+    let mut workspace = TensorContractWorkspace::default();
+
+    let err = tensorcontract_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &lhs,
+        &rhs,
+        1.0,
+        0.0,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, OperationError::StructureMismatch { tensor: "dst" });
+}
+
+#[test]
+fn tensorcontract_structure_rejects_multiblock_until_block_sparse_enumeration_exists() {
+    let dense = BlockStructure::trivial(&[2, 2]).unwrap();
+    let multiblock = BlockStructure::packed_column_major(2, [vec![1, 2], vec![1, 2]]).unwrap();
+
+    let err = TensorContractStructure::compile_structures(
+        &dense,
+        &multiblock,
+        &dense,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        OperationError::UnsupportedTensorContractScope {
+            message: "block-sparse contraction enumeration is not implemented yet",
+        }
+    );
+}
+
+#[test]
+fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let lhs_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [
+            (BlockKey::sector_ids([10]), vec![1, 2]),
+            (BlockKey::sector_ids([20]), vec![1, 2]),
+        ],
+    )
+    .unwrap();
+    let rhs_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [
+            (BlockKey::sector_ids([30]), vec![2, 1]),
+            (BlockKey::sector_ids([40]), vec![2, 1]),
+        ],
+    )
+    .unwrap();
+    let dst_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [(BlockKey::sector_ids([99]), vec![1, 1])],
+    )
+    .unwrap();
+    let lhs = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![1.0, 2.0, 3.0, 4.0],
+        lhs_space,
+        lhs_structure,
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![5.0, 6.0, 7.0, 8.0],
+        rhs_space,
+        rhs_structure,
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![10.0], dst_space, dst_structure)
+            .unwrap();
+    let structure = TensorContractStructure::compile_with_block_specs(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        &[
+            TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5),
+            TensorContractBlockSpec::with_coefficient(0, 1, 1, 2.0),
+        ],
+    )
+    .unwrap();
+
+    tensorcontract_execute_with(
+        &mut DenseTreeTransformOperations::default_executor(),
+        &mut TensorContractWorkspace::default(),
+        &structure,
+        &mut dst,
+        &lhs,
+        &rhs,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(structure.terms().len(), 2);
+    assert_eq!(dst.data(), &[259.0]);
+}
+
+#[test]
+fn tensorcontract_structure_rejects_invalid_explicit_block_term_at_compile_time() {
+    let dense = BlockStructure::trivial(&[1, 1]).unwrap();
+
+    let err = TensorContractStructure::compile_structures_with_block_specs(
+        &dense,
+        &dense,
+        &dense,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        &[TensorContractBlockSpec::new(0, 1, 0)],
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        OperationError::BlockIndexOutOfBounds {
+            tensor: "lhs",
+            index: 1,
+            count: 1,
+        }
+    );
+}

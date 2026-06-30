@@ -6,10 +6,6 @@
 //! lowers those views to strided-rs kernels at the same granularity that
 //! TensorKit uses Strided.jl/StridedViews.jl internally.
 
-use std::sync::Arc;
-
-use tenet_core::{BlockLayout, BlockStructure};
-
 mod axis;
 mod backend;
 mod cache;
@@ -19,6 +15,7 @@ mod facade;
 mod host_kernels;
 mod scalar;
 mod strided;
+mod structure_identity;
 mod tensoradd;
 mod tree_context;
 mod tree_structure;
@@ -66,7 +63,6 @@ pub(crate) use host_kernels::{
 pub use scalar::{
     DenseBlockScalar, DenseRecouplingScalar, RecouplingCoefficientAction, TreeTransformScalar,
 };
-use strided::{column_major_strides_usize, element_count, offset_to_isize};
 pub use tensoradd::{tensoradd_structure, TensorAddStructure, TensorAddStructureTerm};
 pub use tree_context::TreeTransformExecutionContext;
 pub use tree_structure::TreeTransformStructure;
@@ -87,49 +83,6 @@ pub(crate) use tree_transform::{
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
     TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
 };
-
-pub(crate) fn validate_structure_identity(
-    tensor: &'static str,
-    expected: &Arc<BlockStructure>,
-    actual: &Arc<BlockStructure>,
-) -> Result<(), OperationError> {
-    if Arc::ptr_eq(expected, actual) || expected.as_ref() == actual.as_ref() {
-        Ok(())
-    } else {
-        Err(OperationError::StructureMismatch { tensor })
-    }
-}
-
-pub(crate) fn permutation_axes(
-    permutation: AxisPermutation<'_>,
-    rank: usize,
-) -> Result<Vec<usize>, OperationError> {
-    match permutation {
-        AxisPermutation::Identity => Ok((0..rank).collect()),
-        AxisPermutation::Axes(axes) => {
-            if axes.len() != rank {
-                return Err(OperationError::InvalidPermutation {
-                    axes: axes.to_vec(),
-                    rank,
-                });
-            }
-            let mut seen = vec![false; rank];
-            for &axis in axes {
-                if axis >= rank || seen[axis] {
-                    return Err(OperationError::InvalidPermutation {
-                        axes: axes.to_vec(),
-                        rank,
-                    });
-                }
-                seen[axis] = true;
-            }
-            Ok(axes.to_vec())
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn _assert_layout_owned_by_tenet(_layout: BlockLayout<'_>) {}
 
 #[cfg(test)]
 mod tests;
