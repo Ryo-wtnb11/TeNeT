@@ -623,7 +623,116 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
     }
 }
 
-pub fn build_unique_tree_transform_group_plan<T, R, F>(
+/// Build a TensorKit-style grouped tree-transform plan for multiplicity-free
+/// fusion rules.
+///
+/// This is the generic callback form: each source tree may map to multiple
+/// destination trees, and duplicate destinations are accumulated into one
+/// group-level recoupling matrix. `GenericFusion` with vertex multiplicities is
+/// intentionally not represented by this scalar-coefficient API.
+pub fn build_tree_transform_group_plan<T, R, F>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+    mut transform: F,
+) -> Result<TreeTransformGroupPlan<T>, OperationError>
+where
+    R: FusionRule,
+    T: Clone + Add<Output = T> + Zero,
+    F: FnMut(&FusionTreeBlockKey) -> Result<Vec<(FusionTreeBlockKey, T)>, OperationError>,
+{
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+
+    let mut specs = Vec::new();
+    for group in src_structure.fusion_tree_groups() {
+        let src_block_indices = group.block_indices();
+        let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
+        let mut dst_keys = Vec::<BlockKey>::new();
+        let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+        let mut rows = Vec::<Vec<T>>::new();
+
+        for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
+            let block = src_structure.block(src_block_index)?;
+            let BlockKey::FusionTree(src_key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index: src_block_index,
+                });
+            };
+            src_keys.push(BlockKey::from(src_key.clone()));
+
+            for row in &mut rows {
+                row.push(T::zero());
+            }
+            for (dst_tree_key, coefficient) in transform(src_key)? {
+                let dst_key = BlockKey::from(dst_tree_key);
+                let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
+                    dst_row
+                } else {
+                    let dst_row = dst_keys.len();
+                    dst_index_by_key.insert(dst_key.clone(), dst_row);
+                    dst_keys.push(dst_key);
+                    rows.push(vec![T::zero(); src_column + 1]);
+                    dst_row
+                };
+                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient;
+            }
+        }
+
+        if dst_keys.is_empty() {
+            return Err(OperationError::EmptyTransformBlock);
+        }
+        let src_count = src_keys.len();
+        let mut coefficients_src_by_dst = Vec::with_capacity(dst_keys.len() * src_count);
+        for row in rows {
+            coefficients_src_by_dst.extend(row);
+        }
+        specs.push(TreeTransformGroupBlockSpec::multi(
+            group.group_key().clone(),
+            dst_keys,
+            src_keys,
+            coefficients_src_by_dst,
+        ));
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
+/// Standard all-codomain tree-transform builder for Unique and Simple
+/// multiplicity-free rules.
+pub fn build_all_codomain_tree_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    build_multiplicity_free_all_codomain_tree_transform_group_plan(rule, operation, src_structure)
+}
+
+/// Standard full tree-pair transform builder for Unique and Simple
+/// multiplicity-free rules.
+pub fn build_tree_pair_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    build_multiplicity_free_tree_pair_transform_group_plan(rule, operation, src_structure)
+}
+
+pub(crate) fn build_unique_tree_transform_group_plan<T, R, F>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -662,7 +771,7 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-pub fn build_unique_all_codomain_tree_transform_group_plan<R>(
+pub(crate) fn build_unique_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -722,7 +831,7 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-pub fn build_multiplicity_free_all_codomain_tree_transform_group_plan<R>(
+pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -820,7 +929,7 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-pub fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
+pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -923,7 +1032,7 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-pub fn build_unique_tree_pair_transform_group_plan<R>(
+pub(crate) fn build_unique_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
     src_structure: &BlockStructure,
@@ -4919,7 +5028,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_tree_transform_plan_builder_rejects_simple_fusion() {
+    fn single_output_unique_tree_transform_helper_rejects_simple_fusion() {
         let src_key = fusion_tree_test_key([1, 1, 1], [1], 1, [false, false, false], [false]);
         let src_structure =
             BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])])
@@ -4942,6 +5051,62 @@ mod tests {
                 operation,
                 style: FusionStyleKind::Simple,
             }
+        );
+    }
+
+    #[test]
+    fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let src_tree0 = expect_tree_key(&src_key0);
+        let src_tree1 = expect_tree_key(&src_key1);
+        let src_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+
+        let plan =
+            build_tree_transform_group_plan(&SimpleSu2Rule, operation, &src_structure, |src| {
+                if src == &src_tree0 {
+                    Ok(vec![
+                        (src_tree0.clone(), 0.5_f64),
+                        (src_tree1.clone(), 0.866_025_403_784_438_6),
+                    ])
+                } else if src == &src_tree1 {
+                    Ok(vec![
+                        (src_tree0.clone(), 0.866_025_403_784_438_6),
+                        (src_tree1.clone(), -0.5),
+                    ])
+                } else {
+                    panic!("unexpected source key {src:?}")
+                }
+            })
+            .unwrap();
+
+        assert_eq!(plan.specs().len(), 1);
+        let spec = &plan.specs()[0];
+        assert_eq!(spec.src_keys(), &[src_key0.clone(), src_key1.clone()]);
+        assert_eq!(spec.dst_keys(), &[src_key0, src_key1]);
+        assert_eq!(
+            spec.coefficients_src_by_dst(),
+            &[0.5, 0.866_025_403_784_438_6, 0.866_025_403_784_438_6, -0.5]
         );
     }
 
@@ -4971,12 +5136,9 @@ mod tests {
         .unwrap();
         let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
-        let plan = build_multiplicity_free_all_codomain_tree_transform_group_plan(
-            &SU2FusionRule,
-            operation,
-            &src_structure,
-        )
-        .unwrap();
+        let plan =
+            build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation, &src_structure)
+                .unwrap();
 
         assert_eq!(plan.specs().len(), 1);
         let spec = &plan.specs()[0];
@@ -5028,7 +5190,7 @@ mod tests {
     }
 
     #[test]
-    fn multiplicity_free_su2_tree_pair_plan_builder_handles_domain_crossing() {
+    fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
             [1],
             [1],
@@ -5060,7 +5222,7 @@ mod tests {
         )
         .unwrap();
 
-        let plan = build_multiplicity_free_tree_pair_transform_group_plan(
+        let plan = build_tree_pair_transform_group_plan(
             &SU2FusionRule,
             TreeTransformOperationKey::permute([1], [0]),
             &src_structure,
@@ -5120,7 +5282,7 @@ mod tests {
         let src_structure = src_space.subblock_structure();
         let dst_structure = dst_space.subblock_structure();
 
-        let plan = build_multiplicity_free_tree_pair_transform_group_plan(
+        let plan = build_tree_pair_transform_group_plan(
             &rule,
             TreeTransformOperationKey::permute([1, 0], [2]),
             src_structure,
