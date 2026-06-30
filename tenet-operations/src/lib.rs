@@ -43,9 +43,11 @@ pub use contract::{
     tensorcontract_fusion_into_with, tensorcontract_fusion_structure,
     tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
     tensorcontract_into_with, tensorcontract_into_with_context, tensorcontract_structure,
-    TensorContractBackend, TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
-    TensorContractExecutionContext, TensorContractFusionExplicitPlan, TensorContractPlanKey,
-    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+    TensorContractBackend, TensorContractBlockPlanKey, TensorContractBlockPlanTerm,
+    TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
+    TensorContractExecutionContext, TensorContractFusionExecutionContext,
+    TensorContractFusionExplicitPlan, TensorContractPlanKey, TensorContractStructure,
+    TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use error::OperationError;
 pub use facade::{

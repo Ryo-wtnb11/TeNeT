@@ -405,6 +405,10 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     let lhs_canonical_space = lhs_space.clone();
     let canonical_dst_space = lhs_space.clone();
     let rhs_canonical_space = rhs_space.clone();
+    let context_dst_space = dst_space.clone();
+    let context_canonical_dst_space = canonical_dst_space.clone();
+    let context_lhs_canonical_space = lhs_canonical_space.clone();
+    let context_rhs_canonical_space = rhs_canonical_space.clone();
     let lhs = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![10.0], lhs_space).unwrap();
     let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
     let mut expected_dst =
@@ -537,6 +541,52 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     }
     assert!((explicit_dst.data()[0] - 53.0).abs() < 1.0e-12);
     assert!((explicit_dst.data()[1] - 92.602_540_378_443_86).abs() < 1.0e-12);
+
+    let mut context_dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], context_dst_space)
+            .unwrap();
+    let mut context_canonical_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
+        vec![999.0],
+        context_canonical_dst_space,
+    )
+    .unwrap();
+    let mut context_lhs_canonical = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
+        vec![123.0],
+        context_lhs_canonical_space,
+    )
+    .unwrap();
+    let mut context_rhs_canonical = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
+        vec![456.0],
+        context_rhs_canonical_space,
+    )
+    .unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .tensorcontract_fusion_explicit_plan_into_canonical_dst(
+            &rule,
+            &plan,
+            &mut context_dst,
+            &mut context_canonical_dst,
+            &mut context_lhs_canonical,
+            &mut context_rhs_canonical,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+    assert_eq!(context_canonical_dst.data(), expected_canonical_dst.data());
+    for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual {actual} expected {expected}"
+        );
+    }
+    assert_eq!(context.contract_cache().structure_len(), 1);
+    assert_eq!(context.contract_cache().stats().structure_hits(), 0);
+    assert_eq!(context.contract_cache().stats().structure_misses(), 1);
 }
 
 #[test]
@@ -767,6 +817,8 @@ fn tensorcontract_fusion_noncanonical_su2_requires_explicit_transform_sequence()
         .collect::<Vec<_>>();
     let initial_dst = vec![2.0, -1.0, 4.0, -3.0];
     let initial_dst_for_explicit = initial_dst.clone();
+    let initial_dst_for_context = initial_dst.clone();
+    let initial_dst_for_context_replay = initial_dst.clone();
     let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
     let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
     let mut direct_dst =
@@ -877,9 +929,11 @@ fn tensorcontract_fusion_noncanonical_su2_requires_explicit_transform_sequence()
     assert_eq!(direct_dst.data(), &[2.0, -1.0, 4.0, -3.0]);
     assert_ne!(expected_dst.data(), direct_dst.data());
 
-    let mut explicit_dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst_for_explicit, dst_space)
-            .unwrap();
+    let mut explicit_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial_dst_for_explicit,
+        dst_space.clone(),
+    )
+    .unwrap();
     tensorcontract_fusion_explicit_plan_into(
         &rule,
         &plan,
@@ -898,6 +952,74 @@ fn tensorcontract_fusion_noncanonical_su2_requires_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
+
+    let mut context_dst =
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst_for_context, dst_space)
+            .unwrap();
+    let mut context_lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        vec![0.0; lhs_canonical_space.required_len().unwrap()],
+        lhs_canonical_space,
+    )
+    .unwrap();
+    let mut context_rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_canonical_space.required_len().unwrap()],
+        rhs_canonical_space,
+    )
+    .unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .tensorcontract_fusion_explicit_plan_into(
+            &rule,
+            &plan,
+            &mut context_dst,
+            &mut context_lhs_canonical,
+            &mut context_rhs_canonical,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+    for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+    assert_eq!(context.tree_context().cache().plan_len(), 2);
+    assert_eq!(context.tree_context().cache().structure_len(), 2);
+    assert_eq!(context.contract_cache().structure_len(), 1);
+    assert_eq!(context.contract_cache().stats().structure_hits(), 0);
+    assert_eq!(context.contract_cache().stats().structure_misses(), 1);
+
+    context_dst
+        .data_mut()
+        .copy_from_slice(&initial_dst_for_context_replay);
+    context
+        .tensorcontract_fusion_explicit_plan_into(
+            &rule,
+            &plan,
+            &mut context_dst,
+            &mut context_lhs_canonical,
+            &mut context_rhs_canonical,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+    for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+    assert_eq!(context.tree_context().cache().plan_len(), 2);
+    assert_eq!(context.tree_context().cache().structure_len(), 2);
+    assert_eq!(context.contract_cache().structure_len(), 1);
+    assert_eq!(context.contract_cache().stats().structure_hits(), 1);
+    assert_eq!(context.contract_cache().stats().structure_misses(), 1);
 }
 
 #[test]
