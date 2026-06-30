@@ -505,6 +505,16 @@ where
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
+    if !is_canonical_fusion_source_contract(
+        lhs.homspace(),
+        rhs.homspace(),
+        axis_plan.lhs_contracting_axes.as_slice(),
+        axis_plan.rhs_contracting_axes.as_slice(),
+    ) {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+        });
+    }
     if is_canonical_fusion_compose_contract(
         lhs.homspace(),
         rhs.homspace(),
@@ -5799,15 +5809,24 @@ fn is_canonical_fusion_compose_contract(
     output_axes: &[usize],
     dst_codomain_rank: usize,
 ) -> bool {
+    let canonical_output_rank = lhs.codomain().len() + rhs.domain().len();
+    let canonical_output_axes = (0..canonical_output_rank).collect::<Vec<_>>();
+    is_canonical_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
+        && output_axes == canonical_output_axes.as_slice()
+        && dst_codomain_rank == lhs.codomain().len()
+}
+
+fn is_canonical_fusion_source_contract(
+    lhs: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+) -> bool {
     let lhs_domain_axes =
         (lhs.codomain().len()..lhs.codomain().len() + lhs.domain().len()).collect::<Vec<_>>();
     let rhs_codomain_axes = (0..rhs.codomain().len()).collect::<Vec<_>>();
-    let canonical_output_rank = lhs.codomain().len() + rhs.domain().len();
-    let canonical_output_axes = (0..canonical_output_rank).collect::<Vec<_>>();
     lhs_contracting_axes == lhs_domain_axes.as_slice()
         && rhs_contracting_axes == rhs_codomain_axes.as_slice()
-        && output_axes == canonical_output_axes.as_slice()
-        && dst_codomain_rank == lhs.codomain().len()
 }
 
 fn validate_block_index(
@@ -8540,7 +8559,7 @@ mod tests {
     }
 
     #[test]
-    fn tensorcontract_fusion_block_specs_enumerates_noncanonical_tree_transform_terms() {
+    fn tensorcontract_fusion_block_specs_rejects_source_tree_transform_terms() {
         let rule = Z2FusionRule;
         let leg = |is_dual| SectorLeg::new([SectorId::new(0)], is_dual);
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
@@ -8564,18 +8583,20 @@ mod tests {
         )
         .unwrap();
 
-        let specs = tensorcontract_fusion_block_specs(
+        let err = tensorcontract_fusion_block_specs(
             &rule,
             &transformed_dst_space,
             &fusion_space,
             &fusion_space,
             TensorContractAxisSpec::canonical(&[0], &[1]),
         )
-        .unwrap();
+        .unwrap_err();
 
         assert_eq!(
-            specs,
-            vec![TensorContractBlockSpec::with_coefficient(0, 0, 0, 1.0)]
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            }
         );
 
         let specs = tensorcontract_fusion_block_specs(
@@ -8594,7 +8615,7 @@ mod tests {
     }
 
     #[test]
-    fn tensorcontract_fusion_noncanonical_replays_transformed_product_block() {
+    fn tensorcontract_fusion_into_rejects_source_tree_transform_terms() {
         let rule = Z2FusionRule;
         let leg = |is_dual| SectorLeg::new([SectorId::new(0)], is_dual);
         let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
@@ -8623,7 +8644,7 @@ mod tests {
         let mut dst =
             TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![7.0], dst_space).unwrap();
 
-        tensorcontract_fusion_into(
+        let err = tensorcontract_fusion_into(
             &rule,
             &mut dst,
             &lhs,
@@ -8632,9 +8653,14 @@ mod tests {
             3.0,
             11.0,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(dst.data(), &[107.0]);
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            }
+        );
     }
 
     #[test]
@@ -8750,16 +8776,11 @@ mod tests {
         let dst_space = FusionTensorMapSpace::new(
             TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
             dst_hom,
-            BlockStructure::packed_column_major_with_keys(
-                2,
-                [(dst_keys[0].clone(), vec![2, 2])],
-            )
-            .unwrap(),
+            BlockStructure::packed_column_major_with_keys(2, [(dst_keys[0].clone(), vec![2, 2])])
+                .unwrap(),
         )
         .unwrap();
-        let lhs_data = (0..32)
-            .map(|index| 0.25 + index as f64)
-            .collect::<Vec<_>>();
+        let lhs_data = (0..32).map(|index| 0.25 + index as f64).collect::<Vec<_>>();
         let rhs_data = (0..32)
             .map(|index| 10.0 - 0.5 * index as f64)
             .collect::<Vec<_>>();
@@ -8833,7 +8854,212 @@ mod tests {
     }
 
     #[test]
-    fn tensorcontract_fusion_product_noncanonical_supports_complex_data() {
+    fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
+        let rule = U1FusionRule;
+        let plus_two = U1Irrep::new(2).sector_id();
+        let minus_two = U1Irrep::new(-2).sector_id();
+        let lhs_domain = FusionTreeKey::new(
+            [plus_two],
+            Some(plus_two),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        let rhs_codomain = FusionTreeKey::new(
+            [minus_two],
+            Some(minus_two),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        assert!(contracted_fusion_tree_basis_matches(
+            &rule,
+            &lhs_domain,
+            &rhs_codomain
+        ));
+
+        let raw_rhs_codomain = FusionTreeKey::new(
+            [plus_two],
+            Some(plus_two),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        assert!(!contracted_fusion_tree_basis_matches(
+            &rule,
+            &lhs_domain,
+            &raw_rhs_codomain
+        ));
+
+        let dual_flag_rhs_codomain = FusionTreeKey::new(
+            [minus_two],
+            Some(minus_two),
+            [true],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        assert!(!contracted_fusion_tree_basis_matches(
+            &rule,
+            &lhs_domain,
+            &dual_flag_rhs_codomain
+        ));
+    }
+
+    #[test]
+    fn tensorcontract_fusion_noncanonical_su2_requires_explicit_transform_sequence() {
+        let rule = SU2FusionRule;
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
+        let axes = TensorContractAxisSpec::canonical(&[0, 1, 2], &[1, 2, 3]);
+        let output_axes = [0, 1];
+        let lhs_canonical_hom = lhs_hom
+            .permute(&rule, &[3], &[0, 1, 2])
+            .expect("valid lhs canonical tree-pair transform");
+        let rhs_canonical_hom = rhs_hom
+            .permute(&rule, &[1, 2, 3], &[0])
+            .expect("valid rhs canonical tree-pair transform");
+        let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+            &rule,
+            &lhs_hom,
+            &rhs_hom,
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            &output_axes,
+            1,
+        )
+        .unwrap();
+
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+            lhs_hom,
+            &rule,
+            [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+            rhs_hom,
+            &rule,
+            [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
+        )
+        .unwrap();
+        let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
+            lhs_canonical_hom,
+            &rule,
+            [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
+        )
+        .unwrap();
+        let rhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
+            rhs_canonical_hom,
+            &rule,
+            [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            dst_hom,
+            &rule,
+            [vec![2, 2]],
+        )
+        .unwrap();
+        let lhs_data = (0..32)
+            .map(|index| 1.0 + 0.125 * index as f64)
+            .collect::<Vec<_>>();
+        let rhs_data = (0..32)
+            .map(|index| -3.0 + 0.25 * index as f64)
+            .collect::<Vec<_>>();
+        let initial_dst = vec![2.0, -1.0, 4.0, -3.0];
+        let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+        let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+        let mut direct_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+            initial_dst.clone(),
+            dst_space.clone(),
+        )
+        .unwrap();
+        let mut expected_dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
+        let mut lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+            vec![0.0; lhs_canonical_space.required_len().unwrap()],
+            lhs_canonical_space,
+        )
+        .unwrap();
+        let mut rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+            vec![0.0; rhs_canonical_space.required_len().unwrap()],
+            rhs_canonical_space,
+        )
+        .unwrap();
+        let err = tensorcontract_fusion_block_specs(
+            &rule,
+            direct_dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            }
+        );
+
+        tree_pair_transform_into(
+            &rule,
+            TreeTransformOperationKey::permute([3], [0, 1, 2]),
+            &mut lhs_canonical,
+            &lhs,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        tree_pair_transform_into(
+            &rule,
+            TreeTransformOperationKey::permute([1, 2, 3], [0]),
+            &mut rhs_canonical,
+            &rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        let canonical_specs = tensorcontract_fusion_block_specs(
+            &rule,
+            expected_dst.fusion_space().unwrap(),
+            lhs_canonical.fusion_space().unwrap(),
+            rhs_canonical.fusion_space().unwrap(),
+            TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]),
+        )
+        .unwrap();
+        assert_eq!(canonical_specs.len(), 2);
+
+        let alpha = -1.5;
+        let beta = 0.25;
+        let err = tensorcontract_fusion_into(&rule, &mut direct_dst, &lhs, &rhs, axes, alpha, beta)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            }
+        );
+        tensorcontract_fusion_into(
+            &rule,
+            &mut expected_dst,
+            &lhs_canonical,
+            &rhs_canonical,
+            TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]),
+            alpha,
+            beta,
+        )
+        .unwrap();
+
+        assert_eq!(direct_dst.data(), &[2.0, -1.0, 4.0, -3.0]);
+        assert_ne!(expected_dst.data(), direct_dst.data());
+    }
+
+    #[test]
+    fn tensorcontract_fusion_product_noncanonical_requires_explicit_transform() {
         let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
         let scalar_key = BlockKey::from(FusionTreeBlockKey::pair(
             empty_fusion_tree(),
@@ -8861,34 +9087,22 @@ mod tests {
         )
         .unwrap();
         let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[1, 0, 2]));
-        let specs = tensorcontract_fusion_block_specs(
+        let err = tensorcontract_fusion_block_specs(
             &rule,
             dst.fusion_space().unwrap(),
             lhs.fusion_space().unwrap(),
             rhs.fusion_space().unwrap(),
             axes,
         )
-        .unwrap();
-        assert!(!specs.is_empty());
+        .unwrap_err();
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            }
+        );
 
-        let mut expected = dst
-            .data()
-            .iter()
-            .map(|&value| Complex64::new(3.0, 0.0) * value)
-            .collect::<Vec<_>>();
-        let lhs_structure = lhs.structure();
-        let rhs_structure = rhs.structure();
-        let dst_structure = dst.structure();
-        for spec in &specs {
-            let lhs_offset = lhs_structure.block(spec.lhs_block()).unwrap().offset();
-            let rhs_offset = rhs_structure.block(spec.rhs_block()).unwrap().offset();
-            let dst_offset = dst_structure.block(spec.dst_block()).unwrap().offset();
-            expected[dst_offset] += Complex64::new(2.0 * spec.coefficient(), 0.0)
-                * lhs.data()[lhs_offset]
-                * rhs.data()[rhs_offset];
-        }
-
-        tensorcontract_fusion_into(
+        let err = tensorcontract_fusion_into(
             &rule,
             &mut dst,
             &lhs,
@@ -8897,12 +9111,14 @@ mod tests {
             Complex64::new(2.0, 0.0),
             Complex64::new(3.0, 0.0),
         )
-        .unwrap();
+        .unwrap_err();
 
-        for (&actual, expected) in dst.data().iter().zip(expected) {
-            let delta = actual - expected;
-            assert!(delta.re.abs() < 1.0e-12 && delta.im.abs() < 1.0e-12);
-        }
+        assert_eq!(
+            err,
+            OperationError::UnsupportedTensorContractScope {
+                message: "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly",
+            }
+        );
     }
 
     #[test]
