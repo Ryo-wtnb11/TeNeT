@@ -77,6 +77,7 @@ fn bench_su2_noncanonical_source() {
         "canonical_contract_warm_ns,{:.3}",
         nanos_per(canonical_contract, WARM_CONTEXT_ITERS)
     );
+    println!("result_checksum,{:.12}", checksum(&warm_data));
     println!("source_transform_checksum,{source_checksum:.12}");
     println!(
         "tree_plan_cache,hits={},misses={},len={}",
@@ -139,6 +140,7 @@ fn bench_su2_output_scratch() {
         "output_transform_warm_ns,{:.3}",
         nanos_per(output_transform, WARM_CONTEXT_ITERS)
     );
+    println!("result_checksum,{:.12}", checksum(&warm_data));
     println!(
         "tree_plan_cache,hits={},misses={},len={}",
         context.tree_context().cache().stats().plan_hits(),
@@ -193,6 +195,7 @@ fn bench_product_complex() {
         nanos_per(context_cold, COLD_CONTEXT_ITERS)
     );
     println!("context_warm_ns,{:.3}", nanos_per(warm, WARM_CONTEXT_ITERS));
+    println!("result_checksum,{:.12}", checksum_complex(&warm_data));
     println!(
         "tree_plan_cache,hits={},misses={},len={}",
         context.tree_context().cache().stats().plan_hits(),
