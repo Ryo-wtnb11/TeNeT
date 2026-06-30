@@ -379,6 +379,75 @@ impl FusionTreeHomSpace {
         &self.domain
     }
 
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.codomain.len() + self.domain.len()
+    }
+
+    pub fn compose<R>(rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+    {
+        if lhs.domain.len() != rhs.codomain.len() {
+            return Err(CoreError::DimensionMismatch {
+                expected: lhs.domain.len(),
+                actual: rhs.codomain.len(),
+            });
+        }
+        for (lhs_domain, rhs_codomain) in lhs.domain.legs().iter().zip(rhs.codomain.legs()) {
+            validate_composed_leg(rule, lhs_domain, rhs_codomain)?;
+        }
+        Ok(Self::new(lhs.codomain.clone(), rhs.domain.clone()))
+    }
+
+    pub fn tensorcontract_homspace<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+    ) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+    {
+        let lhs_rank = lhs.rank();
+        let rhs_rank = rhs.rank();
+        let lhs_domain_axes =
+            (lhs.codomain.len()..lhs.codomain.len() + lhs.domain.len()).collect::<Vec<_>>();
+        let rhs_codomain_axes = (0..rhs.codomain.len()).collect::<Vec<_>>();
+        if lhs_contracting_axes != lhs_domain_axes.as_slice() {
+            return Err(CoreError::InvalidPermutation {
+                permutation: lhs_contracting_axes.to_vec(),
+                rank: lhs_rank,
+            });
+        }
+        if rhs_contracting_axes != rhs_codomain_axes.as_slice() {
+            return Err(CoreError::InvalidPermutation {
+                permutation: rhs_contracting_axes.to_vec(),
+                rank: rhs_rank,
+            });
+        }
+
+        let output_rank = lhs.codomain.len() + rhs.domain.len();
+        let canonical_output_axes = (0..output_rank).collect::<Vec<_>>();
+        if output_axes != canonical_output_axes.as_slice() {
+            return Err(CoreError::InvalidPermutation {
+                permutation: output_axes.to_vec(),
+                rank: output_rank,
+            });
+        }
+        if dst_codomain_rank != lhs.codomain.len() {
+            return Err(CoreError::StructureRankMismatch {
+                expected: lhs.codomain.len(),
+                actual: dst_codomain_rank,
+            });
+        }
+
+        Self::compose(rule, lhs, rhs)
+    }
+
     pub fn fusion_tree_keys<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
     where
         R: MultiplicityFreeFusionRule,
@@ -502,6 +571,41 @@ impl FusionTreeHomSpace {
     }
 }
 
+fn validate_composed_leg<R>(
+    rule: &R,
+    lhs_domain: &SectorLeg,
+    rhs_codomain: &SectorLeg,
+) -> Result<(), CoreError>
+where
+    R: FusionRule,
+{
+    if lhs_domain.is_dual() != rhs_codomain.is_dual() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "contracted fusion leg duality flags do not match",
+        });
+    }
+    let mut lhs_external = lhs_domain
+        .sectors()
+        .iter()
+        .copied()
+        .map(|sector| rule.dual(sector))
+        .collect::<Vec<_>>();
+    lhs_external.sort_unstable();
+    lhs_external.dedup();
+    if lhs_external.len() != rhs_codomain.sectors().len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: lhs_external.len(),
+            actual: rhs_codomain.sectors().len(),
+        });
+    }
+    for (&expected, &actual) in lhs_external.iter().zip(rhs_codomain.sectors()) {
+        if expected != actual {
+            return Err(CoreError::SectorMismatch { expected, actual });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
     dense_space: TensorMapSpace<NOUT, NIN>,
@@ -593,6 +697,11 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     #[inline]
     pub fn subblock_structure(&self) -> &Arc<BlockStructure> {
         &self.subblock_structure
+    }
+
+    pub fn find_subblock_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {
+        self.subblock_structure
+            .find_block_index_by_fusion_tree_key(key)
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {
@@ -3884,6 +3993,33 @@ impl FusionTreeBlockKey {
     #[inline]
     pub fn domain_is_dual(&self) -> &[bool] {
         self.domain_tree.is_dual()
+    }
+
+    pub fn external_sectors<R>(&self, rule: &R) -> Vec<SectorId>
+    where
+        R: FusionRule,
+    {
+        let mut sectors = Vec::with_capacity(
+            self.codomain_tree.uncoupled().len() + self.domain_tree.uncoupled().len(),
+        );
+        sectors.extend(self.codomain_tree.uncoupled().iter().copied());
+        sectors.extend(
+            self.domain_tree
+                .uncoupled()
+                .iter()
+                .copied()
+                .map(|sector| rule.dual(sector)),
+        );
+        sectors
+    }
+
+    pub fn external_is_dual(&self) -> Vec<bool> {
+        let mut is_dual = Vec::with_capacity(
+            self.codomain_tree.is_dual().len() + self.domain_tree.is_dual().len(),
+        );
+        is_dual.extend(self.codomain_tree.is_dual().iter().copied());
+        is_dual.extend(self.domain_tree.is_dual().iter().copied());
+        is_dual
     }
 
     pub fn group_key(&self) -> FusionTreeGroupKey {
@@ -7425,6 +7561,106 @@ mod tests {
         assert_eq!(key.codomain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(key.domain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(key.coupled(), Some(SectorId::new(1)));
+    }
+
+    #[test]
+    fn fusion_tree_block_key_external_sectors_restore_visible_domain_sector() {
+        let rule = Z4PointedRule;
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], true)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+        );
+        let key = hom
+            .unique_fusion_tree_key_from_external_sectors(
+                &rule,
+                &[SectorId::new(1), SectorId::new(3)],
+            )
+            .unwrap();
+
+        assert_eq!(key.codomain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(key.domain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(
+            key.external_sectors(&rule),
+            vec![SectorId::new(1), SectorId::new(3)]
+        );
+        assert_eq!(key.external_is_dual(), vec![true, false]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_compose_matches_nonselfdual_domain_convention() {
+        let rule = U1FusionRule;
+        let physical = u1(1);
+        let lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([rule.dual(physical)], false)]),
+        );
+        let rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([physical], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(3)], false)]),
+        );
+
+        let composed = FusionTreeHomSpace::compose(&rule, &lhs, &rhs).unwrap();
+
+        assert_eq!(composed.codomain().legs()[0].sectors(), &[u1(2)]);
+        assert_eq!(composed.domain().legs()[0].sectors(), &[u1(3)]);
+    }
+
+    #[test]
+    fn fusion_tree_homspace_tensorcontract_accepts_only_canonical_compose_shape_for_now() {
+        let rule = Z2FusionRule;
+        let lhs = FusionTreeHomSpace::from_sector_ids([0], [0]);
+        let rhs = FusionTreeHomSpace::from_sector_ids([0], [0]);
+
+        let composed =
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[1], &[0], &[0, 1], 1)
+                .unwrap();
+        assert_eq!(composed.codomain().len(), 1);
+        assert_eq!(composed.domain().len(), 1);
+
+        let noncanonical_lhs =
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[0], &[0], &[0, 1], 1)
+                .unwrap_err();
+        assert_eq!(
+            noncanonical_lhs,
+            CoreError::InvalidPermutation {
+                permutation: vec![0],
+                rank: 2,
+            }
+        );
+
+        let output_permute =
+            FusionTreeHomSpace::tensorcontract_homspace(&rule, &lhs, &rhs, &[1], &[0], &[1, 0], 1)
+                .unwrap_err();
+        assert_eq!(
+            output_permute,
+            CoreError::InvalidPermutation {
+                permutation: vec![1, 0],
+                rank: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn fusion_tree_homspace_compose_rejects_unmatched_contracted_sector() {
+        let rule = U1FusionRule;
+        let lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(0)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+        );
+        let rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(0)], false)]),
+        );
+
+        let err = FusionTreeHomSpace::compose(&rule, &lhs, &rhs).unwrap_err();
+
+        assert_eq!(
+            err,
+            CoreError::SectorMismatch {
+                expected: rule.dual(u1(1)),
+                actual: u1(1),
+            }
+        );
     }
 
     #[test]

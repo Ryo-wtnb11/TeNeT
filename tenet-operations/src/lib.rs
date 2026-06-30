@@ -20,9 +20,10 @@ use tenet_core::{
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
     multiplicity_free_transpose_tree_pair, BlockKey, BlockLayout, BlockStructure, BlockView,
     BlockViewMut, BraidingStyleKind, CoreError, FermionParityFusionRule, FusionRule,
-    FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
+    FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockGroup, FusionTreeBlockKey,
+    FusionTreeGroupKey, FusionTreeHomSpace, MultiplicityFreeFusionRule,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductFusionRule,
-    ProductSectorCodec, SU2FusionRule, TensorMap, U1FusionRule, Z2FusionRule,
+    ProductSectorCodec, SU2FusionRule, SectorId, TensorMap, U1FusionRule, Z2FusionRule,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -427,6 +428,135 @@ pub fn tensorcontract_structure<
     axes: TensorContractAxisSpec<'_>,
 ) -> Result<TensorContractStructure, OperationError> {
     TensorContractStructure::compile(dst, lhs, rhs, axes)
+}
+
+pub fn tensorcontract_fusion_structure<
+    R,
+    TDst,
+    TLhs,
+    TRhs,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    rule: &R,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<TensorContractStructure, OperationError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let dst_fusion = dst
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let lhs_fusion = lhs
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let rhs_fusion = rhs
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let block_specs =
+        tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+    TensorContractStructure::compile_with_block_specs(dst, lhs, rhs, axes, &block_specs)
+}
+
+pub fn tensorcontract_fusion_block_specs<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let axis_plan = TensorContractAxisPlan::compile(
+        lhs.subblock_structure().rank(),
+        rhs.subblock_structure().rank(),
+        dst.subblock_structure().rank(),
+        axes,
+    )?;
+    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs.homspace(),
+        rhs.homspace(),
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axis_plan.output_axes.as_slice(),
+        DST_NOUT,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    if &expected_homspace != dst.homspace() {
+        return Err(OperationError::StructureMismatch { tensor: "dst" });
+    }
+
+    let mut specs = Vec::new();
+    for lhs_index in 0..lhs.subblock_structure().block_count() {
+        let lhs_block = lhs.subblock_structure().block(lhs_index)?;
+        let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
+            continue;
+        };
+        let lhs_external = lhs_key.external_sectors(rule);
+        for rhs_index in 0..rhs.subblock_structure().block_count() {
+            let rhs_block = rhs.subblock_structure().block(rhs_index)?;
+            let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
+                continue;
+            };
+            let rhs_external = rhs_key.external_sectors(rule);
+            if !contracted_external_sectors_match(
+                &lhs_external,
+                &rhs_external,
+                axis_plan.lhs_contracting_axes.as_slice(),
+                axis_plan.rhs_contracting_axes.as_slice(),
+            ) {
+                continue;
+            }
+            let dst_key = FusionTreeBlockKey::pair(
+                lhs_key.codomain_tree().clone(),
+                rhs_key.domain_tree().clone(),
+            );
+            let dst_external = dst_key.external_sectors(rule);
+            let expected_external =
+                contracted_output_external_sectors(&lhs_external, &rhs_external, &axis_plan);
+            if dst_external != expected_external {
+                return Err(OperationError::StructureMismatch { tensor: "dst" });
+            }
+            let dst_keys = dst
+                .homspace()
+                .fusion_tree_keys_from_external_sectors(rule, &dst_external)
+                .map_err(OperationError::from_core_preserving_context)?;
+            if !dst_keys.contains(&dst_key) {
+                return Err(OperationError::MissingBlockKey {
+                    key: BlockKey::from(dst_key),
+                });
+            }
+            let dst_index = dst.find_subblock_index(&dst_key).ok_or_else(|| {
+                OperationError::MissingBlockKey {
+                    key: BlockKey::from(dst_key.clone()),
+                }
+            })?;
+            specs.push(TensorContractBlockSpec::new(
+                dst_index, lhs_index, rhs_index,
+            ));
+        }
+    }
+    Ok(specs)
 }
 
 impl TensorContractStructure {
@@ -5346,6 +5476,41 @@ fn validate_axis_subset(
     Ok(seen)
 }
 
+fn contracted_external_sectors_match(
+    lhs_external: &[SectorId],
+    rhs_external: &[SectorId],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+) -> bool {
+    lhs_axes
+        .iter()
+        .zip(rhs_axes)
+        .all(|(&lhs_axis, &rhs_axis)| lhs_external[lhs_axis] == rhs_external[rhs_axis])
+}
+
+fn contracted_output_external_sectors(
+    lhs_external: &[SectorId],
+    rhs_external: &[SectorId],
+    axis_plan: &TensorContractAxisPlan,
+) -> Vec<SectorId> {
+    let mut canonical = axis_plan
+        .lhs_open_axes
+        .iter()
+        .map(|&axis| lhs_external[axis])
+        .collect::<Vec<_>>();
+    canonical.extend(
+        axis_plan
+            .rhs_open_axes
+            .iter()
+            .map(|&axis| rhs_external[axis]),
+    );
+    axis_plan
+        .output_axes
+        .iter()
+        .map(|&axis| canonical[axis])
+        .collect()
+}
+
 fn validate_block_index(
     tensor: &'static str,
     index: usize,
@@ -7836,6 +8001,228 @@ mod tests {
                 index: 1,
                 count: 1,
             }
+        );
+    }
+
+    #[test]
+    fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let lhs =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0, 3.0], lhs_space).unwrap();
+        let rhs =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0, 7.0], rhs_space).unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space)
+                .unwrap();
+
+        let specs = tensorcontract_fusion_block_specs(
+            &rule,
+            dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+        assert_eq!(
+            specs,
+            vec![
+                TensorContractBlockSpec::new(0, 0, 0),
+                TensorContractBlockSpec::new(1, 1, 1),
+            ]
+        );
+
+        let structure = tensorcontract_fusion_structure(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+        tensorcontract_execute_with(
+            &mut DenseTreeTransformOperations::default_executor(),
+            &mut TensorContractWorkspace::default(),
+            &structure,
+            &mut dst,
+            &lhs,
+            &rhs,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[50.0, 102.0]);
+    }
+
+    #[test]
+    fn tensorcontract_fusion_block_specs_enumerates_su2_innerline_blocks_from_homspace() {
+        let rule = SU2FusionRule;
+        let half = SectorId::new(1);
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]),
+            &rule,
+            [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([1], [1]),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]),
+            &rule,
+            [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
+        )
+        .unwrap();
+
+        let specs = tensorcontract_fusion_block_specs(
+            &rule,
+            &dst_space,
+            &lhs_space,
+            &rhs_space,
+            TensorContractAxisSpec::canonical(&[3], &[0]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            specs,
+            vec![
+                TensorContractBlockSpec::new(0, 0, 0),
+                TensorContractBlockSpec::new(1, 1, 0),
+            ]
+        );
+        assert_eq!(
+            dst_space
+                .homspace()
+                .fusion_tree_keys_from_external_sectors(&rule, &[half, half, half, half])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let dst_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+        let keys = dst_hom.fusion_tree_keys(&rule);
+        let dst_structure =
+            BlockStructure::packed_column_major_with_keys(2, [(keys[0].clone(), vec![1, 1])])
+                .unwrap();
+        let dst_space = FusionTensorMapSpace::new(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            dst_hom,
+            dst_structure,
+        )
+        .unwrap();
+
+        let err = tensorcontract_fusion_block_specs(
+            &rule,
+            &dst_space,
+            &lhs_space,
+            &rhs_space,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::MissingBlockKey {
+                key: keys[1].clone().into()
+            }
+        );
+    }
+
+    #[test]
+    fn tensorcontract_fusion_block_specs_rejects_noncanonical_axes_until_recoupling_is_wired() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0)], false);
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+
+        let err = tensorcontract_fusion_block_specs(
+            &rule,
+            &fusion_space,
+            &fusion_space,
+            &fusion_space,
+            TensorContractAxisSpec::canonical(&[0], &[0]),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            OperationError::Core(CoreError::InvalidPermutation {
+                permutation: vec![0],
+                rank: 2,
+            })
         );
     }
 
