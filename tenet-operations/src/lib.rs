@@ -2384,15 +2384,31 @@ impl<T> TreeTransformWorkspace<T> {
     }
 }
 
-pub trait TreeTransformBackend<T>
-where
+pub trait TreeTransformScalar:
+    Copy
+    + Add<Self, Output = Self>
+    + Mul<Self, Output = Self>
+    + PartialEq
+    + Zero
+    + One
+    + strided_kernel::MaybeSendSync
+{
+}
+
+impl<T> TreeTransformScalar for T where
     T: Copy
         + Add<T, Output = T>
         + Mul<T, Output = T>
         + PartialEq
         + Zero
         + One
-        + strided_kernel::MaybeSendSync,
+        + strided_kernel::MaybeSendSync
+{
+}
+
+pub trait TreeTransformBackend<T>
+where
+    T: TreeTransformScalar,
 {
     type Workspace;
 
@@ -2483,6 +2499,158 @@ impl<E> DenseTreeTransformOperations<E> {
 impl Default for DenseTreeTransformOperations<DefaultDenseExecutor> {
     fn default() -> Self {
         Self::default_executor()
+    }
+}
+
+#[derive(Debug)]
+pub struct TreeTransformExecutionContext<T, RuleKey, B = DenseTreeTransformOperations>
+where
+    T: TreeTransformScalar,
+    B: TreeTransformBackend<T>,
+{
+    backend: B,
+    workspace: B::Workspace,
+    cache: TreeTransformCache<T, RuleKey>,
+}
+
+impl<T, RuleKey, B> TreeTransformExecutionContext<T, RuleKey, B>
+where
+    T: TreeTransformScalar,
+    B: TreeTransformBackend<T>,
+{
+    pub fn with_parts(
+        backend: B,
+        workspace: B::Workspace,
+        cache: TreeTransformCache<T, RuleKey>,
+    ) -> Self {
+        Self {
+            backend,
+            workspace,
+            cache,
+        }
+    }
+
+    #[inline]
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    #[inline]
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
+    #[inline]
+    pub fn workspace(&self) -> &B::Workspace {
+        &self.workspace
+    }
+
+    #[inline]
+    pub fn workspace_mut(&mut self) -> &mut B::Workspace {
+        &mut self.workspace
+    }
+
+    #[inline]
+    pub fn cache(&self) -> &TreeTransformCache<T, RuleKey> {
+        &self.cache
+    }
+
+    #[inline]
+    pub fn cache_mut(&mut self) -> &mut TreeTransformCache<T, RuleKey> {
+        &mut self.cache
+    }
+
+    pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<T, RuleKey>) {
+        (self.backend, self.workspace, self.cache)
+    }
+}
+
+impl<T, RuleKey, B> TreeTransformExecutionContext<T, RuleKey, B>
+where
+    T: TreeTransformScalar,
+    RuleKey: Clone + Eq + Hash,
+    B: TreeTransformBackend<T>,
+    B::Workspace: Default,
+{
+    pub fn new(backend: B) -> Self {
+        Self::with_parts(backend, B::Workspace::default(), TreeTransformCache::new())
+    }
+}
+
+impl<T, RuleKey, B> Default for TreeTransformExecutionContext<T, RuleKey, B>
+where
+    T: TreeTransformScalar,
+    RuleKey: Clone + Eq + Hash,
+    B: TreeTransformBackend<T> + Default,
+    B::Workspace: Default,
+{
+    fn default() -> Self {
+        Self::new(B::default())
+    }
+}
+
+impl<T, RuleKey, B> TreeTransformExecutionContext<T, RuleKey, B>
+where
+    T: TreeTransformScalar,
+    RuleKey: Clone + Eq + Hash,
+    B: TreeTransformBackend<T>,
+{
+    pub fn tree_pair_transform_into<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
+        backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+    }
+
+    pub fn all_codomain_tree_transform_into<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        let structure = cache.get_or_compile_all_codomain(rule, operation, dst, src)?;
+        backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
     }
 }
 
@@ -2860,6 +3028,62 @@ where
 {
     let structure = tree_pair_transform_structure(rule, operation, dst, src)?;
     tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
+}
+
+pub fn tree_pair_transform_into_with_context<
+    B,
+    R,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    context: &mut TreeTransformExecutionContext<R::Scalar, RuleKey, B>,
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: R::Scalar,
+    beta: R::Scalar,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: Clone + Eq + Hash,
+    R::Scalar: TreeTransformScalar,
+{
+    context.tree_pair_transform_into(rule, operation, dst, src, alpha, beta)
+}
+
+pub fn all_codomain_tree_transform_into_with_context<
+    B,
+    R,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    context: &mut TreeTransformExecutionContext<R::Scalar, RuleKey, B>,
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    dst: &mut TensorMap<R::Scalar, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<R::Scalar, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: R::Scalar,
+    beta: R::Scalar,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<R::Scalar>,
+    R: MultiplicityFreeFusionSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: Clone + Eq + Hash,
+    R::Scalar: TreeTransformScalar,
+{
+    context.all_codomain_tree_transform_into(rule, operation, dst, src, alpha, beta)
 }
 
 pub fn tensoradd_assign_into<T, const NOUT: usize, const NIN: usize, S>(
@@ -6348,6 +6572,128 @@ mod tests {
     }
 
     #[test]
+    fn tree_transform_execution_context_reuses_all_codomain_cache() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let block_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let mut src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            space.clone(),
+            block_structure.clone(),
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
+                .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+        let mut context =
+            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+        all_codomain_tree_transform_into_with_context(
+            &mut context,
+            &SU2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(context.cache().plan_len(), 1);
+        assert_eq!(context.cache().structure_len(), 1);
+        assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
+        assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
+
+        src.data_mut().copy_from_slice(&[3.0, -4.0]);
+        dst.data_mut().copy_from_slice(&[1.0, 2.0]);
+        context
+            .all_codomain_tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 2.0, -1.0)
+            .unwrap();
+
+        assert_eq!(context.cache().plan_len(), 1);
+        assert_eq!(context.cache().structure_len(), 1);
+        let c = 0.866_025_403_784_438_6;
+        assert!((dst.data()[0] - (-1.0 + 2.0 * (0.5 * 3.0 + c * -4.0))).abs() < 1.0e-12);
+        assert!((dst.data()[1] - (-2.0 + 2.0 * (c * 3.0 - 0.5 * -4.0))).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes() {
+        let src_key0 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [0, 1],
+            [1, 1, 1],
+        );
+        let src_key1 = all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            [2, 1],
+            [1, 1, 1],
+        );
+        let block_structure = BlockStructure::packed_column_major_with_keys(
+            4,
+            [
+                (src_key0.clone(), vec![1, 1, 1, 1]),
+                (src_key1.clone(), vec![1, 1, 1, 1]),
+            ],
+        )
+        .unwrap();
+        let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![10.0, 20.0],
+            space.clone(),
+            block_structure.clone(),
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
+                .unwrap();
+        let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+        let mut context =
+            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+        context
+            .tree_pair_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+            .unwrap();
+        assert_eq!(context.cache().plan_len(), 1);
+        assert_eq!(context.cache().structure_len(), 1);
+
+        dst.data_mut().copy_from_slice(&[0.0, 0.0]);
+        context
+            .all_codomain_tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
+            .unwrap();
+
+        assert_eq!(context.cache().plan_len(), 2);
+        assert_eq!(context.cache().structure_len(), 2);
+        assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
+        assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
+    }
+
+    #[test]
     fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
             [1],
@@ -6789,6 +7135,116 @@ mod tests {
                 "actual {actual} != expected {expected}"
             );
         }
+    }
+
+    #[test]
+    fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
+        let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+        type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+        let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+        let mut src =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let plan = build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure())
+            .unwrap();
+        let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
+        let expected_first = expected_single_tree_pair_replay(
+            &plan,
+            dst.structure(),
+            src.structure(),
+            dst.data(),
+            src.data(),
+            2.0,
+            3.0,
+        );
+
+        context
+            .tree_pair_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0)
+            .unwrap();
+
+        assert_eq!(context.cache().plan_len(), 1);
+        assert_eq!(context.cache().structure_len(), 1);
+        for (actual, expected) in dst.data().iter().zip(expected_first) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} != expected {expected}"
+            );
+        }
+
+        src.data_mut().copy_from_slice(&[4.0, 5.0]);
+        dst.data_mut().copy_from_slice(&[6.0, 7.0]);
+        let expected_second = expected_single_tree_pair_replay(
+            &plan,
+            dst.structure(),
+            src.structure(),
+            dst.data(),
+            src.data(),
+            -1.0,
+            0.5,
+        );
+        tree_pair_transform_into_with_context(
+            &mut context,
+            &rule,
+            operation,
+            &mut dst,
+            &src,
+            -1.0,
+            0.5,
+        )
+        .unwrap();
+
+        assert_eq!(context.cache().plan_len(), 1);
+        assert_eq!(context.cache().structure_len(), 1);
+        for (actual, expected) in dst.data().iter().zip(expected_second) {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "actual {actual} != expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
+        let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+        type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+        let src =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
+                .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
+                .unwrap();
+        let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
+
+        context
+            .tree_pair_transform_into(
+                &rule,
+                TreeTransformOperationKey::permute([1, 0], [2]),
+                &mut dst,
+                &src,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(context.cache().plan_len(), 1);
+        assert_eq!(context.cache().structure_len(), 1);
+
+        dst.data_mut().copy_from_slice(&[1.0, 2.0]);
+        context
+            .tree_pair_transform_into(
+                &rule,
+                TreeTransformOperationKey::braid([1, 0], [2], [1, 0], [2]),
+                &mut dst,
+                &src,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+
+        assert_eq!(context.cache().plan_len(), 2);
+        assert_eq!(context.cache().structure_len(), 2);
     }
 
     #[test]
