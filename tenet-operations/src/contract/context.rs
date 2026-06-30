@@ -1,19 +1,25 @@
 use std::hash::Hash;
 
-use tenet_core::{MultiplicityFreeRigidSymbols, TensorMap};
+use tenet_core::{BlockStructure, CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::backend::DenseTreeTransformOperations;
 use crate::cache::{TensorContractStructureCache, TensorContractStructureCacheKey};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
-use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction, TreeTransformBackend};
+use crate::{
+    DenseBlockScalar, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
+    TreeTransformBackend,
+};
 
 use super::backend::TensorContractBackend;
+use super::dynamic::tensorcontract_fusion_dynamic_plan_into_context;
 use super::fusion::{
-    tensorcontract_fusion_block_specs, TensorContractFusionExplicitPlan,
-    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+    tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
+    TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
+use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -284,6 +290,46 @@ impl TensorContractCache<TensorContractBlockPlanKey> {
             .get(&structure_key)
             .expect("tensor contract structure inserted before replay"))
     }
+
+    pub(crate) fn get_or_compile_with_block_specs_structures(
+        &mut self,
+        dst_structure: &BlockStructure,
+        lhs_structure: &BlockStructure,
+        rhs_structure: &BlockStructure,
+        axes: TensorContractAxisSpec<'_>,
+        block_specs: &[TensorContractBlockSpec],
+    ) -> Result<&TensorContractStructure, OperationError> {
+        let plan_key = TensorContractBlockPlanKey::from_block_specs(
+            lhs_structure.rank(),
+            rhs_structure.rank(),
+            dst_structure.rank(),
+            axes,
+            block_specs,
+        )?;
+        let structure_key = TensorContractStructureCacheKey::from_structures(
+            plan_key.clone(),
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+        )?;
+        if self.structures.get(&structure_key).is_some() {
+            self.stats.structure_hits += 1;
+        } else {
+            self.stats.structure_misses += 1;
+            let structure = TensorContractStructure::compile_structures_with_block_specs(
+                dst_structure,
+                lhs_structure,
+                rhs_structure,
+                plan_key.axes().as_spec(),
+                block_specs,
+            )?;
+            self.structures.insert(structure_key.clone(), structure);
+        }
+        Ok(self
+            .structures
+            .get(&structure_key)
+            .expect("tensor contract structure inserted before replay"))
+    }
 }
 
 #[derive(Debug)]
@@ -444,6 +490,7 @@ pub struct TensorContractFusionExecutionContext<
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
+    fusion_scratch: DynamicFusionScratchWorkspace<D>,
 }
 
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
@@ -464,6 +511,7 @@ where
             contract_backend,
             contract_workspace,
             contract_cache,
+            fusion_scratch: DynamicFusionScratchWorkspace::default(),
         }
     }
 
@@ -564,6 +612,92 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
 {
+    pub fn tensorcontract_fusion_into<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        &mut self,
+        rule: &R,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        axes: TensorContractAxisSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        let dst_fusion = dst
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let lhs_fusion = lhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let rhs_fusion = rhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+
+        match tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes) {
+            Ok(block_specs) => {
+                let structure = self.contract_cache.get_or_compile_with_block_specs(
+                    dst,
+                    lhs,
+                    rhs,
+                    axes,
+                    &block_specs,
+                )?;
+                self.contract_backend.tensorcontract_structure_into(
+                    &mut self.contract_workspace,
+                    structure,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                )
+            }
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+            }) => {
+                let plan = tensorcontract_fusion_explicit_plan(
+                    rule, dst_fusion, lhs_fusion, rhs_fusion, axes,
+                )?;
+                let Self {
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    contract_cache,
+                    fusion_scratch,
+                } = self;
+                tensorcontract_fusion_dynamic_plan_into_context(
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    contract_cache,
+                    fusion_scratch,
+                    rule,
+                    &plan,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                )
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn tensorcontract_fusion_explicit_plan_into<
         R,
         const DST_NOUT: usize,

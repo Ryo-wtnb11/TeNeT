@@ -1,6 +1,7 @@
 mod api;
 mod backend;
 mod context;
+mod dynamic;
 mod fusion;
 mod scratch;
 mod structure;

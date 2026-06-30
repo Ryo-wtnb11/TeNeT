@@ -2,7 +2,9 @@ use core::ops::{Add, Mul};
 use std::hash::Hash;
 
 use num_traits::Zero;
-use tenet_core::{MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap};
+use tenet_core::{
+    BlockStructure, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
+};
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
 use crate::error::OperationError;
@@ -136,6 +138,43 @@ where
         } = self;
         let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
         backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+    }
+
+    pub(crate) fn tree_pair_transform_into_raw<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst_structure: &std::sync::Arc<BlockStructure>,
+        src_structure: &std::sync::Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        let structure = cache.get_or_compile_tree_pair_structures(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
+        )?;
+        backend.tree_transform_structure_into_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
     }
 
     pub fn all_codomain_tree_transform_into<

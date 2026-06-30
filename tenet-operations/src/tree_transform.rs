@@ -1356,6 +1356,29 @@ where
         self.get_or_compile_structure(plan_key, dst, src)
     }
 
+    pub fn get_or_compile_tree_pair_structures<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
+    {
+        let plan_key =
+            TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src_structure)?;
+        if self.plans.contains_key(&plan_key) {
+            self.stats.plan_hits += 1;
+        } else {
+            self.stats.plan_misses += 1;
+            let plan = build_tree_pair_transform_group_plan(rule, operation, src_structure)?;
+            self.plans.insert(plan_key.clone(), plan);
+        }
+        self.get_or_compile_structure_from_structures(plan_key, dst_structure, src_structure)
+    }
+
     pub fn get_or_compile_all_codomain<
         R,
         TDst,
@@ -1422,6 +1445,37 @@ where
                 .get(&plan_key)
                 .expect("tree transform plan inserted before structure compile");
             let structure = plan.compile(dst, src)?;
+            self.structures.insert(structure_key.clone(), structure);
+        }
+        Ok(self
+            .structures
+            .get(&structure_key)
+            .expect("tree transform structure inserted before return"))
+    }
+
+    fn get_or_compile_structure_from_structures(
+        &mut self,
+        plan_key: TreeTransformSectorPlanKey<RuleKey>,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        T: Copy,
+    {
+        let structure_key = TreeTransformStructureCacheKey::from_structures(
+            plan_key.clone(),
+            dst_structure,
+            src_structure,
+        )?;
+        if self.structures.get(&structure_key).is_some() {
+            self.stats.structure_hits += 1;
+        } else {
+            self.stats.structure_misses += 1;
+            let plan = self
+                .plans
+                .get(&plan_key)
+                .expect("tree transform plan inserted before structure compile");
+            let structure = plan.compile_structures(dst_structure, src_structure)?;
             self.structures.insert(structure_key.clone(), structure);
         }
         Ok(self

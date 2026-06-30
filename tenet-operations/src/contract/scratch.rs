@@ -17,7 +17,7 @@ use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec};
 /// Internal dynamic-rank fusion space used for TensorKit-style temporary
 /// materialization. Public tensors remain const-generic; source/output tree
 /// transforms that change the codomain/domain split are absorbed here.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DynamicFusionMapSpace {
     nout: usize,
     nin: usize,
@@ -105,6 +105,7 @@ impl DynamicFusionMapSpace {
         lhs: &Self,
         rhs: &Self,
         plan: &TensorContractFusionExplicitPlan,
+        output_dst: Option<&Self>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -125,7 +126,16 @@ impl DynamicFusionMapSpace {
         )
         .map_err(OperationError::from_core_preserving_context)?;
 
-        let inferred_shapes = infer_canonical_dst_shapes(rule, lhs, rhs, &axis_plan)?;
+        let mut inferred_shapes = infer_canonical_dst_shapes(rule, lhs, rhs, &axis_plan)?;
+        if let Some(output_dst) = output_dst {
+            infer_canonical_dst_shapes_from_output(
+                rule,
+                &homspace,
+                plan,
+                output_dst,
+                &mut inferred_shapes,
+            )?;
+        }
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::new();
         for key in homspace.fusion_tree_keys(rule) {
             let shape = inferred_shapes.get(&key).cloned().ok_or_else(|| {
@@ -215,6 +225,109 @@ impl<T> DynamicFusionScratch<T> {
     pub(crate) fn data_mut(&mut self) -> &mut [T] {
         &mut self.data
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicFusionScratchWorkspace<T> {
+    lhs: Option<DynamicFusionScratch<T>>,
+    rhs: Option<DynamicFusionScratch<T>>,
+    dst: Option<DynamicFusionScratch<T>>,
+}
+
+impl<T> Default for DynamicFusionScratchWorkspace<T> {
+    fn default() -> Self {
+        Self {
+            lhs: None,
+            rhs: None,
+            dst: None,
+        }
+    }
+}
+
+impl<T> DynamicFusionScratchWorkspace<T>
+where
+    T: Clone + Zero,
+{
+    pub(crate) fn prepare_lhs(
+        &mut self,
+        space: DynamicFusionMapSpace,
+    ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
+        prepare_scratch_slot(&mut self.lhs, space)
+    }
+
+    pub(crate) fn prepare_rhs(
+        &mut self,
+        space: DynamicFusionMapSpace,
+    ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
+        prepare_scratch_slot(&mut self.rhs, space)
+    }
+
+    pub(crate) fn prepare_dst(
+        &mut self,
+        space: DynamicFusionMapSpace,
+    ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
+        prepare_scratch_slot(&mut self.dst, space)
+    }
+
+    pub(crate) fn lhs(&self) -> &DynamicFusionScratch<T> {
+        self.lhs
+            .as_ref()
+            .expect("lhs dynamic scratch prepared before replay")
+    }
+
+    pub(crate) fn rhs(&self) -> &DynamicFusionScratch<T> {
+        self.rhs
+            .as_ref()
+            .expect("rhs dynamic scratch prepared before replay")
+    }
+
+    pub(crate) fn dst(&self) -> &DynamicFusionScratch<T> {
+        self.dst
+            .as_ref()
+            .expect("dst dynamic scratch prepared before replay")
+    }
+
+    pub(crate) fn lhs_rhs(&self) -> (&DynamicFusionScratch<T>, &DynamicFusionScratch<T>) {
+        (self.lhs(), self.rhs())
+    }
+
+    pub(crate) fn lhs_rhs_dst_mut(
+        &mut self,
+    ) -> (
+        &DynamicFusionScratch<T>,
+        &DynamicFusionScratch<T>,
+        &mut DynamicFusionScratch<T>,
+    ) {
+        let Self { lhs, rhs, dst } = self;
+        (
+            lhs.as_ref()
+                .expect("lhs dynamic scratch prepared before replay"),
+            rhs.as_ref()
+                .expect("rhs dynamic scratch prepared before replay"),
+            dst.as_mut()
+                .expect("dst dynamic scratch prepared before replay"),
+        )
+    }
+}
+
+fn prepare_scratch_slot<T>(
+    slot: &mut Option<DynamicFusionScratch<T>>,
+    space: DynamicFusionMapSpace,
+) -> Result<&mut DynamicFusionScratch<T>, OperationError>
+where
+    T: Clone + Zero,
+{
+    match slot {
+        Some(scratch) if scratch.space == space => {
+            scratch.fill_zero();
+        }
+        _ => {
+            *slot = Some(DynamicFusionScratch::zeroed(space)?);
+        }
+    }
+    Ok(slot
+        .as_mut()
+        .expect("dynamic scratch slot prepared before return"))
 }
 
 pub(crate) fn tensorcontract_dynamic_canonical_fusion_block_specs<R>(
@@ -362,6 +475,79 @@ where
     Ok(shapes)
 }
 
+fn infer_canonical_dst_shapes_from_output<R>(
+    rule: &R,
+    canonical_homspace: &FusionTreeHomSpace,
+    plan: &TensorContractFusionExplicitPlan,
+    output_dst: &DynamicFusionMapSpace,
+    shapes: &mut HashMap<FusionTreeBlockKey, Vec<usize>>,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let canonical_rank = plan.canonical_dst_nout() + plan.canonical_dst_nin();
+    let dummy_blocks = canonical_homspace
+        .fusion_tree_keys(rule)
+        .into_iter()
+        .map(|key| (BlockKey::from(key), vec![1; canonical_rank]));
+    let dummy_structure =
+        BlockStructure::packed_column_major_with_keys(canonical_rank, dummy_blocks)?;
+    let transform_plan = build_tree_pair_transform_group_plan(
+        rule,
+        plan.output_transform().clone(),
+        &dummy_structure,
+    )?;
+    let (codomain_axes, domain_axes) = tree_transform_operation_axes(plan.output_transform());
+    let output_axes = codomain_axes
+        .iter()
+        .chain(domain_axes)
+        .copied()
+        .collect::<Vec<_>>();
+    for spec in transform_plan.specs() {
+        let src_count = spec.src_keys().len();
+        for (src_column, src_key) in spec.src_keys().iter().enumerate() {
+            let BlockKey::FusionTree(src_tree_key) = src_key else {
+                continue;
+            };
+            for (dst_row, dst_key) in spec.dst_keys().iter().enumerate() {
+                let coefficient = spec.coefficients_src_by_dst()[src_column + dst_row * src_count];
+                if coefficient == 0.0 {
+                    continue;
+                }
+                let Ok(dst_block) = output_dst.structure().block_by_key(dst_key) else {
+                    continue;
+                };
+                let candidate = invert_selected_shape(
+                    dst_block.shape(),
+                    &output_axes,
+                    canonical_rank,
+                    "output",
+                )?;
+                merge_inferred_shape(shapes, src_tree_key.clone(), candidate)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_inferred_shape(
+    shapes: &mut HashMap<FusionTreeBlockKey, Vec<usize>>,
+    key: FusionTreeBlockKey,
+    candidate: Vec<usize>,
+) -> Result<(), OperationError> {
+    if let Some(existing) = shapes.get(&key) {
+        if existing != &candidate {
+            return Err(OperationError::ShapeMismatch {
+                dst: existing.clone(),
+                src: candidate,
+            });
+        }
+    } else {
+        shapes.insert(key, candidate);
+    }
+    Ok(())
+}
+
 fn is_canonical_dynamic_source_contract(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
@@ -426,4 +612,39 @@ fn selected_shape(
         selected.push(dim);
     }
     Ok(selected)
+}
+
+fn invert_selected_shape(
+    selected_shape: &[usize],
+    axes: &[usize],
+    rank: usize,
+    tensor: &'static str,
+) -> Result<Vec<usize>, OperationError> {
+    if selected_shape.len() != axes.len() {
+        return Err(OperationError::RankMismatch {
+            expected: axes.len(),
+            actual: selected_shape.len(),
+        });
+    }
+    let mut seen = vec![false; rank];
+    let mut shape = vec![0; rank];
+    for (&axis, &dim) in axes.iter().zip(selected_shape) {
+        if axis >= rank || seen[axis] {
+            return Err(OperationError::InvalidAxisSet {
+                tensor,
+                axes: axes.to_vec(),
+                rank,
+            });
+        }
+        seen[axis] = true;
+        shape[axis] = dim;
+    }
+    if seen.iter().any(|&value| !value) {
+        return Err(OperationError::InvalidAxisSet {
+            tensor,
+            axes: axes.to_vec(),
+            rank,
+        });
+    }
+    Ok(shape)
 }
