@@ -327,6 +327,10 @@ impl<T: Copy> TreeTransformStructure<T> {
                 });
             }
         }
+        blocks.sort_by(|lhs, rhs| {
+            tree_transform_block_weight(rhs, &layouts)
+                .cmp(&tree_transform_block_weight(lhs, &layouts))
+        });
 
         Ok(Self {
             rank,
@@ -377,6 +381,14 @@ impl<T: Copy> TreeTransformStructure<T> {
             .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn replay_weights(&self) -> Vec<usize> {
+        self.blocks
+            .iter()
+            .map(|block| tree_transform_block_weight(block, &self.layouts))
+            .collect()
+    }
+
     #[inline]
     pub(crate) fn storage_conjugate(&self) -> bool {
         self.storage_conjugate
@@ -393,6 +405,23 @@ impl<T: Copy> TreeTransformStructure<T> {
     ) -> Result<(), OperationError> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
         validate_structure_identity("src", &self.src_structure, src_structure)
+    }
+}
+
+fn tree_transform_block_weight(
+    block: &TreeTransformBlock,
+    layouts: &TreeTransformLayoutTable,
+) -> usize {
+    match *block {
+        TreeTransformBlock::Single { dst_layout, .. } => layouts.entry(dst_layout).element_count,
+        TreeTransformBlock::Multi {
+            dst_count,
+            src_count,
+            element_count,
+            ..
+        } => dst_count
+            .saturating_mul(src_count)
+            .saturating_mul(element_count),
     }
 }
 

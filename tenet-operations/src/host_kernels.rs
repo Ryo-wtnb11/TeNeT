@@ -21,6 +21,8 @@ pub struct TreeTransformWorkspace<T> {
     source: Vec<T>,
     destination: Vec<T>,
     coefficients: Vec<T>,
+    coefficient_cache_key: Option<CoefficientCacheKey>,
+    coefficient_cache_refreshes: usize,
 }
 
 impl<T> Default for TreeTransformWorkspace<T> {
@@ -30,6 +32,8 @@ impl<T> Default for TreeTransformWorkspace<T> {
             source: Vec::new(),
             destination: Vec::new(),
             coefficients: Vec::new(),
+            coefficient_cache_key: None,
+            coefficient_cache_refreshes: 0,
         }
     }
 }
@@ -41,6 +45,44 @@ impl<T> TreeTransformWorkspace<T> {
 
     pub fn destination_len(&self) -> usize {
         self.destination.len()
+    }
+
+    pub fn coefficient_len(&self) -> usize {
+        self.coefficients.len()
+    }
+
+    pub fn coefficient_cache_refreshes(&self) -> usize {
+        self.coefficient_cache_refreshes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CoefficientCacheKey {
+    ptr: *const (),
+    len: usize,
+}
+
+impl<T> TreeTransformWorkspace<T>
+where
+    T: Copy,
+{
+    fn prepare_coefficients_from<C>(&mut self, coefficients: &[C])
+    where
+        T: RecouplingCoefficientAction<C>,
+        C: Copy,
+    {
+        let key = CoefficientCacheKey {
+            ptr: coefficients.as_ptr().cast::<()>(),
+            len: coefficients.len(),
+        };
+        if self.coefficient_cache_key == Some(key) {
+            return;
+        }
+        self.coefficients.clear();
+        self.coefficients
+            .extend(coefficients.iter().copied().map(T::coefficient_as_data));
+        self.coefficient_cache_key = Some(key);
+        self.coefficient_cache_refreshes += 1;
     }
 }
 
@@ -651,20 +693,14 @@ where
             actual: coefficients_src_by_dst.len(),
         });
     }
-    workspace.coefficients.clear();
-    workspace.coefficients.extend(
-        coefficients_src_by_dst[coefficient_start..coefficient_end]
-            .iter()
-            .copied()
-            .map(D::coefficient_as_data),
-    );
+    workspace.prepare_coefficients_from(coefficients_src_by_dst);
 
     apply_recoupling_matrix_with_dense_executor(
         dense,
         &mut workspace.destination,
         &workspace.source,
         &workspace.coefficients,
-        0,
+        coefficient_start,
         element_count,
         src_count,
         dst_count,

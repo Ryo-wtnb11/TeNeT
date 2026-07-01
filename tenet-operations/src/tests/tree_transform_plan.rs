@@ -435,6 +435,97 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
 }
 
 #[test]
+fn tree_transform_dense_recoupling_reuses_converted_coefficients() {
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let structure = BlockStructure::packed_column_major_with_keys(
+        4,
+        [
+            (src_key0.clone(), vec![1, 1, 1, 1]),
+            (src_key1.clone(), vec![1, 1, 1, 1]),
+        ],
+    )
+    .unwrap();
+    let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<Complex64, 4, 0>::from_vec_with_structure(
+        vec![Complex64::new(10.0, 1.0), Complex64::new(20.0, -2.0)],
+        src_space,
+        structure.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<Complex64, 4, 0>::from_vec_with_structure(
+        vec![Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
+        dst_space,
+        structure.clone(),
+    )
+    .unwrap();
+    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let compiled = tree_pair_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+    let first = dst.data().to_vec();
+    assert_eq!(workspace.coefficient_len(), 4);
+    assert_eq!(workspace.coefficient_cache_refreshes(), 1);
+
+    dst.data_mut().fill(Complex64::new(0.0, 0.0));
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+    assert_eq!(dst.data(), first.as_slice());
+    assert_eq!(workspace.coefficient_cache_refreshes(), 1);
+}
+
+#[test]
+fn tree_transform_structure_sorts_replay_blocks_by_tensorkit_weight() {
+    let dst_structure =
+        BlockStructure::packed_column_major(1, [vec![1], vec![3], vec![3]]).unwrap();
+    let src_structure =
+        BlockStructure::packed_column_major(1, [vec![1], vec![3], vec![3]]).unwrap();
+    let structure = TreeTransformStructure::compile_structures(
+        &dst_structure,
+        &src_structure,
+        &[
+            TreeTransformBlockSpec::single(0, 0, 1.0),
+            TreeTransformBlockSpec::multi(vec![1, 2], vec![1, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(structure.replay_weights(), vec![12, 1]);
+}
+
+#[test]
 fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],
