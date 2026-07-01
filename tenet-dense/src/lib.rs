@@ -600,26 +600,28 @@ mod tenferro_adapter {
         let rhs_view =
             strided_einsum2::StridedView::new(rhs.data(), &rhs_shape, &rhs_strides, rhs_offset)
                 .map_err(strided_error)?;
-        let output_view = strided_einsum2::StridedViewMut::new(
+        let mut output_view = strided_einsum2::StridedViewMut::new(
             output.data_mut(),
             &output_shape,
             &output_strides,
             output_offset,
         )
         .map_err(strided_error)?;
-        let config = strided_einsum2::DotGeneralConfig {
-            lhs_contracting_dims: &[1],
-            rhs_contracting_dims: &[0],
-            lhs_batch_dims: &[],
-            rhs_batch_dims: &[],
-        };
-        strided_einsum2::dot_general_into(
-            output_view,
+        // This is the dense backend's rank-2 `mul!` equivalent.  The public
+        // dot-general path rebuilds an einsum plan every call; canonical
+        // fusion-block contraction has already compiled the rank-2 layout.
+        strided_einsum2::bgemm_faer::bgemm_strided_into(
+            &mut output_view,
             &lhs_view,
             &rhs_view,
-            &config,
+            0,
+            1,
+            1,
+            1,
             T::one(),
             T::zero(),
+            false,
+            false,
         )
         .map_err(strided_error)
     }
