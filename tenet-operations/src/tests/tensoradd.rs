@@ -818,6 +818,136 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_matches_manual_inverse_braid_r
     assert_eq!(actual.data(), expected.data());
 }
 
+#[test]
+fn tensoradd_fusion_source_adjoint_domain_only_braid_matches_manual_inverse_braid_reference() {
+    let rule = UnitaryPhaseAnyonicRule;
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<0, 2>::from_dims([], [1, 1]).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([], [1, 3]),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([3, 1], []),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let src_data = vec![Complex64::new(-4.0, 1.5)];
+    let src = TensorMap::<Complex64, 0, 2>::from_vec_with_fusion_space(src_data.clone(), src_space)
+        .unwrap();
+    let operation =
+        TreeTransformOperationKey::braid([1, 0], Vec::<usize>::new(), Vec::<usize>::new(), [0, 1]);
+    let mut actual = TensorMap::<Complex64, 2, 0>::from_vec_with_fusion_space(
+        vec![Complex64::zero()],
+        dst_space.clone(),
+    )
+    .unwrap();
+
+    tensoradd_fusion_into(
+        &rule,
+        &mut actual,
+        &src,
+        operation,
+        true,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    let adjoint_src_space =
+        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+    let adjoint_src = TensorMap::<Complex64, 2, 0>::from_vec_with_fusion_space(
+        src_data.iter().map(|value| value.conj()).collect(),
+        adjoint_src_space,
+    )
+    .unwrap();
+    let mut expected = TensorMap::<Complex64, 2, 0>::from_vec_with_fusion_space(
+        vec![Complex64::zero()],
+        dst_space,
+    )
+    .unwrap();
+    tree_pair_transform_into(
+        &rule,
+        TreeTransformOperationKey::braid([1, 0], Vec::<usize>::new(), [1, 0], Vec::<usize>::new()),
+        &mut expected,
+        &adjoint_src,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(actual.data(), expected.data());
+}
+
+#[test]
+fn tensoradd_fusion_source_adjoint_mixed_braid_matches_manual_inverse_braid_reference() {
+    let rule = UnitaryPhaseAnyonicRule;
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([1], [1]),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], true)]),
+            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], true)]),
+        ),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let src_data = vec![Complex64::new(0.5, -2.0)];
+    let src = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(src_data.clone(), src_space)
+        .unwrap();
+    let operation = TreeTransformOperationKey::braid([0], [1], [0], [1]);
+    let mut actual = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero()],
+        dst_space.clone(),
+    )
+    .unwrap();
+
+    tensoradd_fusion_into(
+        &rule,
+        &mut actual,
+        &src,
+        operation,
+        true,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    let adjoint_src_space =
+        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+    let adjoint_src = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        src_data.iter().map(|value| value.conj()).collect(),
+        adjoint_src_space,
+    )
+    .unwrap();
+    let mut expected = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero()],
+        dst_space,
+    )
+    .unwrap();
+    tree_pair_transform_into(
+        &rule,
+        TreeTransformOperationKey::braid([1], [0], [0], [1]),
+        &mut expected,
+        &adjoint_src,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(actual.data(), expected.data());
+}
+
 fn reference_adjoint_reflected_braid_levels(
     nout: usize,
     nin: usize,

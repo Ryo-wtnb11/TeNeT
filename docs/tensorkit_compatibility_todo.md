@@ -68,14 +68,17 @@ Implemented test coverage:
   duplicate levels at lowering time.
 - Public `tensoradd_fusion_into` rejects `Braid + source_conjugate` when the
   rule does not declare unitary dagger-compatible braiding.
-- A supported unitary phase anyonic fixture compares public
+- Supported unitary phase anyonic fixtures compare public
   `source_conjugate + explicit Braid` against the explicit categorical
   sequence: adjoint-space view, inverse-level braid, then storage conjugation.
+  Tensoradd covers codomain-only, domain-only, and mixed codomain/domain
+  double-tree maps.
 
 Remaining coverage to add before broadening beyond tensoradd:
 
-- Cover codomain-only, domain-only, and mixed codomain/domain double-tree maps
-  for all public operations that expose explicit braid with source conjugation.
+- Add equivalent codomain-only, domain-only, and mixed codomain/domain
+  double-tree coverage when other public operations expose explicit braid with
+  source conjugation.
 - Include nonscalar SU2 recoupling and nontrivial degeneracy shapes once that
   operation path is enabled beyond tensoradd.
 - Keep symmetric `Permute` behavior separate from explicit `Braid`; symmetric

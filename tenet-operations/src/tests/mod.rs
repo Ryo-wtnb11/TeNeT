@@ -413,7 +413,7 @@ impl MultiplicityFreeFusionSymbols for UnitaryPhaseAnyonicRule {
     }
 
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
-        if matches!((left.id(), right.id()), (1, 3) | (3, 1)) {
+        if matches!((left.id(), right.id()), (1, 1) | (1, 3) | (3, 1)) {
             Complex64::new(0.0, 1.0)
         } else {
             Complex64::new(1.0, 0.0)
