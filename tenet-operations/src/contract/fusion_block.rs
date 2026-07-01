@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -260,6 +260,9 @@ impl CanonicalFusionBlockContractPlan {
             fusion_workspace
                 .buffers
                 .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            fusion_workspace
+                .buffers
+                .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
             pack_group(&group.lhs, lhs_data, &mut fusion_workspace.buffers.lhs)?;
             pack_group(&group.rhs, rhs_data, &mut fusion_workspace.buffers.rhs)?;
             matmul_group_plan(
@@ -312,6 +315,9 @@ impl CanonicalFusionBlockContractPlan {
             fusion_workspace
                 .buffers
                 .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            fusion_workspace
+                .buffers
+                .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
             profile.canonical_workspace_prepare += start.elapsed();
 
             let start = std::time::Instant::now();
@@ -833,12 +839,18 @@ where
             .checked_mul(rhs_cols)
             .ok_or(OperationError::ElementCountOverflow)?;
         self.lhs.resize(lhs_len, T::zero());
-        self.lhs.fill(T::zero());
         self.rhs.resize(rhs_len, T::zero());
-        self.rhs.fill(T::zero());
         self.dst.resize(dst_len, T::zero());
-        self.dst.fill(T::zero());
         Ok(())
+    }
+
+    fn clear_inputs(&mut self, clear_lhs: bool, clear_rhs: bool) {
+        if clear_lhs {
+            self.lhs.fill(T::zero());
+        }
+        if clear_rhs {
+            self.rhs.fill(T::zero());
+        }
     }
 }
 
@@ -908,7 +920,9 @@ struct FusionBlockMatrixGroupBuilder {
     coupled: SectorId,
     row_offsets: HashMap<FusionTreeKey, TreeMatrixOffset>,
     col_offsets: HashMap<FusionTreeKey, TreeMatrixOffset>,
+    tree_pairs: HashSet<(FusionTreeKey, FusionTreeKey)>,
     blocks: Vec<usize>,
+    occupied_elements: usize,
     rows: usize,
     cols: usize,
 }
@@ -919,7 +933,9 @@ impl FusionBlockMatrixGroupBuilder {
             coupled,
             row_offsets: HashMap::new(),
             col_offsets: HashMap::new(),
+            tree_pairs: HashSet::new(),
             blocks: Vec::new(),
+            occupied_elements: 0,
             rows: 0,
             cols: 0,
         }
@@ -933,6 +949,9 @@ impl FusionBlockMatrixGroupBuilder {
         col_dim: usize,
         block_index: usize,
     ) -> Result<(), OperationError> {
+        if !self.tree_pairs.insert((row_tree.clone(), col_tree.clone())) {
+            return Err(OperationError::StructureMismatch { tensor: "fusion" });
+        }
         match self.row_offsets.get(&row_tree) {
             Some(offset) if offset.dim != row_dim => {
                 return Err(OperationError::ShapeMismatch {
@@ -979,6 +998,13 @@ impl FusionBlockMatrixGroupBuilder {
                 );
             }
         }
+        let block_elements = row_dim
+            .checked_mul(col_dim)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        self.occupied_elements = self
+            .occupied_elements
+            .checked_add(block_elements)
+            .ok_or(OperationError::ElementCountOverflow)?;
         self.blocks.push(block_index);
         Ok(())
     }
@@ -1049,10 +1075,15 @@ impl FusionBlockMatrixGroupBuilder {
                 coefficient,
             });
         }
+        let matrix_elements = self
+            .rows
+            .checked_mul(self.cols)
+            .ok_or(OperationError::ElementCountOverflow)?;
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
             rows: self.rows,
             cols: self.cols,
+            needs_clear: self.occupied_elements != matrix_elements,
             subblocks,
         })
     }
@@ -1069,6 +1100,9 @@ struct FusionBlockMatrixGroup {
     coupled: SectorId,
     rows: usize,
     cols: usize,
+    // False only when the group's subblocks cover the packed matrix exactly.
+    // Sparse fusion layouts keep this true so stale workspace cannot leak into GEMM.
+    needs_clear: bool,
     subblocks: Vec<FusionSubblockMatrixLayout>,
 }
 

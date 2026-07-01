@@ -52,6 +52,11 @@ where
         beta: D,
     ) -> Result<(), OperationError>;
 
+    /// Writes the full rank-2 matrix product `lhs * rhs` into `dst_data`.
+    ///
+    /// Implementations must overwrite every element of the `rows x cols`
+    /// output buffer; callers may reuse dirty workspace and must not rely on
+    /// pre-cleared destination storage.
     #[allow(clippy::too_many_arguments)]
     fn matmul_rank2_into_raw(
         &mut self,
