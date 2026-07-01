@@ -114,6 +114,13 @@ impl TreeTransformOperationKey {
     }
 }
 
+/// Semantic cache identity for fusion-tree transformation replay.
+///
+/// Equal keys must imply identical fusion, duality, braiding, and recoupling
+/// coefficients for every sector/tree combination the rule can produce.
+/// Cached tree-transform and fusion-contraction replay plans may be reused
+/// solely from this key plus the operand structures, so custom rules must
+/// include every parameter that can change those coefficients.
 pub trait TreeTransformRuleCacheKey {
     type Key: Clone + Eq + Hash;
 

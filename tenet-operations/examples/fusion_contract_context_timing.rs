@@ -119,9 +119,9 @@ fn bench_su2_noncanonical_source() {
         context.fusion_block_contract_cache_len()
     );
     println!(
-        "fusion_execution_plan_cache,hits={},misses={},len={}",
-        context.fusion_execution_plan_cache_hits(),
-        context.fusion_execution_plan_cache_misses(),
+        "fusion_execution_plan_cache,replay_hits={},compiles={},len={}",
+        context.fusion_execution_plan_cache_replay_hits(),
+        context.fusion_execution_plan_cache_compiles(),
         context.fusion_execution_plan_cache_len()
     );
 }
@@ -173,9 +173,9 @@ fn bench_su2_output_scratch() {
         context.fusion_block_contract_cache_len()
     );
     println!(
-        "fusion_execution_plan_cache,hits={},misses={},len={}",
-        context.fusion_execution_plan_cache_hits(),
-        context.fusion_execution_plan_cache_misses(),
+        "fusion_execution_plan_cache,replay_hits={},compiles={},len={}",
+        context.fusion_execution_plan_cache_replay_hits(),
+        context.fusion_execution_plan_cache_compiles(),
         context.fusion_execution_plan_cache_len()
     );
 }
@@ -226,9 +226,9 @@ fn bench_product_complex() {
         context.fusion_block_contract_cache_len()
     );
     println!(
-        "fusion_execution_plan_cache,hits={},misses={},len={}",
-        context.fusion_execution_plan_cache_hits(),
-        context.fusion_execution_plan_cache_misses(),
+        "fusion_execution_plan_cache,replay_hits={},compiles={},len={}",
+        context.fusion_execution_plan_cache_replay_hits(),
+        context.fusion_execution_plan_cache_compiles(),
         context.fusion_execution_plan_cache_len()
     );
 }

@@ -14,6 +14,7 @@ use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, error as strided_error,
     offset_to_isize, strides_to_isize,
 };
+use crate::structure_identity::validate_structure_identity;
 use crate::{
     DenseBlockScalar, OperationError, RecouplingCoefficientAction, TreeTransformRuleCacheKey,
 };
@@ -172,6 +173,9 @@ impl<T> Default for FusionBlockContractBuffers<T> {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CanonicalFusionBlockContractPlan {
+    dst_structure: Arc<BlockStructure>,
+    lhs_structure: Arc<BlockStructure>,
+    rhs_structure: Arc<BlockStructure>,
     groups: Vec<CanonicalFusionBlockContractGroupPlan>,
 }
 
@@ -217,7 +221,12 @@ impl CanonicalFusionBlockContractPlan {
                 dst_group.clone(),
             )?);
         }
-        Ok(Self { groups })
+        Ok(Self {
+            dst_structure: Arc::clone(dst_space.structure()),
+            lhs_structure: Arc::clone(lhs_space.structure()),
+            rhs_structure: Arc::clone(rhs_space.structure()),
+            groups,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -239,6 +248,7 @@ impl CanonicalFusionBlockContractPlan {
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
+        self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
         scale_all_blocks(dst_structure, dst_data, beta)?;
 
         for group in &self.groups {
@@ -274,6 +284,17 @@ impl CanonicalFusionBlockContractPlan {
             )?;
         }
         Ok(())
+    }
+
+    fn validate_replay_structures(
+        &self,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        rhs_structure: &Arc<BlockStructure>,
+    ) -> Result<(), OperationError> {
+        validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
+        validate_structure_identity("lhs", &self.lhs_structure, lhs_structure)?;
+        validate_structure_identity("rhs", &self.rhs_structure, rhs_structure)
     }
 }
 

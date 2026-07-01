@@ -216,61 +216,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_fusion_dynamic_cached_into_context<
-    RuleKey,
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
->(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    execution_cache: &mut DynamicFusionExecutionPlanCache<RuleKey>,
-    contract_backend: &mut BC,
-    contract_workspace: &mut BC::Workspace,
-    fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
-    scratch: &mut DynamicFusionScratchWorkspace<D>,
-    rule: &R,
-    axes: TensorContractAxisSpec<'_>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-    alpha: D,
-    beta: D,
-) -> Result<bool, OperationError>
-where
-    RuleKey: Clone + Eq + std::hash::Hash,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-{
-    let Some(execution_plan) = execution_cache.get_cached(rule, axes, dst, lhs, rhs)? else {
-        return Ok(false);
-    };
-    execution_plan.execute(
-        tree_context,
-        contract_backend,
-        contract_workspace,
-        fusion_block_workspace,
-        scratch,
-        dst,
-        lhs,
-        rhs,
-        alpha,
-        beta,
-    )?;
-    Ok(true)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     RuleKey,
@@ -294,6 +239,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     contract_workspace: &mut BC::Workspace,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
+    precomputed_key: Option<DynamicFusionExecutionPlanCacheKey<RuleKey>>,
     rule: &R,
     axes: TensorContractAxisSpec<'_>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -309,7 +255,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let execution_plan = execution_cache.get_or_compile(rule, axes, dst, lhs, rhs)?;
+    let execution_plan =
+        execution_cache.get_or_compile_with_key(precomputed_key, rule, axes, dst, lhs, rhs)?;
     execution_plan.execute(
         tree_context,
         contract_backend,
@@ -357,6 +304,11 @@ impl<RuleKey> Default for DynamicFusionExecutionPlanCache<RuleKey> {
     }
 }
 
+pub(crate) enum DynamicFusionExecutionPlanCacheLookup<'a, RuleKey> {
+    Hit(&'a DynamicFusionExecutionPlan),
+    Miss(DynamicFusionExecutionPlanCacheKey<RuleKey>),
+}
+
 impl<RuleKey> DynamicFusionExecutionPlanCache<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
@@ -376,7 +328,7 @@ where
         self.stats
     }
 
-    pub(crate) fn get_cached<
+    pub(crate) fn get_cached_or_key<
         R,
         D,
         const DST_NOUT: usize,
@@ -395,20 +347,20 @@ where
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-    ) -> Result<Option<&DynamicFusionExecutionPlan>, OperationError>
+    ) -> Result<DynamicFusionExecutionPlanCacheLookup<'_, RuleKey>, OperationError>
     where
         R: TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let key = DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
         if let Some(plan) = self.plans.get(&key) {
             self.stats.hits += 1;
-            Ok(Some(plan))
+            Ok(DynamicFusionExecutionPlanCacheLookup::Hit(plan))
         } else {
-            Ok(None)
+            Ok(DynamicFusionExecutionPlanCacheLookup::Miss(key))
         }
     }
 
-    pub(crate) fn get_or_compile<
+    pub(crate) fn get_or_compile_with_key<
         R,
         D,
         const DST_NOUT: usize,
@@ -422,6 +374,7 @@ where
         SRhs,
     >(
         &mut self,
+        key: Option<DynamicFusionExecutionPlanCacheKey<RuleKey>>,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -431,7 +384,10 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let key = DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
+        let key = match key {
+            Some(key) => key,
+            None => DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?,
+        };
         if self.plans.get(&key).is_some() {
             self.stats.hits += 1;
         } else {
@@ -566,7 +522,7 @@ impl DynamicFusionExecutionPlan {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn execute<
+    pub(crate) fn execute<
         BT,
         BC,
         D,
@@ -782,7 +738,7 @@ where
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct DynamicFusionExecutionPlanCacheKey<RuleKey> {
+pub(crate) struct DynamicFusionExecutionPlanCacheKey<RuleKey> {
     rule: RuleKey,
     dst_nout: usize,
     dst_homspace: tenet_core::FusionTreeHomSpace,
