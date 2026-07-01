@@ -140,6 +140,72 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
 }
 
 #[test]
+fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = || SectorLeg::new([even, odd], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let keys = homspace.fusion_tree_keys(&rule);
+    let key_for_sector = |sector| {
+        keys.iter()
+            .find(|key| key.codomain_tree().coupled() == Some(sector))
+            .cloned()
+            .expect("Z2 one-leg homspace contains requested sector")
+    };
+    let even_key = key_for_sector(even);
+    let odd_key = key_for_sector(odd);
+
+    let lhs_space = FusionTensorMapSpace::new(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace.clone(),
+        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+    )
+    .unwrap();
+    let rhs_space = FusionTensorMapSpace::new(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace.clone(),
+        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::new(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace,
+        BlockStructure::packed_column_major_with_keys(
+            2,
+            [(even_key, vec![1, 1]), (odd_key, vec![1, 1])],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
+    let mut dst =
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
+    let axes = TensorContractAxisSpec::canonical(&[1], &[0]);
+    let alpha = 2.0;
+    let beta = 3.0;
+
+    let specs = tensorcontract_fusion_block_specs(
+        &rule,
+        dst.fusion_space().unwrap(),
+        lhs.fusion_space().unwrap(),
+        rhs.fusion_space().unwrap(),
+        axes,
+    )
+    .unwrap();
+    assert_eq!(specs, vec![TensorContractBlockSpec::new(0, 0, 0)]);
+
+    tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+
+    assert_eq!(dst.data(), &[50.0, 60.0]);
+}
+
+#[test]
 fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);

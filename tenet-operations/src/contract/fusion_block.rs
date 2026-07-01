@@ -179,7 +179,7 @@ pub(crate) struct CanonicalFusionBlockContractPlan {
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
-    dst_scale_blocks: Vec<FusionScaleBlockLayout>,
+    inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
     groups: Vec<CanonicalFusionBlockContractGroupPlan>,
 }
 
@@ -212,6 +212,7 @@ impl CanonicalFusionBlockContractPlan {
         let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space, None)?;
 
         let mut groups = Vec::new();
+        let mut active_dst_blocks = HashSet::<usize>::new();
         for lhs_group in lhs_layout.groups {
             let Some(rhs_group) = rhs_layout.group(lhs_group.coupled) else {
                 continue;
@@ -219,6 +220,13 @@ impl CanonicalFusionBlockContractPlan {
             let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
                 continue;
             };
+            for block_index in &dst_group.block_indices {
+                debug_assert!(
+                    !active_dst_blocks.contains(block_index),
+                    "canonical fusion-block dst subblock must be scattered exactly once"
+                );
+            }
+            active_dst_blocks.extend(dst_group.block_indices.iter().copied());
             groups.push(CanonicalFusionBlockContractGroupPlan::compile(
                 lhs_group,
                 rhs_group.clone(),
@@ -229,7 +237,10 @@ impl CanonicalFusionBlockContractPlan {
             dst_structure: Arc::clone(dst_space.structure()),
             lhs_structure: Arc::clone(lhs_space.structure()),
             rhs_structure: Arc::clone(rhs_space.structure()),
-            dst_scale_blocks: fusion_scale_block_layouts(dst_space.structure())?,
+            inactive_dst_scale_blocks: fusion_scale_block_layouts_excluding(
+                dst_space.structure(),
+                &active_dst_blocks,
+            )?,
             groups,
         })
     }
@@ -254,7 +265,7 @@ impl CanonicalFusionBlockContractPlan {
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
         self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
-        scale_all_blocks(&self.dst_scale_blocks, dst_data, beta)?;
+        scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         for group in &self.groups {
             fusion_workspace
@@ -273,7 +284,13 @@ impl CanonicalFusionBlockContractPlan {
                 &fusion_workspace.buffers.rhs,
                 &mut fusion_workspace.buffers.dst,
             )?;
-            scatter_group(&group.dst, dst_data, &fusion_workspace.buffers.dst, alpha)?;
+            scatter_group(
+                &group.dst,
+                dst_data,
+                &fusion_workspace.buffers.dst,
+                alpha,
+                beta,
+            )?;
         }
         Ok(())
     }
@@ -305,7 +322,7 @@ impl CanonicalFusionBlockContractPlan {
         profile.canonical_validate += start.elapsed();
 
         let start = std::time::Instant::now();
-        scale_all_blocks(&self.dst_scale_blocks, dst_data, beta)?;
+        scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
         profile.canonical_scale += start.elapsed();
 
         for group in &self.groups {
@@ -340,7 +357,13 @@ impl CanonicalFusionBlockContractPlan {
             profile.canonical_matmul += start.elapsed();
 
             let start = std::time::Instant::now();
-            scatter_group(&group.dst, dst_data, &fusion_workspace.buffers.dst, alpha)?;
+            scatter_group(
+                &group.dst,
+                dst_data,
+                &fusion_workspace.buffers.dst,
+                alpha,
+                beta,
+            )?;
             profile.canonical_scatter += start.elapsed();
         }
 
@@ -1019,7 +1042,8 @@ impl FusionBlockMatrixGroupBuilder {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         let mut subblocks = Vec::with_capacity(self.blocks.len());
-        for block_index in self.blocks {
+        let block_indices = self.blocks;
+        for &block_index in &block_indices {
             let block = space.structure().block(block_index)?;
             let BlockKey::FusionTree(key) = block.key() else {
                 return Err(OperationError::ExpectedFusionTreeBlock {
@@ -1070,6 +1094,7 @@ impl FusionBlockMatrixGroupBuilder {
                     strides: strides_to_isize(block.strides())?,
                     offset: offset_to_isize(block.offset())?,
                 },
+                zero_strides: vec![0isize; block.shape().len()],
                 matrix_offset,
                 matrix_strides,
                 coefficient,
@@ -1084,6 +1109,7 @@ impl FusionBlockMatrixGroupBuilder {
             rows: self.rows,
             cols: self.cols,
             needs_clear: self.occupied_elements != matrix_elements,
+            block_indices,
             subblocks,
         })
     }
@@ -1103,12 +1129,14 @@ struct FusionBlockMatrixGroup {
     // False only when the group's subblocks cover the packed matrix exactly.
     // Sparse fusion layouts keep this true so stale workspace cannot leak into GEMM.
     needs_clear: bool,
+    block_indices: Vec<usize>,
     subblocks: Vec<FusionSubblockMatrixLayout>,
 }
 
 #[derive(Clone, Debug)]
 struct FusionSubblockMatrixLayout {
     block: FusionStridedBlockLayout,
+    zero_strides: Vec<isize>,
     matrix_offset: isize,
     matrix_strides: Vec<isize>,
     coefficient: f64,
@@ -1127,11 +1155,15 @@ struct FusionScaleBlockLayout {
     zero_strides: Vec<isize>,
 }
 
-fn fusion_scale_block_layouts(
+fn fusion_scale_block_layouts_excluding(
     structure: &BlockStructure,
+    excluded_blocks: &HashSet<usize>,
 ) -> Result<Vec<FusionScaleBlockLayout>, OperationError> {
     let mut layouts = Vec::with_capacity(structure.block_count());
     for block_index in 0..structure.block_count() {
+        if excluded_blocks.contains(&block_index) {
+            continue;
+        }
         let block = structure.block(block_index)?;
         layouts.push(FusionScaleBlockLayout {
             block: FusionStridedBlockLayout {
@@ -1193,6 +1225,7 @@ fn scatter_group<T>(
     data: &mut [T],
     packed: &[T],
     alpha: T,
+    beta: T,
 ) -> Result<(), OperationError>
 where
     T: Copy
@@ -1218,7 +1251,14 @@ where
             layout.matrix_offset,
         )
         .map_err(strided_error)?;
-        strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)?;
+        if beta.is_zero() {
+            strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)?;
+        } else {
+            if !beta.is_one() {
+                scale_view(&mut dst, &layout.zero_strides, beta)?;
+            }
+            strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)?;
+        }
     }
     Ok(())
 }
@@ -1229,8 +1269,11 @@ fn scale_all_blocks<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + std::ops::Mul<T, Output = T> + strided_kernel::MaybeSendSync,
+    T: Copy + std::ops::Mul<T, Output = T> + PartialEq + Zero + One + strided_kernel::MaybeSendSync,
 {
+    if beta.is_one() {
+        return Ok(());
+    }
     for layout in blocks {
         let mut dst = strided_kernel::StridedViewMut::new(
             data,
