@@ -1,5 +1,5 @@
 use core::ops::{Add, Mul};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use tenet_core::{
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
 };
 
-use crate::cache::TreeTransformStructureCacheKey;
+use crate::cache::{OperationCachePolicy, TreeTransformStructureCacheKey};
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
 use super::helpers::fusion_tree_group_block_keys;
@@ -231,8 +231,10 @@ impl<T> TreeTransformGroupPlanCache<T> {
 #[derive(Clone, Debug)]
 pub struct TreeTransformCache<T, RuleKey> {
     plans: HashMap<TreeTransformSectorPlanKey<RuleKey>, TreeTransformGroupPlan<T>>,
+    plan_lru_order: VecDeque<TreeTransformSectorPlanKey<RuleKey>>,
     structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
     last_structure: Option<TreeTransformLastStructure<T, RuleKey>>,
+    policy: OperationCachePolicy,
     stats: TreeTransformCacheStats,
 }
 
@@ -283,8 +285,10 @@ impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
     fn default() -> Self {
         Self {
             plans: HashMap::new(),
+            plan_lru_order: VecDeque::new(),
             structures: TreeTransformStructureCache::default(),
             last_structure: None,
+            policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
         }
     }
@@ -296,6 +300,34 @@ where
 {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_policy(policy: OperationCachePolicy) -> Self {
+        Self {
+            plans: HashMap::new(),
+            plan_lru_order: VecDeque::new(),
+            structures: TreeTransformStructureCache::with_policy(policy),
+            last_structure: None,
+            policy,
+            stats: TreeTransformCacheStats::default(),
+        }
+    }
+
+    #[inline]
+    pub fn policy(&self) -> OperationCachePolicy {
+        self.policy
+    }
+
+    pub fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        self.structures.set_policy(policy);
+        self.last_structure = None;
+        if !policy.stores_entries() {
+            self.plans.clear();
+            self.plan_lru_order.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            self.enforce_plan_lru_limit(max_entries);
+        }
     }
 
     #[inline]
@@ -332,6 +364,9 @@ where
         storage_conjugate: bool,
     ) -> Option<Arc<TreeTransformStructure<T>>> {
         let last = self.last_structure.as_ref()?;
+        if !self.policy.stores_entries() {
+            return None;
+        }
         if &last.rule == rule_key
             && last.scope == scope
             && &last.operation == operation
@@ -366,6 +401,41 @@ where
             storage_conjugate,
             structure,
         });
+    }
+
+    fn touch_plan(&mut self, key: &TreeTransformSectorPlanKey<RuleKey>) {
+        if self.policy.max_entries().is_some() && self.plans.contains_key(key) {
+            if let Some(position) = self.plan_lru_order.iter().position(|stored| stored == key) {
+                self.plan_lru_order.remove(position);
+            }
+            self.plan_lru_order.push_back(key.clone());
+        }
+    }
+
+    fn insert_plan(
+        &mut self,
+        key: TreeTransformSectorPlanKey<RuleKey>,
+        plan: TreeTransformGroupPlan<T>,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        self.plans.insert(key.clone(), plan);
+        if self.policy.max_entries().is_some() {
+            self.touch_plan(&key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_plan_lru_limit(max_entries);
+        }
+    }
+
+    fn enforce_plan_lru_limit(&mut self, max_entries: usize) {
+        while self.plans.len() > max_entries {
+            let Some(oldest) = self.plan_lru_order.pop_front() else {
+                break;
+            };
+            self.plans.remove(&oldest);
+        }
     }
 
     pub fn get_or_compile_tree_pair<
@@ -406,13 +476,21 @@ where
             operation.clone(),
             src.structure(),
         )?;
+        if !self.policy.stores_entries() {
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
+            return Ok(Arc::new(plan.compile(dst, src)?));
+        }
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
+            self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
             let plan =
                 build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
-            self.plans.insert(plan_key.clone(), plan);
+            self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure(
             rule_key,
@@ -452,13 +530,27 @@ where
             operation.clone(),
             src_structure,
         )?;
+        if !self.policy.stores_entries() {
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+            return Ok(Arc::new(
+                plan.compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(dst_structure),
+                    Arc::clone(src_structure),
+                    false,
+                )?,
+            ));
+        }
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
+            self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
             let plan =
                 build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
-            self.plans.insert(plan_key.clone(), plan);
+            self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure_from_structures(
             rule_key,
@@ -499,13 +591,27 @@ where
             operation.clone(),
             src_structure,
         )?;
+        if !self.policy.stores_entries() {
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+            return Ok(Arc::new(
+                plan.compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(dst_structure),
+                    Arc::clone(src_structure),
+                    storage_conjugate,
+                )?,
+            ));
+        }
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
+            self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
             let plan =
                 build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
-            self.plans.insert(plan_key.clone(), plan);
+            self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure_from_structures_with_storage_conjugation(
             rule_key,
@@ -556,8 +662,19 @@ where
             operation.clone(),
             src.structure(),
         )?;
+        if !self.policy.stores_entries() {
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan = build_all_codomain_tree_transform_group_plan(
+                rule,
+                operation.clone(),
+                src.structure(),
+            )?;
+            return Ok(Arc::new(plan.compile(dst, src)?));
+        }
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
+            self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
             let plan = build_all_codomain_tree_transform_group_plan(
@@ -565,7 +682,7 @@ where
                 operation.clone(),
                 src.structure(),
             )?;
-            self.plans.insert(plan_key.clone(), plan);
+            self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure(
             rule_key,
@@ -605,6 +722,7 @@ where
         )?;
         if self.structures.get(&structure_key).is_some() {
             self.stats.structure_hits += 1;
+            self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
             let plan = self
@@ -683,6 +801,7 @@ where
         };
         if self.structures.get(&structure_key).is_some() {
             self.stats.structure_hits += 1;
+            self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
             let plan = self

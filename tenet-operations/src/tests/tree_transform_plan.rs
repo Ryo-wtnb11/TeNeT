@@ -866,6 +866,138 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
 }
 
 #[test]
+fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries() {
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let block_structure = BlockStructure::packed_column_major_with_keys(
+        4,
+        [
+            (src_key0.clone(), vec![1, 1, 1, 1]),
+            (src_key1.clone(), vec![1, 1, 1, 1]),
+        ],
+    )
+    .unwrap();
+    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![10.0, 20.0],
+        space.clone(),
+        block_structure.clone(),
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
+            .unwrap();
+    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let mut context =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .cache_mut()
+        .set_policy(OperationCachePolicy::NoCache);
+
+    for expected_misses in 1..=2 {
+        context
+            .all_codomain_tree_transform_into(
+                &SU2FusionRule,
+                operation.clone(),
+                &mut dst,
+                &src,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(context.cache().plan_len(), 0);
+        assert_eq!(context.cache().structure_len(), 0);
+        assert_eq!(context.cache().stats().plan_hits(), 0);
+        assert_eq!(context.cache().stats().structure_hits(), 0);
+        assert_eq!(context.cache().stats().plan_misses(), expected_misses);
+        assert_eq!(context.cache().stats().structure_misses(), expected_misses);
+    }
+}
+
+#[test]
+fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let block_structure = BlockStructure::packed_column_major_with_keys(
+        4,
+        [
+            (src_key0.clone(), vec![1, 1, 1, 1]),
+            (src_key1.clone(), vec![1, 1, 1, 1]),
+        ],
+    )
+    .unwrap();
+    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![10.0, 20.0],
+        space.clone(),
+        block_structure.clone(),
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
+            .unwrap();
+    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let mut context =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .cache_mut()
+        .set_policy(OperationCachePolicy::task_local_lru(1));
+
+    context
+        .tree_pair_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+        .unwrap();
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+
+    context
+        .all_codomain_tree_transform_into(
+            &SU2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+
+    context
+        .tree_pair_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
+        .unwrap();
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().plan_hits(), 0);
+    assert_eq!(context.cache().stats().structure_hits(), 0);
+    assert_eq!(context.cache().stats().plan_misses(), 3);
+    assert_eq!(context.cache().stats().structure_misses(), 3);
+}
+
+#[test]
 fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],

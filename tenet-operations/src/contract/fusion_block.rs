@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use tenet_core::{
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
-use crate::cache::BlockStructureCacheKey;
+use crate::cache::{BlockStructureCacheKey, OperationCachePolicy};
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, error as strided_error,
     offset_to_isize, strides_to_isize,
@@ -417,6 +417,8 @@ pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
         CanonicalFusionBlockContractCacheKey<RuleKey>,
         Arc<CanonicalFusionBlockContractPlan>,
     >,
+    plan_lru_order: VecDeque<CanonicalFusionBlockContractCacheKey<RuleKey>>,
+    policy: OperationCachePolicy,
     stats: CanonicalFusionBlockContractCacheStats,
 }
 
@@ -426,6 +428,8 @@ impl<RuleKey> Default for CanonicalFusionBlockContractCache<RuleKey> {
             last: None,
             fast_plans: HashMap::new(),
             plans: HashMap::new(),
+            plan_lru_order: VecDeque::new(),
+            policy: OperationCachePolicy::default(),
             stats: CanonicalFusionBlockContractCacheStats::default(),
         }
     }
@@ -445,6 +449,60 @@ where
         self.stats
     }
 
+    pub(crate) fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        self.last = None;
+        self.fast_plans.clear();
+        if !policy.stores_entries() {
+            self.plans.clear();
+            self.plan_lru_order.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn touch_plan(&mut self, key: &CanonicalFusionBlockContractCacheKey<RuleKey>) {
+        if self.policy.max_entries().is_some() && self.plans.contains_key(key) {
+            if let Some(position) = self.plan_lru_order.iter().position(|stored| stored == key) {
+                self.plan_lru_order.remove(position);
+            }
+            self.plan_lru_order.push_back(key.clone());
+        }
+    }
+
+    fn insert_plan(
+        &mut self,
+        key: CanonicalFusionBlockContractCacheKey<RuleKey>,
+        fast_key: CanonicalFusionBlockContractFastKey<RuleKey>,
+        plan: Arc<CanonicalFusionBlockContractPlan>,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        self.plans.insert(key.clone(), Arc::clone(&plan));
+        self.fast_plans.insert(fast_key, plan);
+        if self.policy.max_entries().is_some() {
+            self.touch_plan(&key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn enforce_lru_limit(&mut self, max_entries: usize) {
+        let mut evicted = false;
+        while self.plans.len() > max_entries {
+            let Some(oldest) = self.plan_lru_order.pop_front() else {
+                break;
+            };
+            evicted |= self.plans.remove(&oldest).is_some();
+        }
+        if evicted {
+            self.fast_plans.clear();
+            self.last = None;
+        }
+    }
+
     pub(crate) fn get_or_compile<R>(
         &mut self,
         rule: &R,
@@ -458,11 +516,13 @@ where
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         let raw_axes = RawTensorContractAxisSpecKey::from_axes(axes);
-        if let Some(last) = &self.last {
-            if last.matches(&rule_key, dst_space, lhs_space, rhs_space, axes) {
-                self.stats.hits += 1;
-                self.stats.fast_hits += 1;
-                return Ok(Arc::clone(&last.plan));
+        if self.policy.stores_entries() {
+            if let Some(last) = &self.last {
+                if last.matches(&rule_key, dst_space, lhs_space, rhs_space, axes) {
+                    self.stats.hits += 1;
+                    self.stats.fast_hits += 1;
+                    return Ok(Arc::clone(&last.plan));
+                }
             }
         }
         let axis_plan = TensorContractAxisPlan::compile(
@@ -485,18 +545,20 @@ where
             rhs: CanonicalFusionBlockFastSpaceKey::from_space(rhs_space),
             axes: axes_key.clone(),
         };
-        if let Some(plan) = self.fast_plans.get(&fast_key) {
-            self.stats.hits += 1;
-            self.stats.fast_hits += 1;
-            self.last = Some(CanonicalFusionBlockContractLastEntry {
-                rule: rule_key,
-                dst: CanonicalFusionBlockLastSpaceKey::from_space(dst_space),
-                lhs: CanonicalFusionBlockLastSpaceKey::from_space(lhs_space),
-                rhs: CanonicalFusionBlockLastSpaceKey::from_space(rhs_space),
-                axes: raw_axes,
-                plan: Arc::clone(plan),
-            });
-            return Ok(Arc::clone(plan));
+        if self.policy.stores_entries() {
+            if let Some(plan) = self.fast_plans.get(&fast_key) {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                self.last = Some(CanonicalFusionBlockContractLastEntry {
+                    rule: rule_key,
+                    dst: CanonicalFusionBlockLastSpaceKey::from_space(dst_space),
+                    lhs: CanonicalFusionBlockLastSpaceKey::from_space(lhs_space),
+                    rhs: CanonicalFusionBlockLastSpaceKey::from_space(rhs_space),
+                    axes: raw_axes,
+                    plan: Arc::clone(plan),
+                });
+                return Ok(Arc::clone(plan));
+            }
         }
 
         let key = CanonicalFusionBlockContractCacheKey::from_parts(
@@ -506,9 +568,16 @@ where
             rhs_space,
             axes_key,
         )?;
+        if !self.policy.stores_entries() {
+            self.stats.misses += 1;
+            return Ok(Arc::new(CanonicalFusionBlockContractPlan::compile(
+                rule, dst_space, lhs_space, rhs_space, axes,
+            )?));
+        }
         if let Some(plan) = self.plans.get(&key) {
             self.stats.hits += 1;
             let plan = Arc::clone(plan);
+            self.touch_plan(&key);
             self.fast_plans.insert(fast_key, Arc::clone(&plan));
             self.last = Some(CanonicalFusionBlockContractLastEntry {
                 rule: rule_key,
@@ -525,8 +594,7 @@ where
                 rule, dst_space, lhs_space, rhs_space, axes,
             )?;
             let plan = Arc::new(plan);
-            self.plans.insert(key, Arc::clone(&plan));
-            self.fast_plans.insert(fast_key, Arc::clone(&plan));
+            self.insert_plan(key, fast_key, Arc::clone(&plan));
             self.last = Some(CanonicalFusionBlockContractLastEntry {
                 rule: rule_key,
                 dst: CanonicalFusionBlockLastSpaceKey::from_space(dst_space),

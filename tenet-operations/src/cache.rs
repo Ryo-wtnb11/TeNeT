@@ -1,10 +1,81 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{BlockKey, BlockStructure};
 
 use crate::{OperationError, TensorContractStructure, TreeTransformStructure};
+
+/// Cache policy for TensorKit-style replay caches.
+///
+/// `TaskLocal` means the cache is owned by an explicit execution context. Keeping
+/// one context per task mirrors TensorKit's task-local cache; sharing the same
+/// context/cache handle from a process-level owner gives the corresponding
+/// global cache without hiding synchronization in ordinary tensor operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationCachePolicy {
+    NoCache,
+    TaskLocal,
+    TaskLocalLru { max_entries: usize },
+}
+
+impl Default for OperationCachePolicy {
+    fn default() -> Self {
+        Self::TaskLocal
+    }
+}
+
+impl OperationCachePolicy {
+    #[inline]
+    pub const fn no_cache() -> Self {
+        Self::NoCache
+    }
+
+    #[inline]
+    pub const fn task_local() -> Self {
+        Self::TaskLocal
+    }
+
+    #[inline]
+    pub const fn task_local_lru(max_entries: usize) -> Self {
+        Self::TaskLocalLru { max_entries }
+    }
+
+    #[inline]
+    pub(crate) const fn stores_entries(self) -> bool {
+        !matches!(self, Self::NoCache | Self::TaskLocalLru { max_entries: 0 })
+    }
+
+    #[inline]
+    pub(crate) const fn max_entries(self) -> Option<usize> {
+        match self {
+            Self::NoCache | Self::TaskLocal => None,
+            Self::TaskLocalLru { max_entries } => Some(max_entries),
+        }
+    }
+}
+
+fn touch_lru_key<K>(order: &mut VecDeque<K>, key: &K)
+where
+    K: Clone + Eq,
+{
+    if let Some(position) = order.iter().position(|stored| stored == key) {
+        order.remove(position);
+    }
+    order.push_back(key.clone());
+}
+
+fn enforce_lru_limit<K, V>(map: &mut HashMap<K, V>, order: &mut VecDeque<K>, max_entries: usize)
+where
+    K: Clone + Eq + Hash,
+{
+    while map.len() > max_entries {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct BlockStructureCacheKey {
@@ -129,12 +200,16 @@ where
 #[derive(Clone, Debug)]
 pub struct TreeTransformStructureCache<T, PlanKey> {
     structures: HashMap<TreeTransformStructureCacheKey<PlanKey>, Arc<TreeTransformStructure<T>>>,
+    lru_order: VecDeque<TreeTransformStructureCacheKey<PlanKey>>,
+    policy: OperationCachePolicy,
 }
 
 impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey> {
     fn default() -> Self {
         Self {
             structures: HashMap::new(),
+            lru_order: VecDeque::new(),
+            policy: OperationCachePolicy::default(),
         }
     }
 }
@@ -189,12 +264,16 @@ where
 #[derive(Clone, Debug)]
 pub struct TensorContractStructureCache<C, PlanKey> {
     structures: HashMap<TensorContractStructureCacheKey<PlanKey>, TensorContractStructure<C>>,
+    lru_order: VecDeque<TensorContractStructureCacheKey<PlanKey>>,
+    policy: OperationCachePolicy,
 }
 
 impl<C, PlanKey> Default for TensorContractStructureCache<C, PlanKey> {
     fn default() -> Self {
         Self {
             structures: HashMap::new(),
+            lru_order: VecDeque::new(),
+            policy: OperationCachePolicy::default(),
         }
     }
 }
@@ -205,6 +284,29 @@ where
 {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_policy(policy: OperationCachePolicy) -> Self {
+        Self {
+            structures: HashMap::new(),
+            lru_order: VecDeque::new(),
+            policy,
+        }
+    }
+
+    #[inline]
+    pub fn policy(&self) -> OperationCachePolicy {
+        self.policy
+    }
+
+    pub fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        if !policy.stores_entries() {
+            self.structures.clear();
+            self.lru_order.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
+        }
     }
 
     #[inline]
@@ -224,12 +326,28 @@ where
         self.structures.get(key)
     }
 
+    pub fn touch(&mut self, key: &TensorContractStructureCacheKey<PlanKey>) {
+        if self.policy.max_entries().is_some() && self.structures.contains_key(key) {
+            touch_lru_key(&mut self.lru_order, key);
+        }
+    }
+
     pub fn insert(
         &mut self,
         key: TensorContractStructureCacheKey<PlanKey>,
         structure: TensorContractStructure<C>,
     ) -> Option<TensorContractStructure<C>> {
-        self.structures.insert(key, structure)
+        if !self.policy.stores_entries() {
+            return None;
+        }
+        let old = self.structures.insert(key.clone(), structure);
+        if self.policy.max_entries().is_some() {
+            touch_lru_key(&mut self.lru_order, &key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
+        }
+        old
     }
 }
 
@@ -239,6 +357,29 @@ where
 {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_policy(policy: OperationCachePolicy) -> Self {
+        Self {
+            structures: HashMap::new(),
+            lru_order: VecDeque::new(),
+            policy,
+        }
+    }
+
+    #[inline]
+    pub fn policy(&self) -> OperationCachePolicy {
+        self.policy
+    }
+
+    pub fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        if !policy.stores_entries() {
+            self.structures.clear();
+            self.lru_order.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
+        }
     }
 
     #[inline]
@@ -265,11 +406,27 @@ where
         self.structures.get(key).map(Arc::clone)
     }
 
+    pub fn touch(&mut self, key: &TreeTransformStructureCacheKey<PlanKey>) {
+        if self.policy.max_entries().is_some() && self.structures.contains_key(key) {
+            touch_lru_key(&mut self.lru_order, key);
+        }
+    }
+
     pub fn insert(
         &mut self,
         key: TreeTransformStructureCacheKey<PlanKey>,
         structure: TreeTransformStructure<T>,
     ) -> Option<Arc<TreeTransformStructure<T>>> {
-        self.structures.insert(key, Arc::new(structure))
+        if !self.policy.stores_entries() {
+            return None;
+        }
+        let old = self.structures.insert(key.clone(), Arc::new(structure));
+        if self.policy.max_entries().is_some() {
+            touch_lru_key(&mut self.lru_order, &key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
+        }
+        old
     }
 }

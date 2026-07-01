@@ -1146,19 +1146,32 @@ impl DenseExecutor for ContractLayoutCheckingDenseExecutor {
             _ => panic!("layout-checking executor only covers f64"),
         };
 
-        assert_eq!(lhs.shape(), &[2, 3]);
-        assert_eq!(lhs.strides(), &[1, 2]);
-        assert_eq!(lhs.offset(), 0);
-        assert_eq!(rhs.shape(), &[4, 3]);
-        assert_eq!(rhs.strides(), &[1, 4]);
-        assert_eq!(rhs.offset(), 0);
-        assert_eq!(output.shape(), &[2, 4]);
-        assert_eq!(output.strides(), &[1, 2]);
-        assert_eq!(output.offset(), 0);
-
-        output
-            .data_mut()
-            .copy_from_slice(&[115.0, 148.0, 124.0, 160.0, 133.0, 172.0, 142.0, 184.0]);
+        if lhs.shape() == [2, 3] {
+            assert_eq!(lhs.strides(), &[1, 2]);
+            assert_eq!(lhs.offset(), 0);
+            assert_eq!(rhs.shape(), &[4, 3]);
+            assert_eq!(rhs.strides(), &[1, 4]);
+            assert_eq!(rhs.offset(), 0);
+            assert_eq!(output.shape(), &[2, 4]);
+            assert_eq!(output.strides(), &[1, 2]);
+            assert_eq!(output.offset(), 0);
+            output
+                .data_mut()
+                .copy_from_slice(&[115.0, 148.0, 124.0, 160.0, 133.0, 172.0, 142.0, 184.0]);
+        } else {
+            assert_eq!(lhs.shape(), &[4, 3]);
+            assert_eq!(lhs.strides(), &[1, 4]);
+            assert_eq!(lhs.offset(), 0);
+            assert_eq!(rhs.shape(), &[2, 3]);
+            assert_eq!(rhs.strides(), &[1, 2]);
+            assert_eq!(rhs.offset(), 0);
+            assert_eq!(output.shape(), &[4, 2]);
+            assert_eq!(output.strides(), &[1, 4]);
+            assert_eq!(output.offset(), 0);
+            output
+                .data_mut()
+                .copy_from_slice(&[115.0, 124.0, 133.0, 142.0, 148.0, 160.0, 172.0, 184.0]);
+        }
         Ok(())
     }
 }

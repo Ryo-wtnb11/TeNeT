@@ -8,6 +8,7 @@ use tenet_core::{
 };
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
+use crate::cache::OperationCachePolicy;
 use crate::error::OperationError;
 use crate::scalar::TreeTransformScalar;
 use crate::tree_transform::{
@@ -73,6 +74,13 @@ where
     #[inline]
     pub fn cache_mut(&mut self) -> &mut TreeTransformCache<C, RuleKey> {
         &mut self.cache
+    }
+
+    pub fn set_cache_policy(&mut self, policy: OperationCachePolicy)
+    where
+        RuleKey: Clone + Eq + Hash,
+    {
+        self.cache.set_policy(policy);
     }
 
     pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<C, RuleKey>) {

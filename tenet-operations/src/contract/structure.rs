@@ -542,6 +542,7 @@ impl TensorContractAxisPlan {
 pub(super) struct TensorContractDescriptor<C = f64> {
     dot_config: DenseDotConfig,
     dense_route_kind: TensorContractDenseRouteKind,
+    dense_route_order: TensorContractDenseRouteOrder,
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,
     lhs_open_axes: Vec<usize>,
@@ -578,6 +579,11 @@ where
     #[inline]
     pub(crate) fn dense_route_kind(&self) -> TensorContractDenseRouteKind {
         self.dense_route_kind
+    }
+
+    #[inline]
+    pub(super) fn dense_route_order(&self) -> TensorContractDenseRouteOrder {
+        self.dense_route_order
     }
 
     #[inline]
@@ -655,20 +661,22 @@ where
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
-        let dense_route = TensorContractDenseRoute::select_forward(
+        let dense_route = TensorContractDenseRoute::select(
             axis_plan,
             terms,
+            dst_structure,
             lhs_structure,
             rhs_structure,
         )?;
         let mut descriptor = Self {
             dot_config: DenseDotConfig::new(
-                dense_route.lhs_contracting_axes.clone(),
-                dense_route.rhs_contracting_axes.clone(),
+                dense_route.dot_lhs_contracting_axes(),
+                dense_route.dot_rhs_contracting_axes(),
                 Vec::new(),
                 Vec::new(),
             ),
             dense_route_kind: dense_route.kind,
+            dense_route_order: dense_route.order,
             lhs_contracting_axes: dense_route.lhs_contracting_axes,
             rhs_contracting_axes: dense_route.rhs_contracting_axes,
             lhs_open_axes: axis_plan.lhs_open_axes.clone(),
@@ -735,7 +743,7 @@ where
                     src: rhs_contract_shape,
                 });
             }
-            let output_shape = axis_plan
+            let semantic_output_shape = axis_plan
                 .lhs_open_axes
                 .iter()
                 .map(|&axis| lhs_block.shape()[axis])
@@ -746,6 +754,11 @@ where
                         .map(|&axis| rhs_block.shape()[axis]),
                 )
                 .collect::<Vec<_>>();
+            let output_shape = dense_route
+                .output_axes
+                .iter()
+                .map(|&axis| semantic_output_shape[axis])
+                .collect::<Vec<_>>();
             let output_strides = column_major_strides_usize(&output_shape)?;
             let workspace_len = element_count(&output_shape)?;
             let output_layout_start = descriptor.output_shapes.len();
@@ -755,7 +768,7 @@ where
             let scatter_shape = axis_plan
                 .output_axes
                 .iter()
-                .map(|&axis| output_shape[axis])
+                .map(|&axis| semantic_output_shape[axis])
                 .collect::<Vec<_>>();
             if dst_block.shape() != scatter_shape.as_slice() {
                 return Err(OperationError::ShapeMismatch {
@@ -767,7 +780,10 @@ where
             descriptor
                 .scatter_shapes
                 .extend_from_slice(dst_block.shape());
-            for (dst_axis, &workspace_axis) in axis_plan.output_axes.iter().enumerate() {
+            let workspace_axis_by_semantic_axis =
+                inverse_permutation(&dense_route.output_axes, output_shape.len())?;
+            for (dst_axis, &semantic_axis) in axis_plan.output_axes.iter().enumerate() {
+                let workspace_axis = workspace_axis_by_semantic_axis[semantic_axis];
                 descriptor.dst_strides.push(
                     isize::try_from(dst_block.strides()[dst_axis]).map_err(|_| {
                         OperationError::StrideOverflow {
@@ -815,19 +831,30 @@ where
 pub(crate) enum TensorContractDenseRouteKind {
     ForwardSortLhsContractingAxes,
     ForwardSortRhsContractingAxes,
+    ReverseSortLhsContractingAxes,
+    ReverseSortRhsContractingAxes,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TensorContractDenseRouteOrder {
+    LhsRhs,
+    RhsLhs,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TensorContractDenseRoute {
     kind: TensorContractDenseRouteKind,
+    order: TensorContractDenseRouteOrder,
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,
+    output_axes: Vec<usize>,
 }
 
 impl TensorContractDenseRoute {
-    fn select_forward<C>(
+    fn select<C>(
         axis_plan: &TensorContractAxisPlan,
         terms: &[TensorContractStructureTerm<C>],
+        dst_structure: &BlockStructure,
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
@@ -839,35 +866,123 @@ impl TensorContractDenseRoute {
         let lhs_sorted_by_rhs = take_by_permutation(&axis_plan.lhs_contracting_axes, &rhs_sort);
         let rhs_sorted_by_rhs = take_by_permutation(&axis_plan.rhs_contracting_axes, &rhs_sort);
 
+        let forward_output_axes = forward_output_axes(axis_plan);
+        let reverse_output_axes = reverse_output_axes(axis_plan);
+
         let lhs_cost = dense_route_memcost(
             axis_plan,
             terms,
+            dst_structure,
             lhs_structure,
             rhs_structure,
             &lhs_sorted_by_lhs,
             &rhs_sorted_by_lhs,
+            &forward_output_axes,
+            TensorContractDenseRouteOrder::LhsRhs,
         )?;
         let rhs_cost = dense_route_memcost(
             axis_plan,
             terms,
+            dst_structure,
             lhs_structure,
             rhs_structure,
             &lhs_sorted_by_rhs,
             &rhs_sorted_by_rhs,
+            &forward_output_axes,
+            TensorContractDenseRouteOrder::LhsRhs,
         )?;
 
-        if lhs_cost <= rhs_cost {
-            Ok(Self {
+        let forward = if lhs_cost <= rhs_cost {
+            Self {
                 kind: TensorContractDenseRouteKind::ForwardSortLhsContractingAxes,
+                order: TensorContractDenseRouteOrder::LhsRhs,
+                lhs_contracting_axes: lhs_sorted_by_lhs.clone(),
+                rhs_contracting_axes: rhs_sorted_by_lhs.clone(),
+                output_axes: forward_output_axes.clone(),
+            }
+        } else {
+            Self {
+                kind: TensorContractDenseRouteKind::ForwardSortRhsContractingAxes,
+                order: TensorContractDenseRouteOrder::LhsRhs,
+                lhs_contracting_axes: lhs_sorted_by_rhs.clone(),
+                rhs_contracting_axes: rhs_sorted_by_rhs.clone(),
+                output_axes: forward_output_axes.clone(),
+            }
+        };
+
+        if axis_plan.lhs_conjugate || axis_plan.rhs_conjugate {
+            return Ok(forward);
+        }
+
+        let reverse_lhs_cost = dense_route_memcost(
+            axis_plan,
+            terms,
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            &lhs_sorted_by_lhs,
+            &rhs_sorted_by_lhs,
+            &reverse_output_axes,
+            TensorContractDenseRouteOrder::RhsLhs,
+        )?;
+        let reverse_rhs_cost = dense_route_memcost(
+            axis_plan,
+            terms,
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            &lhs_sorted_by_rhs,
+            &rhs_sorted_by_rhs,
+            &reverse_output_axes,
+            TensorContractDenseRouteOrder::RhsLhs,
+        )?;
+
+        let reverse = if reverse_lhs_cost <= reverse_rhs_cost {
+            Self {
+                kind: TensorContractDenseRouteKind::ReverseSortLhsContractingAxes,
+                order: TensorContractDenseRouteOrder::RhsLhs,
                 lhs_contracting_axes: lhs_sorted_by_lhs,
                 rhs_contracting_axes: rhs_sorted_by_lhs,
-            })
+                output_axes: reverse_output_axes.clone(),
+            }
         } else {
-            Ok(Self {
-                kind: TensorContractDenseRouteKind::ForwardSortRhsContractingAxes,
+            Self {
+                kind: TensorContractDenseRouteKind::ReverseSortRhsContractingAxes,
+                order: TensorContractDenseRouteOrder::RhsLhs,
                 lhs_contracting_axes: lhs_sorted_by_rhs,
                 rhs_contracting_axes: rhs_sorted_by_rhs,
-            })
+                output_axes: reverse_output_axes,
+            }
+        };
+
+        let forward_cost = lhs_cost.min(rhs_cost);
+        let reverse_cost = reverse_lhs_cost.min(reverse_rhs_cost);
+        if forward_cost <= reverse_cost {
+            Ok(forward)
+        } else {
+            Ok(reverse)
+        }
+    }
+
+    fn dot_lhs_contracting_axes(&self) -> Vec<usize> {
+        match self.order {
+            TensorContractDenseRouteOrder::LhsRhs => self.lhs_contracting_axes.clone(),
+            TensorContractDenseRouteOrder::RhsLhs => {
+                let mut axes = self.rhs_contracting_axes.clone();
+                axes.reverse();
+                axes
+            }
+        }
+    }
+
+    fn dot_rhs_contracting_axes(&self) -> Vec<usize> {
+        match self.order {
+            TensorContractDenseRouteOrder::LhsRhs => self.rhs_contracting_axes.clone(),
+            TensorContractDenseRouteOrder::RhsLhs => {
+                let mut axes = self.lhs_contracting_axes.clone();
+                axes.reverse();
+                axes
+            }
         }
     }
 }
@@ -875,39 +990,157 @@ impl TensorContractDenseRoute {
 fn dense_route_memcost<C>(
     axis_plan: &TensorContractAxisPlan,
     terms: &[TensorContractStructureTerm<C>],
+    dst_structure: &BlockStructure,
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
     lhs_contracting_axes: &[usize],
     rhs_contracting_axes: &[usize],
+    output_axes: &[usize],
+    order: TensorContractDenseRouteOrder,
 ) -> Result<usize, OperationError> {
     let mut cost = 0usize;
+    let output_dst_axes = dst_axes_for_route_output(axis_plan, output_axes)?;
+    let first_output_len = match order {
+        TensorContractDenseRouteOrder::LhsRhs => axis_plan.lhs_open_axes.len(),
+        TensorContractDenseRouteOrder::RhsLhs => axis_plan.rhs_open_axes.len(),
+    };
     for term in terms {
+        let dst_block = dst_structure.block(term.dst_block())?;
         let lhs_block = lhs_structure.block(term.lhs_block())?;
         let rhs_block = rhs_structure.block(term.rhs_block())?;
-        if !is_dense_contractable_layout(
-            lhs_block.shape(),
-            lhs_block.strides(),
-            &axis_plan.lhs_open_axes,
-            lhs_contracting_axes,
-            axis_plan.lhs_conjugate,
-        )? {
+        let lhs_needs_copy = match order {
+            TensorContractDenseRouteOrder::LhsRhs => !is_dense_contractable_layout(
+                lhs_block.shape(),
+                lhs_block.strides(),
+                &axis_plan.lhs_open_axes,
+                lhs_contracting_axes,
+                axis_plan.lhs_conjugate,
+            )?,
+            TensorContractDenseRouteOrder::RhsLhs => {
+                let mut reversed_lhs_contracting_axes = lhs_contracting_axes.to_vec();
+                reversed_lhs_contracting_axes.reverse();
+                !is_dense_contractable_layout(
+                    lhs_block.shape(),
+                    lhs_block.strides(),
+                    &reversed_lhs_contracting_axes,
+                    &axis_plan.lhs_open_axes,
+                    axis_plan.lhs_conjugate,
+                )?
+            }
+        };
+        if lhs_needs_copy {
             cost = cost
                 .checked_add(element_count(lhs_block.shape())?)
                 .ok_or(OperationError::ElementCountOverflow)?;
         }
-        if !is_dense_contractable_layout(
-            rhs_block.shape(),
-            rhs_block.strides(),
-            rhs_contracting_axes,
-            &axis_plan.rhs_open_axes,
-            axis_plan.rhs_conjugate,
-        )? {
+        let rhs_needs_copy = match order {
+            TensorContractDenseRouteOrder::LhsRhs => !is_dense_contractable_layout(
+                rhs_block.shape(),
+                rhs_block.strides(),
+                rhs_contracting_axes,
+                &axis_plan.rhs_open_axes,
+                axis_plan.rhs_conjugate,
+            )?,
+            TensorContractDenseRouteOrder::RhsLhs => {
+                let mut reversed_rhs_contracting_axes = rhs_contracting_axes.to_vec();
+                reversed_rhs_contracting_axes.reverse();
+                !is_dense_contractable_layout(
+                    rhs_block.shape(),
+                    rhs_block.strides(),
+                    &axis_plan.rhs_open_axes,
+                    &reversed_rhs_contracting_axes,
+                    axis_plan.rhs_conjugate,
+                )?
+            }
+        };
+        if rhs_needs_copy {
             cost = cost
                 .checked_add(element_count(rhs_block.shape())?)
                 .ok_or(OperationError::ElementCountOverflow)?;
         }
+        if !is_dense_destination_layout(
+            dst_block.shape(),
+            dst_block.strides(),
+            &output_dst_axes[..first_output_len.min(output_dst_axes.len())],
+            &output_dst_axes[first_output_len.min(output_dst_axes.len())..],
+        )? {
+            cost = cost
+                .checked_add(element_count(dst_block.shape())?)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
     }
     Ok(cost)
+}
+
+fn forward_output_axes(axis_plan: &TensorContractAxisPlan) -> Vec<usize> {
+    (0..axis_plan.lhs_open_axes.len() + axis_plan.rhs_open_axes.len()).collect()
+}
+
+fn reverse_output_axes(axis_plan: &TensorContractAxisPlan) -> Vec<usize> {
+    let lhs_open = axis_plan.lhs_open_axes.len();
+    let rhs_open = axis_plan.rhs_open_axes.len();
+    (lhs_open..lhs_open + rhs_open).chain(0..lhs_open).collect()
+}
+
+fn dst_axes_for_route_output(
+    axis_plan: &TensorContractAxisPlan,
+    route_output_axes: &[usize],
+) -> Result<Vec<usize>, OperationError> {
+    let dst_axis_by_semantic_axis =
+        inverse_permutation(&axis_plan.output_axes, route_output_axes.len())?;
+    Ok(route_output_axes
+        .iter()
+        .map(|&semantic_axis| dst_axis_by_semantic_axis[semantic_axis])
+        .collect())
+}
+
+fn inverse_permutation(values: &[usize], len: usize) -> Result<Vec<usize>, OperationError> {
+    let mut inverse = vec![usize::MAX; len];
+    for (index, &value) in values.iter().enumerate() {
+        if value >= len || inverse[value] != usize::MAX {
+            return Err(OperationError::InvalidAxisSet {
+                tensor: "permutation",
+                axes: values.to_vec(),
+                rank: len,
+            });
+        }
+        inverse[value] = index;
+    }
+    if inverse.iter().any(|&index| index == usize::MAX) {
+        return Err(OperationError::InvalidAxisSet {
+            tensor: "permutation",
+            axes: values.to_vec(),
+            rank: len,
+        });
+    }
+    Ok(inverse)
+}
+
+fn is_dense_destination_layout(
+    shape: &[usize],
+    strides: &[usize],
+    first_axes: &[usize],
+    second_axes: &[usize],
+) -> Result<bool, OperationError> {
+    let first_shape = first_axes
+        .iter()
+        .map(|&axis| shape[axis])
+        .collect::<Vec<_>>();
+    let first_strides = first_axes
+        .iter()
+        .map(|&axis| strides[axis])
+        .collect::<Vec<_>>();
+    let second_shape = second_axes
+        .iter()
+        .map(|&axis| shape[axis])
+        .collect::<Vec<_>>();
+    let second_strides = second_axes
+        .iter()
+        .map(|&axis| strides[axis])
+        .collect::<Vec<_>>();
+    let (first_fusable, _, first_stride) = can_fuse_strided_dims(&first_shape, &first_strides)?;
+    let (second_fusable, _, _) = can_fuse_strided_dims(&second_shape, &second_strides)?;
+    Ok(first_fusable && first_stride == 1 && second_fusable)
 }
 
 fn is_dense_contractable_layout(

@@ -9,7 +9,8 @@ use tenet_core::{
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::{
-    BlockStructureCacheKey, TensorContractStructureCache, TensorContractStructureCacheKey,
+    BlockStructureCacheKey, OperationCachePolicy, TensorContractStructureCache,
+    TensorContractStructureCacheKey,
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
@@ -630,6 +631,10 @@ impl TensorContractCacheStats {
 #[derive(Clone, Debug)]
 pub struct TensorContractCache<PlanKey = TensorContractPlanKey> {
     structures: TensorContractStructureCache<f64, PlanKey>,
+    ephemeral_structure: Option<(
+        TensorContractStructureCacheKey<PlanKey>,
+        TensorContractStructure<f64>,
+    )>,
     stats: TensorContractCacheStats,
 }
 
@@ -637,6 +642,7 @@ impl<PlanKey> Default for TensorContractCache<PlanKey> {
     fn default() -> Self {
         Self {
             structures: TensorContractStructureCache::default(),
+            ephemeral_structure: None,
             stats: TensorContractCacheStats::default(),
         }
     }
@@ -648,6 +654,24 @@ where
 {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_policy(policy: OperationCachePolicy) -> Self {
+        Self {
+            structures: TensorContractStructureCache::with_policy(policy),
+            ephemeral_structure: None,
+            stats: TensorContractCacheStats::default(),
+        }
+    }
+
+    #[inline]
+    pub fn policy(&self) -> OperationCachePolicy {
+        self.structures.policy()
+    }
+
+    pub fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.structures.set_policy(policy);
+        self.ephemeral_structure = None;
     }
 
     #[inline]
@@ -703,8 +727,20 @@ impl TensorContractCache<TensorContractPlanKey> {
             lhs.structure(),
             rhs.structure(),
         )?;
+        if !self.structures.policy().stores_entries() {
+            self.stats.structure_misses += 1;
+            let structure =
+                TensorContractStructure::compile(dst, lhs, rhs, plan_key.axes().as_spec())?;
+            self.ephemeral_structure = Some((structure_key, structure));
+            return Ok(&self
+                .ephemeral_structure
+                .as_ref()
+                .expect("ephemeral tensor contract structure inserted before replay")
+                .1);
+        }
         if self.structures.get(&structure_key).is_some() {
             self.stats.structure_hits += 1;
+            self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
             let structure =
@@ -753,8 +789,25 @@ impl TensorContractCache<TensorContractBlockPlanKey> {
             lhs.structure(),
             rhs.structure(),
         )?;
+        if !self.structures.policy().stores_entries() {
+            self.stats.structure_misses += 1;
+            let structure = TensorContractStructure::compile_with_block_specs(
+                dst,
+                lhs,
+                rhs,
+                plan_key.axes().as_spec(),
+                block_specs,
+            )?;
+            self.ephemeral_structure = Some((structure_key, structure));
+            return Ok(&self
+                .ephemeral_structure
+                .as_ref()
+                .expect("ephemeral tensor contract structure inserted before replay")
+                .1);
+        }
         if self.structures.get(&structure_key).is_some() {
             self.stats.structure_hits += 1;
+            self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
             let structure = TensorContractStructure::compile_with_block_specs(
@@ -825,6 +878,10 @@ where
     #[inline]
     pub fn cache_mut(&mut self) -> &mut TensorContractCache {
         &mut self.cache
+    }
+
+    pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
+        self.cache.set_policy(policy);
     }
 
     pub fn into_parts(self) -> (B, B::Workspace, TensorContractCache) {
@@ -1054,6 +1111,12 @@ where
     #[inline]
     pub fn fusion_block_contract_cache_misses(&self) -> usize {
         self.fusion_block_cache.stats().misses()
+    }
+
+    pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
+        self.tree_context.set_cache_policy(policy);
+        self.contract_cache.set_policy(policy);
+        self.fusion_block_cache.set_policy(policy);
     }
 
     pub fn into_parts(

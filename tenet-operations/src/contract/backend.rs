@@ -8,7 +8,7 @@ use crate::{
     OperationError, RecouplingCoefficientAction,
 };
 
-use super::structure::TensorContractStructure;
+use super::structure::{TensorContractDenseRouteOrder, TensorContractStructure};
 
 pub trait TensorContractBackend<D, C = f64>
 where
@@ -265,24 +265,28 @@ where
                 rhs_data,
             )?;
         } else {
-            let lhs = D::dense_read(
-                DenseView::new(
-                    lhs_data,
-                    descriptor.lhs_shape(term),
-                    descriptor.lhs_strides(term),
-                    term.lhs_offset,
-                )
-                .map_err(OperationError::Dense)?,
-            );
-            let rhs = D::dense_read(
-                DenseView::new(
-                    rhs_data,
-                    descriptor.rhs_shape(term),
-                    descriptor.rhs_strides(term),
-                    term.rhs_offset,
-                )
-                .map_err(OperationError::Dense)?,
-            );
+            let logical_lhs = DenseView::new(
+                lhs_data,
+                descriptor.lhs_shape(term),
+                descriptor.lhs_strides(term),
+                term.lhs_offset,
+            )
+            .map_err(OperationError::Dense)?;
+            let logical_rhs = DenseView::new(
+                rhs_data,
+                descriptor.rhs_shape(term),
+                descriptor.rhs_strides(term),
+                term.rhs_offset,
+            )
+            .map_err(OperationError::Dense)?;
+            let (lhs, rhs) = match descriptor.dense_route_order() {
+                TensorContractDenseRouteOrder::LhsRhs => {
+                    (D::dense_read(logical_lhs), D::dense_read(logical_rhs))
+                }
+                TensorContractDenseRouteOrder::RhsLhs => {
+                    (D::dense_read(logical_rhs), D::dense_read(logical_lhs))
+                }
+            };
             let output = D::dense_write(
                 DenseViewMut::new(
                     &mut workspace.output,

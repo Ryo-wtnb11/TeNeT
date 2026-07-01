@@ -32,8 +32,9 @@ pub use backend::{
     TreeTransformBackend,
 };
 pub use cache::{
-    BlockStructureCacheBlockKey, BlockStructureCacheKey, TensorContractStructureCache,
-    TensorContractStructureCacheKey, TreeTransformStructureCache, TreeTransformStructureCacheKey,
+    BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
+    TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCache,
+    TreeTransformStructureCacheKey,
 };
 #[cfg(test)]
 pub(crate) use contract::{

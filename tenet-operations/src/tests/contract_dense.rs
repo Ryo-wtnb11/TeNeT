@@ -154,6 +154,121 @@ fn tensorcontract_dense_route_sorted_by_rhs_matches_independent_oracle() {
     }
 }
 
+#[test]
+fn tensorcontract_dense_route_reverse_ba_matches_independent_oracle() {
+    let lhs_shape = [3usize, 2, 4];
+    let lhs_strides = [1usize, 12, 3];
+    let rhs_shape = [2usize, 5, 4, 7];
+    let rhs_strides = [140usize, 1, 35, 5];
+    let dst_shape = [3usize, 5, 7];
+    let dst_strides = [35usize, 1, 5];
+    let lhs_structure = dense_block_structure(&lhs_shape, &lhs_strides);
+    let rhs_structure = dense_block_structure(&rhs_shape, &rhs_strides);
+    let dst_structure = dense_block_structure(&dst_shape, &dst_strides);
+    let lhs_space = TensorMapSpace::<3, 0>::from_dims(lhs_shape, []).unwrap();
+    let rhs_space = TensorMapSpace::<4, 0>::from_dims(rhs_shape, []).unwrap();
+    let dst_space = TensorMapSpace::<3, 0>::from_dims(dst_shape, []).unwrap();
+    let lhs_data = (0..strided_storage_len(&lhs_shape, &lhs_strides))
+        .map(|index| 0.25 + index as f64)
+        .collect::<Vec<_>>();
+    let rhs_data = (0..strided_storage_len(&rhs_shape, &rhs_strides))
+        .map(|index| -2.0 + 0.75 * index as f64)
+        .collect::<Vec<_>>();
+    let initial_dst = (0..strided_storage_len(&dst_shape, &dst_strides))
+        .map(|index| 0.125 * index as f64 + 1.0)
+        .collect::<Vec<_>>();
+    let lhs =
+        TensorMap::<f64, 3, 0>::from_vec_with_structure(lhs_data.clone(), lhs_space, lhs_structure)
+            .unwrap();
+    let rhs =
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(rhs_data.clone(), rhs_space, rhs_structure)
+            .unwrap();
+    let mut dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(
+        initial_dst.clone(),
+        dst_space,
+        dst_structure,
+    )
+    .unwrap();
+    let axes =
+        TensorContractAxisSpec::new(&[1, 2], &[0, 2], AxisPermutation::from_axes(&[0, 1, 2]));
+    let alpha = 0.75;
+    let beta = -0.25;
+
+    let structure = TensorContractStructure::compile(&dst, &lhs, &rhs, axes).unwrap();
+    assert_eq!(
+        structure.dense_route_kind(),
+        TensorContractDenseRouteKind::ReverseSortLhsContractingAxes
+    );
+    let (lhs_route_axes, rhs_route_axes) = structure.dense_route_contracting_axes();
+    assert_eq!(lhs_route_axes, &[1, 2]);
+    assert_eq!(rhs_route_axes, &[0, 2]);
+
+    tensorcontract_into(&mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    let expected = rank3_by_rank4_contract_oracle(
+        &lhs_data,
+        &lhs_shape,
+        &lhs_strides,
+        &rhs_data,
+        &rhs_shape,
+        &rhs_strides,
+        &initial_dst,
+        &dst_shape,
+        &dst_strides,
+        &[0, 1, 2],
+        alpha,
+        beta,
+    );
+    for (&actual, &expected) in dst.data().iter().zip(&expected) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rank3_by_rank4_contract_oracle(
+    lhs_data: &[f64],
+    lhs_shape: &[usize; 3],
+    lhs_strides: &[usize; 3],
+    rhs_data: &[f64],
+    rhs_shape: &[usize; 4],
+    rhs_strides: &[usize; 4],
+    initial_dst: &[f64],
+    dst_shape: &[usize; 3],
+    dst_strides: &[usize; 3],
+    output_axes: &[usize; 3],
+    alpha: f64,
+    beta: f64,
+) -> Vec<f64> {
+    assert_eq!(lhs_shape[1], rhs_shape[0]);
+    assert_eq!(lhs_shape[2], rhs_shape[2]);
+    let mut out = initial_dst.to_vec();
+    for d2 in 0..dst_shape[2] {
+        for d1 in 0..dst_shape[1] {
+            for d0 in 0..dst_shape[0] {
+                let dst_coords = [d0, d1, d2];
+                let mut canonical = [0usize; 3];
+                for (dst_axis, &canonical_axis) in output_axes.iter().enumerate() {
+                    canonical[canonical_axis] = dst_coords[dst_axis];
+                }
+                let mut sum = 0.0;
+                for k1 in 0..lhs_shape[2] {
+                    for k0 in 0..lhs_shape[1] {
+                        let lhs_coords = [canonical[0], k0, k1];
+                        let rhs_coords = [k0, canonical[1], k1, canonical[2]];
+                        sum += lhs_data[strided_offset3(&lhs_coords, lhs_strides)]
+                            * rhs_data[strided_offset(&rhs_coords, rhs_strides)];
+                    }
+                }
+                let dst_index = strided_offset3(&dst_coords, dst_strides);
+                out[dst_index] = beta * initial_dst[dst_index] + alpha * sum;
+            }
+        }
+    }
+    out
+}
+
 fn dense_block_structure(shape: &[usize], strides: &[usize]) -> BlockStructure {
     BlockStructure::from_blocks_with_rank(
         shape.len(),
@@ -218,6 +333,14 @@ fn rank4_contract_oracle(
 }
 
 fn strided_offset(coords: &[usize; 4], strides: &[usize; 4]) -> usize {
+    coords
+        .iter()
+        .zip(strides)
+        .map(|(&coord, &stride)| coord * stride)
+        .sum()
+}
+
+fn strided_offset3(coords: &[usize; 3], strides: &[usize; 3]) -> usize {
     coords
         .iter()
         .zip(strides)
@@ -341,6 +464,94 @@ fn tensorcontract_execution_context_replays_without_recompiling() {
     assert_eq!(context.cache().structure_len(), 1);
     assert_eq!(context.cache().stats().structure_hits(), 1);
     assert_eq!(context.cache().stats().structure_misses(), 1);
+}
+
+#[test]
+fn tensorcontract_execution_context_no_cache_recompiles_without_retaining_structure() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let mut context = TensorContractExecutionContext::<f64>::default();
+    context
+        .cache_mut()
+        .set_policy(OperationCachePolicy::NoCache);
+
+    for expected_misses in 1..=2 {
+        tensorcontract_into_with_context(
+            &mut context,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(context.cache().structure_len(), 0);
+        assert_eq!(context.cache().stats().structure_hits(), 0);
+        assert_eq!(context.cache().stats().structure_misses(), expected_misses);
+    }
+}
+
+#[test]
+fn tensorcontract_execution_context_task_local_lru_evicts_old_structure() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0>::from_vec(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let mut context = TensorContractExecutionContext::<f64>::default();
+    context
+        .cache_mut()
+        .set_policy(OperationCachePolicy::task_local_lru(1));
+
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().structure_misses(), 1);
+
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::new(&[1], &[0], AxisPermutation::from_axes(&[1, 0])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().structure_misses(), 2);
+
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().structure_hits(), 0);
+    assert_eq!(context.cache().stats().structure_misses(), 3);
 }
 
 #[test]
