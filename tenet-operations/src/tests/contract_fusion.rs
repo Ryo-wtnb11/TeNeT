@@ -89,6 +89,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
+    assert_eq!(context.fusion_route_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_hits(), 0);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
@@ -106,6 +107,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
+    assert_eq!(context.fusion_route_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_hits(), 1);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
@@ -125,6 +127,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
+    assert_eq!(context.fusion_route_cache_len(), 1);
     assert_eq!(
         profile.route,
         TensorContractFusionRoute::CanonicalFusionBlocks
@@ -2044,6 +2047,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert!(automatic_context.tree_context().cache().plan_len() > 0);
     assert!(automatic_context.tree_context().cache().structure_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_len() > 0);
+    assert_eq!(automatic_context.fusion_route_cache_len(), 1);
     assert!(automatic_context.fusion_explicit_plan_cache_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_misses() > 0);
     assert_eq!(automatic_context.dynamic_fusion_space_cache_hits(), 0);
@@ -2109,6 +2113,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         let dynamic_misses = no_cache_context.dynamic_fusion_space_cache_misses();
         assert!(dynamic_misses > previous_dynamic_misses);
         previous_dynamic_misses = dynamic_misses;
+        assert_eq!(no_cache_context.fusion_route_cache_len(), 0);
         assert_eq!(no_cache_context.fusion_explicit_plan_cache_len(), 0);
         assert_eq!(no_cache_context.contract_cache().structure_len(), 0);
         assert_eq!(no_cache_context.fusion_block_contract_cache_len(), 0);
@@ -2132,6 +2137,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert!(warm_policy_context.tree_context().cache().plan_len() <= 1);
     assert!(warm_policy_context.tree_context().cache().structure_len() <= 1);
     assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
+    assert!(warm_policy_context.fusion_route_cache_len() <= 1);
     assert!(warm_policy_context.fusion_explicit_plan_cache_len() <= 1);
     assert!(warm_policy_context.contract_cache().structure_len() <= 1);
     assert!(warm_policy_context.fusion_block_contract_cache_len() <= 1);
@@ -2156,6 +2162,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert!(lru_context.tree_context().cache().plan_len() <= 1);
     assert!(lru_context.tree_context().cache().structure_len() <= 1);
     assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
+    assert!(lru_context.fusion_route_cache_len() <= 1);
     assert!(lru_context.fusion_explicit_plan_cache_len() <= 1);
     assert!(lru_context.contract_cache().structure_len() <= 1);
     assert!(lru_context.fusion_block_contract_cache_len() <= 1);
@@ -2386,8 +2393,12 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     assert!(context.tree_context().cache().stats().structure_misses() >= 3);
     assert!(context.dynamic_fusion_space_cache_hits() > 0);
     assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
-    assert!(context.fusion_block_contract_cache_len() >= 1);
-    assert!(context.fusion_block_contract_cache_misses() >= 1);
+    assert_eq!(context.contract_cache().structure_len(), 0);
+    assert_eq!(context.fusion_route_cache_len(), 3);
+    assert_eq!(context.fusion_explicit_plan_cache_len(), 1);
+    assert_eq!(context.fusion_block_contract_cache_len(), 1);
+    assert_eq!(context.fusion_block_contract_cache_hits(), 2);
+    assert_eq!(context.fusion_block_contract_cache_misses(), 1);
 }
 
 #[test]
@@ -2467,6 +2478,8 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
         }
     }
     assert!(context.tree_context().cache().stats().structure_misses() > 0);
+    assert_eq!(context.contract_cache().structure_len(), 0);
+    assert_eq!(context.fusion_route_cache_len(), 2);
     assert!(context.fusion_block_contract_cache_len() >= 1);
     assert!(context.fusion_block_contract_cache_misses() >= 1);
 }
@@ -2586,6 +2599,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
                 "actual {actual} expected {expected}"
             );
         }
+        assert_eq!(context.fusion_route_cache_len(), 1);
         assert_eq!(context.fusion_block_contract_cache_len(), case_index + 1);
         assert_eq!(context.fusion_block_contract_cache_misses(), case_index + 1);
         assert_eq!(context.fusion_block_contract_cache_hits(), 0);

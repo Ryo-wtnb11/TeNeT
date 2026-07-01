@@ -6,6 +6,7 @@ mod dynamic_space;
 mod fusion;
 mod fusion_block;
 mod profile;
+mod route_cache;
 mod scratch;
 mod structure;
 

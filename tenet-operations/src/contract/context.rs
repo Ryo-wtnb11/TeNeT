@@ -32,10 +32,10 @@ use super::fusion::{
     SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
-    is_canonical_fusion_block_contract, CanonicalFusionBlockContractCache,
-    CanonicalFusionBlockContractWorkspace,
+    CanonicalFusionBlockContractCache, CanonicalFusionBlockContractWorkspace,
 };
 use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
+use super::route_cache::{FusionRouteCache, TensorContractFusionRouteDecision};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
 
@@ -858,6 +858,7 @@ pub struct TensorContractFusionExecutionContext<
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     dynamic_space_cache: DynamicFusionSpaceCache<RuleKey>,
+    route_cache: FusionRouteCache<RuleKey>,
     explicit_plan_cache: FusionExplicitPlanCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
@@ -893,6 +894,7 @@ where
         Self {
             tree_context,
             dynamic_space_cache: DynamicFusionSpaceCache::default(),
+            route_cache: FusionRouteCache::default(),
             explicit_plan_cache: FusionExplicitPlanCache::default(),
             contract_backend,
             contract_workspace,
@@ -969,6 +971,11 @@ where
     }
 
     #[inline]
+    pub fn fusion_route_cache_len(&self) -> usize {
+        self.route_cache.len()
+    }
+
+    #[inline]
     pub fn fusion_block_contract_cache_len(&self) -> usize {
         self.fusion_block_cache.len()
     }
@@ -991,6 +998,7 @@ where
     pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.tree_context.set_cache_policy(policy);
         self.dynamic_space_cache.set_policy(policy);
+        self.route_cache.set_policy(policy);
         self.explicit_plan_cache.set_policy(policy);
         self.contract_cache.set_policy(policy);
         self.fusion_block_cache.set_policy(policy);
@@ -1091,47 +1099,84 @@ where
         let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-        if !axes.lhs_conjugate()
-            && !axes.rhs_conjugate()
-            && is_canonical_fusion_block_contract(
+        if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
+            let route = self.route_cache.get_or_compile_nonconjugate(
                 rule,
                 &dst_dynamic,
                 &lhs_dynamic,
                 &rhs_dynamic,
                 axes,
-            )?
-        {
+            )?;
+            if route == TensorContractFusionRouteDecision::CanonicalFusionBlocks {
+                let Self {
+                    contract_backend,
+                    contract_workspace,
+                    route_cache: _,
+                    explicit_plan_cache: _,
+                    contract_cache: _,
+                    fusion_block_cache,
+                    fusion_block_workspace,
+                    tree_context: _,
+                    dynamic_space_cache: _,
+                    fusion_scratch: _,
+                } = self;
+                let block_plan = fusion_block_cache.get_or_compile(
+                    rule,
+                    &dst_dynamic,
+                    &lhs_dynamic,
+                    &rhs_dynamic,
+                    axes,
+                )?;
+                let dst_structure = std::sync::Arc::clone(dst.structure());
+                let lhs_structure = std::sync::Arc::clone(lhs.structure());
+                let rhs_structure = std::sync::Arc::clone(rhs.structure());
+                block_plan.execute_raw(
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    &dst_structure,
+                    dst.data_mut(),
+                    &lhs_structure,
+                    lhs.data(),
+                    &rhs_structure,
+                    rhs.data(),
+                    alpha,
+                    beta,
+                )?;
+                return Ok(());
+            }
+
+            let plan = self
+                .explicit_plan_cache
+                .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
             let Self {
+                tree_context,
+                dynamic_space_cache,
+                route_cache: _,
+                explicit_plan_cache: _,
                 contract_backend,
                 contract_workspace,
+                contract_cache: _,
                 fusion_block_cache,
                 fusion_block_workspace,
-                ..
+                fusion_scratch,
             } = self;
-            let block_plan = fusion_block_cache.get_or_compile(
-                rule,
-                &dst_dynamic,
-                &lhs_dynamic,
-                &rhs_dynamic,
-                axes,
-            )?;
-            let dst_structure = std::sync::Arc::clone(dst.structure());
-            let lhs_structure = std::sync::Arc::clone(lhs.structure());
-            let rhs_structure = std::sync::Arc::clone(rhs.structure());
-            block_plan.execute_raw(
+            return tensorcontract_fusion_dynamic_plan_into_context(
+                tree_context,
                 contract_backend,
                 contract_workspace,
+                dynamic_space_cache,
+                fusion_block_cache,
                 fusion_block_workspace,
-                &dst_structure,
-                dst.data_mut(),
-                &lhs_structure,
-                lhs.data(),
-                &rhs_structure,
-                rhs.data(),
+                fusion_scratch,
+                rule,
+                plan.as_ref(),
+                dst,
+                lhs,
+                rhs,
                 alpha,
                 beta,
-            )?;
-            return Ok(());
+            );
         }
 
         if axes.lhs_conjugate() || axes.rhs_conjugate() {
@@ -1156,6 +1201,7 @@ where
                     let Self {
                         tree_context,
                         dynamic_space_cache,
+                        route_cache: _,
                         explicit_plan_cache: _,
                         contract_backend,
                         contract_workspace,
@@ -1191,6 +1237,7 @@ where
         let Self {
             tree_context,
             dynamic_space_cache,
+            route_cache: _,
             explicit_plan_cache: _,
             contract_backend,
             contract_workspace,
@@ -1262,24 +1309,31 @@ where
         profile.typed_space_setup += start.elapsed();
 
         let start = std::time::Instant::now();
-        let canonical = !axes.lhs_conjugate()
-            && !axes.rhs_conjugate()
-            && is_canonical_fusion_block_contract(
+        let route = if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
+            Some(self.route_cache.get_or_compile_nonconjugate(
                 rule,
                 &dst_dynamic,
                 &lhs_dynamic,
                 &rhs_dynamic,
                 axes,
-            )?;
+            )?)
+        } else {
+            None
+        };
         profile.canonical_route_check += start.elapsed();
-        if canonical {
+        if route == Some(TensorContractFusionRouteDecision::CanonicalFusionBlocks) {
             profile.route = TensorContractFusionRoute::CanonicalFusionBlocks;
             let Self {
                 contract_backend,
                 contract_workspace,
+                route_cache: _,
+                explicit_plan_cache: _,
+                contract_cache: _,
                 fusion_block_cache,
                 fusion_block_workspace,
-                ..
+                tree_context: _,
+                dynamic_space_cache: _,
+                fusion_scratch: _,
             } = self;
             let start = std::time::Instant::now();
             let block_plan = fusion_block_cache.get_or_compile(
@@ -1303,6 +1357,45 @@ where
                 lhs.data(),
                 &rhs_structure,
                 rhs.data(),
+                alpha,
+                beta,
+                profile,
+            );
+            profile.total += total_start.elapsed();
+            return result;
+        }
+        if route == Some(TensorContractFusionRouteDecision::DynamicTreeCanonical) {
+            let start = std::time::Instant::now();
+            let plan = self
+                .explicit_plan_cache
+                .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+            profile.explicit_plan += start.elapsed();
+            profile.route = TensorContractFusionRoute::DynamicTreeCanonical;
+            let Self {
+                tree_context,
+                dynamic_space_cache,
+                route_cache: _,
+                explicit_plan_cache: _,
+                contract_backend,
+                contract_workspace,
+                contract_cache: _,
+                fusion_block_cache,
+                fusion_block_workspace,
+                fusion_scratch,
+            } = self;
+            let result = tensorcontract_fusion_dynamic_plan_into_context_profiled(
+                tree_context,
+                contract_backend,
+                contract_workspace,
+                dynamic_space_cache,
+                fusion_block_cache,
+                fusion_block_workspace,
+                fusion_scratch,
+                rule,
+                plan.as_ref(),
+                dst,
+                lhs,
+                rhs,
                 alpha,
                 beta,
                 profile,
@@ -1344,6 +1437,7 @@ where
                     let Self {
                         tree_context,
                         dynamic_space_cache,
+                        route_cache: _,
                         explicit_plan_cache: _,
                         contract_backend,
                         contract_workspace,
@@ -1389,6 +1483,7 @@ where
         let Self {
             tree_context,
             dynamic_space_cache,
+            route_cache: _,
             explicit_plan_cache: _,
             contract_backend,
             contract_workspace,
