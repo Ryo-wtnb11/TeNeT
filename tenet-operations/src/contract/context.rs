@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -9,8 +9,8 @@ use tenet_core::{
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::{
-    BlockStructureCacheKey, OperationCachePolicy, TensorContractStructureCache,
-    TensorContractStructureCacheKey,
+    enforce_lru_limit, rebuild_lru_order_from_keys, touch_lru_key, BlockStructureCacheKey,
+    OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
@@ -121,6 +121,8 @@ pub struct TensorContractBlockPlanTerm {
 struct FusionDenseBlockSpecsCache<RuleKey> {
     last: Option<FusionDenseBlockSpecsLastEntry<RuleKey>>,
     entries: HashMap<FusionDenseBlockSpecsCacheKey<RuleKey>, FusionDenseBlockSpecsCacheEntry>,
+    lru_order: VecDeque<FusionDenseBlockSpecsCacheKey<RuleKey>>,
+    policy: OperationCachePolicy,
 }
 
 impl<RuleKey> Default for FusionDenseBlockSpecsCache<RuleKey> {
@@ -128,6 +130,8 @@ impl<RuleKey> Default for FusionDenseBlockSpecsCache<RuleKey> {
         Self {
             last: None,
             entries: HashMap::new(),
+            lru_order: VecDeque::new(),
+            policy: OperationCachePolicy::default(),
         }
     }
 }
@@ -186,6 +190,7 @@ impl RawAxisPermutationKey {
 
 #[derive(Clone, Debug)]
 struct FusionDenseBlockSpecsLastEntry<RuleKey> {
+    key: FusionDenseBlockSpecsCacheKey<RuleKey>,
     rule: RuleKey,
     dst_nout: usize,
     dst_homspace: FusionTreeHomSpace,
@@ -255,6 +260,8 @@ struct FusionDenseBlockSpecsCacheGuards {
 struct FusionExplicitPlanCache<RuleKey> {
     last: Option<FusionExplicitPlanLastEntry<RuleKey>>,
     plans: HashMap<FusionExplicitPlanCacheKey<RuleKey>, Arc<TensorContractFusionExplicitPlan>>,
+    lru_order: VecDeque<FusionExplicitPlanCacheKey<RuleKey>>,
+    policy: OperationCachePolicy,
 }
 
 impl<RuleKey> Default for FusionExplicitPlanCache<RuleKey> {
@@ -262,12 +269,15 @@ impl<RuleKey> Default for FusionExplicitPlanCache<RuleKey> {
         Self {
             last: None,
             plans: HashMap::new(),
+            lru_order: VecDeque::new(),
+            policy: OperationCachePolicy::default(),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 struct FusionExplicitPlanLastEntry<RuleKey> {
+    key: FusionExplicitPlanCacheKey<RuleKey>,
     rule: RuleKey,
     dst_nout: usize,
     dst_nin: usize,
@@ -349,6 +359,54 @@ impl<RuleKey> FusionExplicitPlanCache<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
+    #[inline]
+    fn len(&self) -> usize {
+        self.plans.len()
+    }
+
+    fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        self.last = None;
+        if !policy.stores_entries() {
+            self.plans.clear();
+            self.lru_order.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            rebuild_lru_order_from_keys(&self.plans, &mut self.lru_order);
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn touch_plan(&mut self, key: &FusionExplicitPlanCacheKey<RuleKey>) {
+        if self.policy.max_entries().is_some() && self.plans.contains_key(key) {
+            touch_lru_key(&mut self.lru_order, key);
+        }
+    }
+
+    fn insert_plan(
+        &mut self,
+        key: FusionExplicitPlanCacheKey<RuleKey>,
+        plan: Arc<TensorContractFusionExplicitPlan>,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        self.plans.insert(key.clone(), plan);
+        if self.policy.max_entries().is_some() {
+            self.touch_plan(&key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn enforce_lru_limit(&mut self, max_entries: usize) {
+        let before = self.plans.len();
+        enforce_lru_limit(&mut self.plans, &mut self.lru_order, max_entries);
+        if self.plans.len() != before {
+            self.last = None;
+        }
+    }
+
     fn get_or_compile<
         R,
         const DST_NOUT: usize,
@@ -369,9 +427,23 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(last) = &self.last {
-            if last.matches(&rule_key, dst, lhs, rhs, axes) {
-                return Ok(Arc::clone(&last.plan));
+        if self.policy.stores_entries() {
+            let refresh_lru = self.policy.max_entries().is_some();
+            let last_hit = self.last.as_ref().and_then(|last| {
+                if last.matches(&rule_key, dst, lhs, rhs, axes) {
+                    Some((
+                        refresh_lru.then(|| last.key.clone()),
+                        Arc::clone(&last.plan),
+                    ))
+                } else {
+                    None
+                }
+            });
+            if let Some((key, plan)) = last_hit {
+                if let Some(key) = key.as_ref() {
+                    self.touch_plan(key);
+                }
+                return Ok(plan);
             }
         }
         let raw_axes = RawTensorContractAxisSpecKey::from_axes(axes);
@@ -404,8 +476,16 @@ where
             rhs_homspace: rhs.homspace().clone(),
             axes: axes_key,
         };
+        if !self.policy.stores_entries() {
+            return Ok(Arc::new(tensorcontract_fusion_explicit_plan(
+                rule, dst, lhs, rhs, axes,
+            )?));
+        }
         if let Some(plan) = self.plans.get(&key) {
+            let plan = Arc::clone(plan);
+            self.touch_plan(&key);
             self.last = Some(FusionExplicitPlanLastEntry {
+                key: key.clone(),
                 rule: rule_key,
                 dst_nout: DST_NOUT,
                 dst_nin: DST_NIN,
@@ -423,15 +503,17 @@ where
                 rhs_homspace: rhs.homspace().clone(),
                 rhs_structure: Arc::clone(rhs.subblock_structure()),
                 axes: raw_axes,
-                plan: Arc::clone(plan),
+                plan: Arc::clone(&plan),
             });
-            return Ok(Arc::clone(plan));
+            return Ok(plan);
         }
         let plan = Arc::new(tensorcontract_fusion_explicit_plan(
             rule, dst, lhs, rhs, axes,
         )?);
-        self.plans.insert(key, Arc::clone(&plan));
+        let last_key = key.clone();
+        self.insert_plan(key, Arc::clone(&plan));
         self.last = Some(FusionExplicitPlanLastEntry {
+            key: last_key,
             rule: rule_key,
             dst_nout: DST_NOUT,
             dst_nin: DST_NIN,
@@ -474,6 +556,54 @@ impl<RuleKey> FusionDenseBlockSpecsCache<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
+    #[inline]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        self.last = None;
+        if !policy.stores_entries() {
+            self.entries.clear();
+            self.lru_order.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            rebuild_lru_order_from_keys(&self.entries, &mut self.lru_order);
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn touch_entry(&mut self, key: &FusionDenseBlockSpecsCacheKey<RuleKey>) {
+        if self.policy.max_entries().is_some() && self.entries.contains_key(key) {
+            touch_lru_key(&mut self.lru_order, key);
+        }
+    }
+
+    fn insert_entry(
+        &mut self,
+        key: FusionDenseBlockSpecsCacheKey<RuleKey>,
+        entry: FusionDenseBlockSpecsCacheEntry,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        self.entries.insert(key.clone(), entry);
+        if self.policy.max_entries().is_some() {
+            self.touch_entry(&key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn enforce_lru_limit(&mut self, max_entries: usize) {
+        let before = self.entries.len();
+        enforce_lru_limit(&mut self.entries, &mut self.lru_order, max_entries);
+        if self.entries.len() != before {
+            self.last = None;
+        }
+    }
+
     fn get_or_compile<
         R,
         const DST_NOUT: usize,
@@ -494,9 +624,20 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(last) = &self.last {
-            if last.matches(&rule_key, dst, lhs, rhs, axes) {
-                return Ok(last.entry.clone());
+        if self.policy.stores_entries() {
+            let refresh_lru = self.policy.max_entries().is_some();
+            let last_hit = self.last.as_ref().and_then(|last| {
+                if last.matches(&rule_key, dst, lhs, rhs, axes) {
+                    Some((refresh_lru.then(|| last.key.clone()), last.entry.clone()))
+                } else {
+                    None
+                }
+            });
+            if let Some((key, entry)) = last_hit {
+                if let Some(key) = key.as_ref() {
+                    self.touch_entry(key);
+                }
+                return Ok(entry);
             }
         }
         let raw_axes = RawTensorContractAxisSpecKey::from_axes(axes);
@@ -526,8 +667,32 @@ where
             rhs_structure: BlockStructureCacheKey::from_structure(rhs.subblock_structure())?,
             axes: axes_key,
         };
+        if !self.policy.stores_entries() {
+            let guards = FusionDenseBlockSpecsCacheGuards {
+                _dst_structure: Arc::clone(dst.subblock_structure()),
+                _lhs_structure: Arc::clone(lhs.subblock_structure()),
+                _rhs_structure: Arc::clone(rhs.subblock_structure()),
+            };
+            return match tensorcontract_fusion_block_specs(rule, dst, lhs, rhs, axes) {
+                Ok(block_specs) => Ok(FusionDenseBlockSpecsCacheEntry::Specs {
+                    block_specs: Arc::new(block_specs),
+                    _guards: guards,
+                }),
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => Ok(
+                    FusionDenseBlockSpecsCacheEntry::SourceTransformRequiresExplicit {
+                        _guards: guards,
+                    },
+                ),
+                Err(err) => Err(err),
+            };
+        }
         if let Some(entry) = self.entries.get(&key) {
+            let entry = entry.clone();
+            self.touch_entry(&key);
             self.last = Some(FusionDenseBlockSpecsLastEntry {
+                key: key.clone(),
                 rule: rule_key,
                 dst_nout: DST_NOUT,
                 dst_homspace: dst.homspace().clone(),
@@ -541,7 +706,7 @@ where
                 axes: raw_axes,
                 entry: entry.clone(),
             });
-            return Ok(entry.clone());
+            return Ok(entry);
         }
         let guards = FusionDenseBlockSpecsCacheGuards {
             _dst_structure: Arc::clone(dst.subblock_structure()),
@@ -560,8 +725,10 @@ where
             }
             Err(err) => return Err(err),
         };
-        self.entries.insert(key, entry.clone());
+        let last_key = key.clone();
+        self.insert_entry(key, entry.clone());
         self.last = Some(FusionDenseBlockSpecsLastEntry {
+            key: last_key,
             rule: rule_key,
             dst_nout: DST_NOUT,
             dst_homspace: dst.homspace().clone(),
@@ -1094,6 +1261,16 @@ where
     }
 
     #[inline]
+    pub fn fusion_explicit_plan_cache_len(&self) -> usize {
+        self.explicit_plan_cache.len()
+    }
+
+    #[inline]
+    pub fn fusion_dense_block_specs_cache_len(&self) -> usize {
+        self.dense_block_specs_cache.len()
+    }
+
+    #[inline]
     pub fn fusion_block_contract_cache_len(&self) -> usize {
         self.fusion_block_cache.len()
     }
@@ -1115,7 +1292,10 @@ where
 
     pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.tree_context.set_cache_policy(policy);
+        self.dynamic_space_cache.set_policy(policy);
+        self.explicit_plan_cache.set_policy(policy);
         self.contract_cache.set_policy(policy);
+        self.dense_block_specs_cache.set_policy(policy);
         self.fusion_block_cache.set_policy(policy);
     }
 

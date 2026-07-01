@@ -2016,6 +2016,8 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert!(automatic_context.tree_context().cache().plan_len() > 0);
     assert!(automatic_context.tree_context().cache().structure_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_len() > 0);
+    assert!(automatic_context.fusion_explicit_plan_cache_len() > 0);
+    assert!(automatic_context.fusion_dense_block_specs_cache_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_misses() > 0);
     assert_eq!(automatic_context.dynamic_fusion_space_cache_hits(), 0);
     assert!(
@@ -2052,6 +2054,87 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(automatic_context.fusion_block_contract_cache_len(), 1);
     assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 0);
     assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 1);
+
+    let mut no_cache_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial_dst_for_context_replay.clone(),
+        context_dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut no_cache_context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
+    let mut previous_dynamic_misses = 0;
+    for _ in 0..2 {
+        no_cache_context
+            .tensorcontract_fusion_into(&rule, &mut no_cache_dst, &lhs, &rhs, axes, alpha, beta)
+            .unwrap();
+        for (&actual, &expected) in no_cache_dst.data().iter().zip(expected_dst.data()) {
+            assert!(
+                (actual - expected).abs() < 1.0e-10,
+                "actual {actual} expected {expected}"
+            );
+        }
+        assert_eq!(no_cache_context.tree_context().cache().plan_len(), 0);
+        assert_eq!(no_cache_context.tree_context().cache().structure_len(), 0);
+        assert_eq!(no_cache_context.dynamic_fusion_space_cache_len(), 0);
+        assert_eq!(no_cache_context.dynamic_fusion_space_cache_hits(), 0);
+        assert_eq!(no_cache_context.dynamic_fusion_space_cache_fast_hits(), 0);
+        let dynamic_misses = no_cache_context.dynamic_fusion_space_cache_misses();
+        assert!(dynamic_misses > previous_dynamic_misses);
+        previous_dynamic_misses = dynamic_misses;
+        assert_eq!(no_cache_context.fusion_explicit_plan_cache_len(), 0);
+        assert_eq!(no_cache_context.fusion_dense_block_specs_cache_len(), 0);
+        assert_eq!(no_cache_context.contract_cache().structure_len(), 0);
+        assert_eq!(no_cache_context.fusion_block_contract_cache_len(), 0);
+        no_cache_dst
+            .data_mut()
+            .copy_from_slice(&initial_dst_for_context_replay);
+    }
+
+    let mut warm_policy_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial_dst_for_context_replay.clone(),
+        context_dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut warm_policy_context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    warm_policy_context
+        .tensorcontract_fusion_into(&rule, &mut warm_policy_dst, &lhs, &rhs, axes, alpha, beta)
+        .unwrap();
+    assert!(warm_policy_context.dynamic_fusion_space_cache_len() > 1);
+    warm_policy_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
+    assert!(warm_policy_context.tree_context().cache().plan_len() <= 1);
+    assert!(warm_policy_context.tree_context().cache().structure_len() <= 1);
+    assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
+    assert!(warm_policy_context.fusion_explicit_plan_cache_len() <= 1);
+    assert!(warm_policy_context.fusion_dense_block_specs_cache_len() <= 1);
+    assert!(warm_policy_context.contract_cache().structure_len() <= 1);
+    assert!(warm_policy_context.fusion_block_contract_cache_len() <= 1);
+
+    let mut lru_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial_dst_for_context_replay.clone(),
+        context_dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut lru_context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
+    lru_context
+        .tensorcontract_fusion_into(&rule, &mut lru_dst, &lhs, &rhs, axes, alpha, beta)
+        .unwrap();
+    for (&actual, &expected) in lru_dst.data().iter().zip(expected_dst.data()) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+    assert!(lru_context.tree_context().cache().plan_len() <= 1);
+    assert!(lru_context.tree_context().cache().structure_len() <= 1);
+    assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
+    assert!(lru_context.fusion_explicit_plan_cache_len() <= 1);
+    assert!(lru_context.fusion_dense_block_specs_cache_len() <= 1);
+    assert!(lru_context.contract_cache().structure_len() <= 1);
+    assert!(lru_context.fusion_block_contract_cache_len() <= 1);
 
     let mut split_backend_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -7,7 +7,7 @@ use tenet_core::{
 };
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
-use crate::cache::BlockStructureCacheKey;
+use crate::cache::{touch_lru_key, BlockStructureCacheKey, OperationCachePolicy};
 use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
@@ -757,11 +757,13 @@ pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
         DynamicFusionTransformedSourceSpaceKey<RuleKey>,
         DynamicFusionTransformedSourceEntry,
     >,
+    lru_order: VecDeque<DynamicFusionSpaceCacheEntryKey<RuleKey>>,
     last_canonical_dst: Option<DynamicFusionCanonicalDstLastEntry<RuleKey>>,
     fast_canonical_dsts:
         HashMap<DynamicFusionCanonicalDstFastKey<RuleKey>, DynamicFusionCanonicalDstEntry>,
     canonical_dsts:
         HashMap<DynamicFusionCanonicalDstSpaceKey<RuleKey>, DynamicFusionCanonicalDstEntry>,
+    policy: OperationCachePolicy,
     stats: DynamicFusionSpaceCacheStats,
 }
 
@@ -784,9 +786,11 @@ impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
             last_transformed_sources: Vec::new(),
             fast_transformed_sources: HashMap::new(),
             transformed_sources: HashMap::new(),
+            lru_order: VecDeque::new(),
             last_canonical_dst: None,
             fast_canonical_dsts: HashMap::new(),
             canonical_dsts: HashMap::new(),
+            policy: OperationCachePolicy::default(),
             stats: DynamicFusionSpaceCacheStats::default(),
         }
     }
@@ -794,6 +798,7 @@ impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
 
 #[derive(Clone, Debug)]
 struct DynamicFusionTransformedSourceLastEntry<RuleKey> {
+    key: Option<DynamicFusionTransformedSourceSpaceKey<RuleKey>>,
     rule: RuleKey,
     nout: usize,
     homspace: FusionTreeHomSpace,
@@ -827,6 +832,7 @@ where
 
 #[derive(Clone, Debug)]
 struct DynamicFusionCanonicalDstLastEntry<RuleKey> {
+    key: Option<DynamicFusionCanonicalDstSpaceKey<RuleKey>>,
     rule: RuleKey,
     lhs: DynamicFusionLastSpaceKey,
     rhs: DynamicFusionLastSpaceKey,
@@ -898,15 +904,136 @@ where
         self.stats
     }
 
+    pub(crate) fn set_policy(&mut self, policy: OperationCachePolicy) {
+        self.policy = policy;
+        self.clear_fast_entries();
+        if !policy.stores_entries() {
+            self.transformed_sources.clear();
+            self.lru_order.clear();
+            self.canonical_dsts.clear();
+        } else if let Some(max_entries) = policy.max_entries() {
+            self.rebuild_lru_order();
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn clear_fast_entries(&mut self) {
+        self.last_transformed_sources.clear();
+        self.fast_transformed_sources.clear();
+        self.last_canonical_dst = None;
+        self.fast_canonical_dsts.clear();
+    }
+
+    fn rebuild_lru_order(&mut self) {
+        self.lru_order.clear();
+        self.lru_order.extend(
+            self.transformed_sources
+                .keys()
+                .cloned()
+                .map(DynamicFusionSpaceCacheEntryKey::TransformedSource),
+        );
+        self.lru_order.extend(
+            self.canonical_dsts
+                .keys()
+                .cloned()
+                .map(DynamicFusionSpaceCacheEntryKey::CanonicalDst),
+        );
+    }
+
     fn remember_transformed_source(
         &mut self,
         entry: DynamicFusionTransformedSourceLastEntry<RuleKey>,
     ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
         const LAST_TRANSFORMED_SOURCE_LIMIT: usize = 4;
         if self.last_transformed_sources.len() == LAST_TRANSFORMED_SOURCE_LIMIT {
             self.last_transformed_sources.remove(0);
         }
         self.last_transformed_sources.push(entry);
+    }
+
+    fn touch_transformed_source(&mut self, key: &DynamicFusionTransformedSourceSpaceKey<RuleKey>) {
+        if self.policy.max_entries().is_some() && self.transformed_sources.contains_key(key) {
+            touch_lru_key(
+                &mut self.lru_order,
+                &DynamicFusionSpaceCacheEntryKey::TransformedSource(key.clone()),
+            );
+        }
+    }
+
+    fn insert_transformed_source(
+        &mut self,
+        key: DynamicFusionTransformedSourceSpaceKey<RuleKey>,
+        fast_key: DynamicFusionTransformedSourceFastKey<RuleKey>,
+        entry: DynamicFusionTransformedSourceEntry,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        self.transformed_sources.insert(key.clone(), entry.clone());
+        self.fast_transformed_sources.insert(fast_key, entry);
+        if self.policy.max_entries().is_some() {
+            self.touch_transformed_source(&key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn touch_canonical_dst(&mut self, key: &DynamicFusionCanonicalDstSpaceKey<RuleKey>) {
+        if self.policy.max_entries().is_some() && self.canonical_dsts.contains_key(key) {
+            touch_lru_key(
+                &mut self.lru_order,
+                &DynamicFusionSpaceCacheEntryKey::CanonicalDst(key.clone()),
+            );
+        }
+    }
+
+    fn insert_canonical_dst(
+        &mut self,
+        key: DynamicFusionCanonicalDstSpaceKey<RuleKey>,
+        fast_key: DynamicFusionCanonicalDstFastKey<RuleKey>,
+        entry: DynamicFusionCanonicalDstEntry,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        self.canonical_dsts.insert(key.clone(), entry.clone());
+        self.fast_canonical_dsts.insert(fast_key, entry);
+        if self.policy.max_entries().is_some() {
+            self.touch_canonical_dst(&key);
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
+        }
+    }
+
+    fn enforce_lru_limit(&mut self, max_entries: usize) {
+        let mut evicted_transformed_source = false;
+        let mut evicted_canonical_dst = false;
+        while self.len() > max_entries {
+            let Some(oldest) = self.lru_order.pop_front() else {
+                break;
+            };
+            match oldest {
+                DynamicFusionSpaceCacheEntryKey::TransformedSource(key) => {
+                    evicted_transformed_source |= self.transformed_sources.remove(&key).is_some();
+                }
+                DynamicFusionSpaceCacheEntryKey::CanonicalDst(key) => {
+                    evicted_canonical_dst |= self.canonical_dsts.remove(&key).is_some();
+                }
+            }
+        }
+        if evicted_transformed_source {
+            self.last_transformed_sources.clear();
+            self.fast_transformed_sources.clear();
+        }
+        if evicted_canonical_dst {
+            self.last_canonical_dst = None;
+            self.fast_canonical_dsts.clear();
+        }
     }
 
     fn get_or_compile_transformed_source<
@@ -934,10 +1061,11 @@ where
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
         let rule_key = rule.tree_transform_rule_cache_key();
         let nout = if source_conjugate { SRC_NIN } else { SRC_NOUT };
-        if !source_conjugate {
+        if self.policy.stores_entries() && !source_conjugate {
+            let refresh_lru = self.policy.max_entries().is_some();
             let homspace = src_fusion.homspace();
             let replay_structure = src.structure();
-            for last in &self.last_transformed_sources {
+            let last_hit = self.last_transformed_sources.iter().find_map(|last| {
                 if last.matches(
                     &rule_key,
                     nout,
@@ -946,10 +1074,21 @@ where
                     operation,
                     source_conjugate,
                 ) {
-                    self.stats.hits += 1;
-                    self.stats.fast_hits += 1;
-                    return Ok(last.entry.clone());
+                    Some((
+                        refresh_lru.then(|| last.key.clone()).flatten(),
+                        last.entry.clone(),
+                    ))
+                } else {
+                    None
                 }
+            });
+            if let Some((key, entry)) = last_hit {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                if let Some(key) = key.as_ref() {
+                    self.touch_transformed_source(key);
+                }
+                return Ok(entry);
             }
         }
         let (homspace, replay_structure) = if source_conjugate {
@@ -964,8 +1103,9 @@ where
                 std::sync::Arc::clone(src.structure()),
             )
         };
-        if source_conjugate {
-            for last in &self.last_transformed_sources {
+        if self.policy.stores_entries() && source_conjugate {
+            let refresh_lru = self.policy.max_entries().is_some();
+            let last_hit = self.last_transformed_sources.iter().find_map(|last| {
                 if last.matches(
                     &rule_key,
                     nout,
@@ -974,12 +1114,47 @@ where
                     operation,
                     source_conjugate,
                 ) {
-                    self.stats.hits += 1;
-                    self.stats.fast_hits += 1;
-                    return Ok(last.entry.clone());
+                    Some((
+                        refresh_lru.then(|| last.key.clone()).flatten(),
+                        last.entry.clone(),
+                    ))
+                } else {
+                    None
                 }
+            });
+            if let Some((key, entry)) = last_hit {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                if let Some(key) = key.as_ref() {
+                    self.touch_transformed_source(key);
+                }
+                return Ok(entry);
             }
         }
+        if !self.policy.stores_entries() {
+            self.stats.misses += 1;
+            let space = if source_conjugate {
+                let adjoint = adjoint_fusion_space_view(src_fusion)?;
+                DynamicFusionMapSpace::transformed_from_typed(rule, &adjoint, operation)?
+            } else {
+                DynamicFusionMapSpace::transformed_from_typed(rule, src_fusion, operation)?
+            };
+            let dst_structure = Arc::clone(space.structure());
+            let transform_structure = tree_context
+                .get_or_compile_tree_pair_structure_with_storage_conjugation(
+                    rule,
+                    operation.clone(),
+                    &dst_structure,
+                    &replay_structure,
+                    source_conjugate,
+                )?;
+            return Ok(DynamicFusionTransformedSourceEntry {
+                space: Arc::new(space),
+                replay_structure,
+                transform_structure,
+            });
+        }
+
         let fast_key = DynamicFusionTransformedSourceFastKey {
             rule: rule_key.clone(),
             nout,
@@ -988,11 +1163,27 @@ where
             operation: operation.clone(),
             source_conjugate,
         };
+        let lru_key = if self.policy.max_entries().is_some() {
+            Some(DynamicFusionTransformedSourceSpaceKey {
+                rule: rule_key.clone(),
+                nout,
+                homspace: homspace.clone(),
+                structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
+                operation: operation.clone(),
+                source_conjugate,
+            })
+        } else {
+            None
+        };
         if let Some(entry) = self.fast_transformed_sources.get(&fast_key) {
             let entry = entry.clone();
             self.stats.hits += 1;
             self.stats.fast_hits += 1;
+            if let Some(key) = lru_key.as_ref() {
+                self.touch_transformed_source(key);
+            }
             self.remember_transformed_source(DynamicFusionTransformedSourceLastEntry {
+                key: lru_key,
                 rule: rule_key,
                 nout,
                 homspace,
@@ -1003,20 +1194,26 @@ where
             });
             return Ok(entry);
         }
-        let key = DynamicFusionTransformedSourceSpaceKey {
-            rule: rule_key.clone(),
-            nout,
-            homspace: homspace.clone(),
-            structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
-            operation: operation.clone(),
-            source_conjugate,
+        let key = if let Some(key) = lru_key {
+            key
+        } else {
+            DynamicFusionTransformedSourceSpaceKey {
+                rule: rule_key.clone(),
+                nout,
+                homspace: homspace.clone(),
+                structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
+                operation: operation.clone(),
+                source_conjugate,
+            }
         };
         if let Some(entry) = self.transformed_sources.get(&key) {
             let entry = entry.clone();
             self.stats.hits += 1;
+            self.touch_transformed_source(&key);
             self.fast_transformed_sources
                 .insert(fast_key, entry.clone());
             self.remember_transformed_source(DynamicFusionTransformedSourceLastEntry {
+                key: Some(key.clone()),
                 rule: rule_key,
                 nout,
                 homspace,
@@ -1049,10 +1246,10 @@ where
             replay_structure,
             transform_structure,
         };
-        self.transformed_sources.insert(key, entry.clone());
-        self.fast_transformed_sources
-            .insert(fast_key, entry.clone());
+        let last_key = key.clone();
+        self.insert_transformed_source(key, fast_key, entry.clone());
         self.remember_transformed_source(DynamicFusionTransformedSourceLastEntry {
+            key: Some(last_key),
             rule: rule_key,
             nout,
             homspace,
@@ -1079,11 +1276,40 @@ where
         BT: TreeTransformBackend<D, f64>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
+        if !self.policy.stores_entries() {
+            self.stats.misses += 1;
+            let space =
+                DynamicFusionMapSpace::canonical_dst(rule, lhs, rhs, plan, Some(output_dst))?;
+            let dst_structure = Arc::clone(output_dst.structure());
+            let src_structure = Arc::clone(space.structure());
+            let output_transform_structure = tree_context
+                .get_or_compile_tree_pair_structure_with_storage_conjugation(
+                    rule,
+                    plan.output_transform().clone(),
+                    &dst_structure,
+                    &src_structure,
+                    false,
+                )?;
+            return Ok(DynamicFusionCanonicalDstEntry {
+                space: Arc::new(space),
+                output_transform_structure,
+            });
+        }
         if let Some(last) = &self.last_canonical_dst {
             if last.matches(&rule_key, lhs, rhs, plan, output_dst) {
+                let key = self
+                    .policy
+                    .max_entries()
+                    .is_some()
+                    .then(|| last.key.clone())
+                    .flatten();
+                let entry = last.entry.clone();
                 self.stats.hits += 1;
                 self.stats.fast_hits += 1;
-                return Ok(last.entry.clone());
+                if let Some(key) = key.as_ref() {
+                    self.touch_canonical_dst(key);
+                }
+                return Ok(entry);
             }
         }
         let fast_key = DynamicFusionCanonicalDstFastKey {
@@ -1096,10 +1322,29 @@ where
             output_transform: plan.output_transform().clone(),
             output_dst: DynamicFusionFastSpaceKey::from_space(output_dst),
         };
+        let lru_key = if self.policy.max_entries().is_some() {
+            Some(DynamicFusionCanonicalDstSpaceKey {
+                rule: rule_key.clone(),
+                lhs: DynamicFusionSpaceKey::from_space(lhs)?,
+                rhs: DynamicFusionSpaceKey::from_space(rhs)?,
+                canonical_axes: plan.canonical_axes().clone(),
+                canonical_dst_nout: plan.canonical_dst_nout(),
+                canonical_dst_nin: plan.canonical_dst_nin(),
+                output_transform: plan.output_transform().clone(),
+                output_dst: DynamicFusionSpaceKey::from_space(output_dst)?,
+            })
+        } else {
+            None
+        };
         if let Some(entry) = self.fast_canonical_dsts.get(&fast_key) {
+            let entry = entry.clone();
             self.stats.hits += 1;
             self.stats.fast_hits += 1;
+            if let Some(key) = lru_key.as_ref() {
+                self.touch_canonical_dst(key);
+            }
             self.last_canonical_dst = Some(DynamicFusionCanonicalDstLastEntry {
+                key: lru_key,
                 rule: rule_key,
                 lhs: DynamicFusionLastSpaceKey::from_space(lhs),
                 rhs: DynamicFusionLastSpaceKey::from_space(rhs),
@@ -1110,22 +1355,29 @@ where
                 output_dst: DynamicFusionLastSpaceKey::from_space(output_dst),
                 entry: entry.clone(),
             });
-            return Ok(entry.clone());
+            return Ok(entry);
         }
-        let key = DynamicFusionCanonicalDstSpaceKey {
-            rule: rule_key.clone(),
-            lhs: DynamicFusionSpaceKey::from_space(lhs)?,
-            rhs: DynamicFusionSpaceKey::from_space(rhs)?,
-            canonical_axes: plan.canonical_axes().clone(),
-            canonical_dst_nout: plan.canonical_dst_nout(),
-            canonical_dst_nin: plan.canonical_dst_nin(),
-            output_transform: plan.output_transform().clone(),
-            output_dst: DynamicFusionSpaceKey::from_space(output_dst)?,
+        let key = if let Some(key) = lru_key {
+            key
+        } else {
+            DynamicFusionCanonicalDstSpaceKey {
+                rule: rule_key.clone(),
+                lhs: DynamicFusionSpaceKey::from_space(lhs)?,
+                rhs: DynamicFusionSpaceKey::from_space(rhs)?,
+                canonical_axes: plan.canonical_axes().clone(),
+                canonical_dst_nout: plan.canonical_dst_nout(),
+                canonical_dst_nin: plan.canonical_dst_nin(),
+                output_transform: plan.output_transform().clone(),
+                output_dst: DynamicFusionSpaceKey::from_space(output_dst)?,
+            }
         };
         if let Some(entry) = self.canonical_dsts.get(&key) {
+            let entry = entry.clone();
             self.stats.hits += 1;
+            self.touch_canonical_dst(&key);
             self.fast_canonical_dsts.insert(fast_key, entry.clone());
             self.last_canonical_dst = Some(DynamicFusionCanonicalDstLastEntry {
+                key: Some(key.clone()),
                 rule: rule_key,
                 lhs: DynamicFusionLastSpaceKey::from_space(lhs),
                 rhs: DynamicFusionLastSpaceKey::from_space(rhs),
@@ -1136,7 +1388,7 @@ where
                 output_dst: DynamicFusionLastSpaceKey::from_space(output_dst),
                 entry: entry.clone(),
             });
-            return Ok(entry.clone());
+            return Ok(entry);
         }
 
         self.stats.misses += 1;
@@ -1155,9 +1407,10 @@ where
             space: Arc::new(space),
             output_transform_structure,
         };
-        self.canonical_dsts.insert(key, entry.clone());
-        self.fast_canonical_dsts.insert(fast_key, entry.clone());
+        let last_key = key.clone();
+        self.insert_canonical_dst(key, fast_key, entry.clone());
         self.last_canonical_dst = Some(DynamicFusionCanonicalDstLastEntry {
+            key: Some(last_key),
             rule: rule_key,
             lhs: DynamicFusionLastSpaceKey::from_space(lhs),
             rhs: DynamicFusionLastSpaceKey::from_space(rhs),
@@ -1170,6 +1423,12 @@ where
         });
         Ok(entry)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DynamicFusionSpaceCacheEntryKey<RuleKey> {
+    TransformedSource(DynamicFusionTransformedSourceSpaceKey<RuleKey>),
+    CanonicalDst(DynamicFusionCanonicalDstSpaceKey<RuleKey>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

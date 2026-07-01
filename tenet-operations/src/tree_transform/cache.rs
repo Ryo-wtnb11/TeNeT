@@ -9,7 +9,10 @@ use tenet_core::{
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
 };
 
-use crate::cache::{OperationCachePolicy, TreeTransformStructureCacheKey};
+use crate::cache::{
+    rebuild_lru_order_from_keys, touch_lru_key, OperationCachePolicy,
+    TreeTransformStructureCacheKey,
+};
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
 use super::helpers::fusion_tree_group_block_keys;
@@ -272,6 +275,8 @@ impl TreeTransformCacheStats {
 
 #[derive(Clone, Debug)]
 struct TreeTransformLastStructure<T, RuleKey> {
+    plan_key: TreeTransformSectorPlanKey<RuleKey>,
+    structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
     rule: RuleKey,
     scope: TreeTransformPlanScope,
     operation: TreeTransformOperationKey,
@@ -326,6 +331,7 @@ where
             self.plans.clear();
             self.plan_lru_order.clear();
         } else if let Some(max_entries) = policy.max_entries() {
+            rebuild_lru_order_from_keys(&self.plans, &mut self.plan_lru_order);
             self.enforce_plan_lru_limit(max_entries);
         }
     }
@@ -363,10 +369,10 @@ where
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
     ) -> Option<Arc<TreeTransformStructure<T>>> {
-        let last = self.last_structure.as_ref()?;
         if !self.policy.stores_entries() {
             return None;
         }
+        let last = self.last_structure.as_ref()?;
         if &last.rule == rule_key
             && last.scope == scope
             && &last.operation == operation
@@ -374,9 +380,16 @@ where
             && last.src_ptr == Arc::as_ptr(src_structure)
             && last.storage_conjugate == storage_conjugate
         {
+            let structure = Arc::clone(&last.structure);
             self.stats.plan_hits += 1;
             self.stats.structure_hits += 1;
-            Some(Arc::clone(&last.structure))
+            if self.policy.max_entries().is_some() {
+                let plan_key = last.plan_key.clone();
+                let structure_key = last.structure_key.clone();
+                self.touch_plan(&plan_key);
+                self.structures.touch(&structure_key);
+            }
+            Some(structure)
         } else {
             None
         }
@@ -384,6 +397,8 @@ where
 
     fn remember_structure(
         &mut self,
+        plan_key: TreeTransformSectorPlanKey<RuleKey>,
+        structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
         rule: RuleKey,
         scope: TreeTransformPlanScope,
         operation: TreeTransformOperationKey,
@@ -393,6 +408,8 @@ where
         structure: Arc<TreeTransformStructure<T>>,
     ) {
         self.last_structure = Some(TreeTransformLastStructure {
+            plan_key,
+            structure_key,
             rule,
             scope,
             operation,
@@ -405,10 +422,7 @@ where
 
     fn touch_plan(&mut self, key: &TreeTransformSectorPlanKey<RuleKey>) {
         if self.policy.max_entries().is_some() && self.plans.contains_key(key) {
-            if let Some(position) = self.plan_lru_order.iter().position(|stored| stored == key) {
-                self.plan_lru_order.remove(position);
-            }
-            self.plan_lru_order.push_back(key.clone());
+            touch_lru_key(&mut self.plan_lru_order, key);
         }
     }
 
@@ -737,6 +751,8 @@ where
             .get_arc(&structure_key)
             .expect("tree transform structure inserted before return");
         self.remember_structure(
+            plan_key,
+            structure_key,
             rule_key,
             scope,
             operation,
@@ -820,6 +836,8 @@ where
             .get_arc(&structure_key)
             .expect("tree transform structure inserted before return");
         self.remember_structure(
+            plan_key,
+            structure_key,
             rule_key,
             scope,
             operation,

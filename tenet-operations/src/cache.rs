@@ -55,7 +55,7 @@ impl OperationCachePolicy {
     }
 }
 
-fn touch_lru_key<K>(order: &mut VecDeque<K>, key: &K)
+pub(crate) fn touch_lru_key<K>(order: &mut VecDeque<K>, key: &K)
 where
     K: Clone + Eq,
 {
@@ -65,8 +65,11 @@ where
     order.push_back(key.clone());
 }
 
-fn enforce_lru_limit<K, V>(map: &mut HashMap<K, V>, order: &mut VecDeque<K>, max_entries: usize)
-where
+pub(crate) fn enforce_lru_limit<K, V>(
+    map: &mut HashMap<K, V>,
+    order: &mut VecDeque<K>,
+    max_entries: usize,
+) where
     K: Clone + Eq + Hash,
 {
     while map.len() > max_entries {
@@ -75,6 +78,14 @@ where
         };
         map.remove(&oldest);
     }
+}
+
+pub(crate) fn rebuild_lru_order_from_keys<K, V>(map: &HashMap<K, V>, order: &mut VecDeque<K>)
+where
+    K: Clone,
+{
+    order.clear();
+    order.extend(map.keys().cloned());
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -305,6 +316,7 @@ where
             self.structures.clear();
             self.lru_order.clear();
         } else if let Some(max_entries) = policy.max_entries() {
+            rebuild_lru_order_from_keys(&self.structures, &mut self.lru_order);
             enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
         }
     }
@@ -378,6 +390,7 @@ where
             self.structures.clear();
             self.lru_order.clear();
         } else if let Some(max_entries) = policy.max_entries() {
+            rebuild_lru_order_from_keys(&self.structures, &mut self.lru_order);
             enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
         }
     }
