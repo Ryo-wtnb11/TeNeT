@@ -13,13 +13,14 @@ use crate::cache::{
     rebuild_lru_order_from_keys, touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
 };
 use crate::strided::{
-    column_major_strides_isize, column_major_strides_usize, element_count, error as strided_error,
-    offset_to_isize, strides_to_isize,
+    column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
+    strides_to_isize,
 };
 use crate::structure_identity::validate_structure_identity;
 use crate::{
-    axpby_raw_strided_kernel, copy_scale_raw_strided_kernel, ConjugateValue, DenseBlockScalar,
-    OperationError, RecouplingCoefficientAction, TreeTransformRuleCacheKey,
+    axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_trusted,
+    scale_raw_strided_kernel_trusted, ConjugateValue, DenseBlockScalar, OperationError,
+    RecouplingCoefficientAction, TreeTransformRuleCacheKey,
 };
 
 use super::backend::TensorContractBackend;
@@ -265,7 +266,14 @@ impl CanonicalFusionBlockContractPlan {
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
-        self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+        self.validate_replay_inputs(
+            dst_structure,
+            dst_data.len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
         scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         for group in &self.groups {
@@ -319,7 +327,14 @@ impl CanonicalFusionBlockContractPlan {
         let total_start = std::time::Instant::now();
 
         let start = std::time::Instant::now();
-        self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+        self.validate_replay_inputs(
+            dst_structure,
+            dst_data.len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
         profile.canonical_validate += start.elapsed();
 
         let start = std::time::Instant::now();
@@ -382,6 +397,37 @@ impl CanonicalFusionBlockContractPlan {
         validate_structure_identity("lhs", &self.lhs_structure, lhs_structure)?;
         validate_structure_identity("rhs", &self.rhs_structure, rhs_structure)
     }
+
+    fn validate_replay_inputs(
+        &self,
+        dst_structure: &Arc<BlockStructure>,
+        dst_len: usize,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_len: usize,
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_len: usize,
+    ) -> Result<(), OperationError> {
+        self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+        validate_storage_len(dst_structure, dst_len)?;
+        validate_storage_len(lhs_structure, lhs_len)?;
+        validate_storage_len(rhs_structure, rhs_len)
+    }
+}
+
+fn validate_storage_len(
+    structure: &BlockStructure,
+    actual_len: usize,
+) -> Result<(), OperationError> {
+    let expected = structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    if actual_len != expected {
+        return Err(OperationError::ElementCountMismatch {
+            expected,
+            actual: actual_len,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1151,7 +1197,6 @@ struct FusionStridedBlockLayout {
 #[derive(Clone, Debug)]
 struct FusionScaleBlockLayout {
     block: FusionStridedBlockLayout,
-    zero_strides: Vec<isize>,
 }
 
 fn fusion_scale_block_layouts_excluding(
@@ -1170,7 +1215,6 @@ fn fusion_scale_block_layouts_excluding(
                 strides: strides_to_isize(block.strides())?,
                 offset: offset_to_isize(block.offset())?,
             },
-            zero_strides: vec![0isize; block.shape().len()],
         });
     }
     Ok(layouts)
@@ -1197,7 +1241,7 @@ where
         + strided_kernel::MaybeSendSync,
 {
     for layout in &group.subblocks {
-        copy_scale_raw_strided_kernel(
+        copy_scale_raw_strided_kernel_trusted(
             packed,
             data,
             &layout.block.shape,
@@ -1229,7 +1273,7 @@ where
         + strided_kernel::MaybeSendSync,
 {
     for layout in &group.subblocks {
-        axpby_raw_strided_kernel(
+        axpby_raw_strided_kernel_trusted(
             data,
             packed,
             &layout.block.shape,
@@ -1256,30 +1300,15 @@ where
         return Ok(());
     }
     for layout in blocks {
-        let mut dst = strided_kernel::StridedViewMut::new(
+        scale_raw_strided_kernel_trusted(
             data,
             &layout.block.shape,
             &layout.block.strides,
             layout.block.offset,
-        )
-        .map_err(strided_error)?;
-        scale_view(&mut dst, &layout.zero_strides, beta)?;
+            beta,
+        )?;
     }
     Ok(())
-}
-
-fn scale_view<T>(
-    dst: &mut strided_kernel::StridedViewMut<'_, T>,
-    zero_strides: &[isize],
-    beta: T,
-) -> Result<(), OperationError>
-where
-    T: Copy + std::ops::Mul<T, Output = T> + strided_kernel::MaybeSendSync,
-{
-    let scalar = [beta];
-    let beta_view = strided_kernel::StridedView::<T>::new(&scalar, dst.dims(), &zero_strides, 0)
-        .map_err(strided_error)?;
-    strided_kernel::mul(dst, &beta_view).map_err(strided_error)
 }
 
 fn matmul_group_plan<B, D>(

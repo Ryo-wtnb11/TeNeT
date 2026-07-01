@@ -170,6 +170,8 @@ where
     C: Copy,
 {
     structure.validate_replay_structures(dst_structure, src_structure)?;
+    validate_replay_storage_len(dst_structure, dst_data.len())?;
+    validate_replay_storage_len(src_structure, src_data.len())?;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -272,6 +274,8 @@ where
     C: Copy,
 {
     structure.validate_replay_structures(dst_structure, src_structure)?;
+    validate_replay_storage_len(dst_structure, dst_data.len())?;
+    validate_replay_storage_len(src_structure, src_data.len())?;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -341,6 +345,8 @@ where
 
     let start = std::time::Instant::now();
     structure.validate_replay_structures(dst_structure, src_structure)?;
+    validate_replay_storage_len(dst_structure, dst_data.len())?;
+    validate_replay_storage_len(src_structure, src_data.len())?;
     profile.validate += start.elapsed();
 
     for block in &structure.blocks {
@@ -469,7 +475,7 @@ where
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
-    tensoradd_raw_strided_kernel(
+    tensoradd_raw_strided_kernel_trusted(
         zero_strides,
         dst_data,
         src_data,
@@ -537,6 +543,58 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+fn tensoradd_raw_strided_kernel_trusted<T>(
+    zero_strides: &mut Vec<isize>,
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    if source_conjugate {
+        return tensoradd_raw_strided_conjugating_kernel_trusted(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            alpha,
+            beta,
+        );
+    }
+    zero_strides.clear();
+    axpby_raw_strided_kernel_trusted(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        alpha,
+        beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tensoradd_raw_strided_kernel_profiled<T>(
     zero_strides: &mut Vec<isize>,
     dst_data: &mut [T],
@@ -563,7 +621,7 @@ where
 {
     if source_conjugate {
         let start = std::time::Instant::now();
-        let result = tensoradd_raw_strided_conjugating_kernel(
+        let result = tensoradd_raw_strided_conjugating_kernel_trusted(
             zero_strides,
             dst_data,
             src_data,
@@ -580,7 +638,7 @@ where
     }
 
     let start = std::time::Instant::now();
-    let result = axpby_raw_strided_kernel(
+    let result = axpby_raw_strided_kernel_trusted(
         dst_data,
         src_data,
         shape,
@@ -612,6 +670,47 @@ fn tensoradd_raw_strided_conjugating_kernel<T>(
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
 {
+    validate_raw_strided_views(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    raw_strided_combine_loop(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        true,
+        raw_strided_action(alpha, beta),
+    )?;
+    zero_strides.clear();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tensoradd_raw_strided_conjugating_kernel_trusted<T>(
+    zero_strides: &mut Vec<isize>,
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+{
+    #[cfg(debug_assertions)]
     validate_raw_strided_views(
         dst_data,
         src_data,
@@ -701,7 +800,51 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn copy_scale_raw_strided_kernel<T>(
+pub(crate) fn axpby_raw_strided_kernel_trusted<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    #[cfg(debug_assertions)]
+    validate_raw_strided_views(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    raw_strided_combine_loop(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        false,
+        raw_strided_action(alpha, beta),
+    )
+}
+
+pub(crate) fn copy_scale_raw_strided_kernel_trusted<T>(
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
@@ -714,6 +857,7 @@ pub(crate) fn copy_scale_raw_strided_kernel<T>(
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
 {
+    #[cfg(debug_assertions)]
     validate_raw_strided_views(
         dst_data,
         src_data,
@@ -737,6 +881,59 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+fn copy_scale_raw_strided_kernel_with_conjugate_trusted<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
+{
+    #[cfg(debug_assertions)]
+    validate_raw_strided_views(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    raw_strided_combine_loop(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        RawStridedAction::CopyScale { alpha },
+    )
+}
+
+pub(crate) fn scale_raw_strided_kernel_trusted<T>(
+    dst_data: &mut [T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    dst_offset: isize,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Mul<T, Output = T>,
+{
+    #[cfg(debug_assertions)]
+    validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
+    raw_strided_scale_loop(dst_data, shape, dst_strides, dst_offset, beta)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_raw_strided_views<T>(
     dst_data: &mut [T],
     src_data: &[T],
@@ -748,6 +945,22 @@ fn validate_raw_strided_views<T>(
 ) -> Result<(), OperationError> {
     validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
     validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
+    Ok(())
+}
+
+fn validate_replay_storage_len(
+    structure: &BlockStructure,
+    actual_len: usize,
+) -> Result<(), OperationError> {
+    let expected = structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    if actual_len != expected {
+        return Err(OperationError::ElementCountMismatch {
+            expected,
+            actual: actual_len,
+        });
+    }
     Ok(())
 }
 
@@ -793,6 +1006,82 @@ fn validate_raw_strided_bounds(
     let max_offset = checked_offset_to_index(max_offset)?;
     if max_offset >= len {
         return Err(OperationError::OffsetOverflow { value: max_offset });
+    }
+    Ok(())
+}
+
+fn raw_strided_scale_loop<T>(
+    dst_data: &mut [T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    dst_offset: isize,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Mul<T, Output = T>,
+{
+    let len = crate::strided::element_count(shape)?;
+    if len == 0 {
+        return Ok(());
+    }
+    if shape.is_empty() {
+        let dst_index = checked_offset_to_index(dst_offset)?;
+        dst_data[dst_index] = beta * dst_data[dst_index];
+        return Ok(());
+    }
+    if is_column_major_contiguous(shape, dst_strides)? {
+        let dst_start = checked_offset_to_index(dst_offset)?;
+        let dst_end = dst_start
+            .checked_add(len)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let dst = dst_data
+            .get_mut(dst_start..dst_end)
+            .ok_or(OperationError::OffsetOverflow { value: dst_end })?;
+        for dst_value in dst.iter_mut() {
+            *dst_value = beta * *dst_value;
+        }
+        return Ok(());
+    }
+
+    raw_strided_scale_recurse(
+        shape.len() - 1,
+        dst_data,
+        shape,
+        dst_strides,
+        dst_offset,
+        beta,
+    )
+}
+
+fn raw_strided_scale_recurse<T>(
+    axis: usize,
+    dst_data: &mut [T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    dst_base: isize,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Mul<T, Output = T>,
+{
+    if axis == 0 {
+        for index in 0..shape[0] {
+            let dst_index =
+                checked_offset_to_index(checked_strided_offset(dst_base, index, dst_strides[0])?)?;
+            dst_data[dst_index] = beta * dst_data[dst_index];
+        }
+        return Ok(());
+    }
+
+    for index in 0..shape[axis] {
+        raw_strided_scale_recurse(
+            axis - 1,
+            dst_data,
+            shape,
+            dst_strides,
+            checked_strided_offset(dst_base, index, dst_strides[axis])?,
+            beta,
+        )?;
     }
     Ok(())
 }
@@ -948,7 +1237,7 @@ where
 {
     let shape = layouts.shape(dst_layout);
     let scale = alpha.scale_by_coefficient(coefficient);
-    tensoradd_raw_strided_kernel(
+    tensoradd_raw_strided_kernel_trusted(
         zero_strides,
         dst_data,
         src_data,
@@ -1322,16 +1611,7 @@ where
 {
     let shape = layouts.shape(layout);
     let packed_offset = offset_to_isize(packed_offset)?;
-    validate_raw_strided_views(
-        packed,
-        src_data,
-        shape,
-        layouts.packed_strides(layout),
-        layouts.strides(layout),
-        packed_offset,
-        layout.offset,
-    )?;
-    raw_strided_combine_loop(
+    copy_scale_raw_strided_kernel_with_conjugate_trusted(
         packed,
         src_data,
         shape,
@@ -1340,7 +1620,7 @@ where
         packed_offset,
         layout.offset,
         source_conjugate,
-        RawStridedAction::CopyScale { alpha: T::one() },
+        T::one(),
     )
 }
 
@@ -1364,7 +1644,7 @@ where
     let shape = layouts.shape(layout);
     let start = std::time::Instant::now();
     let packed_offset = offset_to_isize(packed_offset)?;
-    let result = validate_raw_strided_views(
+    let result = copy_scale_raw_strided_kernel_with_conjugate_trusted(
         packed,
         src_data,
         shape,
@@ -1372,20 +1652,9 @@ where
         layouts.strides(layout),
         packed_offset,
         layout.offset,
-    )
-    .and_then(|()| {
-        raw_strided_combine_loop(
-            packed,
-            src_data,
-            shape,
-            layouts.packed_strides(layout),
-            layouts.strides(layout),
-            packed_offset,
-            layout.offset,
-            source_conjugate,
-            RawStridedAction::CopyScale { alpha: T::one() },
-        )
-    });
+        source_conjugate,
+        T::one(),
+    );
     profile.strided_kernel += start.elapsed();
     result
 }
@@ -1412,7 +1681,7 @@ where
 {
     let shape = layouts.shape(layout);
     zero_strides.clear();
-    axpby_raw_strided_kernel(
+    axpby_raw_strided_kernel_trusted(
         dst_data,
         packed,
         shape,
@@ -1450,7 +1719,7 @@ where
     let shape = layouts.shape(layout);
     let start = std::time::Instant::now();
     let packed_offset = offset_to_isize(packed_offset)?;
-    let result = axpby_raw_strided_kernel(
+    let result = axpby_raw_strided_kernel_trusted(
         dst_data,
         packed,
         shape,
