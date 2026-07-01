@@ -364,6 +364,35 @@ where
         self.get_or_compile_structure_from_structures(plan_key, dst_structure, src_structure)
     }
 
+    pub fn get_or_compile_tree_pair_structures_with_storage_conjugation<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        storage_conjugate: bool,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
+    {
+        let plan_key =
+            TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src_structure)?;
+        if self.plans.contains_key(&plan_key) {
+            self.stats.plan_hits += 1;
+        } else {
+            self.stats.plan_misses += 1;
+            let plan = build_tree_pair_transform_group_plan(rule, operation, src_structure)?;
+            self.plans.insert(plan_key.clone(), plan);
+        }
+        self.get_or_compile_structure_from_structures_with_storage_conjugation(
+            plan_key,
+            dst_structure,
+            src_structure,
+            storage_conjugate,
+        )
+    }
+
     pub fn get_or_compile_all_codomain<
         R,
         TDst,
@@ -447,11 +476,39 @@ where
     where
         T: Copy,
     {
+        self.get_or_compile_structure_from_structures_with_storage_conjugation(
+            plan_key,
+            dst_structure,
+            src_structure,
+            false,
+        )
+    }
+
+    fn get_or_compile_structure_from_structures_with_storage_conjugation(
+        &mut self,
+        plan_key: TreeTransformSectorPlanKey<RuleKey>,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        storage_conjugate: bool,
+    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    where
+        T: Copy,
+    {
         let structure_key = TreeTransformStructureCacheKey::from_structures(
             plan_key.clone(),
             dst_structure,
             src_structure,
         )?;
+        let structure_key = if storage_conjugate {
+            TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
+                plan_key.clone(),
+                dst_structure,
+                src_structure,
+                true,
+            )?
+        } else {
+            structure_key
+        };
         if self.structures.get(&structure_key).is_some() {
             self.stats.structure_hits += 1;
         } else {
@@ -460,7 +517,11 @@ where
                 .plans
                 .get(&plan_key)
                 .expect("tree transform plan inserted before structure compile");
-            let structure = plan.compile_structures(dst_structure, src_structure)?;
+            let structure = plan.compile_structures_with_storage_conjugation(
+                dst_structure,
+                src_structure,
+                storage_conjugate,
+            )?;
             self.structures.insert(structure_key.clone(), structure);
         }
         Ok(self

@@ -1,19 +1,24 @@
 use num_traits::One;
 use tenet_core::{CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
-use crate::axis::TensorContractAxisSpec;
+use crate::axis::{AxisPermutation, TensorContractAxisSpec};
+use crate::lowering::adjoint_fusion_space_view;
 use crate::{
-    tree_pair_transform_into_with, DenseBlockScalar, DenseRecouplingScalar,
-    DenseTreeTransformOperations, OperationError, RecouplingCoefficientAction,
-    TreeTransformBackend, TreeTransformWorkspace,
+    build_tree_pair_transform_group_plan, tree_pair_transform_into_with, DenseBlockScalar,
+    DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
+    RecouplingCoefficientAction, TreeTransformBackend, TreeTransformWorkspace,
 };
 
 use super::backend::{TensorContractBackend, TensorContractWorkspace};
 use super::dynamic::tensorcontract_fusion_dynamic_transforms_into_with;
+use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_structure,
     TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
     SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+};
+use super::fusion_block::{
+    is_canonical_fusion_block_contract, tensorcontract_canonical_fusion_blocks_into_raw,
 };
 use super::structure::{tensorcontract_structure, TensorContractStructure};
 
@@ -48,6 +53,78 @@ where
         lhs,
         rhs,
         axes,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorproduct_into<
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    output_permutation: AxisPermutation<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
+    tensorcontract_into(
+        dst,
+        lhs,
+        rhs,
+        TensorContractAxisSpec::new(&[], &[], output_permutation),
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorproduct_into_with_conjugation<
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    output_permutation: AxisPermutation<'_>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
+    tensorcontract_into(
+        dst,
+        lhs,
+        rhs,
+        TensorContractAxisSpec::new_with_conjugation(
+            &[],
+            &[],
+            output_permutation,
+            lhs_conjugate,
+            rhs_conjugate,
+        ),
         alpha,
         beta,
     )
@@ -118,6 +195,86 @@ where
         lhs,
         rhs,
         axes,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorproduct_fusion_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    output_permutation: AxisPermutation<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    tensorcontract_fusion_into(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        TensorContractAxisSpec::new(&[], &[], output_permutation),
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensorproduct_fusion_into_with_conjugation<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    output_permutation: AxisPermutation<'_>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    tensorcontract_fusion_into(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        TensorContractAxisSpec::new_with_conjugation(
+            &[],
+            &[],
+            output_permutation,
+            lhs_conjugate,
+            rhs_conjugate,
+        ),
         alpha,
         beta,
     )
@@ -374,23 +531,25 @@ where
 
     lhs_canonical.data_mut().fill(D::zero());
     rhs_canonical.data_mut().fill(D::zero());
-    tree_pair_transform_into_with(
+    tree_pair_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
         plan.lhs_transform().clone(),
         lhs_canonical,
         lhs,
+        plan.lhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
-    tree_pair_transform_into_with(
+    tree_pair_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
         plan.rhs_transform().clone(),
         rhs_canonical,
         rhs,
+        plan.rhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
@@ -475,23 +634,25 @@ where
     lhs_canonical.data_mut().fill(D::zero());
     rhs_canonical.data_mut().fill(D::zero());
     canonical_dst.data_mut().fill(D::zero());
-    tree_pair_transform_into_with(
+    tree_pair_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
         plan.lhs_transform().clone(),
         lhs_canonical,
         lhs,
+        plan.lhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
-    tree_pair_transform_into_with(
+    tree_pair_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
         plan.rhs_transform().clone(),
         rhs_canonical,
         rhs,
+        plan.rhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
@@ -516,6 +677,63 @@ where
         dst,
         canonical_dst,
         D::one(),
+        beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_pair_transform_into_with_optional_storage_conjugation<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    operation: crate::TreeTransformOperationKey,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    source_conjugate: bool,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    if !source_conjugate {
+        return tree_pair_transform_into_with(
+            backend, workspace, rule, operation, dst, src, alpha, beta,
+        );
+    }
+
+    let src_fusion = src
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
+    let plan = build_tree_pair_transform_group_plan(rule, operation, &src_replay_structure)?;
+    let structure = plan.compile_structures_with_storage_conjugation(
+        &dst_structure,
+        &src_replay_structure,
+        true,
+    )?;
+    backend.tree_transform_structure_into_raw(
+        workspace,
+        &structure,
+        &dst_structure,
+        &src_replay_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
         beta,
     )
 }
@@ -549,6 +767,38 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
+    let dst_fusion = dst
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let lhs_fusion = lhs
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let rhs_fusion = rhs
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
+    let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
+    let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+    if !axes.lhs_conjugate()
+        && !axes.rhs_conjugate()
+        && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
+    {
+        return tensorcontract_canonical_fusion_blocks_into_raw(
+            backend,
+            workspace,
+            rule,
+            &dst_dynamic,
+            dst.data_mut(),
+            &lhs_dynamic,
+            lhs.data(),
+            &rhs_dynamic,
+            rhs.data(),
+            axes,
+            alpha,
+            beta,
+        );
+    }
+
     match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
         Ok(structure) => {
             tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)

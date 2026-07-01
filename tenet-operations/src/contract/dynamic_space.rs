@@ -6,13 +6,12 @@ use tenet_core::{
     FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
 };
 
-use crate::axis::TensorContractAxisSpec;
 use crate::cache::BlockStructureCacheKey;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{OperationError, TreeTransformOperationKey};
 
 use super::fusion::{contracted_fusion_tree_basis_matches, TensorContractFusionExplicitPlan};
-use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec};
+use super::structure::TensorContractAxisPlan;
 
 /// Internal dynamic-rank fusion space used for TensorKit-style temporary
 /// materialization. Public tensors remain const-generic; source/output tree
@@ -181,11 +180,6 @@ impl DynamicFusionMapSpace {
         self.subblock_structure.required_len()
     }
 
-    pub(crate) fn find_subblock_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {
-        self.subblock_structure
-            .find_block_index_by_fusion_tree_key(key)
-    }
-
     pub(super) fn cache_key(&self) -> Result<DynamicFusionMapSpaceCacheKey, OperationError> {
         DynamicFusionMapSpaceCacheKey::from_dynamic_space(self)
     }
@@ -219,84 +213,6 @@ impl DynamicFusionMapSpaceCacheKey {
             structure: BlockStructureCacheKey::from_structure(space.subblock_structure.as_ref())?,
         })
     }
-}
-
-pub(crate) fn tensorcontract_dynamic_canonical_fusion_block_specs<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractAxisSpec<'_>,
-) -> Result<Vec<TensorContractBlockSpec>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
-        rule,
-        lhs.homspace(),
-        rhs.homspace(),
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axis_plan.output_axes.as_slice(),
-        dst.nout(),
-    )
-    .map_err(OperationError::from_core_preserving_context)?;
-    if expected_homspace != *dst.homspace() {
-        return Err(OperationError::StructureMismatch { tensor: "dst" });
-    }
-    if !is_canonical_dynamic_source_contract(lhs, rhs, &axis_plan) {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "dynamic fusion contraction expects canonical source tree-pair transforms",
-        });
-    }
-
-    let mut specs = Vec::new();
-    for lhs_index in 0..lhs.structure().block_count() {
-        let lhs_block = lhs.structure().block(lhs_index)?;
-        let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
-            continue;
-        };
-        let lhs_external = lhs_key.external_sectors(rule);
-        for rhs_index in 0..rhs.structure().block_count() {
-            let rhs_block = rhs.structure().block(rhs_index)?;
-            let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
-                continue;
-            };
-            let rhs_external = rhs_key.external_sectors(rule);
-            if !contracted_external_sectors_match(
-                &lhs_external,
-                &rhs_external,
-                axis_plan.lhs_contracting_axes.as_slice(),
-                axis_plan.rhs_contracting_axes.as_slice(),
-            ) {
-                continue;
-            }
-            if !contracted_fusion_tree_basis_matches(
-                rule,
-                lhs_key.domain_tree(),
-                rhs_key.codomain_tree(),
-            ) {
-                continue;
-            }
-            let dst_key = FusionTreeBlockKey::pair(
-                lhs_key.codomain_tree().clone(),
-                rhs_key.domain_tree().clone(),
-            );
-            let dst_index = dst.find_subblock_index(&dst_key).ok_or_else(|| {
-                OperationError::MissingBlockKey {
-                    key: BlockKey::from(dst_key.clone()),
-                }
-            })?;
-            specs.push(TensorContractBlockSpec::with_coefficient(
-                dst_index,
-                lhs_index,
-                rhs_index,
-                rule.scalar_one(),
-            ));
-        }
-    }
-    Ok(specs)
 }
 
 fn infer_canonical_dst_shapes<R>(
@@ -437,17 +353,6 @@ fn merge_inferred_shape(
         shapes.insert(key, candidate);
     }
     Ok(())
-}
-
-fn is_canonical_dynamic_source_contract(
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axis_plan: &TensorContractAxisPlan,
-) -> bool {
-    let lhs_domain_axes = (lhs.nout()..lhs.rank()).collect::<Vec<_>>();
-    let rhs_codomain_axes = (0..rhs.nout()).collect::<Vec<_>>();
-    axis_plan.lhs_contracting_axes == lhs_domain_axes
-        && axis_plan.rhs_contracting_axes == rhs_codomain_axes
 }
 
 fn contracted_external_sectors_match(

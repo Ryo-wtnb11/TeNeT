@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, TensorMap,
+    CoreError, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols, TensorMap,
 };
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -18,11 +17,15 @@ use crate::{
 
 use super::backend::TensorContractBackend;
 use super::dynamic::tensorcontract_fusion_dynamic_plan_into_context;
+use super::dynamic_space::DynamicFusionMapSpace;
 use super::dynamic_space_cache::{DynamicFusionSpaceCache, TensorContractFusionSpaceCacheStats};
 use super::fusion::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
-    TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
-    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+    tensorcontract_fusion_structure, TensorContractFusionExplicitPlan,
+    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+};
+use super::fusion_block::{
+    is_canonical_fusion_block_contract, tensorcontract_canonical_fusion_blocks_into_raw,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
@@ -41,10 +44,12 @@ impl TensorContractPlanKey {
     ) -> Result<Self, OperationError> {
         let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
         Ok(Self {
-            axes: OwnedTensorContractAxisSpec::new(
+            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
                 axis_plan.lhs_contracting_axes,
                 axis_plan.rhs_contracting_axes,
                 axis_plan.output_axes,
+                axis_plan.lhs_conjugate,
+                axis_plan.rhs_conjugate,
             ),
         })
     }
@@ -71,10 +76,12 @@ impl TensorContractBlockPlanKey {
     ) -> Result<Self, OperationError> {
         let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
         Ok(Self {
-            axes: OwnedTensorContractAxisSpec::new(
+            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
                 axis_plan.lhs_contracting_axes,
                 axis_plan.rhs_contracting_axes,
                 axis_plan.output_axes,
+                axis_plan.lhs_conjugate,
+                axis_plan.rhs_conjugate,
             ),
             block_specs: block_specs
                 .iter()
@@ -175,10 +182,12 @@ where
             dst_homspace: dst.homspace().clone(),
             lhs_homspace: lhs.homspace().clone(),
             rhs_homspace: rhs.homspace().clone(),
-            axes: OwnedTensorContractAxisSpec::new(
+            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
                 axis_plan.lhs_contracting_axes,
                 axis_plan.rhs_contracting_axes,
                 axis_plan.output_axes,
+                axis_plan.lhs_conjugate,
+                axis_plan.rhs_conjugate,
             ),
         })
     }
@@ -456,46 +465,6 @@ impl TensorContractCache<TensorContractBlockPlanKey> {
                 dst,
                 lhs,
                 rhs,
-                plan_key.axes().as_spec(),
-                block_specs,
-            )?;
-            self.structures.insert(structure_key.clone(), structure);
-        }
-        Ok(self
-            .structures
-            .get(&structure_key)
-            .expect("tensor contract structure inserted before replay"))
-    }
-
-    pub(crate) fn get_or_compile_with_block_specs_structures(
-        &mut self,
-        dst_structure: &BlockStructure,
-        lhs_structure: &BlockStructure,
-        rhs_structure: &BlockStructure,
-        axes: TensorContractAxisSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
-    ) -> Result<&TensorContractStructure, OperationError> {
-        let plan_key = TensorContractBlockPlanKey::from_block_specs(
-            lhs_structure.rank(),
-            rhs_structure.rank(),
-            dst_structure.rank(),
-            axes,
-            block_specs,
-        )?;
-        let structure_key = TensorContractStructureCacheKey::from_structures(
-            plan_key.clone(),
-            dst_structure,
-            lhs_structure,
-            rhs_structure,
-        )?;
-        if self.structures.get(&structure_key).is_some() {
-            self.stats.structure_hits += 1;
-        } else {
-            self.stats.structure_misses += 1;
-            let structure = TensorContractStructure::compile_structures_with_block_specs(
-                dst_structure,
-                lhs_structure,
-                rhs_structure,
                 plan_key.axes().as_spec(),
                 block_specs,
             )?;
@@ -857,6 +826,35 @@ where
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
 
+        let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
+        let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
+        let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+        if !axes.lhs_conjugate()
+            && !axes.rhs_conjugate()
+            && is_canonical_fusion_block_contract(
+                rule,
+                &dst_dynamic,
+                &lhs_dynamic,
+                &rhs_dynamic,
+                axes,
+            )?
+        {
+            return tensorcontract_canonical_fusion_blocks_into_raw(
+                &mut self.contract_backend,
+                &mut self.contract_workspace,
+                rule,
+                &dst_dynamic,
+                dst.data_mut(),
+                &lhs_dynamic,
+                lhs.data(),
+                &rhs_dynamic,
+                rhs.data(),
+                axes,
+                alpha,
+                beta,
+            );
+        }
+
         if !self.fusion_plan_cache.is_empty() {
             let plan_key = fusion_plan_cache_key(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
             if self.fusion_plan_cache.contains_key(&plan_key) {
@@ -887,6 +885,53 @@ where
                     alpha,
                     beta,
                 );
+            }
+        }
+
+        if axes.lhs_conjugate() || axes.rhs_conjugate() {
+            match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
+                Ok(structure) => {
+                    return self.contract_backend.tensorcontract_structure_into(
+                        &mut self.contract_workspace,
+                        &structure,
+                        dst,
+                        lhs,
+                        rhs,
+                        alpha,
+                        beta,
+                    );
+                }
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => {
+                    let Self {
+                        tree_context,
+                        contract_backend,
+                        contract_workspace,
+                        contract_cache,
+                        fusion_plan_cache,
+                        fusion_scratch,
+                        fusion_space_cache,
+                    } = self;
+                    let plan = fusion_plan_cache
+                        .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+                    return tensorcontract_fusion_dynamic_plan_into_context(
+                        tree_context,
+                        contract_backend,
+                        contract_workspace,
+                        contract_cache,
+                        fusion_scratch,
+                        fusion_space_cache,
+                        rule,
+                        plan,
+                        dst,
+                        lhs,
+                        rhs,
+                        alpha,
+                        beta,
+                    );
+                }
+                Err(err) => return Err(err),
             }
         }
 

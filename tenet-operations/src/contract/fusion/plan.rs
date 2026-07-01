@@ -1,6 +1,7 @@
 use tenet_core::{FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::{OperationError, TreeTransformOperationKey};
 
 use super::super::structure::TensorContractAxisPlan;
@@ -17,6 +18,8 @@ pub struct TensorContractFusionExplicitPlan {
     lhs_canonical_nin: usize,
     rhs_canonical_nout: usize,
     rhs_canonical_nin: usize,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
 }
 
 impl TensorContractFusionExplicitPlan {
@@ -89,6 +92,16 @@ impl TensorContractFusionExplicitPlan {
     pub fn rhs_canonical_nin(&self) -> usize {
         self.rhs_canonical_nin
     }
+
+    #[inline]
+    pub fn lhs_source_conjugate(&self) -> bool {
+        self.lhs_source_conjugate
+    }
+
+    #[inline]
+    pub fn rhs_source_conjugate(&self) -> bool {
+        self.rhs_source_conjugate
+    }
 }
 
 pub fn tensorcontract_fusion_explicit_plan<
@@ -105,6 +118,76 @@ pub fn tensorcontract_fusion_explicit_plan<
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
     axes: TensorContractAxisSpec<'_>,
+) -> Result<TensorContractFusionExplicitPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let lowered_axes =
+        lower_tensorcontract_adjoint_axes::<LHS_NOUT, LHS_NIN, RHS_NOUT, RHS_NIN>(axes)?;
+    if axes.lhs_conjugate() && axes.rhs_conjugate() {
+        let lhs_adjoint = adjoint_fusion_space_view(lhs)?;
+        let rhs_adjoint = adjoint_fusion_space_view(rhs)?;
+        return tensorcontract_fusion_explicit_plan_from_spaces(
+            rule,
+            dst,
+            &lhs_adjoint,
+            &rhs_adjoint,
+            lowered_axes.as_spec(),
+            lowered_axes.lhs_storage_conjugate(),
+            lowered_axes.rhs_storage_conjugate(),
+        );
+    }
+    if axes.lhs_conjugate() {
+        let lhs_adjoint = adjoint_fusion_space_view(lhs)?;
+        return tensorcontract_fusion_explicit_plan_from_spaces(
+            rule,
+            dst,
+            &lhs_adjoint,
+            rhs,
+            lowered_axes.as_spec(),
+            lowered_axes.lhs_storage_conjugate(),
+            lowered_axes.rhs_storage_conjugate(),
+        );
+    }
+    if axes.rhs_conjugate() {
+        let rhs_adjoint = adjoint_fusion_space_view(rhs)?;
+        return tensorcontract_fusion_explicit_plan_from_spaces(
+            rule,
+            dst,
+            lhs,
+            &rhs_adjoint,
+            lowered_axes.as_spec(),
+            lowered_axes.lhs_storage_conjugate(),
+            lowered_axes.rhs_storage_conjugate(),
+        );
+    }
+    tensorcontract_fusion_explicit_plan_from_spaces(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        lowered_axes.as_spec(),
+        false,
+        false,
+    )
+}
+
+fn tensorcontract_fusion_explicit_plan_from_spaces<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axes: TensorContractAxisSpec<'_>,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
 ) -> Result<TensorContractFusionExplicitPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -161,5 +244,7 @@ where
         lhs_canonical_nin,
         rhs_canonical_nout,
         rhs_canonical_nin,
+        lhs_source_conjugate,
+        rhs_source_conjugate,
     })
 }

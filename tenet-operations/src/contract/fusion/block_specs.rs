@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, BlockKey, CoreError, FusionRule, FusionTensorMapSpace,
-    FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeRigidSymbols, SectorId,
-    TensorMap,
+    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
+    FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    MultiplicityFreeRigidSymbols, SectorId, TensorMap,
 };
 
 use crate::axis::TensorContractAxisSpec;
+use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::OperationError;
 
 use super::super::structure::{
@@ -44,12 +47,110 @@ where
     let rhs_fusion = rhs
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    let block_specs =
-        tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
-    TensorContractStructure::compile_with_block_specs(dst, lhs, rhs, axes, &block_specs)
+    let lowered_axes =
+        lower_tensorcontract_adjoint_axes::<LHS_NOUT, LHS_NIN, RHS_NOUT, RHS_NIN>(axes)?;
+    if axes.lhs_conjugate() && axes.rhs_conjugate() {
+        let lhs_adjoint = adjoint_fusion_space_view(lhs_fusion)?;
+        let rhs_adjoint = adjoint_fusion_space_view(rhs_fusion)?;
+        tensorcontract_fusion_structure_from_spaces(
+            rule,
+            dst_fusion,
+            &lhs_adjoint,
+            &rhs_adjoint,
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
+            lowered_axes.as_spec(),
+        )
+    } else if axes.lhs_conjugate() {
+        let lhs_adjoint = adjoint_fusion_space_view(lhs_fusion)?;
+        tensorcontract_fusion_structure_from_spaces(
+            rule,
+            dst_fusion,
+            &lhs_adjoint,
+            rhs_fusion,
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
+            lowered_axes.as_spec(),
+        )
+    } else if axes.rhs_conjugate() {
+        let rhs_adjoint = adjoint_fusion_space_view(rhs_fusion)?;
+        tensorcontract_fusion_structure_from_spaces(
+            rule,
+            dst_fusion,
+            lhs_fusion,
+            &rhs_adjoint,
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
+            lowered_axes.as_spec(),
+        )
+    } else {
+        tensorcontract_fusion_structure_from_spaces(
+            rule,
+            dst_fusion,
+            lhs_fusion,
+            rhs_fusion,
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
+            lowered_axes.as_spec(),
+        )
+    }
+}
+
+fn tensorcontract_fusion_structure_from_spaces<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    lhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
+    rhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<TensorContractStructure, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let block_specs = tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)?;
+    TensorContractStructure::compile_shared_structures_with_block_specs_and_storage(
+        std::sync::Arc::clone(dst.subblock_structure()),
+        std::sync::Arc::clone(lhs.subblock_structure()),
+        std::sync::Arc::clone(rhs.subblock_structure()),
+        lhs_storage_structure,
+        rhs_storage_structure,
+        axes,
+        &block_specs,
+    )
 }
 
 pub fn tensorcontract_fusion_block_specs<
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<Vec<TensorContractBlockSpec>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    reject_fusion_contract_conjugation(axes)?;
+    tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)
+}
+
+fn tensorcontract_fusion_block_specs_lowered<
     R,
     const DST_NOUT: usize,
     const DST_NIN: usize,
@@ -180,11 +281,17 @@ where
                     key: BlockKey::from(dst_key.clone()),
                 }
             })?;
+            let coefficient = rhs_contract_twist_factor(
+                rule,
+                rhs.homspace(),
+                axis_plan.rhs_contracting_axes.as_slice(),
+                rhs_key.codomain_tree(),
+            )?;
             specs.push(TensorContractBlockSpec::with_coefficient(
                 dst_index,
                 lhs_index,
                 rhs_index,
-                rule.scalar_one(),
+                coefficient,
             ));
         }
     }
@@ -251,6 +358,12 @@ where
                         lhs_canonical.codomain_tree().clone(),
                         rhs_canonical.domain_tree().clone(),
                     );
+                    let rhs_twist = rhs_contract_twist_factor(
+                        rule,
+                        rhs.homspace(),
+                        axis_plan.rhs_contracting_axes.as_slice(),
+                        rhs_canonical.codomain_tree(),
+                    )?;
                     let dst_terms = multiplicity_free_permute_tree_pair(
                         rule,
                         &canonical_dst_key,
@@ -268,7 +381,7 @@ where
                             dst_index,
                             lhs_index,
                             rhs_index,
-                            *lhs_coeff * *rhs_coeff * dst_coeff,
+                            *lhs_coeff * *rhs_coeff * dst_coeff * rhs_twist,
                         ));
                     }
                 }
@@ -280,8 +393,65 @@ where
 
 pub(crate) const EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST: &str =
     "explicit fusion contraction with output tree-pair transform requires caller-owned canonical_dst";
+pub(crate) const FUSION_TENSORCONTRACT_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT: &str =
+    "fusion tensorcontract with conjugation requires categorical adjoint lowering";
 pub(crate) const SOURCE_TRANSFORM_REQUIRES_EXPLICIT: &str =
     "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly";
+
+pub(crate) fn reject_fusion_contract_conjugation(
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<(), OperationError> {
+    if axes.lhs_conjugate() || axes.rhs_conjugate() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: FUSION_TENSORCONTRACT_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn rhs_contract_twist_factor<R>(
+    rule: &R,
+    rhs: &FusionTreeHomSpace,
+    rhs_contracting_axes: &[usize],
+    rhs_canonical_codomain: &FusionTreeKey,
+) -> Result<f64, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    if rule.braiding_style() != BraidingStyleKind::Fermionic {
+        return Ok(rule.scalar_one());
+    }
+    if rhs_contracting_axes.len() != rhs_canonical_codomain.uncoupled().len() {
+        return Err(OperationError::StructureRankMismatch {
+            expected: rhs_contracting_axes.len(),
+            actual: rhs_canonical_codomain.uncoupled().len(),
+        });
+    }
+    let mut factor = rule.scalar_one();
+    for (position, &axis) in rhs_contracting_axes.iter().enumerate() {
+        if external_axis_is_dual(rhs, axis)? {
+            factor *= rule.twist_scalar(rhs_canonical_codomain.uncoupled()[position]);
+        }
+    }
+    Ok(factor)
+}
+
+fn external_axis_is_dual(
+    homspace: &FusionTreeHomSpace,
+    axis: usize,
+) -> Result<bool, OperationError> {
+    if axis < homspace.codomain().len() {
+        Ok(homspace.codomain().legs()[axis].is_dual())
+    } else if axis < homspace.rank() {
+        Ok(!homspace.domain().legs()[axis - homspace.codomain().len()].is_dual())
+    } else {
+        Err(OperationError::InvalidAxisSet {
+            tensor: "rhs",
+            axes: vec![axis],
+            rank: homspace.rank(),
+        })
+    }
+}
 
 fn contracted_external_sectors_match(
     lhs_external: &[SectorId],

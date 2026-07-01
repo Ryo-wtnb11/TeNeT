@@ -101,6 +101,48 @@ fn tensorcontract_execution_context_replays_without_recompiling() {
 }
 
 #[test]
+fn tensorcontract_execution_context_keys_conjugation_flags() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let lhs =
+        TensorMap::<Complex64, 2, 0>::from_vec(vec![Complex64::new(1.0, 1.0)], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<Complex64, 2, 0>::from_vec(vec![Complex64::new(2.0, 3.0)], rhs_space).unwrap();
+    let mut dst =
+        TensorMap::<Complex64, 2, 0>::filled(Complex64::new(0.0, 0.0), dst_space).unwrap();
+    let mut context = TensorContractExecutionContext::<Complex64>::default();
+
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+    assert_eq!(dst.data(), &[Complex64::new(-1.0, 5.0)]);
+
+    tensorcontract_into_with_context(
+        &mut context,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[0], true, false),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[Complex64::new(5.0, 1.0)]);
+    assert_eq!(context.cache().structure_len(), 2);
+    assert_eq!(context.cache().stats().structure_hits(), 0);
+    assert_eq!(context.cache().stats().structure_misses(), 2);
+}
+
+#[test]
 fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([4, 3], []).unwrap();
@@ -143,6 +185,87 @@ fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
 }
 
 #[test]
+fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutation() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs = TensorMap::<Complex64, 2, 0>::from_vec(
+        vec![
+            Complex64::new(1.0, 1.0),
+            Complex64::new(2.0, -1.0),
+            Complex64::new(3.0, 2.0),
+            Complex64::new(4.0, -3.0),
+        ],
+        lhs_space,
+    )
+    .unwrap();
+    let rhs = TensorMap::<Complex64, 2, 0>::from_vec(
+        vec![
+            Complex64::new(5.0, -2.0),
+            Complex64::new(6.0, 1.0),
+            Complex64::new(7.0, -4.0),
+            Complex64::new(8.0, 2.0),
+        ],
+        rhs_space,
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<Complex64, 2, 0>::filled(Complex64::new(0.0, 0.0), dst_space).unwrap();
+
+    tensorcontract_into(
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::new_with_conjugation(
+            &[1],
+            &[0],
+            AxisPermutation::from_axes(&[1, 0]),
+            true,
+            false,
+        ),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst.data(),
+        &[
+            Complex64::new(23.0, -16.0),
+            Complex64::new(31.0, -21.0),
+            Complex64::new(33.0, 23.0),
+            Complex64::new(44.0, 31.0),
+        ]
+    );
+
+    tensorcontract_into(
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::new_with_conjugation(
+            &[1],
+            &[0],
+            AxisPermutation::from_axes(&[1, 0]),
+            false,
+            true,
+        ),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst.data(),
+        &[
+            Complex64::new(23.0, 16.0),
+            Complex64::new(31.0, 21.0),
+            Complex64::new(33.0, -23.0),
+            Complex64::new(44.0, -31.0),
+        ]
+    );
+}
+
+#[test]
 fn tensorcontract_dense_backend_covers_all_gemm_dtypes() {
     assert_tensorcontract_scalar_dtype(2.0_f32, 3.0_f32, 5.0_f32, 27.0_f32);
     assert_tensorcontract_scalar_dtype(2.0_f64, 3.0_f64, 5.0_f64, 27.0_f64);
@@ -157,6 +280,61 @@ fn tensorcontract_dense_backend_covers_all_gemm_dtypes() {
         Complex64::new(3.0, 0.0),
         Complex64::new(5.0, 0.0),
         Complex64::new(27.0, 0.0),
+    );
+}
+
+#[test]
+fn tensorproduct_into_is_checked_no_contraction_wrapper() {
+    let lhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    let rhs_space = TensorMapSpace::<1, 0>::from_dims([3], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let lhs = TensorMap::<f64, 1, 0>::from_vec(vec![2.0, 3.0], lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 1, 0>::from_vec(vec![5.0, 7.0, 11.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
+
+    tensorproduct_into(&mut dst, &lhs, &rhs, AxisPermutation::identity(), 2.0, 3.0).unwrap();
+
+    assert_eq!(dst.data(), &[23.0, 33.0, 31.0, 45.0, 47.0, 69.0]);
+}
+
+#[test]
+fn tensorproduct_with_conjugation_is_empty_contract_wrapper() {
+    let lhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    let rhs_space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs = TensorMap::<Complex64, 1, 0>::from_vec(
+        vec![Complex64::new(1.0, 1.0), Complex64::new(2.0, -3.0)],
+        lhs_space,
+    )
+    .unwrap();
+    let rhs = TensorMap::<Complex64, 1, 0>::from_vec(
+        vec![Complex64::new(4.0, 2.0), Complex64::new(5.0, -1.0)],
+        rhs_space,
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<Complex64, 2, 0>::filled(Complex64::new(0.0, 0.0), dst_space).unwrap();
+
+    tensorproduct_into_with_conjugation(
+        &mut dst,
+        &lhs,
+        &rhs,
+        AxisPermutation::identity(),
+        true,
+        false,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst.data(),
+        &[
+            Complex64::new(6.0, -2.0),
+            Complex64::new(2.0, 16.0),
+            Complex64::new(4.0, -6.0),
+            Complex64::new(13.0, 13.0),
+        ]
     );
 }
 
@@ -319,6 +497,52 @@ fn tensorcontract_structure_rejects_multiblock_until_block_sparse_enumeration_ex
             message: "block-sparse contraction enumeration is not implemented yet",
         }
     );
+}
+
+#[test]
+fn plain_tensorcontract_rejects_one_block_fusion_tensor_instead_of_dense_contract() {
+    let rule = FermionParityFusionRule;
+    let odd = SectorId::new(1);
+    let hom = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([odd], false)]),
+            FusionProductSpace::new([SectorLeg::new([odd], false)]),
+        )
+    };
+    let space = || {
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            hom(),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let lhs: TensorMap<f64, 1, 1> =
+        TensorMap::from_vec_with_fusion_space(vec![2.0], space()).unwrap();
+    let rhs: TensorMap<f64, 1, 1> =
+        TensorMap::from_vec_with_fusion_space(vec![3.0], space()).unwrap();
+    let mut dst: TensorMap<f64, 1, 1> =
+        TensorMap::from_vec_with_fusion_space(vec![10.0], space()).unwrap();
+
+    let err = tensorcontract_into(
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        1.0,
+        0.0,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        OperationError::UnsupportedTensorContractScope {
+            message:
+                "plain tensorcontract does not lower fusion-tree blocks; use tensorcontract_fusion_*"
+        }
+    );
+    assert_eq!(dst.data(), &[10.0]);
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use tenet_core::{BlockStructure, CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
 use crate::axis::TensorContractAxisSpec;
+use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{
@@ -11,13 +12,11 @@ use crate::{
 
 use super::backend::TensorContractBackend;
 use super::context::{TensorContractBlockPlanKey, TensorContractCache};
-use super::dynamic_space::{
-    tensorcontract_dynamic_canonical_fusion_block_specs, DynamicFusionMapSpace,
-};
+use super::dynamic_space::DynamicFusionMapSpace;
 use super::dynamic_space_cache::DynamicFusionSpaceCache;
 use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
+use super::fusion_block::tensorcontract_canonical_fusion_blocks_into_raw;
 use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
-use super::structure::TensorContractStructure;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
@@ -110,17 +109,17 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let lhs_space = DynamicFusionMapSpace::transformed_from_typed(
+    let (lhs_space, lhs_replay_structure) = transformed_source_space_and_structure(
         rule,
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        lhs,
         plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
     )?;
-    let rhs_space = DynamicFusionMapSpace::transformed_from_typed(
+    let (rhs_space, rhs_replay_structure) = transformed_source_space_and_structure(
         rule,
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        rhs,
         plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
     )?;
     let mut lhs_canonical = DynamicFusionScratch::<D>::zeroed(lhs_space)?;
     let mut rhs_canonical = DynamicFusionScratch::<D>::zeroed(rhs_space)?;
@@ -132,6 +131,8 @@ where
         plan.lhs_transform().clone(),
         &mut lhs_canonical,
         lhs,
+        &lhs_replay_structure,
+        plan.lhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
@@ -142,6 +143,8 @@ where
         plan.rhs_transform().clone(),
         &mut rhs_canonical,
         rhs,
+        &rhs_replay_structure,
+        plan.rhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
@@ -244,17 +247,19 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let lhs_space = space_cache.transformed_from_typed(
+    let (lhs_space, lhs_replay_structure) = cached_transformed_source_space_and_structure(
+        space_cache,
         rule,
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        lhs,
         plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
     )?;
-    let rhs_space = space_cache.transformed_from_typed(
+    let (rhs_space, rhs_replay_structure) = cached_transformed_source_space_and_structure(
+        space_cache,
         rule,
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        rhs,
         plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
     )?;
 
     tree_pair_transform_typed_to_dynamic_with_context(
@@ -263,6 +268,8 @@ where
         plan.lhs_transform().clone(),
         scratch.prepare_lhs(lhs_space)?,
         lhs,
+        &lhs_replay_structure,
+        plan.lhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
@@ -272,6 +279,8 @@ where
         plan.rhs_transform().clone(),
         scratch.prepare_rhs(rhs_space)?,
         rhs,
+        &rhs_replay_structure,
+        plan.rhs_source_conjugate(),
         D::one(),
         D::zero(),
     )?;
@@ -342,6 +351,63 @@ where
     )
 }
 
+fn transformed_source_space_and_structure<R, D, const SRC_NOUT: usize, const SRC_NIN: usize, SSrc>(
+    rule: &R,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    operation: &TreeTransformOperationKey,
+    source_conjugate: bool,
+) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let src_fusion = src
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    if source_conjugate {
+        let adjoint = adjoint_fusion_space_view(src_fusion)?;
+        let replay_structure = std::sync::Arc::clone(adjoint.subblock_structure());
+        let space = DynamicFusionMapSpace::transformed_from_typed(rule, &adjoint, operation)?;
+        Ok((space, replay_structure))
+    } else {
+        let replay_structure = std::sync::Arc::clone(src.structure());
+        let space = DynamicFusionMapSpace::transformed_from_typed(rule, src_fusion, operation)?;
+        Ok((space, replay_structure))
+    }
+}
+
+fn cached_transformed_source_space_and_structure<
+    RuleKey,
+    R,
+    D,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SSrc,
+>(
+    space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    rule: &R,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    operation: &TreeTransformOperationKey,
+    source_conjugate: bool,
+) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
+where
+    RuleKey: Clone + Eq + std::hash::Hash,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+{
+    let src_fusion = src
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    if source_conjugate {
+        let adjoint = adjoint_fusion_space_view(src_fusion)?;
+        let replay_structure = std::sync::Arc::clone(adjoint.subblock_structure());
+        let space = space_cache.transformed_from_typed(rule, &adjoint, operation)?;
+        Ok((space, replay_structure))
+    } else {
+        let replay_structure = std::sync::Arc::clone(src.structure());
+        let space = space_cache.transformed_from_typed(rule, src_fusion, operation)?;
+        Ok((space, replay_structure))
+    }
+}
+
 fn tree_pair_transform_typed_to_dynamic<
     BT,
     R,
@@ -356,6 +422,8 @@ fn tree_pair_transform_typed_to_dynamic<
     operation: TreeTransformOperationKey,
     dst: &mut DynamicFusionScratch<D>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    src_replay_structure: &std::sync::Arc<BlockStructure>,
+    source_conjugate: bool,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -365,15 +433,18 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
     dst.fill_zero();
-    let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
-    let structure = plan.compile_structures(dst.space().structure(), src.structure())?;
+    let plan = build_tree_pair_transform_group_plan(rule, operation, src_replay_structure)?;
+    let structure = plan.compile_structures_with_storage_conjugation(
+        dst.space().structure(),
+        src_replay_structure,
+        source_conjugate,
+    )?;
     let dst_structure = std::sync::Arc::clone(dst.space().structure());
-    let src_structure = std::sync::Arc::clone(src.structure());
     tree_backend.tree_transform_structure_into_raw(
         tree_workspace,
         &structure,
         &dst_structure,
-        &src_structure,
+        src_replay_structure,
         dst.data_mut(),
         src.data(),
         alpha,
@@ -395,6 +466,8 @@ fn tree_pair_transform_typed_to_dynamic_with_context<
     operation: TreeTransformOperationKey,
     dst: &mut DynamicFusionScratch<D>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    src_replay_structure: &std::sync::Arc<BlockStructure>,
+    source_conjugate: bool,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -406,14 +479,14 @@ where
 {
     dst.fill_zero();
     let dst_structure = std::sync::Arc::clone(dst.space().structure());
-    let src_structure = std::sync::Arc::clone(src.structure());
-    tree_context.tree_pair_transform_into_raw(
+    tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
         rule,
         operation,
         &dst_structure,
-        &src_structure,
+        src_replay_structure,
         dst.data_mut(),
         src.data(),
+        source_conjugate,
         alpha,
         beta,
     )
@@ -513,29 +586,18 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let block_specs = tensorcontract_dynamic_canonical_fusion_block_specs(
+    let _ = dst_structure;
+    tensorcontract_canonical_fusion_blocks_into_raw(
+        backend,
+        workspace,
         rule,
         dst_space,
-        lhs.space(),
-        rhs.space(),
-        axes,
-    )?;
-    let structure = TensorContractStructure::compile_structures_with_block_specs(
-        dst_structure,
-        lhs.space().structure(),
-        rhs.space().structure(),
-        axes,
-        &block_specs,
-    )?;
-    backend.tensorcontract_structure_into_raw(
-        workspace,
-        &structure,
-        dst_structure,
-        lhs.space().structure(),
-        rhs.space().structure(),
         dst_data,
+        lhs.space(),
         lhs.data(),
+        rhs.space(),
         rhs.data(),
+        axes,
         alpha,
         beta,
     )
@@ -561,29 +623,18 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let block_specs = tensorcontract_dynamic_canonical_fusion_block_specs(
+    let _ = (cache, dst_structure);
+    tensorcontract_canonical_fusion_blocks_into_raw(
+        backend,
+        workspace,
         rule,
         dst_space,
-        lhs.space(),
-        rhs.space(),
-        axes,
-    )?;
-    let structure = cache.get_or_compile_with_block_specs_structures(
-        dst_structure,
-        lhs.space().structure(),
-        rhs.space().structure(),
-        axes,
-        &block_specs,
-    )?;
-    backend.tensorcontract_structure_into_raw(
-        workspace,
-        structure,
-        dst_structure,
-        lhs.space().structure(),
-        rhs.space().structure(),
         dst_data,
+        lhs.space(),
         lhs.data(),
+        rhs.space(),
         rhs.data(),
+        axes,
         alpha,
         beta,
     )

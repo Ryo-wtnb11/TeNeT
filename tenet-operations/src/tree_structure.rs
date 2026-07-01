@@ -18,6 +18,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
+    storage_conjugate: bool,
     pub(crate) blocks: Vec<TreeTransformBlock>,
     pub(crate) layouts: TreeTransformLayoutTable,
     pub(crate) coefficients_src_by_dst: Vec<T>,
@@ -44,6 +45,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
             specs,
+            false,
         )
     }
 
@@ -52,10 +54,25 @@ impl<T: Copy> TreeTransformStructure<T> {
         src_structure: &BlockStructure,
         specs: &[TreeTransformBlockSpec<T>],
     ) -> Result<Self, OperationError> {
+        Self::compile_structures_with_storage_conjugation(
+            dst_structure,
+            src_structure,
+            specs,
+            false,
+        )
+    }
+
+    pub fn compile_structures_with_storage_conjugation(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        specs: &[TreeTransformBlockSpec<T>],
+        storage_conjugate: bool,
+    ) -> Result<Self, OperationError> {
         Self::compile_shared_structures(
             Arc::new(dst_structure.clone()),
             Arc::new(src_structure.clone()),
             specs,
+            storage_conjugate,
         )
     }
 
@@ -77,6 +94,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
             specs,
+            false,
         )
     }
 
@@ -85,10 +103,25 @@ impl<T: Copy> TreeTransformStructure<T> {
         src_structure: &BlockStructure,
         specs: &[TreeTransformKeyBlockSpec<T>],
     ) -> Result<Self, OperationError> {
+        Self::compile_keyed_structures_with_storage_conjugation(
+            dst_structure,
+            src_structure,
+            specs,
+            false,
+        )
+    }
+
+    pub fn compile_keyed_structures_with_storage_conjugation(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        specs: &[TreeTransformKeyBlockSpec<T>],
+        storage_conjugate: bool,
+    ) -> Result<Self, OperationError> {
         Self::compile_keyed_shared_structures(
             Arc::new(dst_structure.clone()),
             Arc::new(src_structure.clone()),
             specs,
+            storage_conjugate,
         )
     }
 
@@ -110,6 +143,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
             specs,
+            false,
         )
     }
 
@@ -118,10 +152,25 @@ impl<T: Copy> TreeTransformStructure<T> {
         src_structure: &BlockStructure,
         specs: &[TreeTransformGroupBlockSpec<T>],
     ) -> Result<Self, OperationError> {
+        Self::compile_grouped_structures_with_storage_conjugation(
+            dst_structure,
+            src_structure,
+            specs,
+            false,
+        )
+    }
+
+    pub fn compile_grouped_structures_with_storage_conjugation(
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        specs: &[TreeTransformGroupBlockSpec<T>],
+        storage_conjugate: bool,
+    ) -> Result<Self, OperationError> {
         Self::compile_grouped_shared_structures(
             Arc::new(dst_structure.clone()),
             Arc::new(src_structure.clone()),
             specs,
+            storage_conjugate,
         )
     }
 
@@ -129,30 +178,43 @@ impl<T: Copy> TreeTransformStructure<T> {
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformGroupBlockSpec<T>],
+        storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
         let indexed_specs = specs
             .iter()
             .map(|spec| spec.to_indexed_spec(&dst_structure, &src_structure))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::compile_shared_structures(dst_structure, src_structure, &indexed_specs)
+        Self::compile_shared_structures(
+            dst_structure,
+            src_structure,
+            &indexed_specs,
+            storage_conjugate,
+        )
     }
 
     fn compile_keyed_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformKeyBlockSpec<T>],
+        storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
         let indexed_specs = specs
             .iter()
             .map(|spec| spec.to_indexed_spec(&dst_structure, &src_structure))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::compile_shared_structures(dst_structure, src_structure, &indexed_specs)
+        Self::compile_shared_structures(
+            dst_structure,
+            src_structure,
+            &indexed_specs,
+            storage_conjugate,
+        )
     }
 
     fn compile_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformBlockSpec<T>],
+        storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
         let rank = dst_structure.rank();
         if src_structure.rank() != rank {
@@ -218,8 +280,13 @@ impl<T: Copy> TreeTransformStructure<T> {
             let src_layout_start = layouts.entry_count();
             for &src_block in &spec.src_blocks {
                 let block = src_structure.block(src_block)?;
-                let layout_element_count =
-                    layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+                let layout_element_count = layouts.push_block_with_axes(
+                    rank,
+                    block.shape(),
+                    block.strides(),
+                    block.offset(),
+                    spec.source_axes(),
+                )?;
                 match element_count {
                     Some(expected) if expected != layout_element_count => {
                         return Err(OperationError::ElementCountMismatch {
@@ -263,6 +330,7 @@ impl<T: Copy> TreeTransformStructure<T> {
 
         Ok(Self {
             rank,
+            storage_conjugate,
             blocks,
             layouts,
             coefficients_src_by_dst,
@@ -307,6 +375,11 @@ impl<T: Copy> TreeTransformStructure<T> {
         self.blocks
             .iter()
             .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
+    }
+
+    #[inline]
+    pub(crate) fn storage_conjugate(&self) -> bool {
+        self.storage_conjugate
     }
 
     pub(crate) fn coefficient(&self, index: usize) -> T {
@@ -410,6 +483,43 @@ impl TreeTransformLayoutTable {
         });
         Ok(element_count)
     }
+
+    fn push_block_with_axes(
+        &mut self,
+        rank: usize,
+        shape: &[usize],
+        strides: &[usize],
+        offset: usize,
+        axes: Option<&[usize]>,
+    ) -> Result<usize, OperationError> {
+        let Some(axes) = axes else {
+            return self.push_block(rank, shape, strides, offset);
+        };
+        validate_axis_permutation(axes, rank)?;
+        let shape = axes.iter().map(|&axis| shape[axis]).collect::<Vec<_>>();
+        let strides = axes.iter().map(|&axis| strides[axis]).collect::<Vec<_>>();
+        self.push_block(rank, &shape, &strides, offset)
+    }
+}
+
+fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), OperationError> {
+    if axes.len() != rank {
+        return Err(OperationError::InvalidPermutation {
+            axes: axes.to_vec(),
+            rank,
+        });
+    }
+    let mut seen = vec![false; rank];
+    for &axis in axes {
+        if axis >= rank || seen[axis] {
+            return Err(OperationError::InvalidPermutation {
+                axes: axes.to_vec(),
+                rank,
+            });
+        }
+        seen[axis] = true;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]

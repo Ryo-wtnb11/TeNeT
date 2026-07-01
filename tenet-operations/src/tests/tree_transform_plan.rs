@@ -1274,7 +1274,7 @@ fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
     let src_large_structure =
         column_major_structure_like(src_space.subblock_structure(), vec![2, 1, 1]);
     let dst_large_structure =
-        column_major_structure_like(dst_space.subblock_structure(), vec![2, 1, 1]);
+        column_major_structure_like(dst_space.subblock_structure(), vec![1, 2, 1]);
     let large_space = TensorMapSpace::<2, 1>::from_dims([2, 1], [1]).unwrap();
     let src_large = TensorMap::<f64, 2, 1>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
@@ -2183,7 +2183,15 @@ fn tree_transform_structure_cache_key_tracks_concrete_layout() {
     .unwrap();
     let base =
         TreeTransformStructureCacheKey::from_structures(plan_key.clone(), &src, &src).unwrap();
+    let conjugating = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
+        plan_key.clone(),
+        &src,
+        &src,
+        true,
+    )
+    .unwrap();
 
+    assert_ne!(base, conjugating);
     assert_ne!(
         base,
         TreeTransformStructureCacheKey::from_structures(plan_key.clone(), &shape_changed, &src)

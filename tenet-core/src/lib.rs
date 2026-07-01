@@ -812,6 +812,10 @@ pub trait FusionRule {
 
     fn vacuum(&self) -> SectorId;
 
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        false
+    }
+
     fn dual(&self, sector: SectorId) -> SectorId {
         sector
     }
@@ -862,9 +866,15 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
 }
 
 pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar;
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar;
 
@@ -1092,6 +1102,10 @@ where
         self.encode_sector(self.left.vacuum(), self.right.vacuum())
     }
 
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        self.left.supports_unitary_braid_dagger() && self.right.supports_unitary_braid_dagger()
+    }
+
     fn dual(&self, sector: SectorId) -> SectorId {
         let (left, right) = self.decode_sector_or_panic(sector);
         self.encode_sector(self.left.dual(left), self.right.dual(right))
@@ -1197,6 +1211,16 @@ where
     RightRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
     Codec: ProductSectorCodec,
 {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.dim_scalar(left) * self.right.dim_scalar(right)
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.inv_dim_scalar(left) * self.right.inv_dim_scalar(right)
+    }
+
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
         self.left.sqrt_dim_scalar(left) * self.right.sqrt_dim_scalar(right)
@@ -1205,6 +1229,11 @@ where
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
         self.left.inv_sqrt_dim_scalar(left) * self.right.inv_sqrt_dim_scalar(right)
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.twist_scalar(left) * self.right.twist_scalar(right)
     }
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
@@ -1284,6 +1313,10 @@ impl FusionRule for Z2FusionRule {
         Z2Irrep::EVEN.into()
     }
 
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
         let left = Z2Irrep::from_sector_id(left).expect("Z2 fusion received an invalid sector");
         let right = Z2Irrep::from_sector_id(right).expect("Z2 fusion received an invalid sector");
@@ -1347,11 +1380,23 @@ impl MultiplicityFreePivotalSymbols for Z2FusionRule {
 }
 
 impl MultiplicityFreeRigidSymbols for Z2FusionRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
     fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 
     fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 
@@ -1374,6 +1419,10 @@ impl FusionRule for FermionParityFusionRule {
 
     fn vacuum(&self) -> SectorId {
         Z2Irrep::EVEN.into()
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
@@ -1436,12 +1485,28 @@ impl MultiplicityFreePivotalSymbols for FermionParityFusionRule {
 }
 
 impl MultiplicityFreeRigidSymbols for FermionParityFusionRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
     fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 
     fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if sector == Z2Irrep::ODD.into() {
+            -1.0
+        } else {
+            1.0
+        }
     }
 
     fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
@@ -1509,6 +1574,10 @@ impl FusionRule for U1FusionRule {
         U1Irrep::new(0).into()
     }
 
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
     fn dual(&self, sector: SectorId) -> SectorId {
         let sector = U1Irrep::from_sector_id(sector).expect("U(1) dual received an invalid sector");
         U1Irrep::new(
@@ -1568,11 +1637,23 @@ impl MultiplicityFreeFusionSymbols for U1FusionRule {
 }
 
 impl MultiplicityFreeRigidSymbols for U1FusionRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
     fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 
     fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 
@@ -1626,6 +1707,10 @@ impl FusionRule for SU2FusionRule {
 
     fn vacuum(&self) -> SectorId {
         SU2Irrep::from_twice_spin(0).into()
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
@@ -1688,12 +1773,24 @@ impl MultiplicityFreeFusionSymbols for SU2FusionRule {
 }
 
 impl MultiplicityFreeRigidSymbols for SU2FusionRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        (SU2Irrep::from_sector_id(sector).twice_spin() + 1) as f64
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        1.0 / self.dim_scalar(sector)
+    }
+
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
-        ((SU2Irrep::from_sector_id(sector).twice_spin() + 1) as f64).sqrt()
+        self.dim_scalar(sector).sqrt()
     }
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         1.0 / self.sqrt_dim_scalar(sector)
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
     }
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
@@ -2185,6 +2282,155 @@ impl FusionTreeKey {
             None
         }
     }
+}
+
+/// Split a left-associated fusion tree using TensorKit's `split(f, m)`
+/// convention.
+///
+/// The first output contains the first `front_rank` uncoupled sectors. The
+/// second output starts with the intermediate sector between the two pieces and
+/// then contains the remaining uncoupled sectors. This is a structural
+/// categorical operation: no dense storage is touched and no coefficient is
+/// introduced.
+pub fn split_fusion_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    front_rank: usize,
+) -> Result<(FusionTreeKey, FusionTreeKey), CoreError>
+where
+    R: FusionRule,
+{
+    let rank = tree.uncoupled().len();
+    if front_rank > rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: front_rank,
+        });
+    }
+    validate_fusion_tree_key_shape(tree)?;
+
+    if front_rank == rank {
+        let coupled = coupled_or_vacuum(rule, tree);
+        let trace_tree = FusionTreeKey::new(
+            [coupled],
+            Some(coupled),
+            [false],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        return Ok((tree.clone(), trace_tree));
+    }
+
+    if front_rank == 1 {
+        let first = tree.uncoupled()[0];
+        let front_tree = FusionTreeKey::new(
+            [first],
+            Some(first),
+            [tree.is_dual()[0]],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        let mut tail_is_dual = tree.is_dual().to_vec();
+        tail_is_dual[0] = false;
+        let tail_tree = FusionTreeKey::new(
+            tree.uncoupled().to_vec(),
+            tree.coupled(),
+            tail_is_dual,
+            tree.innerlines().to_vec(),
+            tree.vertices().to_vec(),
+        );
+        return Ok((front_tree, tail_tree));
+    }
+
+    if front_rank == 0 {
+        if rank == 0 {
+            return Err(CoreError::MalformedFusionTree {
+                message: "split at zero requires a non-empty source fusion tree",
+            });
+        }
+        let unit = rule.vacuum();
+        let front_tree = FusionTreeKey::new(
+            Vec::<SectorId>::new(),
+            Some(unit),
+            Vec::<bool>::new(),
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        );
+        let mut tail_uncoupled = Vec::with_capacity(rank + 1);
+        tail_uncoupled.push(unit);
+        tail_uncoupled.extend_from_slice(tree.uncoupled());
+        let mut tail_is_dual = Vec::with_capacity(rank + 1);
+        tail_is_dual.push(false);
+        tail_is_dual.extend_from_slice(tree.is_dual());
+        let mut tail_innerlines = Vec::with_capacity(rank.saturating_sub(1));
+        if rank >= 2 {
+            tail_innerlines.push(tree.uncoupled()[0]);
+            tail_innerlines.extend_from_slice(tree.innerlines());
+        }
+        let mut tail_vertices = Vec::with_capacity(rank);
+        tail_vertices.push(SectorId::new(1));
+        tail_vertices.extend_from_slice(tree.vertices());
+        let tail_tree = FusionTreeKey::new(
+            tail_uncoupled,
+            tree.coupled(),
+            tail_is_dual,
+            tail_innerlines,
+            tail_vertices,
+        );
+        return Ok((front_tree, tail_tree));
+    }
+
+    let intermediate =
+        *tree
+            .innerlines()
+            .get(front_rank - 2)
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "split requires the intermediate innerline",
+            })?;
+    let front_tree = FusionTreeKey::new(
+        tree.uncoupled()[..front_rank].to_vec(),
+        Some(intermediate),
+        tree.is_dual()[..front_rank].to_vec(),
+        tree.innerlines()[..front_rank.saturating_sub(2)].to_vec(),
+        tree.vertices()[..front_rank - 1].to_vec(),
+    );
+
+    let mut tail_uncoupled = Vec::with_capacity(rank - front_rank + 1);
+    tail_uncoupled.push(intermediate);
+    tail_uncoupled.extend_from_slice(&tree.uncoupled()[front_rank..]);
+    let mut tail_is_dual = Vec::with_capacity(rank - front_rank + 1);
+    tail_is_dual.push(false);
+    tail_is_dual.extend_from_slice(&tree.is_dual()[front_rank..]);
+    let tail_tree = FusionTreeKey::new(
+        tail_uncoupled,
+        tree.coupled(),
+        tail_is_dual,
+        tree.innerlines()[front_rank - 1..].to_vec(),
+        tree.vertices()[front_rank - 1..].to_vec(),
+    );
+    Ok((front_tree, tail_tree))
+}
+
+fn validate_fusion_tree_key_shape(tree: &FusionTreeKey) -> Result<(), CoreError> {
+    let rank = tree.uncoupled().len();
+    if tree.is_dual().len() != rank {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree sectors and duality flags must have matching length",
+        });
+    }
+    let expected_innerlines = rank.saturating_sub(2);
+    if tree.innerlines().len() != expected_innerlines {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree has an invalid number of innerlines",
+        });
+    }
+    let expected_vertices = rank.saturating_sub(1);
+    if tree.vertices().len() != expected_vertices {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree has an invalid number of vertices",
+        });
+    }
+    Ok(())
 }
 
 pub fn unique_artin_braid_first<R>(
@@ -6208,6 +6454,28 @@ mod tests {
     }
 
     #[test]
+    fn unique_braid_tree_reflected_levels_select_inverse_artin_branch() {
+        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let levels = [3, 8];
+        let min_level = levels.iter().copied().min().unwrap();
+        let max_level = levels.iter().copied().max().unwrap();
+        let reflected_levels = levels
+            .iter()
+            .map(|&level| min_level + max_level - level)
+            .collect::<Vec<_>>();
+
+        let (forward_tree, forward_coeff) =
+            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &levels).unwrap();
+        let (inverse_tree, inverse_coeff) =
+            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &reflected_levels).unwrap();
+
+        assert_eq!(reflected_levels, vec![8, 3]);
+        assert_eq!(forward_tree, inverse_tree);
+        assert_eq!(forward_coeff, 5.0);
+        assert_eq!(inverse_coeff, 7.0);
+    }
+
+    #[test]
     fn unique_braid_tree_rejects_invalid_permutation_and_level_count() {
         let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
 
@@ -8317,5 +8585,47 @@ mod tests {
                 actual: 5
             }
         );
+    }
+
+    #[test]
+    fn split_fusion_tree_matches_tensorkit_front_tail_convention() {
+        let rule = SU2FusionRule;
+        let half = SU2Irrep::from_twice_spin(1).sector_id();
+        let one = SU2Irrep::from_twice_spin(2).sector_id();
+        let tree = FusionTreeKey::new(
+            [half, half, one],
+            Some(one),
+            [false, false, true],
+            [SectorId::new(0)],
+            [SectorId::new(1), SectorId::new(1)],
+        );
+
+        let (front, tail) = split_fusion_tree(&rule, &tree, 2).unwrap();
+
+        assert_eq!(front.uncoupled(), &[half, half]);
+        assert_eq!(front.coupled(), Some(SectorId::new(0)));
+        assert_eq!(front.is_dual(), &[false, false]);
+        assert_eq!(front.innerlines(), &[]);
+        assert_eq!(front.vertices(), &[SectorId::new(1)]);
+        assert_eq!(tail.uncoupled(), &[SectorId::new(0), one]);
+        assert_eq!(tail.coupled(), Some(one));
+        assert_eq!(tail.is_dual(), &[false, true]);
+        assert_eq!(tail.innerlines(), &[]);
+        assert_eq!(tail.vertices(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn rigid_symbols_separate_twist_from_frobenius_schur_phase() {
+        let fermion = FermionParityFusionRule;
+        let odd = SectorId::new(1);
+        assert_eq!(fermion.dim_scalar(odd), 1.0);
+        assert_eq!(fermion.twist_scalar(odd), -1.0);
+        assert_eq!(fermion.frobenius_schur_phase_scalar(odd), 1.0);
+
+        let su2 = SU2FusionRule;
+        let half = SU2Irrep::from_twice_spin(1).sector_id();
+        assert_eq!(su2.dim_scalar(half), 2.0);
+        assert_eq!(su2.twist_scalar(half), 1.0);
+        assert_eq!(su2.frobenius_schur_phase_scalar(half), -1.0);
     }
 }

@@ -19,11 +19,15 @@ pub struct TensorContractStructure<C = f64> {
     pub(super) lhs_contracting_axes: Vec<usize>,
     pub(super) rhs_contracting_axes: Vec<usize>,
     pub(super) output_axes: Vec<usize>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
     terms: Vec<TensorContractStructureTerm<C>>,
     descriptor: TensorContractDescriptor<C>,
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
+    lhs_storage_structure: Arc<BlockStructure>,
+    rhs_storage_structure: Arc<BlockStructure>,
 }
 
 pub fn tensorcontract_structure<
@@ -48,6 +52,11 @@ pub fn tensorcontract_structure<
     TensorContractStructure::compile(dst, lhs, rhs, axes)
 }
 
+pub(crate) const PLAIN_TENSORCONTRACT_FUSION_REQUIRES_FUSION_API: &str =
+    "plain tensorcontract does not lower fusion-tree blocks; use tensorcontract_fusion_*";
+pub(crate) const PLAIN_TENSORCONTRACT_BLOCK_SPARSE_UNSUPPORTED: &str =
+    "block-sparse contraction enumeration is not implemented yet";
+
 impl TensorContractStructure {
     pub fn compile<
         TDst,
@@ -68,6 +77,14 @@ impl TensorContractStructure {
         rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
         axes: TensorContractAxisSpec<'_>,
     ) -> Result<Self, OperationError> {
+        if dst.fusion_space().is_some()
+            || lhs.fusion_space().is_some()
+            || rhs.fusion_space().is_some()
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: PLAIN_TENSORCONTRACT_FUSION_REQUIRES_FUSION_API,
+            });
+        }
         Self::compile_shared_structures(
             Arc::clone(dst.structure()),
             Arc::clone(lhs.structure()),
@@ -114,6 +131,8 @@ impl TensorContractStructure {
             Arc::clone(dst.structure()),
             Arc::clone(lhs.structure()),
             Arc::clone(rhs.structure()),
+            Arc::clone(lhs.structure()),
+            Arc::clone(rhs.structure()),
             axes,
             block_specs,
         )
@@ -130,6 +149,28 @@ impl TensorContractStructure {
             Arc::new(dst_structure.clone()),
             Arc::new(lhs_structure.clone()),
             Arc::new(rhs_structure.clone()),
+            Arc::new(lhs_structure.clone()),
+            Arc::new(rhs_structure.clone()),
+            axes,
+            block_specs,
+        )
+    }
+
+    pub(crate) fn compile_shared_structures_with_block_specs_and_storage(
+        dst_structure: Arc<BlockStructure>,
+        lhs_structure: Arc<BlockStructure>,
+        rhs_structure: Arc<BlockStructure>,
+        lhs_storage_structure: Arc<BlockStructure>,
+        rhs_storage_structure: Arc<BlockStructure>,
+        axes: TensorContractAxisSpec<'_>,
+        block_specs: &[TensorContractBlockSpec],
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures_with_block_specs(
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            lhs_storage_structure,
+            rhs_storage_structure,
             axes,
             block_specs,
         )
@@ -146,13 +187,15 @@ impl TensorContractStructure {
             || rhs_structure.block_count() != 1
         {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "block-sparse contraction enumeration is not implemented yet",
+                message: PLAIN_TENSORCONTRACT_BLOCK_SPARSE_UNSUPPORTED,
             });
         }
 
         let block_specs = [TensorContractBlockSpec::new(0, 0, 0)];
         Self::compile_shared_structures_with_block_specs(
-            dst_structure,
+            Arc::clone(&dst_structure),
+            Arc::clone(&lhs_structure),
+            Arc::clone(&rhs_structure),
             lhs_structure,
             rhs_structure,
             axes,
@@ -164,6 +207,28 @@ impl TensorContractStructure {
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
+        lhs_storage_structure: Arc<BlockStructure>,
+        rhs_storage_structure: Arc<BlockStructure>,
+        axes: TensorContractAxisSpec<'_>,
+        block_specs: &[TensorContractBlockSpec],
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures_with_block_specs_inner(
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            lhs_storage_structure,
+            rhs_storage_structure,
+            axes,
+            block_specs,
+        )
+    }
+
+    fn compile_shared_structures_with_block_specs_inner(
+        dst_structure: Arc<BlockStructure>,
+        lhs_structure: Arc<BlockStructure>,
+        rhs_structure: Arc<BlockStructure>,
+        lhs_storage_structure: Arc<BlockStructure>,
+        rhs_storage_structure: Arc<BlockStructure>,
         axes: TensorContractAxisSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError> {
@@ -200,11 +265,15 @@ impl TensorContractStructure {
             lhs_contracting_axes: axis_plan.lhs_contracting_axes,
             rhs_contracting_axes: axis_plan.rhs_contracting_axes,
             output_axes: axis_plan.output_axes,
+            lhs_conjugate: axis_plan.lhs_conjugate,
+            rhs_conjugate: axis_plan.rhs_conjugate,
             terms,
             descriptor,
             dst_structure,
             lhs_structure,
             rhs_structure,
+            lhs_storage_structure,
+            rhs_storage_structure,
         })
     }
 }
@@ -246,6 +315,16 @@ where
     }
 
     #[inline]
+    pub fn lhs_conjugate(&self) -> bool {
+        self.lhs_conjugate
+    }
+
+    #[inline]
+    pub fn rhs_conjugate(&self) -> bool {
+        self.rhs_conjugate
+    }
+
+    #[inline]
     pub fn terms(&self) -> &[TensorContractStructureTerm<C>] {
         &self.terms
     }
@@ -262,8 +341,8 @@ where
         rhs_structure: &Arc<BlockStructure>,
     ) -> Result<(), OperationError> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
-        validate_structure_identity("lhs", &self.lhs_structure, lhs_structure)?;
-        validate_structure_identity("rhs", &self.rhs_structure, rhs_structure)
+        validate_structure_identity("lhs", &self.lhs_storage_structure, lhs_structure)?;
+        validate_structure_identity("rhs", &self.rhs_storage_structure, rhs_structure)
     }
 
     pub fn execute_with<
@@ -398,6 +477,8 @@ pub(super) struct TensorContractAxisPlan {
     pub(super) lhs_open_axes: Vec<usize>,
     pub(super) rhs_open_axes: Vec<usize>,
     pub(super) output_axes: Vec<usize>,
+    pub(super) lhs_conjugate: bool,
+    pub(super) rhs_conjugate: bool,
 }
 
 impl TensorContractAxisPlan {
@@ -438,6 +519,8 @@ impl TensorContractAxisPlan {
             lhs_open_axes,
             rhs_open_axes,
             output_axes,
+            lhs_conjugate: axes.lhs_conjugate(),
+            rhs_conjugate: axes.rhs_conjugate(),
         })
     }
 }
@@ -445,6 +528,12 @@ impl TensorContractAxisPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TensorContractDescriptor<C = f64> {
     dot_config: DenseDotConfig,
+    lhs_contracting_axes: Vec<usize>,
+    rhs_contracting_axes: Vec<usize>,
+    lhs_open_axes: Vec<usize>,
+    rhs_open_axes: Vec<usize>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
     terms: Vec<TensorContractDescriptorTerm<C>>,
     lhs_shapes: Vec<usize>,
     lhs_strides: Vec<usize>,
@@ -469,6 +558,36 @@ where
     #[inline]
     pub(super) fn dot_config(&self) -> &DenseDotConfig {
         &self.dot_config
+    }
+
+    #[inline]
+    pub(super) fn lhs_contracting_axes(&self) -> &[usize] {
+        &self.lhs_contracting_axes
+    }
+
+    #[inline]
+    pub(super) fn rhs_contracting_axes(&self) -> &[usize] {
+        &self.rhs_contracting_axes
+    }
+
+    #[inline]
+    pub(super) fn lhs_open_axes(&self) -> &[usize] {
+        &self.lhs_open_axes
+    }
+
+    #[inline]
+    pub(super) fn rhs_open_axes(&self) -> &[usize] {
+        &self.rhs_open_axes
+    }
+
+    #[inline]
+    pub(super) fn lhs_conjugate(&self) -> bool {
+        self.lhs_conjugate
+    }
+
+    #[inline]
+    pub(super) fn rhs_conjugate(&self) -> bool {
+        self.rhs_conjugate
     }
 
     pub(super) fn lhs_shape(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
@@ -523,6 +642,12 @@ where
                 Vec::new(),
                 Vec::new(),
             ),
+            lhs_contracting_axes: axis_plan.lhs_contracting_axes.clone(),
+            rhs_contracting_axes: axis_plan.rhs_contracting_axes.clone(),
+            lhs_open_axes: axis_plan.lhs_open_axes.clone(),
+            rhs_open_axes: axis_plan.rhs_open_axes.clone(),
+            lhs_conjugate: axis_plan.lhs_conjugate,
+            rhs_conjugate: axis_plan.rhs_conjugate,
             terms: Vec::new(),
             lhs_shapes: Vec::new(),
             lhs_strides: Vec::new(),

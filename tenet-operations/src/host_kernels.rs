@@ -10,9 +10,9 @@ use crate::strided::{
 };
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
-    DenseRecouplingScalar, HostAllocator, OperationError, RecouplingCoefficientAction,
-    TensorAddStructure, TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable,
-    TreeTransformStructure,
+    ConjugateValue, DenseRecouplingScalar, HostAllocator, OperationError,
+    RecouplingCoefficientAction, TensorAddStructure, TreeTransformBlock, TreeTransformLayout,
+    TreeTransformLayoutTable, TreeTransformStructure,
 };
 
 #[derive(Clone, Debug)]
@@ -71,6 +71,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let descriptor = structure.descriptor();
@@ -129,6 +130,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<C>,
     C: Copy,
@@ -164,6 +166,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<C>,
     C: Copy,
@@ -181,6 +184,7 @@ where
                 structure.layouts.entry(dst_layout),
                 structure.layouts.entry(src_layout),
                 structure.coefficient(coefficient),
+                structure.storage_conjugate(),
                 dst_data,
                 src_data,
                 alpha,
@@ -203,6 +207,7 @@ where
                 coefficient_start,
                 element_count,
                 &structure.coefficients_src_by_dst,
+                structure.storage_conjugate(),
                 dst_data,
                 src_data,
                 alpha,
@@ -234,7 +239,7 @@ pub(crate) fn tree_transform_structure_with_dense_recoupling<
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
 {
     let dst_structure = Arc::clone(dst.structure());
@@ -265,7 +270,7 @@ pub(crate) fn tree_transform_structure_with_dense_recoupling_raw<E, D, C>(
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
 {
     structure.validate_replay_structures(dst_structure, src_structure)?;
@@ -281,6 +286,7 @@ where
                 structure.layouts.entry(dst_layout),
                 structure.layouts.entry(src_layout),
                 structure.coefficient(coefficient),
+                structure.storage_conjugate(),
                 dst_data,
                 src_data,
                 alpha,
@@ -304,6 +310,7 @@ where
                 coefficient_start,
                 element_count,
                 &structure.coefficients_src_by_dst,
+                structure.storage_conjugate(),
                 dst_data,
                 src_data,
                 alpha,
@@ -366,6 +373,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     tensoradd_raw_strided_kernel(
@@ -377,6 +385,7 @@ where
         descriptor.src_strides(term),
         term.dst_offset,
         term.src_offset,
+        descriptor.source_conjugate(),
         alpha,
         beta,
     )
@@ -392,6 +401,7 @@ pub(crate) fn tensoradd_raw_strided_kernel<T>(
     src_strides: &[isize],
     dst_offset: isize,
     src_offset: isize,
+    source_conjugate: bool,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -402,8 +412,23 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
+    if source_conjugate {
+        return tensoradd_raw_strided_conjugating_kernel(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            alpha,
+            beta,
+        );
+    }
     let mut dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
         .map_err(strided_error)?;
     let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
@@ -419,12 +444,47 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn tensoradd_raw_strided_conjugating_kernel<T>(
+    zero_strides: &mut Vec<isize>,
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+{
+    let len = crate::strided::element_count(shape)?;
+    if len == 0 {
+        return Ok(());
+    }
+    for linear in 0..len {
+        let dst_index = strided_offset(linear, shape, dst_strides, dst_offset)?;
+        let src_index = strided_offset(linear, shape, src_strides, src_offset)?;
+        let value = alpha * src_data[src_index].maybe_conj(true);
+        dst_data[dst_index] = if beta.is_zero() {
+            value
+        } else {
+            beta * dst_data[dst_index] + value
+        };
+    }
+    zero_strides.clear();
+    Ok(())
+}
+
 fn tree_transform_single_with_strided_kernel<D, C>(
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
     dst_layout: &TreeTransformLayout,
     src_layout: &TreeTransformLayout,
     coefficient: C,
+    source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -437,34 +497,26 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     let shape = layouts.shape(dst_layout);
-    let mut dst = strided_kernel::StridedViewMut::new(
+    let scale = alpha.scale_by_coefficient(coefficient);
+    tensoradd_raw_strided_kernel(
+        zero_strides,
         dst_data,
-        shape,
-        layouts.strides(dst_layout),
-        dst_layout.offset,
-    )
-    .map_err(strided_error)?;
-    let src = strided_kernel::StridedView::<D>::new(
         src_data,
         shape,
+        layouts.strides(dst_layout),
         layouts.strides(src_layout),
+        dst_layout.offset,
         src_layout.offset,
+        source_conjugate,
+        scale,
+        beta,
     )
-    .map_err(strided_error)?;
-    let scale = alpha.scale_by_coefficient(coefficient);
-    if beta.is_zero() {
-        strided_kernel::copy_scale(&mut dst, &src, scale).map_err(strided_error)
-    } else {
-        if !beta.is_one() {
-            scale_destination(zero_strides, &mut dst, beta)?;
-        }
-        strided_kernel::axpy(&mut dst, &src, scale).map_err(strided_error)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -478,6 +530,7 @@ fn tree_transform_multi_with_pack_gemm_scatter<D, C>(
     coefficient_start: usize,
     element_count: usize,
     coefficients_src_by_dst: &[C],
+    source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -490,6 +543,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<C>,
     C: Copy,
@@ -511,6 +565,7 @@ where
             src_data,
             &mut workspace.source,
             src_index * element_count,
+            source_conjugate,
         )?;
     }
 
@@ -552,6 +607,7 @@ fn tree_transform_multi_with_dense_recoupling<E, D, C>(
     coefficient_start: usize,
     element_count: usize,
     coefficients_src_by_dst: &[C],
+    source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
@@ -559,7 +615,7 @@ fn tree_transform_multi_with_dense_recoupling<E, D, C>(
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
 {
     let source_len = element_count
@@ -579,6 +635,7 @@ where
             src_data,
             &mut workspace.source,
             src_index * element_count,
+            source_conjugate,
         )?;
     }
 
@@ -775,11 +832,25 @@ fn pack_layout_into_column<T>(
     src_data: &[T],
     packed: &mut [T],
     packed_offset: usize,
+    source_conjugate: bool,
 ) -> Result<(), OperationError>
 where
-    T: Copy + strided_kernel::MaybeSendSync,
+    T: Copy + ConjugateValue + strided_kernel::MaybeSendSync,
 {
     let shape = layouts.shape(layout);
+    if source_conjugate {
+        let packed_offset = offset_to_isize(packed_offset)?;
+        let len = crate::strided::element_count(shape)?;
+        let packed_strides = layouts.packed_strides(layout);
+        let src_strides = layouts.strides(layout);
+        for linear in 0..len {
+            let dst_index = strided_offset(linear, shape, packed_strides, packed_offset)?;
+            let src_index = strided_offset(linear, shape, src_strides, layout.offset)?;
+            packed[dst_index] = src_data[src_index].maybe_conj(true);
+        }
+        return Ok(());
+    }
+
     let mut dst = strided_kernel::StridedViewMut::new(
         packed,
         shape,
@@ -857,4 +928,28 @@ where
         strided_kernel::StridedView::<T>::new(&scalar, dst.dims(), zero_strides.as_slice(), 0)
             .map_err(strided_error)?;
     strided_kernel::mul(dst, &beta_view).map_err(strided_error)
+}
+
+fn strided_offset(
+    mut linear: usize,
+    shape: &[usize],
+    strides: &[isize],
+    base: isize,
+) -> Result<usize, OperationError> {
+    let mut offset = base;
+    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
+        let coord = if dim == 0 { 0 } else { linear % dim };
+        if dim != 0 {
+            linear /= dim;
+        }
+        let coord = isize::try_from(coord).map_err(|_| OperationError::ElementCountOverflow)?;
+        offset = offset
+            .checked_add(
+                coord
+                    .checked_mul(stride)
+                    .ok_or(OperationError::ElementCountOverflow)?,
+            )
+            .ok_or(OperationError::ElementCountOverflow)?;
+    }
+    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
 }

@@ -154,16 +154,46 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
+        self.tree_pair_transform_into_raw_with_storage_conjugation(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            false,
+            alpha,
+            beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_pair_transform_into_raw_with_storage_conjugation<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst_structure: &std::sync::Arc<BlockStructure>,
+        src_structure: &std::sync::Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        storage_conjugate: bool,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
         let Self {
             backend,
             workspace,
             cache,
         } = self;
-        let structure = cache.get_or_compile_tree_pair_structures(
+        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
             rule,
             operation,
             dst_structure,
             src_structure,
+            storage_conjugate,
         )?;
         backend.tree_transform_structure_into_raw(
             workspace,

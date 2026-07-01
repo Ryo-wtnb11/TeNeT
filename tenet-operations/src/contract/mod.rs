@@ -5,6 +5,7 @@ mod dynamic;
 mod dynamic_space;
 mod dynamic_space_cache;
 mod fusion;
+mod fusion_block;
 mod scratch;
 mod structure;
 
@@ -14,7 +15,9 @@ pub use api::{
     tensorcontract_fusion_explicit_plan_into_canonical_dst_with,
     tensorcontract_fusion_explicit_plan_into_with, tensorcontract_fusion_into,
     tensorcontract_fusion_into_with, tensorcontract_fusion_via_tree_pair_transforms_into,
-    tensorcontract_into, tensorcontract_into_with,
+    tensorcontract_into, tensorcontract_into_with, tensorproduct_fusion_into,
+    tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
+    tensorproduct_into_with_conjugation,
 };
 pub use backend::{TensorContractBackend, TensorContractWorkspace};
 pub use context::{

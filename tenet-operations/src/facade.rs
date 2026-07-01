@@ -3,18 +3,29 @@ use std::hash::Hash;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockView, BlockViewMut, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
+    BlockView, BlockViewMut, CoreError, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, TensorMap,
 };
 
-use crate::axis::AxisPermutation;
+use crate::axis::{AxisPermutation, TensorTraceAxisSpec};
 use crate::backend::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
     TreeTransformBackend,
 };
 use crate::error::OperationError;
 use crate::host_kernels::{tensoradd_block_with_strided_kernel, TreeTransformWorkspace};
-use crate::scalar::{DenseRecouplingScalar, RecouplingCoefficientAction, TreeTransformScalar};
-use crate::tensoradd::{tensoradd_structure, TensorAddStructure};
+use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
+use crate::scalar::{
+    ConjugateValue, DenseRecouplingScalar, RealStructuralCoefficient, RecouplingCoefficientAction,
+    TreeTransformScalar,
+};
+use crate::tensoradd::{
+    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
+};
+use crate::tensortrace::{
+    tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
+    TensorTraceStructure,
+};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_structure::TreeTransformStructure;
 use crate::tree_transform::{
@@ -60,6 +71,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let mut backend = HostTensorOperations;
@@ -70,6 +82,38 @@ where
         dst,
         src,
         permutation,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensoradd_into_with_conjugation<T, const NOUT: usize, const NIN: usize, S>(
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    permutation: AxisPermutation<'_>,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let mut backend = HostTensorOperations;
+    let mut allocator = HostAllocator::default();
+    tensoradd_into_with_backend_and_conjugation(
+        &mut backend,
+        &mut allocator,
+        dst,
+        src,
+        permutation,
+        source_conjugate,
         alpha,
         beta,
     )
@@ -92,9 +136,36 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let structure = tensoradd_structure(dst, src, permutation)?;
+    tensoradd_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tensoradd_into_with_backend_and_conjugation<B, T, const NOUT: usize, const NIN: usize, S>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    dst: &mut TensorMap<T, NOUT, NIN, S>,
+    src: &TensorMap<T, NOUT, NIN, S>,
+    permutation: AxisPermutation<'_>,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = tensoradd_structure_with_conjugation(dst, src, permutation, source_conjugate)?;
     tensoradd_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
 }
 
@@ -115,6 +186,421 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    structure.execute_with(backend, allocator, dst, src, alpha, beta)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tensoradd_fusion_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    operation: TreeTransformOperationKey,
+    source_conjugate: bool,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+{
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tensoradd_fusion_into_with(
+        &mut backend,
+        &mut workspace,
+        rule,
+        dst,
+        src,
+        operation,
+        source_conjugate,
+        alpha,
+        beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tensoradd_fusion_into_with<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    operation: TreeTransformOperationKey,
+    source_conjugate: bool,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+{
+    let src_fusion = src
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    if source_conjugate
+        && matches!(&operation, TreeTransformOperationKey::Braid { .. })
+        && !rule.supports_unitary_braid_dagger()
+    {
+        return Err(OperationError::UnsupportedTreeTransformScope {
+            operation,
+            message:
+                "source adjoint explicit braid requires a unitary dagger-compatible braiding rule",
+        });
+    }
+    let lowered =
+        lower_tensoradd_source_operation::<SRC_NOUT, SRC_NIN>(operation, source_conjugate)?;
+    if lowered.storage_conjugate() {
+        let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+        let dst_structure = std::sync::Arc::clone(dst.structure());
+        let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
+        let plan = build_tree_pair_transform_group_plan(
+            rule,
+            lowered.into_operation(),
+            &src_replay_structure,
+        )?;
+        let structure = plan.compile_structures_with_storage_conjugation(
+            &dst_structure,
+            &src_replay_structure,
+            true,
+        )?;
+        backend.tree_transform_structure_into_raw(
+            workspace,
+            &structure,
+            &dst_structure,
+            &src_replay_structure,
+            dst.data_mut(),
+            src.data(),
+            alpha,
+            beta,
+        )
+    } else {
+        tree_pair_transform_into_with(
+            backend,
+            workspace,
+            rule,
+            lowered.into_operation(),
+            dst,
+            src,
+            alpha,
+            beta,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tensoradd_fusion_into_with_context<
+    B,
+    R,
+    D,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    operation: TreeTransformOperationKey,
+    source_conjugate: bool,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: Clone + Eq + Hash,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+{
+    let src_fusion = src
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    if source_conjugate
+        && matches!(&operation, TreeTransformOperationKey::Braid { .. })
+        && !rule.supports_unitary_braid_dagger()
+    {
+        return Err(OperationError::UnsupportedTreeTransformScope {
+            operation,
+            message:
+                "source adjoint explicit braid requires a unitary dagger-compatible braiding rule",
+        });
+    }
+    let lowered =
+        lower_tensoradd_source_operation::<SRC_NOUT, SRC_NIN>(operation, source_conjugate)?;
+    if lowered.storage_conjugate() {
+        let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+        let dst_structure = std::sync::Arc::clone(dst.structure());
+        let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
+        context.tree_pair_transform_into_raw_with_storage_conjugation(
+            rule,
+            lowered.into_operation(),
+            &dst_structure,
+            &src_replay_structure,
+            dst.data_mut(),
+            src.data(),
+            true,
+            alpha,
+            beta,
+        )
+    } else {
+        tree_pair_transform_into_with_context(
+            context,
+            rule,
+            lowered.into_operation(),
+            dst,
+            src,
+            alpha,
+            beta,
+        )
+    }
+}
+
+pub fn tensortrace_into<
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let mut backend = HostTensorOperations;
+    let mut allocator = HostAllocator::default();
+    tensortrace_into_with(&mut backend, &mut allocator, dst, src, axes, alpha, beta)
+}
+
+pub fn tensortrace_into_with<
+    B,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = tensortrace_structure(dst, src, axes)?;
+    tensortrace_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
+}
+
+pub fn tensortrace_execute_with<
+    B,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    structure: &TensorTraceStructure,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    structure.execute_with(backend, allocator, dst, src, alpha, beta)
+}
+
+pub fn tensortrace_fusion_into<
+    R,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    rule: &R,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Copy
+        + RealStructuralCoefficient,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let mut backend = HostTensorOperations;
+    let mut allocator = HostAllocator::default();
+    tensortrace_fusion_into_with(
+        &mut backend,
+        &mut allocator,
+        rule,
+        dst,
+        src,
+        axes,
+        alpha,
+        beta,
+    )
+}
+
+pub fn tensortrace_fusion_into_with<
+    B,
+    R,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    rule: &R,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Copy
+        + RealStructuralCoefficient,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = tensortrace_fusion_structure(rule, dst, src, axes)?;
+    tensortrace_fusion_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
+}
+
+pub fn tensortrace_fusion_execute_with<
+    B,
+    C,
+    T,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+>(
+    backend: &mut B,
+    allocator: &mut B::Allocator,
+    structure: &TensorTraceFusionStructure<C>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    B: TensorOperationsBackend,
+    C: Copy,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
 {
     structure.execute_with(backend, allocator, dst, src, alpha, beta)
@@ -147,6 +633,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
     C: Copy,
 {
@@ -336,6 +823,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::zero())
@@ -353,6 +841,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::one())
@@ -379,6 +868,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let mut allocator = HostAllocator::default();
@@ -397,6 +887,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let mut allocator = HostAllocator::default();

@@ -8,7 +8,7 @@ use crate::axis::{permutation_axes, AxisPermutation};
 use crate::error::OperationError;
 use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
-use crate::TensorOperationsBackend;
+use crate::{ConjugateValue, TensorOperationsBackend};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorAddStructure {
@@ -28,16 +28,59 @@ pub fn tensoradd_structure<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst
     TensorAddStructure::compile(dst, src, permutation)
 }
 
+pub fn tensoradd_structure_with_conjugation<
+    TDst,
+    TSrc,
+    const NOUT: usize,
+    const NIN: usize,
+    SDst,
+    SSrc,
+>(
+    dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+    src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    permutation: AxisPermutation<'_>,
+    source_conjugate: bool,
+) -> Result<TensorAddStructure, OperationError> {
+    TensorAddStructure::compile_with_conjugation(dst, src, permutation, source_conjugate)
+}
+
+pub(crate) const PLAIN_TENSORADD_FUSION_PERMUTE_REQUIRES_TREE_TRANSFORM: &str =
+    "plain tensoradd does not lower fusion-tree permutations; use tree_pair_transform_*";
+pub(crate) const PLAIN_TENSORADD_FUSION_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT: &str =
+    "plain tensoradd with fusion-tree conjugation requires categorical adjoint lowering";
+
 impl TensorAddStructure {
     pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
         dst: &TensorMap<TDst, NOUT, NIN, SDst>,
         src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
         permutation: AxisPermutation<'_>,
     ) -> Result<Self, OperationError> {
+        Self::compile_with_conjugation(dst, src, permutation, false)
+    }
+
+    pub fn compile_with_conjugation<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+        permutation: AxisPermutation<'_>,
+        source_conjugate: bool,
+    ) -> Result<Self, OperationError> {
+        let axes = permutation_axes(permutation, dst.structure().rank())?;
+        let has_fusion = dst.fusion_space().is_some() || src.fusion_space().is_some();
+        if source_conjugate && has_fusion {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: PLAIN_TENSORADD_FUSION_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT,
+            });
+        }
+        if !axes.iter().copied().eq(0..dst.structure().rank()) && has_fusion {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: PLAIN_TENSORADD_FUSION_PERMUTE_REQUIRES_TREE_TRANSFORM,
+            });
+        }
         Self::compile_shared_structures(
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
             permutation,
+            source_conjugate,
         )
     }
 
@@ -50,6 +93,7 @@ impl TensorAddStructure {
             Arc::new(dst_structure.clone()),
             Arc::new(src_structure.clone()),
             permutation,
+            false,
         )
     }
 
@@ -57,6 +101,7 @@ impl TensorAddStructure {
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         permutation: AxisPermutation<'_>,
+        source_conjugate: bool,
     ) -> Result<Self, OperationError> {
         if dst_structure.block_count() != src_structure.block_count() {
             return Err(OperationError::BlockCountMismatch {
@@ -102,8 +147,14 @@ impl TensorAddStructure {
             });
         }
 
-        let descriptor =
-            TensorAddDescriptor::compile(rank, &axes, &terms, &dst_structure, &src_structure)?;
+        let descriptor = TensorAddDescriptor::compile(
+            rank,
+            &axes,
+            source_conjugate,
+            &terms,
+            &dst_structure,
+            &src_structure,
+        )?;
 
         Ok(Self {
             rank,
@@ -161,6 +212,7 @@ impl TensorAddStructure {
             + PartialEq
             + Zero
             + One
+            + ConjugateValue
             + strided_kernel::MaybeSendSync,
     {
         backend.tensoradd_structure_into(allocator, self, dst, src, alpha, beta)
@@ -193,6 +245,7 @@ impl TensorAddStructureTerm {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TensorAddDescriptor {
+    source_conjugate: bool,
     terms: Vec<TensorAddDescriptorTerm>,
     shapes: Vec<usize>,
     dst_strides: Vec<isize>,
@@ -203,6 +256,11 @@ impl TensorAddDescriptor {
     #[inline]
     pub(crate) fn terms(&self) -> &[TensorAddDescriptorTerm] {
         &self.terms
+    }
+
+    #[inline]
+    pub(crate) fn source_conjugate(&self) -> bool {
+        self.source_conjugate
     }
 
     fn reserve(&mut self, term_count: usize, rank: usize) {
@@ -228,11 +286,15 @@ impl TensorAddDescriptor {
     fn compile(
         rank: usize,
         axes: &[usize],
+        source_conjugate: bool,
         terms: &[TensorAddStructureTerm],
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
-        let mut descriptor = Self::default();
+        let mut descriptor = Self {
+            source_conjugate,
+            ..Self::default()
+        };
         descriptor.reserve(terms.len(), rank);
 
         for term in terms {

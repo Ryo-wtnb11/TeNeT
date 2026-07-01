@@ -26,6 +26,10 @@ pub enum OperationError {
         lhs: usize,
         rhs: usize,
     },
+    TraceAxisCountMismatch {
+        lhs: usize,
+        rhs: usize,
+    },
     DuplicateTransformDestination {
         dst_block: usize,
     },
@@ -125,6 +129,9 @@ impl fmt::Display for OperationError {
             }
             Self::ContractAxisCountMismatch { lhs, rhs } => {
                 write!(f, "contracting axis count mismatch: lhs {lhs}, rhs {rhs}")
+            }
+            Self::TraceAxisCountMismatch { lhs, rhs } => {
+                write!(f, "trace axis count mismatch: lhs {lhs}, rhs {rhs}")
             }
             Self::DuplicateTransformDestination { dst_block } => {
                 write!(

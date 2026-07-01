@@ -70,8 +70,12 @@ impl TreeTransformOperationKey {
     /// Build an explicit braid operation with source-axis permutations and levels.
     ///
     /// Axis numbering follows TensorKit's `Index2Tuple` convention; see
-    /// [`Self::transpose`]. `codomain_levels` and `domain_levels` are the
-    /// levels of the source axes selected by each output tuple.
+    /// [`Self::transpose`]. `codomain_levels` and `domain_levels` are split by
+    /// the source tensor's codomain/domain tree axes, independent of the output
+    /// tuple positions selected by `codomain_permutation` and
+    /// `domain_permutation`. This mirrors TensorKit's `add_braid!`, which
+    /// splits the full source `levels` tuple with `codomainind(tsrc)` and
+    /// `domainind(tsrc)`.
     pub fn braid<Codomain, Domain, CodomainLevels, DomainLevels>(
         codomain_permutation: Codomain,
         domain_permutation: Domain,

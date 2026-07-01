@@ -8,8 +8,8 @@ use tenet_core::{
     BraidingStyleKind, CoreError, FermionParityFusionRule, FusionProductSpace, FusionRule,
     FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeGroupKey,
     FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreePivotalSymbols, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, ProductFusionRule, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 
@@ -336,6 +336,137 @@ impl MultiplicityFreePivotalSymbols for UniqueAnyonicRule {
     }
 }
 
+impl MultiplicityFreeRigidSymbols for UniqueAnyonicRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UnitaryPhaseAnyonicRule;
+
+impl FusionRule for UnitaryPhaseAnyonicRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        vec![SectorId::new((left.id() + right.id()) % 4)]
+    }
+}
+
+impl MultiplicityFreeFusionRule for UnitaryPhaseAnyonicRule {}
+
+impl MultiplicityFreeFusionSymbols for UnitaryPhaseAnyonicRule {
+    type Scalar = Complex64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value.conj()
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
+        if matches!((left.id(), right.id()), (1, 3) | (3, 1)) {
+            Complex64::new(0.0, 1.0)
+        } else {
+            Complex64::new(1.0, 0.0)
+        }
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for UnitaryPhaseAnyonicRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreeBlockKey,
+        _destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for UnitaryPhaseAnyonicRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct UniquePlanarRule;
 
@@ -444,6 +575,7 @@ fn assert_tensoradd_dtype<T>(
         + Mul<T, Output = T>
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
@@ -468,6 +600,7 @@ where
         + Mul<T, Output = T>
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
@@ -495,6 +628,7 @@ fn assert_tree_single_dtype<T>(
         + Mul<T, Output = T>
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
@@ -534,6 +668,7 @@ where
         + Mul<T, Output = T>
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
@@ -687,6 +822,7 @@ fn assert_tree_multi_tensorkit_orientation_dtype<T>(
         + Mul<T, Output = T>
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
@@ -791,6 +927,7 @@ fn assert_tree_multi_keyed_dtype<T>(
         + Mul<T, Output = T>
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
@@ -1060,6 +1197,8 @@ mod contract_dense;
 mod contract_fusion;
 
 mod tensoradd;
+
+mod tensortrace;
 
 mod tree_transform_exec;
 

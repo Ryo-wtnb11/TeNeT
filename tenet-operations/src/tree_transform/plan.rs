@@ -25,6 +25,7 @@ pub struct TreeTransformBlockSpec<T> {
     pub(crate) dst_blocks: Vec<usize>,
     pub(crate) src_blocks: Vec<usize>,
     pub(crate) coefficients_src_by_dst: Vec<T>,
+    pub(crate) source_axes: Option<Vec<usize>>,
 }
 
 impl<T> TreeTransformBlockSpec<T> {
@@ -33,6 +34,7 @@ impl<T> TreeTransformBlockSpec<T> {
             dst_blocks: vec![dst_block],
             src_blocks: vec![src_block],
             coefficients_src_by_dst: vec![coefficient],
+            source_axes: None,
         }
     }
 
@@ -45,7 +47,21 @@ impl<T> TreeTransformBlockSpec<T> {
             dst_blocks,
             src_blocks,
             coefficients_src_by_dst,
+            source_axes: None,
         }
+    }
+
+    pub fn with_source_axes<I>(mut self, axes: I) -> Self
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.source_axes = Some(axes.into_iter().collect());
+        self
+    }
+
+    fn with_optional_source_axes(mut self, axes: Option<Vec<usize>>) -> Self {
+        self.source_axes = axes;
+        self
     }
 
     #[inline]
@@ -64,6 +80,11 @@ impl<T> TreeTransformBlockSpec<T> {
     pub fn coefficients_src_by_dst(&self) -> &[T] {
         &self.coefficients_src_by_dst
     }
+
+    #[inline]
+    pub fn source_axes(&self) -> Option<&[usize]> {
+        self.source_axes.as_deref()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,6 +92,7 @@ pub struct TreeTransformKeyBlockSpec<T> {
     dst_keys: Vec<BlockKey>,
     src_keys: Vec<BlockKey>,
     coefficients_src_by_dst: Vec<T>,
+    source_axes: Option<Vec<usize>>,
 }
 
 impl<T> TreeTransformKeyBlockSpec<T> {
@@ -83,6 +105,7 @@ impl<T> TreeTransformKeyBlockSpec<T> {
             dst_keys: vec![dst_key.into()],
             src_keys: vec![src_key.into()],
             coefficients_src_by_dst: vec![coefficient],
+            source_axes: None,
         }
     }
 
@@ -101,7 +124,16 @@ impl<T> TreeTransformKeyBlockSpec<T> {
             dst_keys: dst_keys.into_iter().map(Into::into).collect(),
             src_keys: src_keys.into_iter().map(Into::into).collect(),
             coefficients_src_by_dst,
+            source_axes: None,
         }
+    }
+
+    pub fn with_source_axes<I>(mut self, axes: I) -> Self
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.source_axes = Some(axes.into_iter().collect());
+        self
     }
 
     #[inline]
@@ -136,6 +168,7 @@ impl<T: Copy> TreeTransformKeyBlockSpec<T> {
             src_blocks,
             self.coefficients_src_by_dst.clone(),
         ))
+        .map(|spec| spec.with_optional_source_axes(self.source_axes.clone()))
     }
 }
 
@@ -145,6 +178,7 @@ pub struct TreeTransformGroupBlockSpec<T> {
     dst_keys: Vec<BlockKey>,
     src_keys: Vec<BlockKey>,
     coefficients_src_by_dst: Vec<T>,
+    source_axes: Option<Vec<usize>>,
 }
 
 impl<T> TreeTransformGroupBlockSpec<T> {
@@ -163,6 +197,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             dst_keys: vec![dst_key.into()],
             src_keys: vec![src_key.into()],
             coefficients_src_by_dst: vec![coefficient],
+            source_axes: None,
         }
     }
 
@@ -183,7 +218,16 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             dst_keys: dst_keys.into_iter().map(Into::into).collect(),
             src_keys: src_keys.into_iter().map(Into::into).collect(),
             coefficients_src_by_dst,
+            source_axes: None,
         }
+    }
+
+    pub fn with_source_axes<I>(mut self, axes: I) -> Self
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.source_axes = Some(axes.into_iter().collect());
+        self
     }
 
     pub fn from_block_groups(
@@ -250,6 +294,7 @@ impl<T: Copy> TreeTransformGroupBlockSpec<T> {
             src_blocks,
             self.coefficients_src_by_dst.clone(),
         ))
+        .map(|spec| spec.with_optional_source_axes(self.source_axes.clone()))
     }
 }
 
@@ -303,10 +348,20 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
     ) -> Result<TreeTransformStructure<T>, OperationError> {
-        TreeTransformStructure::compile_grouped_structures(
+        self.compile_structures_with_storage_conjugation(dst_structure, src_structure, false)
+    }
+
+    pub fn compile_structures_with_storage_conjugation(
+        &self,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError> {
+        TreeTransformStructure::compile_grouped_structures_with_storage_conjugation(
             dst_structure,
             src_structure,
             &self.specs,
+            storage_conjugate,
         )
     }
 }
@@ -336,6 +391,7 @@ where
         });
     }
     operation.validate_braiding_support(rule)?;
+    let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
@@ -381,12 +437,15 @@ where
         for row in rows {
             coefficients_src_by_dst.extend(row);
         }
-        specs.push(TreeTransformGroupBlockSpec::multi(
-            group.group_key().clone(),
-            dst_keys,
-            src_keys,
-            coefficients_src_by_dst,
-        ));
+        specs.push(
+            TreeTransformGroupBlockSpec::multi(
+                group.group_key().clone(),
+                dst_keys,
+                src_keys,
+                coefficients_src_by_dst,
+            )
+            .with_source_axes(source_axes.clone()),
+        );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -438,6 +497,7 @@ where
         });
     }
     operation.validate_braiding_support(rule)?;
+    let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
@@ -449,12 +509,15 @@ where
             });
         };
         let (dst_key, coefficient) = transform(src_key)?;
-        specs.push(TreeTransformGroupBlockSpec::single(
-            src_key.group_key(),
-            dst_key,
-            src_key.clone(),
-            coefficient,
-        ));
+        specs.push(
+            TreeTransformGroupBlockSpec::single(
+                src_key.group_key(),
+                dst_key,
+                src_key.clone(),
+                coefficient,
+            )
+            .with_source_axes(source_axes.clone()),
+        );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -478,6 +541,7 @@ where
     }
     operation.validate_braiding_support(rule)?;
     validate_all_codomain_operation_scope(&operation)?;
+    let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
@@ -510,12 +574,15 @@ where
             }
         };
         let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, src_key.domain_tree().clone());
-        specs.push(TreeTransformGroupBlockSpec::single(
-            src_key.group_key(),
-            dst_key,
-            src_key.clone(),
-            coefficient,
-        ));
+        specs.push(
+            TreeTransformGroupBlockSpec::single(
+                src_key.group_key(),
+                dst_key,
+                src_key.clone(),
+                coefficient,
+            )
+            .with_source_axes(source_axes.clone()),
+        );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -538,6 +605,7 @@ where
     }
     operation.validate_braiding_support(rule)?;
     validate_all_codomain_operation_scope(&operation)?;
+    let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
@@ -608,12 +676,15 @@ where
         for row in rows {
             coefficients_src_by_dst.extend(row);
         }
-        specs.push(TreeTransformGroupBlockSpec::multi(
-            group.group_key().clone(),
-            dst_keys,
-            src_keys,
-            coefficients_src_by_dst,
-        ));
+        specs.push(
+            TreeTransformGroupBlockSpec::multi(
+                group.group_key().clone(),
+                dst_keys,
+                src_keys,
+                coefficients_src_by_dst,
+            )
+            .with_source_axes(source_axes.clone()),
+        );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -635,6 +706,7 @@ where
         });
     }
     operation.validate_braiding_support(rule)?;
+    let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
@@ -711,12 +783,15 @@ where
         for row in rows {
             coefficients_src_by_dst.extend(row);
         }
-        specs.push(TreeTransformGroupBlockSpec::multi(
-            group.group_key().clone(),
-            dst_keys,
-            src_keys,
-            coefficients_src_by_dst,
-        ));
+        specs.push(
+            TreeTransformGroupBlockSpec::multi(
+                group.group_key().clone(),
+                dst_keys,
+                src_keys,
+                coefficients_src_by_dst,
+            )
+            .with_source_axes(source_axes.clone()),
+        );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -739,6 +814,7 @@ where
         });
     }
     operation.validate_braiding_support(rule)?;
+    let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
@@ -775,12 +851,15 @@ where
                 unique_transpose_tree_pair(rule, src_key, codomain_permutation, domain_permutation)?
             }
         };
-        specs.push(TreeTransformGroupBlockSpec::single(
-            src_key.group_key(),
-            dst_key,
-            src_key.clone(),
-            coefficient,
-        ));
+        specs.push(
+            TreeTransformGroupBlockSpec::single(
+                src_key.group_key(),
+                dst_key,
+                src_key.clone(),
+                coefficient,
+            )
+            .with_source_axes(source_axes.clone()),
+        );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -811,6 +890,28 @@ fn validate_all_codomain_operation_scope(
             operation: operation.clone(),
             message: "all-codomain UniqueFusion lowering supports explicit Permute or Braid operations",
         }),
+    }
+}
+
+fn operation_source_axes(operation: &TreeTransformOperationKey) -> Vec<usize> {
+    match operation {
+        TreeTransformOperationKey::Permute {
+            codomain_permutation,
+            domain_permutation,
+        }
+        | TreeTransformOperationKey::Braid {
+            codomain_permutation,
+            domain_permutation,
+            ..
+        }
+        | TreeTransformOperationKey::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => codomain_permutation
+            .iter()
+            .chain(domain_permutation)
+            .copied()
+            .collect(),
     }
 }
 

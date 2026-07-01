@@ -7,9 +7,11 @@ use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
 
 use crate::{
     copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
+    tensortrace_fusion_structure_with_strided_kernel, tensortrace_structure_with_strided_kernel,
     tree_transform_structure_with_dense_recoupling, tree_transform_structure_with_strided_kernel,
-    DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, TensorAddStructure,
-    TreeTransformScalar, TreeTransformStructure, TreeTransformWorkspace,
+    ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
+    TensorAddStructure, TensorTraceFusionStructure, TensorTraceStructure, TreeTransformScalar,
+    TreeTransformStructure, TreeTransformWorkspace,
 };
 
 pub trait TreeTransformBackend<D, C>
@@ -77,7 +79,65 @@ pub trait TensorOperationsBackend {
             + PartialEq
             + Zero
             + One
+            + ConjugateValue
             + strided_kernel::MaybeSendSync;
+
+    fn tensortrace_structure_into<
+        T,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        structure: &TensorTraceStructure,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + strided_kernel::MaybeSendSync;
+
+    fn tensortrace_fusion_structure_into<
+        T,
+        C,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        structure: &TensorTraceFusionStructure<C>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + RecouplingCoefficientAction<C>
+            + strided_kernel::MaybeSendSync,
+        C: Copy;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -152,9 +212,75 @@ impl TensorOperationsBackend for HostTensorOperations {
             + PartialEq
             + Zero
             + One
+            + ConjugateValue
             + strided_kernel::MaybeSendSync,
     {
         tensoradd_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
+    }
+
+    fn tensortrace_structure_into<
+        T,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        structure: &TensorTraceStructure,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + strided_kernel::MaybeSendSync,
+    {
+        tensortrace_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
+    }
+
+    fn tensortrace_fusion_structure_into<
+        T,
+        C,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+    >(
+        &mut self,
+        allocator: &mut Self::Allocator,
+        structure: &TensorTraceFusionStructure<C>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        alpha: T,
+        beta: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Copy
+            + Add<T, Output = T>
+            + Mul<T, Output = T>
+            + PartialEq
+            + Zero
+            + One
+            + ConjugateValue
+            + RecouplingCoefficientAction<C>
+            + strided_kernel::MaybeSendSync,
+        C: Copy,
+    {
+        tensortrace_fusion_structure_with_strided_kernel(
+            allocator, structure, dst, src, alpha, beta,
+        )
     }
 }
 
@@ -166,6 +292,7 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<C>,
     C: Copy,
@@ -218,7 +345,7 @@ where
 impl<E, D, C> TreeTransformBackend<D, C> for DenseTreeTransformOperations<E>
 where
     E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
 {
     type Workspace = TreeTransformWorkspace<D>;

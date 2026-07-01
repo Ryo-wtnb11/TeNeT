@@ -13,15 +13,19 @@ mod contract;
 mod error;
 mod facade;
 mod host_kernels;
+mod lowering;
 mod scalar;
 mod strided;
 mod structure_identity;
 mod tensoradd;
+mod tensortrace;
 mod tree_context;
 mod tree_structure;
 mod tree_transform;
 
-pub use axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+pub use axis::{
+    AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
+};
 pub use backend::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
     TreeTransformBackend,
@@ -43,9 +47,10 @@ pub use contract::{
     tensorcontract_fusion_into_with, tensorcontract_fusion_structure,
     tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
     tensorcontract_into_with, tensorcontract_into_with_context, tensorcontract_structure,
-    TensorContractBackend, TensorContractBlockPlanKey, TensorContractBlockPlanTerm,
-    TensorContractBlockSpec, TensorContractCache, TensorContractCacheStats,
-    TensorContractExecutionContext, TensorContractFusionExecutionContext,
+    tensorproduct_fusion_into, tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
+    tensorproduct_into_with_conjugation, TensorContractBackend, TensorContractBlockPlanKey,
+    TensorContractBlockPlanTerm, TensorContractBlockSpec, TensorContractCache,
+    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractFusionExplicitPlan, TensorContractFusionPlanCacheStats,
     TensorContractFusionSpaceCacheStats, TensorContractPlanKey, TensorContractStructure,
     TensorContractStructureTerm, TensorContractWorkspace,
@@ -53,9 +58,13 @@ pub use contract::{
 pub use error::OperationError;
 pub use facade::{
     all_codomain_tree_transform_into_with_context, copy_into, scaled_add_into, scaled_assign_into,
-    tensoradd_add_into, tensoradd_assign_into, tensoradd_execute_with, tensoradd_into,
-    tensoradd_into_with, tensorcopy_into, tensorcopy_into_with, tree_pair_transform_into,
-    tree_pair_transform_into_with, tree_pair_transform_into_with_context,
+    tensoradd_add_into, tensoradd_assign_into, tensoradd_execute_with, tensoradd_fusion_into,
+    tensoradd_fusion_into_with, tensoradd_fusion_into_with_context, tensoradd_into,
+    tensoradd_into_with, tensoradd_into_with_backend_and_conjugation,
+    tensoradd_into_with_conjugation, tensorcopy_into, tensorcopy_into_with,
+    tensortrace_execute_with, tensortrace_fusion_execute_with, tensortrace_fusion_into,
+    tensortrace_fusion_into_with, tensortrace_into, tensortrace_into_with,
+    tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with,
 };
 pub use host_kernels::TreeTransformWorkspace;
@@ -66,9 +75,19 @@ pub(crate) use host_kernels::{
     tree_transform_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel_raw,
 };
 pub use scalar::{
-    DenseBlockScalar, DenseRecouplingScalar, RecouplingCoefficientAction, TreeTransformScalar,
+    ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
+    RecouplingCoefficientAction, TreeTransformScalar,
 };
-pub use tensoradd::{tensoradd_structure, TensorAddStructure, TensorAddStructureTerm};
+pub use tensoradd::{
+    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
+    TensorAddStructureTerm,
+};
+pub(crate) use tensortrace::tensortrace_fusion_structure_with_strided_kernel;
+pub(crate) use tensortrace::tensortrace_structure_with_strided_kernel;
+pub use tensortrace::{
+    tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
+    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
+};
 pub use tree_context::TreeTransformExecutionContext;
 pub use tree_structure::TreeTransformStructure;
 pub(crate) use tree_structure::{

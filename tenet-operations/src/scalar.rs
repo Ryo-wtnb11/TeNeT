@@ -4,6 +4,52 @@ use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_dense::{DenseRead, DenseView, DenseViewMut, DenseWrite};
 
+pub trait ConjugateValue: Copy {
+    fn maybe_conj(self, conjugate: bool) -> Self;
+}
+
+macro_rules! impl_real_conjugate_value {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl ConjugateValue for $ty {
+                #[inline]
+                fn maybe_conj(self, _conjugate: bool) -> Self {
+                    self
+                }
+            }
+        )+
+    };
+}
+
+impl_real_conjugate_value!(f32, f64, i32, i64);
+
+impl ConjugateValue for Complex32 {
+    #[inline]
+    fn maybe_conj(self, conjugate: bool) -> Self {
+        if conjugate {
+            self.conj()
+        } else {
+            self
+        }
+    }
+}
+
+impl ConjugateValue for Complex64 {
+    #[inline]
+    fn maybe_conj(self, conjugate: bool) -> Self {
+        if conjugate {
+            self.conj()
+        } else {
+            self
+        }
+    }
+}
+
+pub trait RealStructuralCoefficient: Copy {}
+
+impl RealStructuralCoefficient for f32 {}
+impl RealStructuralCoefficient for f64 {}
+
 pub trait TreeTransformScalar:
     Copy
     + Add<Self, Output = Self>
@@ -11,6 +57,7 @@ pub trait TreeTransformScalar:
     + PartialEq
     + Zero
     + One
+    + ConjugateValue
     + strided_kernel::MaybeSendSync
 {
 }
@@ -22,6 +69,7 @@ impl<T> TreeTransformScalar for T where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync
 {
 }
@@ -135,6 +183,7 @@ pub trait DenseBlockScalar:
     + PartialEq
     + Zero
     + One
+    + ConjugateValue
     + strided_kernel::MaybeSendSync
     + 'static
 {

@@ -75,6 +75,7 @@ pub struct TreeTransformStructureCacheKey<PlanKey> {
     plan: PlanKey,
     dst: BlockStructureCacheKey,
     src: BlockStructureCacheKey,
+    storage_conjugate: bool,
 }
 
 impl<PlanKey> TreeTransformStructureCacheKey<PlanKey>
@@ -86,10 +87,20 @@ where
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
+        Self::from_structures_with_storage_conjugation(plan, dst_structure, src_structure, false)
+    }
+
+    pub fn from_structures_with_storage_conjugation(
+        plan: PlanKey,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        storage_conjugate: bool,
+    ) -> Result<Self, OperationError> {
         Ok(Self {
             plan,
             dst: BlockStructureCacheKey::from_structure(dst_structure)?,
             src: BlockStructureCacheKey::from_structure(src_structure)?,
+            storage_conjugate,
         })
     }
 
@@ -106,6 +117,11 @@ where
     #[inline]
     pub fn src(&self) -> &BlockStructureCacheKey {
         &self.src
+    }
+
+    #[inline]
+    pub fn storage_conjugate(&self) -> bool {
+        self.storage_conjugate
     }
 }
 
