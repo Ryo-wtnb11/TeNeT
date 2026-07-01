@@ -49,11 +49,11 @@ pub use contract::{
     tensorcontract_into, tensorcontract_into_with, tensorcontract_into_with_context,
     tensorcontract_structure, tensorproduct_fusion_into,
     tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
-    tensorproduct_into_with_conjugation, TensorContractBackend, TensorContractBlockPlanKey,
-    TensorContractBlockPlanTerm, TensorContractBlockSpec, TensorContractCache,
-    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractFusionExplicitPlan, TensorContractPlanKey, TensorContractStructure,
-    TensorContractStructureTerm, TensorContractWorkspace,
+    tensorproduct_into_with_conjugation, HostTreeFusionExecutionContext, TensorContractBackend,
+    TensorContractBlockPlanKey, TensorContractBlockPlanTerm, TensorContractBlockSpec,
+    TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
+    TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan, TensorContractPlanKey,
+    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use error::OperationError;
 pub use facade::{

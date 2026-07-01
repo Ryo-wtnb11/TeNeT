@@ -11,8 +11,9 @@ use tenet_operations::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
     tree_pair_transform_into_with_context, AxisPermutation, HostTensorOperations,
-    TensorContractAxisSpec, TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext, TreeTransformRuleCacheKey,
+    HostTreeFusionExecutionContext, TensorContractAxisSpec, TensorContractFusionExecutionContext,
+    TensorContractFusionExplicitPlan, TreeTransformBuiltinRuleCacheKey,
+    TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
 
 static LHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
@@ -423,11 +424,8 @@ impl Su2NoncanonicalFixture {
     fn time_context_warm_host_tree(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
-        let mut context = TensorContractFusionExecutionContext::<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-            HostTensorOperations,
-        >::default();
+        let mut context =
+            HostTreeFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
         context
             .tensorcontract_fusion_into(
                 &rule,

@@ -3,13 +3,12 @@ use std::hash::Hash;
 use tenet_core::{CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
-use crate::backend::DenseTreeTransformOperations;
 use crate::cache::{TensorContractStructureCache, TensorContractStructureCacheKey};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
-    DenseBlockScalar, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
-    TreeTransformBackend,
+    DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
+    OperationError, RecouplingCoefficientAction, TreeTransformBackend,
 };
 
 use super::backend::TensorContractBackend;
@@ -467,6 +466,13 @@ pub struct TensorContractFusionExecutionContext<
     fusion_block_workspace: CanonicalFusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
 }
+
+pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecutionContext<
+    D,
+    RuleKey,
+    HostTensorOperations,
+    DenseTreeTransformOperations,
+>;
 
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
