@@ -18,7 +18,8 @@ use crate::strided::{
 };
 use crate::structure_identity::validate_structure_identity;
 use crate::{
-    DenseBlockScalar, OperationError, RecouplingCoefficientAction, TreeTransformRuleCacheKey,
+    axpby_raw_strided_kernel, ConjugateValue, DenseBlockScalar, OperationError,
+    RecouplingCoefficientAction, TreeTransformRuleCacheKey,
 };
 
 use super::backend::TensorContractBackend;
@@ -1094,7 +1095,6 @@ impl FusionBlockMatrixGroupBuilder {
                     strides: strides_to_isize(block.strides())?,
                     offset: offset_to_isize(block.offset())?,
                 },
-                zero_strides: vec![0isize; block.shape().len()],
                 matrix_offset,
                 matrix_strides,
                 coefficient,
@@ -1136,7 +1136,6 @@ struct FusionBlockMatrixGroup {
 #[derive(Clone, Debug)]
 struct FusionSubblockMatrixLayout {
     block: FusionStridedBlockLayout,
-    zero_strides: Vec<isize>,
     matrix_offset: isize,
     matrix_strides: Vec<isize>,
     coefficient: f64,
@@ -1234,31 +1233,21 @@ where
         + PartialEq
         + Zero
         + One
+        + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
     for layout in &group.subblocks {
-        let mut dst = strided_kernel::StridedViewMut::new(
+        axpby_raw_strided_kernel(
             data,
-            &layout.block.shape,
-            &layout.block.strides,
-            layout.block.offset,
-        )
-        .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(
             packed,
             &layout.block.shape,
+            &layout.block.strides,
             &layout.matrix_strides,
+            layout.block.offset,
             layout.matrix_offset,
-        )
-        .map_err(strided_error)?;
-        if beta.is_zero() {
-            strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)?;
-        } else {
-            if !beta.is_one() {
-                scale_view(&mut dst, &layout.zero_strides, beta)?;
-            }
-            strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)?;
-        }
+            alpha,
+            beta,
+        )?;
     }
     Ok(())
 }

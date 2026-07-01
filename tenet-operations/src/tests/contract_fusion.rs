@@ -206,6 +206,107 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
 }
 
 #[test]
+fn tensorcontract_fusion_block_replay_scatter_beta_supports_dense_dtypes() {
+    assert_fusion_block_scatter_beta_dtype(2.0_f32, 5.0, 10.0, 20.0, 2.0, 3.0);
+    assert_fusion_block_scatter_beta_dtype(2.0_f64, 5.0, 10.0, 20.0, 2.0, 3.0);
+    assert_fusion_block_scatter_beta_dtype(
+        Complex32::new(2.0, 1.0),
+        Complex32::new(5.0, -2.0),
+        Complex32::new(10.0, 1.0),
+        Complex32::new(20.0, -3.0),
+        Complex32::new(2.0, -1.0),
+        Complex32::new(-1.0, 0.5),
+    );
+    assert_fusion_block_scatter_beta_dtype(
+        Complex64::new(2.0, 1.0),
+        Complex64::new(5.0, -2.0),
+        Complex64::new(10.0, 1.0),
+        Complex64::new(20.0, -3.0),
+        Complex64::new(2.0, -1.0),
+        Complex64::new(-1.0, 0.5),
+    );
+}
+
+fn assert_fusion_block_scatter_beta_dtype<T>(
+    lhs_value: T,
+    rhs_value: T,
+    initial_even: T,
+    initial_odd: T,
+    alpha: T,
+    beta: T,
+) where
+    T: DenseBlockScalar + DenseRecouplingScalar + RecouplingCoefficientAction<f64> + Debug,
+{
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = || SectorLeg::new([even, odd], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let keys = homspace.fusion_tree_keys(&rule);
+    let key_for_sector = |sector| {
+        keys.iter()
+            .find(|key| key.codomain_tree().coupled() == Some(sector))
+            .cloned()
+            .expect("Z2 one-leg homspace contains requested sector")
+    };
+    let even_key = key_for_sector(even);
+    let odd_key = key_for_sector(odd);
+
+    let lhs_space = FusionTensorMapSpace::new(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace.clone(),
+        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+    )
+    .unwrap();
+    let rhs_space = FusionTensorMapSpace::new(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace.clone(),
+        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::new(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace,
+        BlockStructure::packed_column_major_with_keys(
+            2,
+            [(even_key, vec![1, 1]), (odd_key, vec![1, 1])],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let lhs = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(vec![lhs_value], lhs_space).unwrap();
+    let rhs = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(vec![rhs_value], rhs_space).unwrap();
+    let mut dst = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(
+        vec![initial_even, initial_odd],
+        dst_space,
+    )
+    .unwrap();
+
+    tensorcontract_fusion_into(
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        alpha,
+        beta,
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst.data(),
+        &[
+            beta * initial_even + alpha * lhs_value * rhs_value,
+            beta * initial_odd
+        ]
+    );
+}
+
+#[test]
 fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);

@@ -612,6 +612,41 @@ where
     assert_eq!(dst.data(), expected.as_slice());
 }
 
+fn assert_tensoradd_permuted_general_dtype<T>(
+    values: Vec<T>,
+    fill: T,
+    alpha: T,
+    beta: T,
+    expected: Vec<T>,
+) where
+    T: Copy
+        + Clone
+        + Debug
+        + PartialEq
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let src = TensorMap::<T, 2, 0>::from_vec(values, src_space).unwrap();
+    let mut dst = TensorMap::<T, 2, 0>::filled(fill, dst_space).unwrap();
+
+    tensoradd_into(
+        &mut dst,
+        &src,
+        AxisPermutation::from_axes(&[1, 0]),
+        alpha,
+        beta,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), expected.as_slice());
+}
+
 fn assert_tree_single_dtype<T>(
     values: Vec<T>,
     fill: T,
