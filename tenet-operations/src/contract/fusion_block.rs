@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
@@ -6,12 +8,15 @@ use tenet_core::{
     SectorId,
 };
 
-use crate::axis::TensorContractAxisSpec;
+use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use crate::cache::BlockStructureCacheKey;
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, error as strided_error,
     offset_to_isize, strides_to_isize,
 };
-use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
+use crate::{
+    DenseBlockScalar, OperationError, RecouplingCoefficientAction, TreeTransformRuleCacheKey,
+};
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
@@ -38,65 +43,22 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
-    reject_fusion_contract_conjugation(axes)?;
-    validate_canonical_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_space.rank(),
-        rhs_space.rank(),
-        dst_space.rank(),
-        axes,
-    )?;
-
-    let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space, None)?;
-    let rhs_layout =
-        FusionBlockMatrixLayout::compile(rule, rhs_space, Some(&axis_plan.rhs_contracting_axes))?;
-    let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space, None)?;
-
-    scale_all_blocks(dst_space.structure(), dst_data, beta)?;
-
-    let mut buffers = FusionBlockContractBuffers::<D>::default();
-    for lhs_group in &lhs_layout.groups {
-        let Some(rhs_group) = rhs_layout.group(lhs_group.coupled) else {
-            continue;
-        };
-        let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
-            continue;
-        };
-        if lhs_group.cols != rhs_group.rows {
-            return Err(OperationError::ShapeMismatch {
-                dst: vec![lhs_group.cols],
-                src: vec![rhs_group.rows],
-            });
-        }
-        if dst_group.rows != lhs_group.rows || dst_group.cols != rhs_group.cols {
-            return Err(OperationError::ShapeMismatch {
-                dst: vec![dst_group.rows, dst_group.cols],
-                src: vec![lhs_group.rows, rhs_group.cols],
-            });
-        }
-
-        buffers.prepare(lhs_group.rows, lhs_group.cols, rhs_group.cols)?;
-        pack_group(lhs_group, lhs_space.structure(), lhs_data, &mut buffers.lhs)?;
-        pack_group(rhs_group, rhs_space.structure(), rhs_data, &mut buffers.rhs)?;
-        matmul_group(
-            backend,
-            workspace,
-            lhs_group.rows,
-            lhs_group.cols,
-            rhs_group.cols,
-            &buffers.lhs,
-            &buffers.rhs,
-            &mut buffers.dst,
-        )?;
-        scatter_group(
-            dst_group,
-            dst_space.structure(),
-            dst_data,
-            &buffers.dst,
-            alpha,
-        )?;
-    }
-    Ok(())
+    let plan =
+        CanonicalFusionBlockContractPlan::compile(rule, dst_space, lhs_space, rhs_space, axes)?;
+    let mut fusion_workspace = CanonicalFusionBlockContractWorkspace::<D>::default();
+    plan.execute_raw(
+        backend,
+        workspace,
+        &mut fusion_workspace,
+        dst_space.structure(),
+        dst_data,
+        lhs_space.structure(),
+        lhs_data,
+        rhs_space.structure(),
+        rhs_data,
+        alpha,
+        beta,
+    )
 }
 
 pub(crate) fn is_canonical_fusion_block_contract<R>(
@@ -179,6 +141,19 @@ fn is_canonical_output(
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct CanonicalFusionBlockContractWorkspace<T> {
+    buffers: FusionBlockContractBuffers<T>,
+}
+
+impl<T> Default for CanonicalFusionBlockContractWorkspace<T> {
+    fn default() -> Self {
+        Self {
+            buffers: FusionBlockContractBuffers::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct FusionBlockContractBuffers<T> {
     lhs: Vec<T>,
     rhs: Vec<T>,
@@ -192,6 +167,293 @@ impl<T> Default for FusionBlockContractBuffers<T> {
             rhs: Vec::new(),
             dst: Vec::new(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CanonicalFusionBlockContractPlan {
+    groups: Vec<CanonicalFusionBlockContractGroupPlan>,
+}
+
+impl CanonicalFusionBlockContractPlan {
+    pub(crate) fn compile<R>(
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        lhs_space: &DynamicFusionMapSpace,
+        rhs_space: &DynamicFusionMapSpace,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        reject_fusion_contract_conjugation(axes)?;
+        validate_canonical_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
+        let axis_plan = TensorContractAxisPlan::compile(
+            lhs_space.rank(),
+            rhs_space.rank(),
+            dst_space.rank(),
+            axes,
+        )?;
+
+        let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space, None)?;
+        let rhs_layout = FusionBlockMatrixLayout::compile(
+            rule,
+            rhs_space,
+            Some(&axis_plan.rhs_contracting_axes),
+        )?;
+        let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space, None)?;
+
+        let mut groups = Vec::new();
+        for lhs_group in lhs_layout.groups {
+            let Some(rhs_group) = rhs_layout.group(lhs_group.coupled) else {
+                continue;
+            };
+            let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
+                continue;
+            };
+            groups.push(CanonicalFusionBlockContractGroupPlan::compile(
+                lhs_group,
+                rhs_group.clone(),
+                dst_group.clone(),
+            )?);
+        }
+        Ok(Self { groups })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_raw<B, D>(
+        &self,
+        backend: &mut B,
+        workspace: &mut B::Workspace,
+        fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        B: TensorContractBackend<D, f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    {
+        scale_all_blocks(dst_structure, dst_data, beta)?;
+
+        for group in &self.groups {
+            fusion_workspace
+                .buffers
+                .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            pack_group(
+                &group.lhs,
+                lhs_structure,
+                lhs_data,
+                &mut fusion_workspace.buffers.lhs,
+            )?;
+            pack_group(
+                &group.rhs,
+                rhs_structure,
+                rhs_data,
+                &mut fusion_workspace.buffers.rhs,
+            )?;
+            matmul_group_plan(
+                backend,
+                workspace,
+                group,
+                &fusion_workspace.buffers.lhs,
+                &fusion_workspace.buffers.rhs,
+                &mut fusion_workspace.buffers.dst,
+            )?;
+            scatter_group(
+                &group.dst,
+                dst_structure,
+                dst_data,
+                &fusion_workspace.buffers.dst,
+                alpha,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalFusionBlockContractGroupPlan {
+    lhs: FusionBlockMatrixGroup,
+    rhs: FusionBlockMatrixGroup,
+    dst: FusionBlockMatrixGroup,
+    matmul_dst_structure: Arc<BlockStructure>,
+    matmul_lhs_structure: Arc<BlockStructure>,
+    matmul_rhs_structure: Arc<BlockStructure>,
+    matmul_structure: TensorContractStructure,
+}
+
+impl CanonicalFusionBlockContractGroupPlan {
+    fn compile(
+        lhs: FusionBlockMatrixGroup,
+        rhs: FusionBlockMatrixGroup,
+        dst: FusionBlockMatrixGroup,
+    ) -> Result<Self, OperationError> {
+        if lhs.cols != rhs.rows {
+            return Err(OperationError::ShapeMismatch {
+                dst: vec![lhs.cols],
+                src: vec![rhs.rows],
+            });
+        }
+        if dst.rows != lhs.rows || dst.cols != rhs.cols {
+            return Err(OperationError::ShapeMismatch {
+                dst: vec![dst.rows, dst.cols],
+                src: vec![lhs.rows, rhs.cols],
+            });
+        }
+
+        let matmul_lhs_structure = Arc::new(BlockStructure::trivial(&[lhs.rows, lhs.cols])?);
+        let matmul_rhs_structure = Arc::new(BlockStructure::trivial(&[lhs.cols, rhs.cols])?);
+        let matmul_dst_structure = Arc::new(BlockStructure::trivial(&[lhs.rows, rhs.cols])?);
+        let matmul_structure = TensorContractStructure::compile_structures(
+            &matmul_dst_structure,
+            &matmul_lhs_structure,
+            &matmul_rhs_structure,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )?;
+        Ok(Self {
+            lhs,
+            rhs,
+            dst,
+            matmul_dst_structure,
+            matmul_lhs_structure,
+            matmul_rhs_structure,
+            matmul_structure,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CanonicalFusionBlockContractCacheStats {
+    hits: usize,
+    misses: usize,
+}
+
+impl CanonicalFusionBlockContractCacheStats {
+    #[inline]
+    pub(crate) fn hits(self) -> usize {
+        self.hits
+    }
+
+    #[inline]
+    pub(crate) fn misses(self) -> usize {
+        self.misses
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
+    plans: HashMap<CanonicalFusionBlockContractCacheKey<RuleKey>, CanonicalFusionBlockContractPlan>,
+    stats: CanonicalFusionBlockContractCacheStats,
+}
+
+impl<RuleKey> Default for CanonicalFusionBlockContractCache<RuleKey> {
+    fn default() -> Self {
+        Self {
+            plans: HashMap::new(),
+            stats: CanonicalFusionBlockContractCacheStats::default(),
+        }
+    }
+}
+
+impl<RuleKey> CanonicalFusionBlockContractCache<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.plans.len()
+    }
+
+    #[inline]
+    pub(crate) fn stats(&self) -> CanonicalFusionBlockContractCacheStats {
+        self.stats
+    }
+
+    pub(crate) fn get_or_compile<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        lhs_space: &DynamicFusionMapSpace,
+        rhs_space: &DynamicFusionMapSpace,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Result<&CanonicalFusionBlockContractPlan, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let key = CanonicalFusionBlockContractCacheKey::from_spaces(
+            rule, dst_space, lhs_space, rhs_space, axes,
+        )?;
+        if self.plans.get(&key).is_some() {
+            self.stats.hits += 1;
+        } else {
+            self.stats.misses += 1;
+            let plan = CanonicalFusionBlockContractPlan::compile(
+                rule, dst_space, lhs_space, rhs_space, axes,
+            )?;
+            self.plans.insert(key.clone(), plan);
+        }
+        Ok(self
+            .plans
+            .get(&key)
+            .expect("canonical fusion block contract plan inserted before replay"))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct CanonicalFusionBlockContractCacheKey<RuleKey> {
+    rule: RuleKey,
+    dst_nout: usize,
+    dst_homspace: FusionTreeHomSpace,
+    dst_structure: BlockStructureCacheKey,
+    lhs_nout: usize,
+    lhs_homspace: FusionTreeHomSpace,
+    lhs_structure: BlockStructureCacheKey,
+    rhs_nout: usize,
+    rhs_homspace: FusionTreeHomSpace,
+    rhs_structure: BlockStructureCacheKey,
+    axes: OwnedTensorContractAxisSpec,
+}
+
+impl<RuleKey> CanonicalFusionBlockContractCacheKey<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    fn from_spaces<R>(
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+        Ok(Self {
+            rule: rule.tree_transform_rule_cache_key(),
+            dst_nout: dst.nout(),
+            dst_homspace: dst.homspace().clone(),
+            dst_structure: BlockStructureCacheKey::from_structure(dst.structure())?,
+            lhs_nout: lhs.nout(),
+            lhs_homspace: lhs.homspace().clone(),
+            lhs_structure: BlockStructureCacheKey::from_structure(lhs.structure())?,
+            rhs_nout: rhs.nout(),
+            rhs_homspace: rhs.homspace().clone(),
+            rhs_structure: BlockStructureCacheKey::from_structure(rhs.structure())?,
+            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
+                axis_plan.lhs_contracting_axes,
+                axis_plan.rhs_contracting_axes,
+                axis_plan.output_axes,
+                axis_plan.lhs_conjugate,
+                axis_plan.rhs_conjugate,
+            ),
+        })
     }
 }
 
@@ -578,12 +840,10 @@ where
     strided_kernel::mul(dst, &beta_view).map_err(strided_error)
 }
 
-fn matmul_group<B, D>(
+fn matmul_group_plan<B, D>(
     backend: &mut B,
     workspace: &mut B::Workspace,
-    rows: usize,
-    contracted: usize,
-    cols: usize,
+    group: &CanonicalFusionBlockContractGroupPlan,
     lhs: &[D],
     rhs: &[D],
     dst: &mut [D],
@@ -592,21 +852,12 @@ where
     B: TensorContractBackend<D, f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
-    let lhs_structure = std::sync::Arc::new(BlockStructure::trivial(&[rows, contracted])?);
-    let rhs_structure = std::sync::Arc::new(BlockStructure::trivial(&[contracted, cols])?);
-    let dst_structure = std::sync::Arc::new(BlockStructure::trivial(&[rows, cols])?);
-    let structure = TensorContractStructure::compile_structures(
-        &dst_structure,
-        &lhs_structure,
-        &rhs_structure,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
-    )?;
     backend.tensorcontract_structure_into_raw(
         workspace,
-        &structure,
-        &dst_structure,
-        &lhs_structure,
-        &rhs_structure,
+        &group.matmul_structure,
+        &group.matmul_dst_structure,
+        &group.matmul_lhs_structure,
+        &group.matmul_rhs_structure,
         dst,
         lhs,
         rhs,

@@ -11,11 +11,13 @@ use crate::{
 };
 
 use super::backend::TensorContractBackend;
-use super::context::{TensorContractBlockPlanKey, TensorContractCache};
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::dynamic_space_cache::DynamicFusionSpaceCache;
 use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
-use super::fusion_block::tensorcontract_canonical_fusion_blocks_into_raw;
+use super::fusion_block::{
+    tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractCache,
+    CanonicalFusionBlockContractWorkspace,
+};
 use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
 
 #[allow(clippy::too_many_arguments)]
@@ -229,7 +231,8 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
-    contract_cache: &mut TensorContractCache<TensorContractBlockPlanKey>,
+    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
     rule: &R,
@@ -295,7 +298,8 @@ where
         return tensorcontract_dynamic_canonical_into_raw_with_cache(
             contract_backend,
             contract_workspace,
-            contract_cache,
+            fusion_block_cache,
+            fusion_block_workspace,
             rule,
             &dst_space,
             &dst_structure,
@@ -328,7 +332,8 @@ where
         tensorcontract_dynamic_canonical_into_raw_with_cache(
             contract_backend,
             contract_workspace,
-            contract_cache,
+            fusion_block_cache,
+            fusion_block_workspace,
             rule,
             &canonical_dst_space_for_contract,
             &canonical_dst_structure,
@@ -607,7 +612,8 @@ where
 fn tensorcontract_dynamic_canonical_into_raw_with_cache<B, R, D>(
     backend: &mut B,
     workspace: &mut B::Workspace,
-    cache: &mut TensorContractCache<TensorContractBlockPlanKey>,
+    cache: &mut CanonicalFusionBlockContractCache<R::Key>,
+    fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
     dst_structure: &std::sync::Arc<BlockStructure>,
@@ -620,21 +626,20 @@ fn tensorcontract_dynamic_canonical_into_raw_with_cache<B, R, D>(
 ) -> Result<(), OperationError>
 where
     B: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let _ = (cache, dst_structure);
-    tensorcontract_canonical_fusion_blocks_into_raw(
+    let plan = cache.get_or_compile(rule, dst_space, lhs.space(), rhs.space(), axes)?;
+    plan.execute_raw(
         backend,
         workspace,
-        rule,
-        dst_space,
+        fusion_workspace,
+        dst_structure,
         dst_data,
-        lhs.space(),
+        lhs.space().structure(),
         lhs.data(),
-        rhs.space(),
+        rhs.space().structure(),
         rhs.data(),
-        axes,
         alpha,
         beta,
     )

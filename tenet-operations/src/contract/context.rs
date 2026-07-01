@@ -25,7 +25,8 @@ use super::fusion::{
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
-    is_canonical_fusion_block_contract, tensorcontract_canonical_fusion_blocks_into_raw,
+    is_canonical_fusion_block_contract, CanonicalFusionBlockContractCache,
+    CanonicalFusionBlockContractWorkspace,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
@@ -635,6 +636,8 @@ pub struct TensorContractFusionExecutionContext<
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
+    fusion_block_cache: CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_workspace: CanonicalFusionBlockContractWorkspace<D>,
     fusion_plan_cache: TensorContractFusionPlanCache<RuleKey>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
     fusion_space_cache: DynamicFusionSpaceCache<RuleKey>,
@@ -658,6 +661,8 @@ where
             contract_backend,
             contract_workspace,
             contract_cache,
+            fusion_block_cache: CanonicalFusionBlockContractCache::default(),
+            fusion_block_workspace: CanonicalFusionBlockContractWorkspace::default(),
             fusion_plan_cache: TensorContractFusionPlanCache::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
             fusion_space_cache: DynamicFusionSpaceCache::default(),
@@ -702,6 +707,21 @@ where
     #[inline]
     pub fn contract_cache_mut(&mut self) -> &mut TensorContractCache<TensorContractBlockPlanKey> {
         &mut self.contract_cache
+    }
+
+    #[inline]
+    pub fn fusion_block_contract_cache_len(&self) -> usize {
+        self.fusion_block_cache.len()
+    }
+
+    #[inline]
+    pub fn fusion_block_contract_cache_hits(&self) -> usize {
+        self.fusion_block_cache.stats().hits()
+    }
+
+    #[inline]
+    pub fn fusion_block_contract_cache_misses(&self) -> usize {
+        self.fusion_block_cache.stats().misses()
     }
 
     #[inline]
@@ -839,17 +859,26 @@ where
                 axes,
             )?
         {
-            return tensorcontract_canonical_fusion_blocks_into_raw(
-                &mut self.contract_backend,
-                &mut self.contract_workspace,
+            let plan = self.fusion_block_cache.get_or_compile(
                 rule,
                 &dst_dynamic,
-                dst.data_mut(),
                 &lhs_dynamic,
-                lhs.data(),
                 &rhs_dynamic,
-                rhs.data(),
                 axes,
+            )?;
+            let dst_structure = std::sync::Arc::clone(dst.structure());
+            let lhs_structure = std::sync::Arc::clone(lhs.structure());
+            let rhs_structure = std::sync::Arc::clone(rhs.structure());
+            return plan.execute_raw(
+                &mut self.contract_backend,
+                &mut self.contract_workspace,
+                &mut self.fusion_block_workspace,
+                &dst_structure,
+                dst.data_mut(),
+                &lhs_structure,
+                lhs.data(),
+                &rhs_structure,
+                rhs.data(),
                 alpha,
                 beta,
             );
@@ -862,7 +891,9 @@ where
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    contract_cache,
+                    contract_cache: _,
+                    fusion_block_cache,
+                    fusion_block_workspace,
                     fusion_plan_cache,
                     fusion_scratch,
                     fusion_space_cache,
@@ -874,7 +905,8 @@ where
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    contract_cache,
+                    fusion_block_cache,
+                    fusion_block_workspace,
                     fusion_scratch,
                     fusion_space_cache,
                     rule,
@@ -908,7 +940,9 @@ where
                         tree_context,
                         contract_backend,
                         contract_workspace,
-                        contract_cache,
+                        contract_cache: _,
+                        fusion_block_cache,
+                        fusion_block_workspace,
                         fusion_plan_cache,
                         fusion_scratch,
                         fusion_space_cache,
@@ -919,7 +953,8 @@ where
                         tree_context,
                         contract_backend,
                         contract_workspace,
-                        contract_cache,
+                        fusion_block_cache,
+                        fusion_block_workspace,
                         fusion_scratch,
                         fusion_space_cache,
                         rule,
@@ -961,7 +996,9 @@ where
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    contract_cache,
+                    contract_cache: _,
+                    fusion_block_cache,
+                    fusion_block_workspace,
                     fusion_plan_cache,
                     fusion_scratch,
                     fusion_space_cache,
@@ -972,7 +1009,8 @@ where
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    contract_cache,
+                    fusion_block_cache,
+                    fusion_block_workspace,
                     fusion_scratch,
                     fusion_space_cache,
                     rule,

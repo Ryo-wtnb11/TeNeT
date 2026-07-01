@@ -111,6 +111,12 @@ fn bench_su2_noncanonical_source() {
         context.contract_cache().stats().structure_misses(),
         context.contract_cache().structure_len()
     );
+    println!(
+        "fusion_block_contract_cache,hits={},misses={},len={}",
+        context.fusion_block_contract_cache_hits(),
+        context.fusion_block_contract_cache_misses(),
+        context.fusion_block_contract_cache_len()
+    );
 }
 
 fn bench_su2_output_scratch() {
@@ -167,6 +173,12 @@ fn bench_su2_output_scratch() {
         context.contract_cache().stats().structure_misses(),
         context.contract_cache().structure_len()
     );
+    println!(
+        "fusion_block_contract_cache,hits={},misses={},len={}",
+        context.fusion_block_contract_cache_hits(),
+        context.fusion_block_contract_cache_misses(),
+        context.fusion_block_contract_cache_len()
+    );
 }
 
 fn bench_product_complex() {
@@ -221,6 +233,12 @@ fn bench_product_complex() {
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
         context.contract_cache().structure_len()
+    );
+    println!(
+        "fusion_block_contract_cache,hits={},misses={},len={}",
+        context.fusion_block_contract_cache_hits(),
+        context.fusion_block_contract_cache_misses(),
+        context.fusion_block_contract_cache_len()
     );
 }
 
