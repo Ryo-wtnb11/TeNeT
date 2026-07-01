@@ -458,10 +458,18 @@ pub struct TensorContractFusionExecutionContext<
     BC: TensorContractBackend<D, f64>,
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    // Full dynamic fallback replay plan: source tree transforms, canonical
+    // fusion-block contraction, and optional output tree transform.  This is
+    // intentionally not the cache for canonical compose contractions; those
+    // stay in `fusion_block_cache`, matching TensorKit's separate space/tree
+    // transformation and block contraction layers.
     fusion_execution_plan_cache: DynamicFusionExecutionPlanCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
+    // Canonical compose pack/GEMM/scatter plans.  Do not fold this into the
+    // dynamic full execution cache: canonical calls should not pay for source
+    // transform/output transform planning or dynamic scratch spaces.
     fusion_block_cache: CanonicalFusionBlockContractCache<RuleKey>,
     fusion_block_workspace: CanonicalFusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,

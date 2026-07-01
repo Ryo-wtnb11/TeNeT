@@ -69,6 +69,52 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
     .unwrap();
 
     assert_eq!(dst.data(), &[50.0, 102.0]);
+
+    let mut context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        vec![10.0, 20.0],
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut context_dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+            2.0,
+            3.0,
+        )
+        .unwrap();
+    assert_eq!(context_dst.data(), &[50.0, 102.0]);
+    assert_eq!(context.fusion_execution_plan_cache_len(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_compiles(), 0);
+    assert_eq!(context.fusion_block_contract_cache_len(), 1);
+    assert_eq!(context.fusion_block_contract_cache_hits(), 0);
+    assert_eq!(context.fusion_block_contract_cache_misses(), 1);
+
+    context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut context_dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+            2.0,
+            3.0,
+        )
+        .unwrap();
+    assert_eq!(context_dst.data(), &[50.0, 102.0]);
+    assert_eq!(context.fusion_execution_plan_cache_len(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_compiles(), 0);
+    assert_eq!(context.fusion_block_contract_cache_len(), 1);
+    assert_eq!(context.fusion_block_contract_cache_hits(), 1);
+    assert_eq!(context.fusion_block_contract_cache_misses(), 1);
 }
 
 #[test]
