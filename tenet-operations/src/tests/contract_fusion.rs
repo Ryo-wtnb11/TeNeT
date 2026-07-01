@@ -89,9 +89,6 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert_eq!(context.fusion_execution_plan_cache_len(), 1);
-    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_hits(), 0);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
@@ -109,11 +106,8 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert_eq!(context.fusion_execution_plan_cache_len(), 1);
-    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 1);
-    assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
-    assert_eq!(context.fusion_block_contract_cache_hits(), 0);
+    assert_eq!(context.fusion_block_contract_cache_hits(), 1);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
 }
 
@@ -1994,16 +1988,29 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(automatic_context.tree_context().cache().plan_len(), 0);
-    assert_eq!(automatic_context.tree_context().cache().structure_len(), 0);
-    assert_eq!(automatic_context.fusion_execution_plan_cache_len(), 1);
-    assert_eq!(
-        automatic_context.fusion_execution_plan_cache_replay_hits(),
-        0
+    assert!(automatic_context.tree_context().cache().plan_len() > 0);
+    assert!(automatic_context.tree_context().cache().structure_len() > 0);
+    assert!(automatic_context.dynamic_fusion_space_cache_len() > 0);
+    assert!(automatic_context.dynamic_fusion_space_cache_misses() > 0);
+    assert_eq!(automatic_context.dynamic_fusion_space_cache_hits(), 0);
+    assert!(
+        automatic_context
+            .tree_context()
+            .cache()
+            .stats()
+            .plan_misses()
+            > 0
     );
-    assert_eq!(automatic_context.fusion_execution_plan_cache_compiles(), 1);
-    // The automatic dynamic path uses the TensorKit-style canonical
-    // fusion-block pack/GEMM/scatter executor, not the generic dense
+    assert!(
+        automatic_context
+            .tree_context()
+            .cache()
+            .stats()
+            .structure_misses()
+            > 0
+    );
+    // The automatic fusion contraction uses the TensorKit-style canonical
+    // fusion-block pack/GEMM/scatter replay shape, not the generic dense
     // TensorContractStructure cache.
     assert_eq!(automatic_context.contract_cache().structure_len(), 0);
     assert_eq!(
@@ -2017,9 +2024,9 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             .structure_misses(),
         0
     );
-    assert_eq!(automatic_context.fusion_block_contract_cache_len(), 0);
+    assert_eq!(automatic_context.fusion_block_contract_cache_len(), 1);
     assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 0);
-    assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 0);
+    assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 1);
 
     let mut split_backend_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -2071,14 +2078,16 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(automatic_context.tree_context().cache().plan_len(), 0);
-    assert_eq!(automatic_context.tree_context().cache().structure_len(), 0);
-    assert_eq!(automatic_context.fusion_execution_plan_cache_len(), 1);
-    assert_eq!(
-        automatic_context.fusion_execution_plan_cache_replay_hits(),
-        1
+    assert!(automatic_context.tree_context().cache().stats().plan_hits() > 0);
+    assert!(automatic_context.dynamic_fusion_space_cache_hits() > 0);
+    assert!(
+        automatic_context
+            .tree_context()
+            .cache()
+            .stats()
+            .structure_hits()
+            > 0
     );
-    assert_eq!(automatic_context.fusion_execution_plan_cache_compiles(), 1);
     assert_eq!(automatic_context.contract_cache().structure_len(), 0);
     assert_eq!(
         automatic_context.contract_cache().stats().structure_hits(),
@@ -2091,13 +2100,13 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             .structure_misses(),
         0
     );
-    assert_eq!(automatic_context.fusion_block_contract_cache_len(), 0);
-    assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 0);
-    assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 0);
+    assert_eq!(automatic_context.fusion_block_contract_cache_len(), 1);
+    assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 1);
+    assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 1);
 }
 
 #[test]
-fn tensorcontract_fusion_execution_plan_cache_distinguishes_block_structure() {
+fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
@@ -2205,18 +2214,15 @@ fn tensorcontract_fusion_execution_plan_cache_distinguishes_block_structure() {
                 "actual {actual} expected {expected}"
             );
         }
-
-        assert_eq!(context.fusion_execution_plan_cache_len(), case_index + 1);
-        assert_eq!(
-            context.fusion_execution_plan_cache_compiles(),
-            case_index + 1
-        );
-        assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
     }
+    assert!(context.tree_context().cache().stats().structure_misses() >= 3);
+    assert!(context.tree_context().cache().stats().structure_hits() > 0);
+    assert!(context.fusion_block_contract_cache_len() >= 1);
+    assert!(context.fusion_block_contract_cache_misses() >= 1);
 }
 
 #[test]
-fn tensorcontract_fusion_execution_plan_cache_distinguishes_output_axes() {
+fn tensorcontract_fusion_granular_caches_handle_output_axes() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
@@ -2248,7 +2254,7 @@ fn tensorcontract_fusion_execution_plan_cache_distinguishes_output_axes() {
     let mut context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
 
-    for (case_index, output_axes) in [[0usize, 1usize], [1usize, 0usize]].into_iter().enumerate() {
+    for output_axes in [[0usize, 1usize], [1usize, 0usize]] {
         let axes = TensorContractAxisSpec::new(
             &[0, 1, 2],
             &[1, 2, 3],
@@ -2290,17 +2296,14 @@ fn tensorcontract_fusion_execution_plan_cache_distinguishes_output_axes() {
                 "actual {actual} expected {expected}"
             );
         }
-        assert_eq!(context.fusion_execution_plan_cache_len(), case_index + 1);
-        assert_eq!(
-            context.fusion_execution_plan_cache_compiles(),
-            case_index + 1
-        );
-        assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
     }
+    assert!(context.tree_context().cache().stats().structure_misses() > 0);
+    assert!(context.fusion_block_contract_cache_len() >= 1);
+    assert!(context.fusion_block_contract_cache_misses() >= 1);
 }
 
 #[test]
-fn tensorcontract_fusion_execution_plan_cache_distinguishes_source_conjugation() {
+fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
     let rule = SU2FusionRule;
     let mut context = TensorContractFusionExecutionContext::<
         Complex64,
@@ -2414,12 +2417,9 @@ fn tensorcontract_fusion_execution_plan_cache_distinguishes_source_conjugation()
                 "actual {actual} expected {expected}"
             );
         }
-        assert_eq!(context.fusion_execution_plan_cache_len(), case_index + 1);
-        assert_eq!(
-            context.fusion_execution_plan_cache_compiles(),
-            case_index + 1
-        );
-        assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
+        assert_eq!(context.fusion_block_contract_cache_len(), case_index + 1);
+        assert_eq!(context.fusion_block_contract_cache_misses(), case_index + 1);
+        assert_eq!(context.fusion_block_contract_cache_hits(), 0);
     }
 }
 
@@ -2675,11 +2675,13 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
     }
     let expects_dynamic_replay = !(lhs_conjugate && rhs_conjugate);
     if expects_dynamic_replay {
-        assert_eq!(context.fusion_execution_plan_cache_len(), 1);
-        assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
-        assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
+        assert!(context.tree_context().cache().stats().structure_misses() > 0);
+        assert_eq!(context.fusion_block_contract_cache_len(), 1);
+        assert_eq!(context.fusion_block_contract_cache_hits(), 0);
+        assert_eq!(context.fusion_block_contract_cache_misses(), 1);
     } else {
-        assert_eq!(context.fusion_execution_plan_cache_len(), 0);
+        assert_eq!(context.tree_context().cache().structure_len(), 0);
+        assert_eq!(context.fusion_block_contract_cache_len(), 0);
     }
 
     context_dst
@@ -2695,11 +2697,13 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         );
     }
     if expects_dynamic_replay {
-        assert_eq!(context.fusion_execution_plan_cache_len(), 1);
-        assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 1);
-        assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
+        assert!(context.tree_context().cache().stats().structure_hits() > 0);
+        assert_eq!(context.fusion_block_contract_cache_len(), 1);
+        assert_eq!(context.fusion_block_contract_cache_hits(), 1);
+        assert_eq!(context.fusion_block_contract_cache_misses(), 1);
     } else {
-        assert_eq!(context.fusion_execution_plan_cache_len(), 0);
+        assert_eq!(context.tree_context().cache().structure_len(), 0);
+        assert_eq!(context.fusion_block_contract_cache_len(), 0);
     }
 }
 
@@ -2889,12 +2893,9 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     // generic TensorContractStructure cache is only used by dense/block-spec
     // contraction paths.
     assert_eq!(context.contract_cache().structure_len(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_len(), 1);
-    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
-    assert_eq!(context.fusion_block_contract_cache_len(), 0);
+    assert_eq!(context.fusion_block_contract_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_hits(), 0);
-    assert_eq!(context.fusion_block_contract_cache_misses(), 0);
+    assert_eq!(context.fusion_block_contract_cache_misses(), 1);
 
     context_dst
         .data_mut()
@@ -2903,12 +2904,9 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
     assert_eq!(context.contract_cache().stats().structure_hits(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_len(), 1);
-    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 1);
-    assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
-    assert_eq!(context.fusion_block_contract_cache_len(), 0);
-    assert_eq!(context.fusion_block_contract_cache_hits(), 0);
-    assert_eq!(context.fusion_block_contract_cache_misses(), 0);
+    assert_eq!(context.fusion_block_contract_cache_len(), 1);
+    assert_eq!(context.fusion_block_contract_cache_hits(), 1);
+    assert_eq!(context.fusion_block_contract_cache_misses(), 1);
 }
 
 #[test]

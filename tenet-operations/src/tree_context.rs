@@ -12,7 +12,6 @@ use crate::scalar::TreeTransformScalar;
 use crate::tree_transform::{
     TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
 };
-use crate::TreeTransformStructure;
 
 #[derive(Debug)]
 pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
@@ -169,31 +168,6 @@ where
             src_structure,
             storage_conjugate,
         )?;
-        backend.tree_transform_structure_into_raw(
-            workspace,
-            structure,
-            dst_structure,
-            src_structure,
-            dst_data,
-            src_data,
-            alpha,
-            beta,
-        )
-    }
-
-    pub(crate) fn tree_transform_structure_into_raw(
-        &mut self,
-        structure: &TreeTransformStructure<C>,
-        dst_structure: &std::sync::Arc<BlockStructure>,
-        src_structure: &std::sync::Arc<BlockStructure>,
-        dst_data: &mut [D],
-        src_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError> {
-        let Self {
-            backend, workspace, ..
-        } = self;
         backend.tree_transform_structure_into_raw(
             workspace,
             structure,

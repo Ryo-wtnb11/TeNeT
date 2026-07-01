@@ -113,16 +113,16 @@ fn bench_su2_noncanonical_source() {
         context.contract_cache().structure_len()
     );
     println!(
+        "dynamic_fusion_space_cache,hits={},misses={},len={}",
+        context.dynamic_fusion_space_cache_hits(),
+        context.dynamic_fusion_space_cache_misses(),
+        context.dynamic_fusion_space_cache_len()
+    );
+    println!(
         "fusion_block_contract_cache,hits={},misses={},len={}",
         context.fusion_block_contract_cache_hits(),
         context.fusion_block_contract_cache_misses(),
         context.fusion_block_contract_cache_len()
-    );
-    println!(
-        "fusion_execution_plan_cache,replay_hits={},compiles={},len={}",
-        context.fusion_execution_plan_cache_replay_hits(),
-        context.fusion_execution_plan_cache_compiles(),
-        context.fusion_execution_plan_cache_len()
     );
 }
 
@@ -161,22 +161,28 @@ fn bench_su2_output_scratch() {
         context.tree_context().cache().plan_len()
     );
     println!(
+        "tree_structure_cache,hits={},misses={},len={}",
+        context.tree_context().cache().stats().structure_hits(),
+        context.tree_context().cache().stats().structure_misses(),
+        context.tree_context().cache().structure_len()
+    );
+    println!(
         "contract_structure_cache,hits={},misses={},len={}",
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
         context.contract_cache().structure_len()
     );
     println!(
+        "dynamic_fusion_space_cache,hits={},misses={},len={}",
+        context.dynamic_fusion_space_cache_hits(),
+        context.dynamic_fusion_space_cache_misses(),
+        context.dynamic_fusion_space_cache_len()
+    );
+    println!(
         "fusion_block_contract_cache,hits={},misses={},len={}",
         context.fusion_block_contract_cache_hits(),
         context.fusion_block_contract_cache_misses(),
         context.fusion_block_contract_cache_len()
-    );
-    println!(
-        "fusion_execution_plan_cache,replay_hits={},compiles={},len={}",
-        context.fusion_execution_plan_cache_replay_hits(),
-        context.fusion_execution_plan_cache_compiles(),
-        context.fusion_execution_plan_cache_len()
     );
 }
 
@@ -214,6 +220,18 @@ fn bench_product_complex() {
         context.tree_context().cache().plan_len()
     );
     println!(
+        "tree_structure_cache,hits={},misses={},len={}",
+        context.tree_context().cache().stats().structure_hits(),
+        context.tree_context().cache().stats().structure_misses(),
+        context.tree_context().cache().structure_len()
+    );
+    println!(
+        "dynamic_fusion_space_cache,hits={},misses={},len={}",
+        context.dynamic_fusion_space_cache_hits(),
+        context.dynamic_fusion_space_cache_misses(),
+        context.dynamic_fusion_space_cache_len()
+    );
+    println!(
         "contract_structure_cache,hits={},misses={},len={}",
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
@@ -224,12 +242,6 @@ fn bench_product_complex() {
         context.fusion_block_contract_cache_hits(),
         context.fusion_block_contract_cache_misses(),
         context.fusion_block_contract_cache_len()
-    );
-    println!(
-        "fusion_execution_plan_cache,replay_hits={},compiles={},len={}",
-        context.fusion_execution_plan_cache_replay_hits(),
-        context.fusion_execution_plan_cache_compiles(),
-        context.fusion_execution_plan_cache_len()
     );
 }
 
