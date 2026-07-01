@@ -8,10 +8,10 @@ use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
 use crate::{
     copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
     tensortrace_fusion_structure_with_strided_kernel, tensortrace_structure_with_strided_kernel,
-    tree_transform_structure_with_dense_recoupling, tree_transform_structure_with_strided_kernel,
-    ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
-    TensorAddStructure, TensorTraceFusionStructure, TensorTraceStructure,
-    TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
+    tree_transform_structure_with_strided_kernel,
+    tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
+    OperationError, RecouplingCoefficientAction, TensorAddStructure, TensorTraceFusionStructure,
+    TensorTraceStructure, TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
     TreeTransformWorkspace,
 };
 
@@ -395,7 +395,7 @@ where
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
-        tree_transform_structure_with_dense_recoupling(
+        tree_transform_structure_with_structural_recoupling(
             &mut self.dense,
             workspace,
             structure,
@@ -417,7 +417,7 @@ where
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
-        crate::tree_transform_structure_with_dense_recoupling_raw(
+        crate::tree_transform_structure_with_structural_recoupling_raw(
             &mut self.dense,
             workspace,
             structure,
@@ -442,7 +442,7 @@ where
         beta: D,
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
-        crate::tree_transform_structure_with_dense_recoupling_raw_profiled(
+        crate::tree_transform_structure_with_structural_recoupling_raw_profiled(
             &mut self.dense,
             workspace,
             structure,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{BlockStructure, BlockView, BlockViewMut, TensorMap};
-use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
+use tenet_dense::DenseExecutor;
 
 use crate::strided::{
     error as strided_error, offset_to_isize, read as strided_read, write as strided_write,
@@ -20,9 +20,6 @@ pub struct TreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     source: Vec<T>,
     destination: Vec<T>,
-    coefficients: Vec<T>,
-    coefficient_cache_key: Option<CoefficientCacheKey>,
-    coefficient_cache_refreshes: usize,
 }
 
 impl<T> Default for TreeTransformWorkspace<T> {
@@ -31,9 +28,6 @@ impl<T> Default for TreeTransformWorkspace<T> {
             zero_strides: Vec::new(),
             source: Vec::new(),
             destination: Vec::new(),
-            coefficients: Vec::new(),
-            coefficient_cache_key: None,
-            coefficient_cache_refreshes: 0,
         }
     }
 }
@@ -45,44 +39,6 @@ impl<T> TreeTransformWorkspace<T> {
 
     pub fn destination_len(&self) -> usize {
         self.destination.len()
-    }
-
-    pub fn coefficient_len(&self) -> usize {
-        self.coefficients.len()
-    }
-
-    pub fn coefficient_cache_refreshes(&self) -> usize {
-        self.coefficient_cache_refreshes
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CoefficientCacheKey {
-    ptr: *const (),
-    len: usize,
-}
-
-impl<T> TreeTransformWorkspace<T>
-where
-    T: Copy,
-{
-    fn prepare_coefficients_from<C>(&mut self, coefficients: &[C])
-    where
-        T: RecouplingCoefficientAction<C>,
-        C: Copy,
-    {
-        let key = CoefficientCacheKey {
-            ptr: coefficients.as_ptr().cast::<()>(),
-            len: coefficients.len(),
-        };
-        if self.coefficient_cache_key == Some(key) {
-            return;
-        }
-        self.coefficients.clear();
-        self.coefficients
-            .extend(coefficients.iter().copied().map(T::coefficient_as_data));
-        self.coefficient_cache_key = Some(key);
-        self.coefficient_cache_refreshes += 1;
     }
 }
 
@@ -260,7 +216,7 @@ where
     Ok(())
 }
 
-pub(crate) fn tree_transform_structure_with_dense_recoupling<
+pub(crate) fn tree_transform_structure_with_structural_recoupling<
     E,
     D,
     C,
@@ -286,7 +242,7 @@ where
 {
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
-    tree_transform_structure_with_dense_recoupling_raw(
+    tree_transform_structure_with_structural_recoupling_raw(
         dense,
         workspace,
         structure,
@@ -299,7 +255,7 @@ where
     )
 }
 
-pub(crate) fn tree_transform_structure_with_dense_recoupling_raw<E, D, C>(
+pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<E, D, C>(
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -341,7 +297,7 @@ where
                 src_count,
                 coefficient_start,
                 element_count,
-            } => tree_transform_multi_with_dense_recoupling(
+            } => tree_transform_multi_with_structural_recoupling(
                 dense,
                 workspace,
                 &structure.layouts,
@@ -364,7 +320,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tree_transform_structure_with_dense_recoupling_raw_profiled<E, D, C>(
+pub(crate) fn tree_transform_structure_with_structural_recoupling_raw_profiled<E, D, C>(
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -420,7 +376,7 @@ where
                 element_count,
             } => {
                 profile.multi_blocks += 1;
-                tree_transform_multi_with_dense_recoupling_profiled(
+                tree_transform_multi_with_structural_recoupling_profiled(
                     dense,
                     workspace,
                     &structure.layouts,
@@ -1092,8 +1048,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_dense_recoupling<E, D, C>(
-    dense: &mut E,
+fn tree_transform_multi_with_structural_recoupling<E, D, C>(
+    _dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
@@ -1135,25 +1091,10 @@ where
         )?;
     }
 
-    let coefficient_count = src_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    if coefficients_src_by_dst.len() < coefficient_end {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
-            actual: coefficients_src_by_dst.len(),
-        });
-    }
-    workspace.prepare_coefficients_from(coefficients_src_by_dst);
-
-    apply_recoupling_matrix_with_dense_executor(
-        dense,
+    apply_recoupling_matrix_src_times_u_transpose(
         &mut workspace.destination,
         &workspace.source,
-        &workspace.coefficients,
+        coefficients_src_by_dst,
         coefficient_start,
         element_count,
         src_count,
@@ -1177,8 +1118,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_dense_recoupling_profiled<E, D, C>(
-    dense: &mut E,
+fn tree_transform_multi_with_structural_recoupling_profiled<E, D, C>(
+    _dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
@@ -1228,34 +1169,19 @@ where
     }
     profile.multi_pack += start.elapsed();
 
-    let coefficient_count = src_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    if coefficients_src_by_dst.len() < coefficient_end {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
-            actual: coefficients_src_by_dst.len(),
-        });
-    }
-
     let start = std::time::Instant::now();
-    workspace.prepare_coefficients_from(coefficients_src_by_dst);
-    profile.multi_coefficient_prepare += start.elapsed();
-
-    apply_recoupling_matrix_with_dense_executor_profiled(
-        dense,
+    apply_recoupling_matrix_src_times_u_transpose(
         &mut workspace.destination,
         &workspace.source,
-        &workspace.coefficients,
+        coefficients_src_by_dst,
         coefficient_start,
         element_count,
         src_count,
         dst_count,
-        profile,
     )?;
+    let elapsed = start.elapsed();
+    profile.multi_scalar_recoupling += elapsed;
+    profile.multi_matmul_total += elapsed;
 
     let start = std::time::Instant::now();
     for dst_index in 0..dst_count {
@@ -1340,166 +1266,6 @@ where
         }
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_recoupling_matrix_with_dense_executor<E, T>(
-    dense: &mut E,
-    destination: &mut [T],
-    source: &[T],
-    coefficients_src_by_dst: &[T],
-    coefficient_start: usize,
-    element_count: usize,
-    src_count: usize,
-    dst_count: usize,
-) -> Result<(), OperationError>
-where
-    E: DenseExecutor,
-    T: DenseRecouplingScalar,
-{
-    let source_len = element_count
-        .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination_len = element_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_count = src_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-
-    if source.len() != source_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: source_len,
-            actual: source.len(),
-        });
-    }
-    if destination.len() != destination_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: destination_len,
-            actual: destination.len(),
-        });
-    }
-    if coefficients_src_by_dst.len() < coefficient_end {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
-            actual: coefficients_src_by_dst.len(),
-        });
-    }
-
-    let source_shape = [element_count, src_count];
-    let source_strides = [1, element_count];
-    let coefficient_shape = [src_count, dst_count];
-    let coefficient_strides = [1, src_count];
-    let destination_shape = [element_count, dst_count];
-    let destination_strides = [1, element_count];
-
-    let lhs = T::dense_read(
-        DenseView::new(source, &source_shape, &source_strides, 0).map_err(OperationError::Dense)?,
-    );
-    let rhs = T::dense_read(
-        DenseView::new(
-            coefficients_src_by_dst,
-            &coefficient_shape,
-            &coefficient_strides,
-            coefficient_start,
-        )
-        .map_err(OperationError::Dense)?,
-    );
-    let output = T::dense_write(
-        DenseViewMut::new(destination, &destination_shape, &destination_strides, 0)
-            .map_err(OperationError::Dense)?,
-    );
-    dense
-        .matmul_into(output, lhs, rhs)
-        .map_err(OperationError::Dense)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_recoupling_matrix_with_dense_executor_profiled<E, T>(
-    dense: &mut E,
-    destination: &mut [T],
-    source: &[T],
-    coefficients_src_by_dst: &[T],
-    coefficient_start: usize,
-    element_count: usize,
-    src_count: usize,
-    dst_count: usize,
-    profile: &mut TreeTransformReplayProfile,
-) -> Result<(), OperationError>
-where
-    E: DenseExecutor,
-    T: DenseRecouplingScalar,
-{
-    let total_start = std::time::Instant::now();
-
-    let source_len = element_count
-        .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination_len = element_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_count = src_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-
-    if source.len() != source_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: source_len,
-            actual: source.len(),
-        });
-    }
-    if destination.len() != destination_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: destination_len,
-            actual: destination.len(),
-        });
-    }
-    if coefficients_src_by_dst.len() < coefficient_end {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
-            actual: coefficients_src_by_dst.len(),
-        });
-    }
-
-    let source_shape = [element_count, src_count];
-    let source_strides = [1, element_count];
-    let coefficient_shape = [src_count, dst_count];
-    let coefficient_strides = [1, src_count];
-    let destination_shape = [element_count, dst_count];
-    let destination_strides = [1, element_count];
-
-    let start = std::time::Instant::now();
-    let lhs = T::dense_read(
-        DenseView::new(source, &source_shape, &source_strides, 0).map_err(OperationError::Dense)?,
-    );
-    let rhs = T::dense_read(
-        DenseView::new(
-            coefficients_src_by_dst,
-            &coefficient_shape,
-            &coefficient_strides,
-            coefficient_start,
-        )
-        .map_err(OperationError::Dense)?,
-    );
-    let output = T::dense_write(
-        DenseViewMut::new(destination, &destination_shape, &destination_strides, 0)
-            .map_err(OperationError::Dense)?,
-    );
-    profile.multi_dense_view_setup += start.elapsed();
-
-    let start = std::time::Instant::now();
-    let result = dense
-        .matmul_into(output, lhs, rhs)
-        .map_err(OperationError::Dense);
-    profile.multi_dense_matmul_call += start.elapsed();
-    profile.multi_matmul_total += total_start.elapsed();
-    result
 }
 
 fn pack_layout_into_column<T>(

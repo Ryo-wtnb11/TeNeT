@@ -74,10 +74,11 @@ pub use facade::{
 pub use host_kernels::TreeTransformWorkspace;
 pub(crate) use host_kernels::{
     axpby_raw_strided_kernel, copy_block_with_strided_kernel, tensoradd_raw_strided_kernel,
-    tensoradd_structure_with_strided_kernel, tree_transform_structure_with_dense_recoupling,
-    tree_transform_structure_with_dense_recoupling_raw,
-    tree_transform_structure_with_dense_recoupling_raw_profiled,
-    tree_transform_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel_raw,
+    tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
+    tree_transform_structure_with_strided_kernel_raw,
+    tree_transform_structure_with_structural_recoupling,
+    tree_transform_structure_with_structural_recoupling_raw,
+    tree_transform_structure_with_structural_recoupling_raw_profiled,
 };
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,

@@ -393,7 +393,7 @@ fn tree_transform_dense_backend_matches_tensorkit_recoupling_orientation_for_gem
 }
 
 #[test]
-fn tree_transform_dense_backend_calls_dense_matmul_for_multi_tree_blocks() {
+fn tree_transform_dense_backend_keeps_multi_tree_recoupling_in_replay_kernel() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure =
@@ -432,6 +432,6 @@ fn tree_transform_dense_backend_calls_dense_matmul_for_multi_tree_blocks() {
     )
     .unwrap();
 
-    assert_eq!(backend.dense().dot_general_into_calls, 1);
+    assert_eq!(backend.dense().dot_general_into_calls, 0);
     assert_eq!(dst.data(), &[10623.0, 12843.0, 21243.0, 25683.0]);
 }

@@ -435,7 +435,7 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
 }
 
 #[test]
-fn tree_transform_dense_recoupling_reuses_converted_coefficients() {
+fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficients() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],
         Some(0),
@@ -488,8 +488,8 @@ fn tree_transform_dense_recoupling_reuses_converted_coefficients() {
     )
     .unwrap();
     let first = dst.data().to_vec();
-    assert_eq!(workspace.coefficient_len(), 4);
-    assert_eq!(workspace.coefficient_cache_refreshes(), 1);
+    assert_eq!(workspace.source_len(), 2);
+    assert_eq!(workspace.destination_len(), 2);
 
     dst.data_mut().fill(Complex64::new(0.0, 0.0));
     tree_transform_execute_with(
@@ -503,7 +503,8 @@ fn tree_transform_dense_recoupling_reuses_converted_coefficients() {
     )
     .unwrap();
     assert_eq!(dst.data(), first.as_slice());
-    assert_eq!(workspace.coefficient_cache_refreshes(), 1);
+    assert_eq!(workspace.source_len(), 2);
+    assert_eq!(workspace.destination_len(), 2);
 }
 
 #[test]

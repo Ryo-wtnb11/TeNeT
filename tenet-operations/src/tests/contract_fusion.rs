@@ -2440,6 +2440,13 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert!(profile.canonical_contract_groups > 0);
     assert_eq!(profile.tree_replay.cache_lookup.as_nanos(), 0);
     assert_eq!(profile.tree_replay.strided_view_setup.as_nanos(), 0);
+    assert_eq!(profile.tree_replay.multi_coefficient_prepare.as_nanos(), 0);
+    assert_eq!(profile.tree_replay.multi_dense_view_setup.as_nanos(), 0);
+    assert_eq!(profile.tree_replay.multi_dense_matmul_call.as_nanos(), 0);
+    assert_eq!(
+        profile.tree_replay.multi_matmul_total,
+        profile.tree_replay.multi_scalar_recoupling
+    );
     assert!(profile.tree_replay.multi_blocks > 0);
     assert!(profile.tree_replay.packed_columns > 0);
     assert_eq!(
