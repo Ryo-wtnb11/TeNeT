@@ -489,7 +489,7 @@ impl DynamicFusionExecutionPlan {
         rule: &R,
         plan: &TensorContractFusionExplicitPlan,
         dst_fusion: &tenet_core::FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-        dst_structure: &BlockStructure,
+        dst_structure: &std::sync::Arc<BlockStructure>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
     ) -> Result<Self, OperationError>
@@ -766,17 +766,17 @@ impl DynamicFusionOutputTransformPlan {
 fn compile_tree_pair_structure<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst_structure: &BlockStructure,
-    src_structure: &BlockStructure,
+    dst_structure: &std::sync::Arc<BlockStructure>,
+    src_structure: &std::sync::Arc<BlockStructure>,
     storage_conjugate: bool,
 ) -> Result<TreeTransformStructure<f64>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src_structure)?;
-    plan.compile_structures_with_storage_conjugation(
-        dst_structure,
-        src_structure,
+    plan.compile_shared_structures_with_storage_conjugation(
+        std::sync::Arc::clone(dst_structure),
+        std::sync::Arc::clone(src_structure),
         storage_conjugate,
     )
 }

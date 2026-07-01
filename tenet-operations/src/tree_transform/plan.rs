@@ -1,5 +1,6 @@
 use core::ops::{Add, Mul};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
@@ -358,6 +359,20 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         storage_conjugate: bool,
     ) -> Result<TreeTransformStructure<T>, OperationError> {
         TreeTransformStructure::compile_grouped_structures_with_storage_conjugation(
+            dst_structure,
+            src_structure,
+            &self.specs,
+            storage_conjugate,
+        )
+    }
+
+    pub(crate) fn compile_shared_structures_with_storage_conjugation(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError> {
+        TreeTransformStructure::compile_grouped_shared_structures(
             dst_structure,
             src_structure,
             &self.specs,

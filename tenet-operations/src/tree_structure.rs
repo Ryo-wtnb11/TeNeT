@@ -174,7 +174,7 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    fn compile_grouped_shared_structures(
+    pub(crate) fn compile_grouped_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformGroupBlockSpec<T>],

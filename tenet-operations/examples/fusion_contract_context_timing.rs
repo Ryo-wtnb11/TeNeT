@@ -10,8 +10,8 @@ use tenet_core::{
 use tenet_operations::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
-    tree_pair_transform_into_with_context, AxisPermutation, TensorContractAxisSpec,
-    TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
+    tree_pair_transform_into_with_context, AxisPermutation, HostTensorOperations,
+    TensorContractAxisSpec, TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
     TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
 
@@ -49,6 +49,12 @@ fn bench_su2_noncanonical_source() {
     let (warm, warm_data) = fixture.time_context_warm(&mut context, WARM_CONTEXT_ITERS);
     assert_close(&warm_data, &expected);
     let (source_transform, source_checksum) = fixture.time_source_transforms(WARM_CONTEXT_ITERS);
+    let (source_transform_host, source_host_checksum) =
+        fixture.time_source_transforms_host_tree(WARM_CONTEXT_ITERS);
+    assert!((source_host_checksum - source_checksum).abs() < 1.0e-12);
+    let (warm_host_tree, warm_host_tree_data) =
+        fixture.time_context_warm_host_tree(WARM_CONTEXT_ITERS);
+    assert_close(&warm_host_tree_data, &expected);
     let (canonical_contract, contract_data) = fixture.time_canonical_contract(WARM_CONTEXT_ITERS);
     assert_close(&contract_data, &expected);
 
@@ -72,6 +78,14 @@ fn bench_su2_noncanonical_source() {
     println!(
         "source_transform_warm_ns,{:.3}",
         nanos_per(source_transform, WARM_CONTEXT_ITERS)
+    );
+    println!(
+        "source_transform_host_tree_warm_ns,{:.3}",
+        nanos_per(source_transform_host, WARM_CONTEXT_ITERS)
+    );
+    println!(
+        "context_warm_host_tree_ns,{:.3}",
+        nanos_per(warm_host_tree, WARM_CONTEXT_ITERS)
     );
     println!(
         "canonical_contract_warm_ns,{:.3}",
@@ -406,12 +420,108 @@ impl Su2NoncanonicalFixture {
         (elapsed, dst.data().to_vec())
     }
 
+    fn time_context_warm_host_tree(&self, iterations: usize) -> (Duration, Vec<f64>) {
+        let rule = SU2FusionRule;
+        let mut dst = self.dst();
+        let mut context = TensorContractFusionExecutionContext::<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+            HostTensorOperations,
+        >::default();
+        context
+            .tensorcontract_fusion_into(
+                &rule,
+                &mut dst,
+                &self.lhs,
+                &self.rhs,
+                axes(),
+                self.alpha,
+                self.beta,
+            )
+            .unwrap();
+        let elapsed = time_loop(iterations, || {
+            dst.data_mut().copy_from_slice(&self.initial_dst);
+            context
+                .tensorcontract_fusion_into(
+                    &rule,
+                    &mut dst,
+                    &self.lhs,
+                    &self.rhs,
+                    axes(),
+                    self.alpha,
+                    self.beta,
+                )
+                .unwrap();
+            black_box(checksum(dst.data()));
+        });
+        (elapsed, dst.data().to_vec())
+    }
+
     fn time_source_transforms(&self, iterations: usize) -> (Duration, f64) {
         let rule = SU2FusionRule;
         let mut lhs_canonical = self.lhs_canonical();
         let mut rhs_canonical = self.rhs_canonical();
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        tree_pair_transform_into_with_context(
+            &mut context,
+            &rule,
+            self.plan.lhs_transform().clone(),
+            &mut lhs_canonical,
+            &self.lhs,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        tree_pair_transform_into_with_context(
+            &mut context,
+            &rule,
+            self.plan.rhs_transform().clone(),
+            &mut rhs_canonical,
+            &self.rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        let elapsed = time_loop(iterations, || {
+            tree_pair_transform_into_with_context(
+                &mut context,
+                &rule,
+                self.plan.lhs_transform().clone(),
+                &mut lhs_canonical,
+                &self.lhs,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            tree_pair_transform_into_with_context(
+                &mut context,
+                &rule,
+                self.plan.rhs_transform().clone(),
+                &mut rhs_canonical,
+                &self.rhs,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            black_box(checksum(lhs_canonical.data()) + checksum(rhs_canonical.data()));
+        });
+        (
+            elapsed,
+            checksum(lhs_canonical.data()) + checksum(rhs_canonical.data()),
+        )
+    }
+
+    fn time_source_transforms_host_tree(&self, iterations: usize) -> (Duration, f64) {
+        let rule = SU2FusionRule;
+        let mut lhs_canonical = self.lhs_canonical();
+        let mut rhs_canonical = self.rhs_canonical();
+        let mut context = TreeTransformExecutionContext::<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+            f64,
+            HostTensorOperations,
+        >::default();
         tree_pair_transform_into_with_context(
             &mut context,
             &rule,

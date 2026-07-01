@@ -1,6 +1,7 @@
 use core::ops::{Add, Mul};
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
@@ -345,8 +346,8 @@ where
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
     ) -> Result<&TreeTransformStructure<T>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -368,8 +369,8 @@ where
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
     ) -> Result<&TreeTransformStructure<T>, OperationError>
     where
@@ -470,8 +471,8 @@ where
     fn get_or_compile_structure_from_structures(
         &mut self,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
     ) -> Result<&TreeTransformStructure<T>, OperationError>
     where
         T: Copy,
@@ -487,8 +488,8 @@ where
     fn get_or_compile_structure_from_structures_with_storage_conjugation(
         &mut self,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
-        dst_structure: &BlockStructure,
-        src_structure: &BlockStructure,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
     ) -> Result<&TreeTransformStructure<T>, OperationError>
     where
@@ -517,9 +518,9 @@ where
                 .plans
                 .get(&plan_key)
                 .expect("tree transform plan inserted before structure compile");
-            let structure = plan.compile_structures_with_storage_conjugation(
-                dst_structure,
-                src_structure,
+            let structure = plan.compile_shared_structures_with_storage_conjugation(
+                Arc::clone(dst_structure),
+                Arc::clone(src_structure),
                 storage_conjugate,
             )?;
             self.structures.insert(structure_key.clone(), structure);
