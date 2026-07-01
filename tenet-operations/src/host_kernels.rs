@@ -623,32 +623,8 @@ where
         return result;
     }
 
-    let setup_start = std::time::Instant::now();
-    if beta.is_zero() {
-        let mut dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
-            .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
-            .map_err(strided_error)?;
-        profile.strided_view_setup += setup_start.elapsed();
-
-        let kernel_start = std::time::Instant::now();
-        let result = strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error);
-        profile.strided_kernel += kernel_start.elapsed();
-        return result;
-    }
-    if beta.is_one() {
-        let mut dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
-            .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
-            .map_err(strided_error)?;
-        profile.strided_view_setup += setup_start.elapsed();
-
-        let kernel_start = std::time::Instant::now();
-        let result = strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error);
-        profile.strided_kernel += kernel_start.elapsed();
-        return result;
-    }
-    validate_raw_strided_views(
+    let start = std::time::Instant::now();
+    let result = axpby_raw_strided_kernel(
         dst_data,
         src_data,
         shape,
@@ -656,23 +632,10 @@ where
         src_strides,
         dst_offset,
         src_offset,
-    )?;
-    profile.strided_view_setup += setup_start.elapsed();
-
-    let kernel_start = std::time::Instant::now();
-    let result = axpby_raw_strided_fused_loop(
-        dst_data,
-        src_data,
-        shape,
-        dst_strides,
-        src_strides,
-        dst_offset,
-        src_offset,
-        false,
         alpha,
         beta,
     );
-    profile.strided_kernel += kernel_start.elapsed();
+    profile.strided_kernel += start.elapsed();
     zero_strides.clear();
     result
 }
@@ -702,7 +665,7 @@ where
         dst_offset,
         src_offset,
     )?;
-    axpby_raw_strided_fused_loop(
+    raw_strided_combine_loop(
         dst_data,
         src_data,
         shape,
@@ -711,11 +674,30 @@ where
         dst_offset,
         src_offset,
         true,
-        alpha,
-        beta,
+        raw_strided_action(alpha, beta),
     )?;
     zero_strides.clear();
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RawStridedAction<T> {
+    CopyScale { alpha: T },
+    Axpy { alpha: T },
+    Axpby { alpha: T, beta: T },
+}
+
+fn raw_strided_action<T>(alpha: T, beta: T) -> RawStridedAction<T>
+where
+    T: Copy + PartialEq + Zero + One,
+{
+    if beta.is_zero() {
+        RawStridedAction::CopyScale { alpha }
+    } else if beta.is_one() {
+        RawStridedAction::Axpy { alpha }
+    } else {
+        RawStridedAction::Axpby { alpha, beta }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -740,21 +722,6 @@ where
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
 {
-    if beta.is_zero() {
-        let mut dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
-            .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
-            .map_err(strided_error)?;
-        return strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error);
-    }
-    if beta.is_one() {
-        let mut dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
-            .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
-            .map_err(strided_error)?;
-        return strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error);
-    }
-
     validate_raw_strided_views(
         dst_data,
         src_data,
@@ -764,7 +731,7 @@ where
         dst_offset,
         src_offset,
     )?;
-    axpby_raw_strided_fused_loop(
+    raw_strided_combine_loop(
         dst_data,
         src_data,
         shape,
@@ -773,8 +740,7 @@ where
         dst_offset,
         src_offset,
         false,
-        alpha,
-        beta,
+        raw_strided_action(alpha, beta),
     )
 }
 
@@ -788,29 +754,59 @@ fn validate_raw_strided_views<T>(
     dst_offset: isize,
     src_offset: isize,
 ) -> Result<(), OperationError> {
-    {
-        let dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
-            .map_err(strided_error)?;
-        if dst.dims() != shape {
-            return Err(OperationError::ShapeMismatch {
-                dst: dst.dims().to_vec(),
-                src: shape.to_vec(),
-            });
+    validate_raw_strided_bounds(dst_data.len(), shape, dst_strides, dst_offset)?;
+    validate_raw_strided_bounds(src_data.len(), shape, src_strides, src_offset)?;
+    Ok(())
+}
+
+fn validate_raw_strided_bounds(
+    len: usize,
+    shape: &[usize],
+    strides: &[isize],
+    offset: isize,
+) -> Result<(), OperationError> {
+    if shape.len() != strides.len() {
+        return Err(OperationError::RankMismatch {
+            expected: shape.len(),
+            actual: strides.len(),
+        });
+    }
+    if shape.iter().any(|&dim| dim == 0) {
+        return Ok(());
+    }
+
+    let mut min_offset = offset;
+    let mut max_offset = offset;
+    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
+        if dim <= 1 {
+            continue;
+        }
+        let dim = isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
+        let end = stride
+            .checked_mul(dim)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if end >= 0 {
+            max_offset = max_offset
+                .checked_add(end)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        } else {
+            min_offset = min_offset
+                .checked_add(end)
+                .ok_or(OperationError::ElementCountOverflow)?;
         }
     }
-    let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
-        .map_err(strided_error)?;
-    if src.dims() != shape {
-        return Err(OperationError::ShapeMismatch {
-            dst: shape.to_vec(),
-            src: src.dims().to_vec(),
-        });
+    if min_offset < 0 {
+        return Err(OperationError::OffsetOverflow { value: usize::MAX });
+    }
+    let max_offset = checked_offset_to_index(max_offset)?;
+    if max_offset >= len {
+        return Err(OperationError::OffsetOverflow { value: max_offset });
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn axpby_raw_strided_fused_loop<T>(
+fn raw_strided_combine_loop<T>(
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
@@ -819,11 +815,10 @@ fn axpby_raw_strided_fused_loop<T>(
     dst_offset: isize,
     src_offset: isize,
     source_conjugate: bool,
-    alpha: T,
-    beta: T,
+    action: RawStridedAction<T>,
 ) -> Result<(), OperationError>
 where
-    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
 {
     let len = crate::strided::element_count(shape)?;
     if len == 0 {
@@ -832,8 +827,11 @@ where
     if shape.is_empty() {
         let dst_index = checked_offset_to_index(dst_offset)?;
         let src_index = checked_offset_to_index(src_offset)?;
-        dst_data[dst_index] =
-            beta * dst_data[dst_index] + alpha * src_data[src_index].maybe_conj(source_conjugate);
+        apply_raw_strided_action(
+            &mut dst_data[dst_index],
+            src_data[src_index].maybe_conj(source_conjugate),
+            action,
+        );
         return Ok(());
     }
     if is_column_major_contiguous(shape, dst_strides)?
@@ -854,12 +852,12 @@ where
             .get(src_start..src_end)
             .ok_or(OperationError::OffsetOverflow { value: src_end })?;
         for (dst_value, src_value) in dst.iter_mut().zip(src.iter().copied()) {
-            *dst_value = beta * *dst_value + alpha * src_value.maybe_conj(source_conjugate);
+            apply_raw_strided_action(dst_value, src_value.maybe_conj(source_conjugate), action);
         }
         return Ok(());
     }
 
-    axpby_raw_strided_recurse(
+    raw_strided_combine_recurse(
         shape.len() - 1,
         dst_data,
         src_data,
@@ -869,13 +867,12 @@ where
         dst_offset,
         src_offset,
         source_conjugate,
-        alpha,
-        beta,
+        action,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn axpby_raw_strided_recurse<T>(
+fn raw_strided_combine_recurse<T>(
     axis: usize,
     dst_data: &mut [T],
     src_data: &[T],
@@ -885,8 +882,7 @@ fn axpby_raw_strided_recurse<T>(
     dst_base: isize,
     src_base: isize,
     source_conjugate: bool,
-    alpha: T,
-    beta: T,
+    action: RawStridedAction<T>,
 ) -> Result<(), OperationError>
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
@@ -897,14 +893,17 @@ where
                 checked_offset_to_index(checked_strided_offset(dst_base, index, dst_strides[0])?)?;
             let src_index =
                 checked_offset_to_index(checked_strided_offset(src_base, index, src_strides[0])?)?;
-            dst_data[dst_index] = beta * dst_data[dst_index]
-                + alpha * src_data[src_index].maybe_conj(source_conjugate);
+            apply_raw_strided_action(
+                &mut dst_data[dst_index],
+                src_data[src_index].maybe_conj(source_conjugate),
+                action,
+            );
         }
         return Ok(());
     }
 
     for index in 0..shape[axis] {
-        axpby_raw_strided_recurse(
+        raw_strided_combine_recurse(
             axis - 1,
             dst_data,
             src_data,
@@ -914,11 +913,21 @@ where
             checked_strided_offset(dst_base, index, dst_strides[axis])?,
             checked_strided_offset(src_base, index, src_strides[axis])?,
             source_conjugate,
-            alpha,
-            beta,
+            action,
         )?;
     }
     Ok(())
+}
+
+fn apply_raw_strided_action<T>(dst: &mut T, src: T, action: RawStridedAction<T>)
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T>,
+{
+    *dst = match action {
+        RawStridedAction::CopyScale { alpha } => alpha * src,
+        RawStridedAction::Axpy { alpha } => *dst + alpha * src,
+        RawStridedAction::Axpby { alpha, beta } => beta * *dst + alpha * src,
+    };
 }
 
 fn tree_transform_single_with_strided_kernel<D, C>(
@@ -1502,37 +1511,35 @@ fn pack_layout_into_column<T>(
     source_conjugate: bool,
 ) -> Result<(), OperationError>
 where
-    T: Copy + ConjugateValue + strided_kernel::MaybeSendSync,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
 {
     let shape = layouts.shape(layout);
-    if source_conjugate {
-        let packed_offset = offset_to_isize(packed_offset)?;
-        let len = crate::strided::element_count(shape)?;
-        let packed_strides = layouts.packed_strides(layout);
-        let src_strides = layouts.strides(layout);
-        for linear in 0..len {
-            let dst_index = strided_offset(linear, shape, packed_strides, packed_offset)?;
-            let src_index = strided_offset(linear, shape, src_strides, layout.offset)?;
-            packed[dst_index] = src_data[src_index].maybe_conj(true);
-        }
-        return Ok(());
-    }
-
-    let mut dst = strided_kernel::StridedViewMut::new(
+    let packed_offset = offset_to_isize(packed_offset)?;
+    validate_raw_strided_views(
         packed,
-        shape,
-        layouts.packed_strides(layout),
-        offset_to_isize(packed_offset)?,
-    )
-    .map_err(strided_error)?;
-    let src = strided_kernel::StridedView::<T>::new(
         src_data,
         shape,
+        layouts.packed_strides(layout),
         layouts.strides(layout),
+        packed_offset,
         layout.offset,
+    )?;
+    raw_strided_combine_loop(
+        packed,
+        src_data,
+        shape,
+        layouts.packed_strides(layout),
+        layouts.strides(layout),
+        packed_offset,
+        layout.offset,
+        source_conjugate,
+        RawStridedAction::CopyScale { alpha: T::one() },
     )
-    .map_err(strided_error)?;
-    strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
 }
 
 fn pack_layout_into_column_profiled<T>(
@@ -1545,43 +1552,38 @@ fn pack_layout_into_column_profiled<T>(
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
 where
-    T: Copy + ConjugateValue + strided_kernel::MaybeSendSync,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
 {
     let shape = layouts.shape(layout);
-    if source_conjugate {
-        let start = std::time::Instant::now();
-        let packed_offset = offset_to_isize(packed_offset)?;
-        let len = crate::strided::element_count(shape)?;
-        let packed_strides = layouts.packed_strides(layout);
-        let src_strides = layouts.strides(layout);
-        for linear in 0..len {
-            let dst_index = strided_offset(linear, shape, packed_strides, packed_offset)?;
-            let src_index = strided_offset(linear, shape, src_strides, layout.offset)?;
-            packed[dst_index] = src_data[src_index].maybe_conj(true);
-        }
-        profile.strided_kernel += start.elapsed();
-        return Ok(());
-    }
-
     let start = std::time::Instant::now();
-    let mut dst = strided_kernel::StridedViewMut::new(
+    let packed_offset = offset_to_isize(packed_offset)?;
+    let result = validate_raw_strided_views(
         packed,
-        shape,
-        layouts.packed_strides(layout),
-        offset_to_isize(packed_offset)?,
-    )
-    .map_err(strided_error)?;
-    let src = strided_kernel::StridedView::<T>::new(
         src_data,
         shape,
+        layouts.packed_strides(layout),
         layouts.strides(layout),
+        packed_offset,
         layout.offset,
     )
-    .map_err(strided_error)?;
-    profile.strided_view_setup += start.elapsed();
-
-    let start = std::time::Instant::now();
-    let result = strided_kernel::copy_into(&mut dst, &src).map_err(strided_error);
+    .and_then(|()| {
+        raw_strided_combine_loop(
+            packed,
+            src_data,
+            shape,
+            layouts.packed_strides(layout),
+            layouts.strides(layout),
+            packed_offset,
+            layout.offset,
+            source_conjugate,
+            RawStridedAction::CopyScale { alpha: T::one() },
+        )
+    });
     profile.strided_kernel += start.elapsed();
     result
 }
@@ -1646,51 +1648,7 @@ where
     let shape = layouts.shape(layout);
     let start = std::time::Instant::now();
     let packed_offset = offset_to_isize(packed_offset)?;
-    if beta.is_zero() {
-        let mut dst = strided_kernel::StridedViewMut::new(
-            dst_data,
-            shape,
-            layouts.strides(layout),
-            layout.offset,
-        )
-        .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(
-            packed,
-            shape,
-            layouts.packed_strides(layout),
-            packed_offset,
-        )
-        .map_err(strided_error)?;
-        profile.strided_view_setup += start.elapsed();
-
-        let start = std::time::Instant::now();
-        let result = strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error);
-        profile.strided_kernel += start.elapsed();
-        return result;
-    }
-    if beta.is_one() {
-        let mut dst = strided_kernel::StridedViewMut::new(
-            dst_data,
-            shape,
-            layouts.strides(layout),
-            layout.offset,
-        )
-        .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(
-            packed,
-            shape,
-            layouts.packed_strides(layout),
-            packed_offset,
-        )
-        .map_err(strided_error)?;
-        profile.strided_view_setup += start.elapsed();
-
-        let start = std::time::Instant::now();
-        let result = strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error);
-        profile.strided_kernel += start.elapsed();
-        return result;
-    }
-    validate_raw_strided_views(
+    let result = axpby_raw_strided_kernel(
         dst_data,
         packed,
         shape,
@@ -1698,49 +1656,12 @@ where
         layouts.packed_strides(layout),
         layout.offset,
         packed_offset,
-    )?;
-    profile.strided_view_setup += start.elapsed();
-
-    let start = std::time::Instant::now();
-    let result = axpby_raw_strided_fused_loop(
-        dst_data,
-        packed,
-        shape,
-        layouts.strides(layout),
-        layouts.packed_strides(layout),
-        layout.offset,
-        packed_offset,
-        false,
         alpha,
         beta,
     );
     profile.strided_kernel += start.elapsed();
     zero_strides.clear();
     result
-}
-
-fn strided_offset(
-    mut linear: usize,
-    shape: &[usize],
-    strides: &[isize],
-    base: isize,
-) -> Result<usize, OperationError> {
-    let mut offset = base;
-    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
-        let coord = if dim == 0 { 0 } else { linear % dim };
-        if dim != 0 {
-            linear /= dim;
-        }
-        let coord = isize::try_from(coord).map_err(|_| OperationError::ElementCountOverflow)?;
-        offset = offset
-            .checked_add(
-                coord
-                    .checked_mul(stride)
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
 }
 
 fn checked_strided_offset(

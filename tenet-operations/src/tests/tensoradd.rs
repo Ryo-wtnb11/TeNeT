@@ -215,6 +215,151 @@ fn tensoradd_permuted_general_beta_supports_all_numeric_dtypes() {
 }
 
 #[test]
+fn tensoradd_permuted_assign_and_add_support_all_numeric_dtypes() {
+    assert_tensoradd_permuted_general_dtype(
+        vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+        10.0,
+        2.0,
+        0.0,
+        vec![2.0, 6.0, 10.0, 4.0, 8.0, 12.0],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+        10.0,
+        2.0,
+        1.0,
+        vec![12.0, 16.0, 20.0, 14.0, 18.0, 22.0],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+        10.0,
+        2.0,
+        0.0,
+        vec![2.0, 6.0, 10.0, 4.0, 8.0, 12.0],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+        10.0,
+        2.0,
+        1.0,
+        vec![12.0, 16.0, 20.0, 14.0, 18.0, 22.0],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1_i32, 2, 3, 4, 5, 6],
+        10,
+        2,
+        0,
+        vec![2, 6, 10, 4, 8, 12],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1_i32, 2, 3, 4, 5, 6],
+        10,
+        2,
+        1,
+        vec![12, 16, 20, 14, 18, 22],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1_i64, 2, 3, 4, 5, 6],
+        10,
+        2,
+        0,
+        vec![2, 6, 10, 4, 8, 12],
+    );
+    assert_tensoradd_permuted_general_dtype(
+        vec![1_i64, 2, 3, 4, 5, 6],
+        10,
+        2,
+        1,
+        vec![12, 16, 20, 14, 18, 22],
+    );
+
+    let values32 = vec![
+        Complex32::new(1.0, 1.0),
+        Complex32::new(2.0, -2.0),
+        Complex32::new(3.0, 0.5),
+        Complex32::new(4.0, -1.0),
+        Complex32::new(5.0, 2.0),
+        Complex32::new(6.0, -3.0),
+    ];
+    let alpha32 = Complex32::new(2.0, -1.0);
+    let fill32 = Complex32::new(10.0, 1.0);
+    let reordered32 = [
+        values32[0],
+        values32[2],
+        values32[4],
+        values32[1],
+        values32[3],
+        values32[5],
+    ];
+    let assign32 = reordered32
+        .iter()
+        .copied()
+        .map(|value| alpha32 * value)
+        .collect();
+    let add32 = reordered32
+        .iter()
+        .copied()
+        .map(|value| fill32 + alpha32 * value)
+        .collect();
+    assert_tensoradd_permuted_general_dtype(
+        values32.clone(),
+        fill32,
+        alpha32,
+        Complex32::zero(),
+        assign32,
+    );
+    assert_tensoradd_permuted_general_dtype(values32, fill32, alpha32, Complex32::one(), add32);
+
+    let values64 = vec![
+        Complex64::new(1.0, 1.0),
+        Complex64::new(2.0, -2.0),
+        Complex64::new(3.0, 0.5),
+        Complex64::new(4.0, -1.0),
+        Complex64::new(5.0, 2.0),
+        Complex64::new(6.0, -3.0),
+    ];
+    let alpha64 = Complex64::new(2.0, -1.0);
+    let fill64 = Complex64::new(10.0, 1.0);
+    let reordered64 = [
+        values64[0],
+        values64[2],
+        values64[4],
+        values64[1],
+        values64[3],
+        values64[5],
+    ];
+    let assign64 = reordered64
+        .iter()
+        .copied()
+        .map(|value| alpha64 * value)
+        .collect();
+    let add64 = reordered64
+        .iter()
+        .copied()
+        .map(|value| fill64 + alpha64 * value)
+        .collect();
+    assert_tensoradd_permuted_general_dtype(
+        values64.clone(),
+        fill64,
+        alpha64,
+        Complex64::zero(),
+        assign64,
+    );
+    assert_tensoradd_permuted_general_dtype(values64, fill64, alpha64, Complex64::one(), add64);
+}
+
+#[test]
+fn tensoradd_permuted_assign_does_not_read_destination() {
+    assert_tensoradd_permuted_general_dtype(
+        vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
+        f64::NAN,
+        2.0,
+        0.0,
+        vec![2.0, 6.0, 10.0, 4.0, 8.0, 12.0],
+    );
+}
+
+#[test]
 fn tensoradd_with_backend_allocator_applies_axis_permutation() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
