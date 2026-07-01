@@ -10,8 +10,8 @@ use tenet_core::{
 use tenet_operations::{
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with, DenseTreeTransformOperations,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext, TreeTransformOperationKey,
-    TreeTransformRuleCacheKey, TreeTransformWorkspace,
+    HostTensorOperations, TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext,
+    TreeTransformOperationKey, TreeTransformRuleCacheKey, TreeTransformWorkspace,
 };
 
 fn main() {
@@ -60,8 +60,10 @@ fn main() {
 #[derive(Clone, Copy)]
 struct Timings {
     compile: Duration,
-    replay: Duration,
-    context_hit_execute: Duration,
+    dense_replay: Duration,
+    host_replay: Duration,
+    dense_context_hit_execute: Duration,
+    host_context_hit_execute: Duration,
     rebuild_execute: Duration,
     oneshot: Duration,
 }
@@ -80,15 +82,22 @@ fn print_fixture(
     oneshot_iters: usize,
 ) {
     let compile_ns = nanos_per(timings.compile, build_iters);
-    let replay_ns = nanos_per(timings.replay, replay_iters);
-    let context_hit_execute_ns = nanos_per(timings.context_hit_execute, context_iters);
+    let dense_replay_ns = nanos_per(timings.dense_replay, replay_iters);
+    let host_replay_ns = nanos_per(timings.host_replay, replay_iters);
+    let dense_context_hit_execute_ns = nanos_per(timings.dense_context_hit_execute, context_iters);
+    let host_context_hit_execute_ns = nanos_per(timings.host_context_hit_execute, context_iters);
     let rebuild_execute_ns = nanos_per(timings.rebuild_execute, rebuild_execute_iters);
     let oneshot_ns = nanos_per(timings.oneshot, oneshot_iters);
     println!("{name} compile avg: {:>10.3} ns", compile_ns);
-    println!("{name} replay  avg: {:>10.3} ns", replay_ns);
+    println!("{name} dense replay avg: {:>10.3} ns", dense_replay_ns);
+    println!("{name} host  replay avg: {:>10.3} ns", host_replay_ns);
     println!(
-        "{name} context cache-hit+execute avg: {:>10.3} ns",
-        context_hit_execute_ns
+        "{name} dense context cache-hit+execute avg: {:>10.3} ns",
+        dense_context_hit_execute_ns
+    );
+    println!(
+        "{name} host  context cache-hit+execute avg: {:>10.3} ns",
+        host_context_hit_execute_ns
     );
     println!(
         "{name} rebuild+execute avg: {:>10.3} ns",
@@ -96,16 +105,24 @@ fn print_fixture(
     );
     println!("{name} one-shot avg: {:>10.3} ns", oneshot_ns);
     println!(
-        "{name} compile/replay ratio: {:>8.2}x",
-        compile_ns / replay_ns
+        "{name} compile/dense replay ratio: {:>8.2}x",
+        compile_ns / dense_replay_ns
     );
     println!(
-        "{name} context/replay ratio: {:>8.2}x",
-        context_hit_execute_ns / replay_ns
+        "{name} compile/host  replay ratio: {:>8.2}x",
+        compile_ns / host_replay_ns
     );
     println!(
-        "{name} rebuild+execute/replay ratio: {:>8.2}x",
-        rebuild_execute_ns / replay_ns
+        "{name} dense context/dense replay ratio: {:>8.2}x",
+        dense_context_hit_execute_ns / dense_replay_ns
+    );
+    println!(
+        "{name} host  context/host  replay ratio: {:>8.2}x",
+        host_context_hit_execute_ns / host_replay_ns
+    );
+    println!(
+        "{name} rebuild+execute/dense replay ratio: {:>8.2}x",
+        rebuild_execute_ns / dense_replay_ns
     );
 }
 
@@ -134,10 +151,26 @@ fn bench_product(
     let structure = tree_pair_transform_structure(&rule, operation.clone(), &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    let replay = time_loop(replay_iters, || {
+    let dense_replay = time_loop(replay_iters, || {
         tree_transform_execute_with(
             &mut backend,
             &mut workspace,
+            &structure,
+            &mut dst,
+            &src,
+            black_box(1.0),
+            black_box(0.0),
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
+    let mut host_backend = HostTensorOperations;
+    let mut host_workspace = TreeTransformWorkspace::default();
+    let host_replay = time_loop(replay_iters, || {
+        tree_transform_execute_with(
+            &mut host_backend,
+            &mut host_workspace,
             &structure,
             &mut dst,
             &src,
@@ -178,10 +211,37 @@ fn bench_product(
         0.0,
     )
     .unwrap();
-    let context_hit_execute = time_loop(context_iters, || {
+    let dense_context_hit_execute = time_loop(context_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
         tree_pair_transform_into_with_context(
             &mut context,
+            &rule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            black_box(1.0),
+            black_box(0.0),
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
+    let mut host_context =
+        TreeTransformExecutionContext::<f64, ProductRuleKey, f64, HostTensorOperations>::default();
+    tree_pair_transform_into_with_context(
+        &mut host_context,
+        &rule,
+        operation.clone(),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    let host_context_hit_execute = time_loop(context_iters, || {
+        src.data_mut().copy_from_slice(&[10.0, 20.0]);
+        tree_pair_transform_into_with_context(
+            &mut host_context,
             &rule,
             operation.clone(),
             &mut dst,
@@ -209,8 +269,10 @@ fn bench_product(
 
     Timings {
         compile,
-        replay,
-        context_hit_execute,
+        dense_replay,
+        host_replay,
+        dense_context_hit_execute,
+        host_context_hit_execute,
         rebuild_execute,
         oneshot,
     }
@@ -248,10 +310,26 @@ fn bench_su2(
         tree_pair_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    let replay = time_loop(replay_iters, || {
+    let dense_replay = time_loop(replay_iters, || {
         tree_transform_execute_with(
             &mut backend,
             &mut workspace,
+            &compiled,
+            &mut dst,
+            &src,
+            black_box(1.0),
+            black_box(0.0),
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
+    let mut host_backend = HostTensorOperations;
+    let mut host_workspace = TreeTransformWorkspace::default();
+    let host_replay = time_loop(replay_iters, || {
+        tree_transform_execute_with(
+            &mut host_backend,
+            &mut host_workspace,
             &compiled,
             &mut dst,
             &src,
@@ -292,10 +370,41 @@ fn bench_su2(
         0.0,
     )
     .unwrap();
-    let context_hit_execute = time_loop(context_iters, || {
+    let dense_context_hit_execute = time_loop(context_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
         tree_pair_transform_into_with_context(
             &mut context,
+            &SU2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            black_box(1.0),
+            black_box(0.0),
+        )
+        .unwrap();
+        black_box(dst.data()[0]);
+    });
+
+    let mut host_context = TreeTransformExecutionContext::<
+        f64,
+        TreeTransformBuiltinRuleCacheKey,
+        f64,
+        HostTensorOperations,
+    >::default();
+    tree_pair_transform_into_with_context(
+        &mut host_context,
+        &SU2FusionRule,
+        operation.clone(),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    let host_context_hit_execute = time_loop(context_iters, || {
+        src.data_mut().copy_from_slice(&[10.0, 20.0]);
+        tree_pair_transform_into_with_context(
+            &mut host_context,
             &SU2FusionRule,
             operation.clone(),
             &mut dst,
@@ -323,8 +432,10 @@ fn bench_su2(
 
     Timings {
         compile,
-        replay,
-        context_hit_execute,
+        dense_replay,
+        host_replay,
+        dense_context_hit_execute,
+        host_context_hit_execute,
         rebuild_execute,
         oneshot,
     }

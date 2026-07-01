@@ -232,6 +232,7 @@ impl<T> TreeTransformGroupPlanCache<T> {
 pub struct TreeTransformCache<T, RuleKey> {
     plans: HashMap<TreeTransformSectorPlanKey<RuleKey>, TreeTransformGroupPlan<T>>,
     structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
+    last_structure: Option<TreeTransformLastStructureKey<RuleKey>>,
     stats: TreeTransformCacheStats,
 }
 
@@ -267,11 +268,23 @@ impl TreeTransformCacheStats {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TreeTransformLastStructureKey<RuleKey> {
+    rule: RuleKey,
+    scope: TreeTransformPlanScope,
+    operation: TreeTransformOperationKey,
+    dst_ptr: *const BlockStructure,
+    src_ptr: *const BlockStructure,
+    storage_conjugate: bool,
+    structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
+}
+
 impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
     fn default() -> Self {
         Self {
             plans: HashMap::new(),
             structures: TreeTransformStructureCache::default(),
+            last_structure: None,
             stats: TreeTransformCacheStats::default(),
         }
     }
@@ -309,6 +322,52 @@ where
         self.stats = TreeTransformCacheStats::default();
     }
 
+    fn fast_structure_key(
+        &mut self,
+        rule_key: &RuleKey,
+        scope: TreeTransformPlanScope,
+        operation: &TreeTransformOperationKey,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        storage_conjugate: bool,
+    ) -> Option<TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>> {
+        let last = self.last_structure.as_ref()?;
+        if &last.rule == rule_key
+            && last.scope == scope
+            && &last.operation == operation
+            && last.dst_ptr == Arc::as_ptr(dst_structure)
+            && last.src_ptr == Arc::as_ptr(src_structure)
+            && last.storage_conjugate == storage_conjugate
+        {
+            self.stats.plan_hits += 1;
+            self.stats.structure_hits += 1;
+            Some(last.structure_key.clone())
+        } else {
+            None
+        }
+    }
+
+    fn remember_structure_key(
+        &mut self,
+        rule: RuleKey,
+        scope: TreeTransformPlanScope,
+        operation: TreeTransformOperationKey,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        storage_conjugate: bool,
+        structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
+    ) {
+        self.last_structure = Some(TreeTransformLastStructureKey {
+            rule,
+            scope,
+            operation,
+            dst_ptr: Arc::as_ptr(dst_structure),
+            src_ptr: Arc::as_ptr(src_structure),
+            storage_conjugate,
+            structure_key,
+        });
+    }
+
     pub fn get_or_compile_tree_pair<
         R,
         TDst,
@@ -330,16 +389,42 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
-        let plan_key =
-            TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src.structure())?;
+        let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(structure_key) = self.fast_structure_key(
+            &rule_key,
+            TreeTransformPlanScope::TreePair,
+            &operation,
+            dst.structure(),
+            src.structure(),
+            false,
+        ) {
+            return Ok(self
+                .structures
+                .get(&structure_key)
+                .expect("last tree transform structure key must reference a cached structure"));
+        }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            src.structure(),
+        )?;
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
         } else {
             self.stats.plan_misses += 1;
-            let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
             self.plans.insert(plan_key.clone(), plan);
         }
-        self.get_or_compile_structure(plan_key, dst, src)
+        self.get_or_compile_structure(
+            rule_key,
+            TreeTransformPlanScope::TreePair,
+            operation,
+            plan_key,
+            dst,
+            src,
+        )
     }
 
     pub fn get_or_compile_tree_pair_structures<R>(
@@ -353,16 +438,42 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
-        let plan_key =
-            TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src_structure)?;
+        let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(structure_key) = self.fast_structure_key(
+            &rule_key,
+            TreeTransformPlanScope::TreePair,
+            &operation,
+            dst_structure,
+            src_structure,
+            false,
+        ) {
+            return Ok(self
+                .structures
+                .get(&structure_key)
+                .expect("last tree transform structure key must reference a cached structure"));
+        }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            src_structure,
+        )?;
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
         } else {
             self.stats.plan_misses += 1;
-            let plan = build_tree_pair_transform_group_plan(rule, operation, src_structure)?;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
             self.plans.insert(plan_key.clone(), plan);
         }
-        self.get_or_compile_structure_from_structures(plan_key, dst_structure, src_structure)
+        self.get_or_compile_structure_from_structures(
+            rule_key,
+            TreeTransformPlanScope::TreePair,
+            operation,
+            plan_key,
+            dst_structure,
+            src_structure,
+        )
     }
 
     pub fn get_or_compile_tree_pair_structures_with_storage_conjugation<R>(
@@ -377,16 +488,38 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
-        let plan_key =
-            TreeTransformSectorPlanKey::tree_pair(rule, operation.clone(), src_structure)?;
+        let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(structure_key) = self.fast_structure_key(
+            &rule_key,
+            TreeTransformPlanScope::TreePair,
+            &operation,
+            dst_structure,
+            src_structure,
+            storage_conjugate,
+        ) {
+            return Ok(self
+                .structures
+                .get(&structure_key)
+                .expect("last tree transform structure key must reference a cached structure"));
+        }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            src_structure,
+        )?;
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
         } else {
             self.stats.plan_misses += 1;
-            let plan = build_tree_pair_transform_group_plan(rule, operation, src_structure)?;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
             self.plans.insert(plan_key.clone(), plan);
         }
         self.get_or_compile_structure_from_structures_with_storage_conjugation(
+            rule_key,
+            TreeTransformPlanScope::TreePair,
+            operation,
             plan_key,
             dst_structure,
             src_structure,
@@ -415,17 +548,45 @@ where
         R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
-        let plan_key =
-            TreeTransformSectorPlanKey::all_codomain(rule, operation.clone(), src.structure())?;
+        let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(structure_key) = self.fast_structure_key(
+            &rule_key,
+            TreeTransformPlanScope::AllCodomain,
+            &operation,
+            dst.structure(),
+            src.structure(),
+            false,
+        ) {
+            return Ok(self
+                .structures
+                .get(&structure_key)
+                .expect("last tree transform structure key must reference a cached structure"));
+        }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::AllCodomain,
+            operation.clone(),
+            src.structure(),
+        )?;
         if self.plans.contains_key(&plan_key) {
             self.stats.plan_hits += 1;
         } else {
             self.stats.plan_misses += 1;
-            let plan =
-                build_all_codomain_tree_transform_group_plan(rule, operation, src.structure())?;
+            let plan = build_all_codomain_tree_transform_group_plan(
+                rule,
+                operation.clone(),
+                src.structure(),
+            )?;
             self.plans.insert(plan_key.clone(), plan);
         }
-        self.get_or_compile_structure(plan_key, dst, src)
+        self.get_or_compile_structure(
+            rule_key,
+            TreeTransformPlanScope::AllCodomain,
+            operation,
+            plan_key,
+            dst,
+            src,
+        )
     }
 
     fn get_or_compile_structure<
@@ -439,6 +600,9 @@ where
         SSrc,
     >(
         &mut self,
+        rule_key: RuleKey,
+        scope: TreeTransformPlanScope,
+        operation: TreeTransformOperationKey,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
@@ -462,6 +626,15 @@ where
             let structure = plan.compile(dst, src)?;
             self.structures.insert(structure_key.clone(), structure);
         }
+        self.remember_structure_key(
+            rule_key,
+            scope,
+            operation,
+            dst.structure(),
+            src.structure(),
+            false,
+            structure_key.clone(),
+        );
         Ok(self
             .structures
             .get(&structure_key)
@@ -470,6 +643,9 @@ where
 
     fn get_or_compile_structure_from_structures(
         &mut self,
+        rule_key: RuleKey,
+        scope: TreeTransformPlanScope,
+        operation: TreeTransformOperationKey,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
@@ -478,6 +654,9 @@ where
         T: Copy,
     {
         self.get_or_compile_structure_from_structures_with_storage_conjugation(
+            rule_key,
+            scope,
+            operation,
             plan_key,
             dst_structure,
             src_structure,
@@ -487,6 +666,9 @@ where
 
     fn get_or_compile_structure_from_structures_with_storage_conjugation(
         &mut self,
+        rule_key: RuleKey,
+        scope: TreeTransformPlanScope,
+        operation: TreeTransformOperationKey,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
@@ -525,6 +707,15 @@ where
             )?;
             self.structures.insert(structure_key.clone(), structure);
         }
+        self.remember_structure_key(
+            rule_key,
+            scope,
+            operation,
+            dst_structure,
+            src_structure,
+            storage_conjugate,
+            structure_key.clone(),
+        );
         Ok(self
             .structures
             .get(&structure_key)

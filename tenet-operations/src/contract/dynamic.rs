@@ -3,7 +3,7 @@ use std::hash::Hash;
 
 use tenet_core::{BlockStructure, CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
-use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::BlockStructureCacheKey;
 use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::tree_context::TreeTransformExecutionContext;
@@ -239,7 +239,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     contract_workspace: &mut BC::Workspace,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
-    precomputed_key: Option<DynamicFusionExecutionPlanCacheKey<RuleKey>>,
+    precomputed_key: Option<DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>>,
     rule: &R,
     axes: TensorContractAxisSpec<'_>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -292,6 +292,7 @@ impl DynamicFusionExecutionPlanCacheStats {
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionExecutionPlanCache<RuleKey> {
     plans: HashMap<DynamicFusionExecutionPlanCacheKey<RuleKey>, DynamicFusionExecutionPlan>,
+    last_plan: Option<DynamicFusionExecutionPlanLastKey<RuleKey>>,
     stats: DynamicFusionExecutionPlanCacheStats,
 }
 
@@ -299,14 +300,46 @@ impl<RuleKey> Default for DynamicFusionExecutionPlanCache<RuleKey> {
     fn default() -> Self {
         Self {
             plans: HashMap::new(),
+            last_plan: None,
             stats: DynamicFusionExecutionPlanCacheStats::default(),
         }
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DynamicFusionExecutionPlanRawFastKey<RuleKey> {
+    rule: RuleKey,
+    dst_nout: usize,
+    lhs_nout: usize,
+    rhs_nout: usize,
+    dst_fusion_ptr: *const (),
+    lhs_fusion_ptr: *const (),
+    rhs_fusion_ptr: *const (),
+    dst_structure_ptr: *const BlockStructure,
+    lhs_structure_ptr: *const BlockStructure,
+    rhs_structure_ptr: *const BlockStructure,
+    lhs_contracting_axes: Vec<usize>,
+    rhs_contracting_axes: Vec<usize>,
+    output_axes: Option<Vec<usize>>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicFusionExecutionPlanPreparedCacheKey<RuleKey> {
+    raw_fast: DynamicFusionExecutionPlanRawFastKey<RuleKey>,
+    full: DynamicFusionExecutionPlanCacheKey<RuleKey>,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicFusionExecutionPlanLastKey<RuleKey> {
+    raw_fast: DynamicFusionExecutionPlanRawFastKey<RuleKey>,
+    full: DynamicFusionExecutionPlanCacheKey<RuleKey>,
+}
+
 pub(crate) enum DynamicFusionExecutionPlanCacheLookup<'a, RuleKey> {
     Hit(&'a DynamicFusionExecutionPlan),
-    Miss(DynamicFusionExecutionPlanCacheKey<RuleKey>),
+    Miss(DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>),
 }
 
 impl<RuleKey> DynamicFusionExecutionPlanCache<RuleKey>
@@ -351,13 +384,39 @@ where
     where
         R: TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let key = DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
-        if let Some(plan) = self.plans.get(&key) {
+        if self
+            .last_plan
+            .as_ref()
+            .is_some_and(|last| last.raw_fast.matches_inputs(rule, axes, dst, lhs, rhs))
+        {
+            let key = self
+                .last_plan
+                .as_ref()
+                .expect("last plan checked above")
+                .full
+                .clone();
             self.stats.hits += 1;
-            Ok(DynamicFusionExecutionPlanCacheLookup::Hit(plan))
-        } else {
-            Ok(DynamicFusionExecutionPlanCacheLookup::Miss(key))
+            return Ok(DynamicFusionExecutionPlanCacheLookup::Hit(
+                self.plans
+                    .get(&key)
+                    .expect("last dynamic fusion plan key must reference a cached plan"),
+            ));
         }
+        let prepared =
+            DynamicFusionExecutionPlanPreparedCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
+        if self.plans.get(&prepared.full).is_some() {
+            self.stats.hits += 1;
+            self.last_plan = Some(DynamicFusionExecutionPlanLastKey {
+                raw_fast: prepared.raw_fast.clone(),
+                full: prepared.full.clone(),
+            });
+            return Ok(DynamicFusionExecutionPlanCacheLookup::Hit(
+                self.plans
+                    .get(&prepared.full)
+                    .expect("dynamic fusion plan found before replay"),
+            ));
+        }
+        Ok(DynamicFusionExecutionPlanCacheLookup::Miss(prepared))
     }
 
     pub(crate) fn get_or_compile_with_key<
@@ -374,7 +433,7 @@ where
         SRhs,
     >(
         &mut self,
-        key: Option<DynamicFusionExecutionPlanCacheKey<RuleKey>>,
+        key: Option<DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>>,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -384,11 +443,13 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let key = match key {
+        let prepared = match key {
             Some(key) => key,
-            None => DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?,
+            None => {
+                DynamicFusionExecutionPlanPreparedCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?
+            }
         };
-        if self.plans.get(&key).is_some() {
+        if self.plans.get(&prepared.full).is_some() {
             self.stats.hits += 1;
         } else {
             self.stats.misses += 1;
@@ -412,11 +473,15 @@ where
                 lhs,
                 rhs,
             )?;
-            self.plans.insert(key.clone(), execution_plan);
+            self.plans.insert(prepared.full.clone(), execution_plan);
         }
+        self.last_plan = Some(DynamicFusionExecutionPlanLastKey {
+            raw_fast: prepared.raw_fast.clone(),
+            full: prepared.full.clone(),
+        });
         Ok(self
             .plans
-            .get(&key)
+            .get(&prepared.full)
             .expect("dynamic fusion execution plan inserted before replay"))
     }
 }
@@ -815,6 +880,153 @@ where
                 lowered_spec.lhs_conjugate(),
                 lowered_spec.rhs_conjugate(),
             ),
+        })
+    }
+}
+
+impl<RuleKey> DynamicFusionExecutionPlanRawFastKey<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn from_inputs<
+        R,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        rule: &R,
+        axes: TensorContractAxisSpec<'_>,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    ) -> Result<Self, OperationError>
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let dst_fusion = dst
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let lhs_fusion = lhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let rhs_fusion = rhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        Ok(Self {
+            rule: rule.tree_transform_rule_cache_key(),
+            dst_nout: DST_NOUT,
+            lhs_nout: LHS_NOUT,
+            rhs_nout: RHS_NOUT,
+            dst_fusion_ptr: std::sync::Arc::as_ptr(dst_fusion) as *const (),
+            lhs_fusion_ptr: std::sync::Arc::as_ptr(lhs_fusion) as *const (),
+            rhs_fusion_ptr: std::sync::Arc::as_ptr(rhs_fusion) as *const (),
+            dst_structure_ptr: std::sync::Arc::as_ptr(dst.structure()),
+            lhs_structure_ptr: std::sync::Arc::as_ptr(lhs.structure()),
+            rhs_structure_ptr: std::sync::Arc::as_ptr(rhs.structure()),
+            lhs_contracting_axes: axes.lhs_contracting_axes().to_vec(),
+            rhs_contracting_axes: axes.rhs_contracting_axes().to_vec(),
+            output_axes: match axes.output_permutation() {
+                AxisPermutation::Identity => None,
+                AxisPermutation::Axes(axes) => Some(axes.to_vec()),
+            },
+            lhs_conjugate: axes.lhs_conjugate(),
+            rhs_conjugate: axes.rhs_conjugate(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matches_inputs<
+        R,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        &self,
+        rule: &R,
+        axes: TensorContractAxisSpec<'_>,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    ) -> bool
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Some(dst_fusion) = dst.fusion_space() else {
+            return false;
+        };
+        let Some(lhs_fusion) = lhs.fusion_space() else {
+            return false;
+        };
+        let Some(rhs_fusion) = rhs.fusion_space() else {
+            return false;
+        };
+        self.rule == rule.tree_transform_rule_cache_key()
+            && self.dst_nout == DST_NOUT
+            && self.lhs_nout == LHS_NOUT
+            && self.rhs_nout == RHS_NOUT
+            && self.dst_fusion_ptr == std::sync::Arc::as_ptr(dst_fusion) as *const ()
+            && self.lhs_fusion_ptr == std::sync::Arc::as_ptr(lhs_fusion) as *const ()
+            && self.rhs_fusion_ptr == std::sync::Arc::as_ptr(rhs_fusion) as *const ()
+            && self.dst_structure_ptr == std::sync::Arc::as_ptr(dst.structure())
+            && self.lhs_structure_ptr == std::sync::Arc::as_ptr(lhs.structure())
+            && self.rhs_structure_ptr == std::sync::Arc::as_ptr(rhs.structure())
+            && self.lhs_contracting_axes.as_slice() == axes.lhs_contracting_axes()
+            && self.rhs_contracting_axes.as_slice() == axes.rhs_contracting_axes()
+            && self.lhs_conjugate == axes.lhs_conjugate()
+            && self.rhs_conjugate == axes.rhs_conjugate()
+            && match (self.output_axes.as_deref(), axes.output_permutation()) {
+                (None, AxisPermutation::Identity) => true,
+                (Some(expected), AxisPermutation::Axes(actual)) => expected == actual,
+                _ => false,
+            }
+    }
+}
+
+impl<RuleKey> DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn from_inputs<
+        R,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        rule: &R,
+        axes: TensorContractAxisSpec<'_>,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    ) -> Result<Self, OperationError>
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        Ok(Self {
+            raw_fast: DynamicFusionExecutionPlanRawFastKey::from_inputs(rule, axes, dst, lhs, rhs)?,
+            full: DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?,
         })
     }
 }
