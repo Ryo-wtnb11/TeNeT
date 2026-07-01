@@ -466,12 +466,19 @@ mod tenferro_adapter {
     #[derive(Debug)]
     pub struct DefaultDenseExecutor {
         backend: CpuBackend,
+        matmul_config: DotGeneralConfig,
     }
 
     impl DefaultDenseExecutor {
         pub fn new() -> Self {
             Self {
                 backend: CpuBackend::new(),
+                matmul_config: DotGeneralConfig {
+                    lhs_contracting_dims: vec![1],
+                    rhs_contracting_dims: vec![0],
+                    lhs_batch_dims: Vec::new(),
+                    rhs_batch_dims: Vec::new(),
+                },
             }
         }
     }
@@ -519,6 +526,20 @@ mod tenferro_adapter {
             let output = TensorWrite::from_view(tenferro_view_mut(output)?);
             self.backend
                 .dot_general_read_into(lhs, rhs, &tenferro_dot_config(config), output)
+                .map_err(|err| tenferro_error("dot_general_read_into", err))
+        }
+
+        fn matmul_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+        ) -> Result<(), DenseError> {
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            self.backend
+                .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
                 .map_err(|err| tenferro_error("dot_general_read_into", err))
         }
     }
@@ -574,7 +595,6 @@ mod tenferro_adapter {
             strides,
             offset,
         } = view;
-        let shape = shape.to_vec();
         let strides = strides_to_isize(strides)?;
         let offset =
             isize::try_from(offset).map_err(|_| DenseError::OffsetOverflow { value: offset })?;
