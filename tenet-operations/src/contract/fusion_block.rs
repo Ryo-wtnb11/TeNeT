@@ -18,8 +18,8 @@ use crate::strided::{
 };
 use crate::structure_identity::validate_structure_identity;
 use crate::{
-    axpby_raw_strided_kernel, ConjugateValue, DenseBlockScalar, OperationError,
-    RecouplingCoefficientAction, TreeTransformRuleCacheKey,
+    axpby_raw_strided_kernel, copy_scale_raw_strided_kernel, ConjugateValue, DenseBlockScalar,
+    OperationError, RecouplingCoefficientAction, TreeTransformRuleCacheKey,
 };
 
 use super::backend::TensorContractBackend;
@@ -1190,31 +1190,23 @@ fn pack_group<T>(
 ) -> Result<(), OperationError>
 where
     T: Copy
+        + std::ops::Add<T, Output = T>
         + std::ops::Mul<T, Output = T>
+        + ConjugateValue
         + RecouplingCoefficientAction<f64>
         + strided_kernel::MaybeSendSync,
 {
     for layout in &group.subblocks {
-        let mut dst = strided_kernel::StridedViewMut::new(
+        copy_scale_raw_strided_kernel(
             packed,
-            &layout.block.shape,
-            &layout.matrix_strides,
-            layout.matrix_offset,
-        )
-        .map_err(strided_error)?;
-        let src = strided_kernel::StridedView::<T>::new(
             data,
             &layout.block.shape,
+            &layout.matrix_strides,
             &layout.block.strides,
+            layout.matrix_offset,
             layout.block.offset,
-        )
-        .map_err(strided_error)?;
-        if layout.coefficient == 1.0 {
-            strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)?;
-        } else {
-            strided_kernel::copy_scale(&mut dst, &src, T::coefficient_as_data(layout.coefficient))
-                .map_err(strided_error)?;
-        }
+            T::coefficient_as_data(layout.coefficient),
+        )?;
     }
     Ok(())
 }

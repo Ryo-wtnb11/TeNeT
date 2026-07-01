@@ -701,6 +701,42 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn copy_scale_raw_strided_kernel<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
+{
+    validate_raw_strided_views(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+    )?;
+    raw_strided_combine_loop(
+        dst_data,
+        src_data,
+        shape,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        false,
+        RawStridedAction::CopyScale { alpha },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_raw_strided_views<T>(
     dst_data: &mut [T],
     src_data: &[T],
