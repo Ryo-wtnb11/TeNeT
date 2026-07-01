@@ -10,7 +10,10 @@ use crate::{
 };
 
 use super::backend::{TensorContractBackend, TensorContractWorkspace};
-use super::dynamic::tensorcontract_fusion_dynamic_transforms_into_with;
+use super::dynamic::{
+    tensorcontract_fusion_dynamic_plan_into_with,
+    tensorcontract_fusion_dynamic_transforms_into_with,
+};
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_structure,
@@ -808,6 +811,107 @@ where
         }) => tensorcontract_fusion_dynamic_transforms_into_with(
             backend, workspace, rule, dst, lhs, rhs, axes, alpha, beta,
         ),
+        Err(err) => Err(err),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tensorcontract_fusion_into_with_backends<
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    tree_backend: &mut BT,
+    tree_workspace: &mut BT::Workspace,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    rule: &R,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    axes: TensorContractAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let dst_fusion = dst
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let lhs_fusion = lhs
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let rhs_fusion = rhs
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
+    let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
+    let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+    if !axes.lhs_conjugate()
+        && !axes.rhs_conjugate()
+        && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
+    {
+        return tensorcontract_canonical_fusion_blocks_into_raw(
+            contract_backend,
+            contract_workspace,
+            rule,
+            &dst_dynamic,
+            dst.data_mut(),
+            &lhs_dynamic,
+            lhs.data(),
+            &rhs_dynamic,
+            rhs.data(),
+            axes,
+            alpha,
+            beta,
+        );
+    }
+
+    match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
+        Ok(structure) => tensorcontract_execute_with(
+            contract_backend,
+            contract_workspace,
+            &structure,
+            dst,
+            lhs,
+            rhs,
+            alpha,
+            beta,
+        ),
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+        }) => {
+            let plan = tensorcontract_fusion_explicit_plan(
+                rule, dst_fusion, lhs_fusion, rhs_fusion, axes,
+            )?;
+            tensorcontract_fusion_dynamic_plan_into_with(
+                tree_backend,
+                tree_workspace,
+                contract_backend,
+                contract_workspace,
+                rule,
+                &plan,
+                dst,
+                lhs,
+                rhs,
+                alpha,
+                beta,
+            )
+        }
         Err(err) => Err(err),
     }
 }

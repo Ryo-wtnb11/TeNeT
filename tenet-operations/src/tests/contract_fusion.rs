@@ -1972,6 +1972,36 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 0);
     assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 0);
 
+    let mut split_backend_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial_dst_for_context_replay.clone(),
+        context_dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut tree_backend = HostTensorOperations;
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_into_with_backends(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &rule,
+        &mut split_backend_dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    for (&actual, &expected) in split_backend_dst.data().iter().zip(expected_dst.data()) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
