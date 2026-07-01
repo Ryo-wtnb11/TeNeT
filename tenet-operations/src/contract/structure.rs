@@ -334,6 +334,19 @@ where
         &self.descriptor
     }
 
+    #[cfg(test)]
+    pub(crate) fn dense_route_kind(&self) -> TensorContractDenseRouteKind {
+        self.descriptor.dense_route_kind()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dense_route_contracting_axes(&self) -> (&[usize], &[usize]) {
+        (
+            self.descriptor.lhs_contracting_axes(),
+            self.descriptor.rhs_contracting_axes(),
+        )
+    }
+
     pub(super) fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
@@ -528,6 +541,7 @@ impl TensorContractAxisPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct TensorContractDescriptor<C = f64> {
     dot_config: DenseDotConfig,
+    dense_route_kind: TensorContractDenseRouteKind,
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,
     lhs_open_axes: Vec<usize>,
@@ -558,6 +572,12 @@ where
     #[inline]
     pub(super) fn dot_config(&self) -> &DenseDotConfig {
         &self.dot_config
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn dense_route_kind(&self) -> TensorContractDenseRouteKind {
+        self.dense_route_kind
     }
 
     #[inline]
@@ -635,15 +655,22 @@ where
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
+        let dense_route = TensorContractDenseRoute::select_forward(
+            axis_plan,
+            terms,
+            lhs_structure,
+            rhs_structure,
+        )?;
         let mut descriptor = Self {
             dot_config: DenseDotConfig::new(
-                axis_plan.lhs_contracting_axes.clone(),
-                axis_plan.rhs_contracting_axes.clone(),
+                dense_route.lhs_contracting_axes.clone(),
+                dense_route.rhs_contracting_axes.clone(),
                 Vec::new(),
                 Vec::new(),
             ),
-            lhs_contracting_axes: axis_plan.lhs_contracting_axes.clone(),
-            rhs_contracting_axes: axis_plan.rhs_contracting_axes.clone(),
+            dense_route_kind: dense_route.kind,
+            lhs_contracting_axes: dense_route.lhs_contracting_axes,
+            rhs_contracting_axes: dense_route.rhs_contracting_axes,
             lhs_open_axes: axis_plan.lhs_open_axes.clone(),
             rhs_open_axes: axis_plan.rhs_open_axes.clone(),
             lhs_conjugate: axis_plan.lhs_conjugate,
@@ -692,12 +719,12 @@ where
                 .rhs_strides
                 .extend_from_slice(rhs_block.strides());
 
-            let lhs_contract_shape = axis_plan
+            let lhs_contract_shape = descriptor
                 .lhs_contracting_axes
                 .iter()
                 .map(|&axis| lhs_block.shape()[axis])
                 .collect::<Vec<_>>();
-            let rhs_contract_shape = axis_plan
+            let rhs_contract_shape = descriptor
                 .rhs_contracting_axes
                 .iter()
                 .map(|&axis| rhs_block.shape()[axis])
@@ -782,6 +809,177 @@ where
 
         Ok(descriptor)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TensorContractDenseRouteKind {
+    ForwardSortLhsContractingAxes,
+    ForwardSortRhsContractingAxes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TensorContractDenseRoute {
+    kind: TensorContractDenseRouteKind,
+    lhs_contracting_axes: Vec<usize>,
+    rhs_contracting_axes: Vec<usize>,
+}
+
+impl TensorContractDenseRoute {
+    fn select_forward<C>(
+        axis_plan: &TensorContractAxisPlan,
+        terms: &[TensorContractStructureTerm<C>],
+        lhs_structure: &BlockStructure,
+        rhs_structure: &BlockStructure,
+    ) -> Result<Self, OperationError> {
+        let lhs_sort = sortperm(&axis_plan.lhs_contracting_axes);
+        let lhs_sorted_by_lhs = take_by_permutation(&axis_plan.lhs_contracting_axes, &lhs_sort);
+        let rhs_sorted_by_lhs = take_by_permutation(&axis_plan.rhs_contracting_axes, &lhs_sort);
+
+        let rhs_sort = sortperm(&axis_plan.rhs_contracting_axes);
+        let lhs_sorted_by_rhs = take_by_permutation(&axis_plan.lhs_contracting_axes, &rhs_sort);
+        let rhs_sorted_by_rhs = take_by_permutation(&axis_plan.rhs_contracting_axes, &rhs_sort);
+
+        let lhs_cost = dense_route_memcost(
+            axis_plan,
+            terms,
+            lhs_structure,
+            rhs_structure,
+            &lhs_sorted_by_lhs,
+            &rhs_sorted_by_lhs,
+        )?;
+        let rhs_cost = dense_route_memcost(
+            axis_plan,
+            terms,
+            lhs_structure,
+            rhs_structure,
+            &lhs_sorted_by_rhs,
+            &rhs_sorted_by_rhs,
+        )?;
+
+        if lhs_cost <= rhs_cost {
+            Ok(Self {
+                kind: TensorContractDenseRouteKind::ForwardSortLhsContractingAxes,
+                lhs_contracting_axes: lhs_sorted_by_lhs,
+                rhs_contracting_axes: rhs_sorted_by_lhs,
+            })
+        } else {
+            Ok(Self {
+                kind: TensorContractDenseRouteKind::ForwardSortRhsContractingAxes,
+                lhs_contracting_axes: lhs_sorted_by_rhs,
+                rhs_contracting_axes: rhs_sorted_by_rhs,
+            })
+        }
+    }
+}
+
+fn dense_route_memcost<C>(
+    axis_plan: &TensorContractAxisPlan,
+    terms: &[TensorContractStructureTerm<C>],
+    lhs_structure: &BlockStructure,
+    rhs_structure: &BlockStructure,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+) -> Result<usize, OperationError> {
+    let mut cost = 0usize;
+    for term in terms {
+        let lhs_block = lhs_structure.block(term.lhs_block())?;
+        let rhs_block = rhs_structure.block(term.rhs_block())?;
+        if !is_dense_contractable_layout(
+            lhs_block.shape(),
+            lhs_block.strides(),
+            &axis_plan.lhs_open_axes,
+            lhs_contracting_axes,
+            axis_plan.lhs_conjugate,
+        )? {
+            cost = cost
+                .checked_add(element_count(lhs_block.shape())?)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+        if !is_dense_contractable_layout(
+            rhs_block.shape(),
+            rhs_block.strides(),
+            rhs_contracting_axes,
+            &axis_plan.rhs_open_axes,
+            axis_plan.rhs_conjugate,
+        )? {
+            cost = cost
+                .checked_add(element_count(rhs_block.shape())?)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+    }
+    Ok(cost)
+}
+
+fn is_dense_contractable_layout(
+    shape: &[usize],
+    strides: &[usize],
+    first_axes: &[usize],
+    second_axes: &[usize],
+    conjugate: bool,
+) -> Result<bool, OperationError> {
+    let first_shape = first_axes
+        .iter()
+        .map(|&axis| shape[axis])
+        .collect::<Vec<_>>();
+    let first_strides = first_axes
+        .iter()
+        .map(|&axis| strides[axis])
+        .collect::<Vec<_>>();
+    let second_shape = second_axes
+        .iter()
+        .map(|&axis| shape[axis])
+        .collect::<Vec<_>>();
+    let second_strides = second_axes
+        .iter()
+        .map(|&axis| strides[axis])
+        .collect::<Vec<_>>();
+    let (first_fusable, _, first_stride) = can_fuse_strided_dims(&first_shape, &first_strides)?;
+    let (second_fusable, _, second_stride) = can_fuse_strided_dims(&second_shape, &second_strides)?;
+    let stride_condition = if conjugate {
+        second_stride == 1
+    } else {
+        first_stride == 1 || second_stride == 1
+    };
+    Ok(first_fusable && second_fusable && stride_condition)
+}
+
+fn can_fuse_strided_dims(
+    dims: &[usize],
+    strides: &[usize],
+) -> Result<(bool, usize, usize), OperationError> {
+    if dims.is_empty() {
+        return Ok((true, 1, 1));
+    }
+    if dims[0] == 0 {
+        return Ok((true, 0, 1));
+    }
+    if dims[0] == 1 {
+        return can_fuse_strided_dims(&dims[1..], &strides[1..]);
+    }
+
+    let (tail_fusable, tail_dim, tail_stride) = can_fuse_strided_dims(&dims[1..], &strides[1..])?;
+    let expected_tail_stride = dims[0]
+        .checked_mul(strides[0])
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let fused_dim = dims[0]
+        .checked_mul(tail_dim)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if tail_fusable && (tail_stride == expected_tail_stride || tail_dim == 1) {
+        let fused_stride = if fused_dim <= 1 { 1 } else { strides[0] };
+        Ok((true, fused_dim, fused_stride))
+    } else {
+        Ok((false, fused_dim, strides[0]))
+    }
+}
+
+fn sortperm(values: &[usize]) -> Vec<usize> {
+    let mut permutation = (0..values.len()).collect::<Vec<_>>();
+    permutation.sort_by_key(|&index| values[index]);
+    permutation
+}
+
+fn take_by_permutation(values: &[usize], permutation: &[usize]) -> Vec<usize> {
+    permutation.iter().map(|&index| values[index]).collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]

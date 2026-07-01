@@ -1,4 +1,5 @@
 use num_traits::Zero;
+use std::sync::Arc;
 
 use crate::OperationError;
 
@@ -6,7 +7,7 @@ use super::dynamic_space::DynamicFusionMapSpace;
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionScratch<T> {
-    space: DynamicFusionMapSpace,
+    space: Arc<DynamicFusionMapSpace>,
     data: Vec<T>,
 }
 
@@ -14,7 +15,7 @@ impl<T> DynamicFusionScratch<T>
 where
     T: Clone + Zero,
 {
-    pub(crate) fn zeroed(space: DynamicFusionMapSpace) -> Result<Self, OperationError> {
+    pub(crate) fn zeroed(space: Arc<DynamicFusionMapSpace>) -> Result<Self, OperationError> {
         let len = space.required_len()?;
         Ok(Self {
             space,
@@ -30,7 +31,7 @@ where
 impl<T> DynamicFusionScratch<T> {
     #[inline]
     pub(crate) fn space(&self) -> &DynamicFusionMapSpace {
-        &self.space
+        self.space.as_ref()
     }
 
     #[inline]
@@ -67,21 +68,21 @@ where
 {
     pub(crate) fn prepare_lhs(
         &mut self,
-        space: DynamicFusionMapSpace,
+        space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
         prepare_scratch_slot(&mut self.lhs, space)
     }
 
     pub(crate) fn prepare_rhs(
         &mut self,
-        space: DynamicFusionMapSpace,
+        space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
         prepare_scratch_slot(&mut self.rhs, space)
     }
 
     pub(crate) fn prepare_dst(
         &mut self,
-        space: DynamicFusionMapSpace,
+        space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
         prepare_scratch_slot(&mut self.dst, space)
     }
@@ -129,13 +130,15 @@ where
 
 fn prepare_scratch_slot<T>(
     slot: &mut Option<DynamicFusionScratch<T>>,
-    space: DynamicFusionMapSpace,
+    space: Arc<DynamicFusionMapSpace>,
 ) -> Result<&mut DynamicFusionScratch<T>, OperationError>
 where
     T: Clone + Zero,
 {
     match slot {
-        Some(scratch) if scratch.space == space => {
+        Some(scratch)
+            if Arc::ptr_eq(&scratch.space, &space) || scratch.space.as_ref() == space.as_ref() =>
+        {
             scratch.fill_zero();
         }
         _ => {

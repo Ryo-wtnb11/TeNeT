@@ -130,8 +130,8 @@ where
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     )?;
-    let mut lhs_canonical = DynamicFusionScratch::<D>::zeroed(lhs_space)?;
-    let mut rhs_canonical = DynamicFusionScratch::<D>::zeroed(rhs_space)?;
+    let mut lhs_canonical = DynamicFusionScratch::<D>::zeroed(Arc::new(lhs_space))?;
+    let mut rhs_canonical = DynamicFusionScratch::<D>::zeroed(Arc::new(rhs_space))?;
 
     tree_pair_transform_typed_to_dynamic(
         tree_backend,
@@ -190,7 +190,7 @@ where
         plan,
         Some(&output_dst_space),
     )?;
-    let mut canonical_dst = DynamicFusionScratch::<D>::zeroed(canonical_dst_space)?;
+    let mut canonical_dst = DynamicFusionScratch::<D>::zeroed(Arc::new(canonical_dst_space))?;
     let canonical_dst_space_for_contract = canonical_dst.space().clone();
     let canonical_dst_structure = std::sync::Arc::clone(canonical_dst.space().structure());
     tensorcontract_dynamic_canonical_into_raw(
@@ -220,6 +220,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     RuleKey,
     BT,
@@ -287,6 +288,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
     RuleKey,
     BT,
@@ -746,6 +748,7 @@ impl DynamicFusionSpaceCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
+    last_transformed_sources: Vec<DynamicFusionTransformedSourceLastEntry<RuleKey>>,
     fast_transformed_sources: HashMap<
         DynamicFusionTransformedSourceFastKey<RuleKey>,
         DynamicFusionTransformedSourceEntry,
@@ -754,6 +757,7 @@ pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
         DynamicFusionTransformedSourceSpaceKey<RuleKey>,
         DynamicFusionTransformedSourceEntry,
     >,
+    last_canonical_dst: Option<DynamicFusionCanonicalDstLastEntry<RuleKey>>,
     fast_canonical_dsts:
         HashMap<DynamicFusionCanonicalDstFastKey<RuleKey>, DynamicFusionCanonicalDstEntry>,
     canonical_dsts:
@@ -763,26 +767,120 @@ pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
 
 #[derive(Clone, Debug)]
 struct DynamicFusionTransformedSourceEntry {
-    space: DynamicFusionMapSpace,
+    space: Arc<DynamicFusionMapSpace>,
     replay_structure: Arc<BlockStructure>,
     transform_structure: Arc<TreeTransformStructure<f64>>,
 }
 
 #[derive(Clone, Debug)]
 struct DynamicFusionCanonicalDstEntry {
-    space: DynamicFusionMapSpace,
+    space: Arc<DynamicFusionMapSpace>,
     output_transform_structure: Arc<TreeTransformStructure<f64>>,
 }
 
 impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
     fn default() -> Self {
         Self {
+            last_transformed_sources: Vec::new(),
             fast_transformed_sources: HashMap::new(),
             transformed_sources: HashMap::new(),
+            last_canonical_dst: None,
             fast_canonical_dsts: HashMap::new(),
             canonical_dsts: HashMap::new(),
             stats: DynamicFusionSpaceCacheStats::default(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DynamicFusionTransformedSourceLastEntry<RuleKey> {
+    rule: RuleKey,
+    nout: usize,
+    homspace: FusionTreeHomSpace,
+    replay_structure: Arc<BlockStructure>,
+    operation: TreeTransformOperationKey,
+    source_conjugate: bool,
+    entry: DynamicFusionTransformedSourceEntry,
+}
+
+impl<RuleKey> DynamicFusionTransformedSourceLastEntry<RuleKey>
+where
+    RuleKey: Eq,
+{
+    fn matches(
+        &self,
+        rule: &RuleKey,
+        nout: usize,
+        homspace: &FusionTreeHomSpace,
+        replay_structure: &Arc<BlockStructure>,
+        operation: &TreeTransformOperationKey,
+        source_conjugate: bool,
+    ) -> bool {
+        &self.rule == rule
+            && self.nout == nout
+            && self.homspace == *homspace
+            && Arc::ptr_eq(&self.replay_structure, replay_structure)
+            && &self.operation == operation
+            && self.source_conjugate == source_conjugate
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DynamicFusionCanonicalDstLastEntry<RuleKey> {
+    rule: RuleKey,
+    lhs: DynamicFusionLastSpaceKey,
+    rhs: DynamicFusionLastSpaceKey,
+    canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_dst_nout: usize,
+    canonical_dst_nin: usize,
+    output_transform: TreeTransformOperationKey,
+    output_dst: DynamicFusionLastSpaceKey,
+    entry: DynamicFusionCanonicalDstEntry,
+}
+
+impl<RuleKey> DynamicFusionCanonicalDstLastEntry<RuleKey>
+where
+    RuleKey: Eq,
+{
+    fn matches(
+        &self,
+        rule: &RuleKey,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        plan: &TensorContractFusionExplicitPlan,
+        output_dst: &DynamicFusionMapSpace,
+    ) -> bool {
+        &self.rule == rule
+            && self.lhs.matches(lhs)
+            && self.rhs.matches(rhs)
+            && self.canonical_axes == *plan.canonical_axes()
+            && self.canonical_dst_nout == plan.canonical_dst_nout()
+            && self.canonical_dst_nin == plan.canonical_dst_nin()
+            && self.output_transform == *plan.output_transform()
+            && self.output_dst.matches(output_dst)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DynamicFusionLastSpaceKey {
+    nout: usize,
+    homspace: FusionTreeHomSpace,
+    structure: Arc<BlockStructure>,
+}
+
+impl DynamicFusionLastSpaceKey {
+    fn from_space(space: &DynamicFusionMapSpace) -> Self {
+        Self {
+            nout: space.nout(),
+            homspace: space.homspace().clone(),
+            structure: Arc::clone(space.structure()),
+        }
+    }
+
+    fn matches(&self, space: &DynamicFusionMapSpace) -> bool {
+        self.nout == space.nout()
+            && self.homspace == *space.homspace()
+            && Arc::ptr_eq(&self.structure, space.structure())
     }
 }
 
@@ -798,6 +896,17 @@ where
     #[inline]
     pub(crate) fn stats(&self) -> DynamicFusionSpaceCacheStats {
         self.stats
+    }
+
+    fn remember_transformed_source(
+        &mut self,
+        entry: DynamicFusionTransformedSourceLastEntry<RuleKey>,
+    ) {
+        const LAST_TRANSFORMED_SOURCE_LIMIT: usize = 4;
+        if self.last_transformed_sources.len() == LAST_TRANSFORMED_SOURCE_LIMIT {
+            self.last_transformed_sources.remove(0);
+        }
+        self.last_transformed_sources.push(entry);
     }
 
     fn get_or_compile_transformed_source<
@@ -825,6 +934,24 @@ where
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
         let rule_key = rule.tree_transform_rule_cache_key();
         let nout = if source_conjugate { SRC_NIN } else { SRC_NOUT };
+        if !source_conjugate {
+            let homspace = src_fusion.homspace();
+            let replay_structure = src.structure();
+            for last in &self.last_transformed_sources {
+                if last.matches(
+                    &rule_key,
+                    nout,
+                    homspace,
+                    replay_structure,
+                    operation,
+                    source_conjugate,
+                ) {
+                    self.stats.hits += 1;
+                    self.stats.fast_hits += 1;
+                    return Ok(last.entry.clone());
+                }
+            }
+        }
         let (homspace, replay_structure) = if source_conjugate {
             let adjoint = adjoint_fusion_space_view(src_fusion)?;
             (
@@ -837,6 +964,22 @@ where
                 std::sync::Arc::clone(src.structure()),
             )
         };
+        if source_conjugate {
+            for last in &self.last_transformed_sources {
+                if last.matches(
+                    &rule_key,
+                    nout,
+                    &homspace,
+                    &replay_structure,
+                    operation,
+                    source_conjugate,
+                ) {
+                    self.stats.hits += 1;
+                    self.stats.fast_hits += 1;
+                    return Ok(last.entry.clone());
+                }
+            }
+        }
         let fast_key = DynamicFusionTransformedSourceFastKey {
             rule: rule_key.clone(),
             nout,
@@ -846,23 +989,43 @@ where
             source_conjugate,
         };
         if let Some(entry) = self.fast_transformed_sources.get(&fast_key) {
+            let entry = entry.clone();
             self.stats.hits += 1;
             self.stats.fast_hits += 1;
-            return Ok(entry.clone());
+            self.remember_transformed_source(DynamicFusionTransformedSourceLastEntry {
+                rule: rule_key,
+                nout,
+                homspace,
+                replay_structure,
+                operation: operation.clone(),
+                source_conjugate,
+                entry: entry.clone(),
+            });
+            return Ok(entry);
         }
         let key = DynamicFusionTransformedSourceSpaceKey {
-            rule: rule_key,
+            rule: rule_key.clone(),
             nout,
-            homspace,
+            homspace: homspace.clone(),
             structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
             operation: operation.clone(),
             source_conjugate,
         };
         if let Some(entry) = self.transformed_sources.get(&key) {
+            let entry = entry.clone();
             self.stats.hits += 1;
             self.fast_transformed_sources
                 .insert(fast_key, entry.clone());
-            return Ok(entry.clone());
+            self.remember_transformed_source(DynamicFusionTransformedSourceLastEntry {
+                rule: rule_key,
+                nout,
+                homspace,
+                replay_structure,
+                operation: operation.clone(),
+                source_conjugate,
+                entry: entry.clone(),
+            });
+            return Ok(entry);
         }
 
         self.stats.misses += 1;
@@ -882,13 +1045,22 @@ where
                 source_conjugate,
             )?;
         let entry = DynamicFusionTransformedSourceEntry {
-            space,
+            space: Arc::new(space),
             replay_structure,
             transform_structure,
         };
         self.transformed_sources.insert(key, entry.clone());
         self.fast_transformed_sources
             .insert(fast_key, entry.clone());
+        self.remember_transformed_source(DynamicFusionTransformedSourceLastEntry {
+            rule: rule_key,
+            nout,
+            homspace,
+            replay_structure: Arc::clone(&entry.replay_structure),
+            operation: operation.clone(),
+            source_conjugate,
+            entry: entry.clone(),
+        });
         Ok(entry)
     }
 
@@ -907,6 +1079,13 @@ where
         BT: TreeTransformBackend<D, f64>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(last) = &self.last_canonical_dst {
+            if last.matches(&rule_key, lhs, rhs, plan, output_dst) {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                return Ok(last.entry.clone());
+            }
+        }
         let fast_key = DynamicFusionCanonicalDstFastKey {
             rule: rule_key.clone(),
             lhs: DynamicFusionFastSpaceKey::from_space(lhs),
@@ -920,10 +1099,21 @@ where
         if let Some(entry) = self.fast_canonical_dsts.get(&fast_key) {
             self.stats.hits += 1;
             self.stats.fast_hits += 1;
+            self.last_canonical_dst = Some(DynamicFusionCanonicalDstLastEntry {
+                rule: rule_key,
+                lhs: DynamicFusionLastSpaceKey::from_space(lhs),
+                rhs: DynamicFusionLastSpaceKey::from_space(rhs),
+                canonical_axes: plan.canonical_axes().clone(),
+                canonical_dst_nout: plan.canonical_dst_nout(),
+                canonical_dst_nin: plan.canonical_dst_nin(),
+                output_transform: plan.output_transform().clone(),
+                output_dst: DynamicFusionLastSpaceKey::from_space(output_dst),
+                entry: entry.clone(),
+            });
             return Ok(entry.clone());
         }
         let key = DynamicFusionCanonicalDstSpaceKey {
-            rule: rule_key,
+            rule: rule_key.clone(),
             lhs: DynamicFusionSpaceKey::from_space(lhs)?,
             rhs: DynamicFusionSpaceKey::from_space(rhs)?,
             canonical_axes: plan.canonical_axes().clone(),
@@ -935,6 +1125,17 @@ where
         if let Some(entry) = self.canonical_dsts.get(&key) {
             self.stats.hits += 1;
             self.fast_canonical_dsts.insert(fast_key, entry.clone());
+            self.last_canonical_dst = Some(DynamicFusionCanonicalDstLastEntry {
+                rule: rule_key,
+                lhs: DynamicFusionLastSpaceKey::from_space(lhs),
+                rhs: DynamicFusionLastSpaceKey::from_space(rhs),
+                canonical_axes: plan.canonical_axes().clone(),
+                canonical_dst_nout: plan.canonical_dst_nout(),
+                canonical_dst_nin: plan.canonical_dst_nin(),
+                output_transform: plan.output_transform().clone(),
+                output_dst: DynamicFusionLastSpaceKey::from_space(output_dst),
+                entry: entry.clone(),
+            });
             return Ok(entry.clone());
         }
 
@@ -951,11 +1152,22 @@ where
                 false,
             )?;
         let entry = DynamicFusionCanonicalDstEntry {
-            space,
+            space: Arc::new(space),
             output_transform_structure,
         };
         self.canonical_dsts.insert(key, entry.clone());
         self.fast_canonical_dsts.insert(fast_key, entry.clone());
+        self.last_canonical_dst = Some(DynamicFusionCanonicalDstLastEntry {
+            rule: rule_key,
+            lhs: DynamicFusionLastSpaceKey::from_space(lhs),
+            rhs: DynamicFusionLastSpaceKey::from_space(rhs),
+            canonical_axes: plan.canonical_axes().clone(),
+            canonical_dst_nout: plan.canonical_dst_nout(),
+            canonical_dst_nin: plan.canonical_dst_nin(),
+            output_transform: plan.output_transform().clone(),
+            output_dst: DynamicFusionLastSpaceKey::from_space(output_dst),
+            entry: entry.clone(),
+        });
         Ok(entry)
     }
 }

@@ -8,7 +8,7 @@ use tenet_core::{
     SectorId,
 };
 
-use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::BlockStructureCacheKey;
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, error as strided_error,
@@ -177,6 +177,7 @@ pub(crate) struct CanonicalFusionBlockContractPlan {
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
+    dst_scale_blocks: Vec<FusionScaleBlockLayout>,
     groups: Vec<CanonicalFusionBlockContractGroupPlan>,
 }
 
@@ -226,6 +227,7 @@ impl CanonicalFusionBlockContractPlan {
             dst_structure: Arc::clone(dst_space.structure()),
             lhs_structure: Arc::clone(lhs_space.structure()),
             rhs_structure: Arc::clone(rhs_space.structure()),
+            dst_scale_blocks: fusion_scale_block_layouts(dst_space.structure())?,
             groups,
         })
     }
@@ -250,24 +252,14 @@ impl CanonicalFusionBlockContractPlan {
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
         self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
-        scale_all_blocks(dst_structure, dst_data, beta)?;
+        scale_all_blocks(&self.dst_scale_blocks, dst_data, beta)?;
 
         for group in &self.groups {
             fusion_workspace
                 .buffers
                 .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-            pack_group(
-                &group.lhs,
-                lhs_structure,
-                lhs_data,
-                &mut fusion_workspace.buffers.lhs,
-            )?;
-            pack_group(
-                &group.rhs,
-                rhs_structure,
-                rhs_data,
-                &mut fusion_workspace.buffers.rhs,
-            )?;
+            pack_group(&group.lhs, lhs_data, &mut fusion_workspace.buffers.lhs)?;
+            pack_group(&group.rhs, rhs_data, &mut fusion_workspace.buffers.rhs)?;
             matmul_group_plan(
                 backend,
                 workspace,
@@ -276,13 +268,7 @@ impl CanonicalFusionBlockContractPlan {
                 &fusion_workspace.buffers.rhs,
                 &mut fusion_workspace.buffers.dst,
             )?;
-            scatter_group(
-                &group.dst,
-                dst_structure,
-                dst_data,
-                &fusion_workspace.buffers.dst,
-                alpha,
-            )?;
+            scatter_group(&group.dst, dst_data, &fusion_workspace.buffers.dst, alpha)?;
         }
         Ok(())
     }
@@ -314,7 +300,7 @@ impl CanonicalFusionBlockContractPlan {
         profile.canonical_validate += start.elapsed();
 
         let start = std::time::Instant::now();
-        scale_all_blocks(dst_structure, dst_data, beta)?;
+        scale_all_blocks(&self.dst_scale_blocks, dst_data, beta)?;
         profile.canonical_scale += start.elapsed();
 
         for group in &self.groups {
@@ -327,21 +313,11 @@ impl CanonicalFusionBlockContractPlan {
             profile.canonical_workspace_prepare += start.elapsed();
 
             let start = std::time::Instant::now();
-            pack_group(
-                &group.lhs,
-                lhs_structure,
-                lhs_data,
-                &mut fusion_workspace.buffers.lhs,
-            )?;
+            pack_group(&group.lhs, lhs_data, &mut fusion_workspace.buffers.lhs)?;
             profile.canonical_pack_lhs += start.elapsed();
 
             let start = std::time::Instant::now();
-            pack_group(
-                &group.rhs,
-                rhs_structure,
-                rhs_data,
-                &mut fusion_workspace.buffers.rhs,
-            )?;
+            pack_group(&group.rhs, rhs_data, &mut fusion_workspace.buffers.rhs)?;
             profile.canonical_pack_rhs += start.elapsed();
 
             let start = std::time::Instant::now();
@@ -356,13 +332,7 @@ impl CanonicalFusionBlockContractPlan {
             profile.canonical_matmul += start.elapsed();
 
             let start = std::time::Instant::now();
-            scatter_group(
-                &group.dst,
-                dst_structure,
-                dst_data,
-                &fusion_workspace.buffers.dst,
-                alpha,
-            )?;
+            scatter_group(&group.dst, dst_data, &fusion_workspace.buffers.dst, alpha)?;
             profile.canonical_scatter += start.elapsed();
         }
 
@@ -438,6 +408,7 @@ impl CanonicalFusionBlockContractCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
+    last: Option<CanonicalFusionBlockContractLastEntry<RuleKey>>,
     fast_plans: HashMap<
         CanonicalFusionBlockContractFastKey<RuleKey>,
         Arc<CanonicalFusionBlockContractPlan>,
@@ -452,6 +423,7 @@ pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
 impl<RuleKey> Default for CanonicalFusionBlockContractCache<RuleKey> {
     fn default() -> Self {
         Self {
+            last: None,
             fast_plans: HashMap::new(),
             plans: HashMap::new(),
             stats: CanonicalFusionBlockContractCacheStats::default(),
@@ -484,6 +456,15 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
+        let rule_key = rule.tree_transform_rule_cache_key();
+        let raw_axes = RawTensorContractAxisSpecKey::from_axes(axes);
+        if let Some(last) = &self.last {
+            if last.matches(&rule_key, dst_space, lhs_space, rhs_space, axes) {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                return Ok(Arc::clone(&last.plan));
+            }
+        }
         let axis_plan = TensorContractAxisPlan::compile(
             lhs_space.rank(),
             rhs_space.rank(),
@@ -497,7 +478,6 @@ where
             axis_plan.lhs_conjugate,
             axis_plan.rhs_conjugate,
         );
-        let rule_key = rule.tree_transform_rule_cache_key();
         let fast_key = CanonicalFusionBlockContractFastKey {
             rule: rule_key.clone(),
             dst: CanonicalFusionBlockFastSpaceKey::from_space(dst_space),
@@ -508,16 +488,36 @@ where
         if let Some(plan) = self.fast_plans.get(&fast_key) {
             self.stats.hits += 1;
             self.stats.fast_hits += 1;
+            self.last = Some(CanonicalFusionBlockContractLastEntry {
+                rule: rule_key,
+                dst: CanonicalFusionBlockLastSpaceKey::from_space(dst_space),
+                lhs: CanonicalFusionBlockLastSpaceKey::from_space(lhs_space),
+                rhs: CanonicalFusionBlockLastSpaceKey::from_space(rhs_space),
+                axes: raw_axes,
+                plan: Arc::clone(plan),
+            });
             return Ok(Arc::clone(plan));
         }
 
         let key = CanonicalFusionBlockContractCacheKey::from_parts(
-            rule_key, dst_space, lhs_space, rhs_space, axes_key,
+            rule_key.clone(),
+            dst_space,
+            lhs_space,
+            rhs_space,
+            axes_key,
         )?;
         if let Some(plan) = self.plans.get(&key) {
             self.stats.hits += 1;
             let plan = Arc::clone(plan);
             self.fast_plans.insert(fast_key, Arc::clone(&plan));
+            self.last = Some(CanonicalFusionBlockContractLastEntry {
+                rule: rule_key,
+                dst: CanonicalFusionBlockLastSpaceKey::from_space(dst_space),
+                lhs: CanonicalFusionBlockLastSpaceKey::from_space(lhs_space),
+                rhs: CanonicalFusionBlockLastSpaceKey::from_space(rhs_space),
+                axes: raw_axes,
+                plan: Arc::clone(&plan),
+            });
             return Ok(plan);
         } else {
             self.stats.misses += 1;
@@ -527,7 +527,120 @@ where
             let plan = Arc::new(plan);
             self.plans.insert(key, Arc::clone(&plan));
             self.fast_plans.insert(fast_key, Arc::clone(&plan));
+            self.last = Some(CanonicalFusionBlockContractLastEntry {
+                rule: rule_key,
+                dst: CanonicalFusionBlockLastSpaceKey::from_space(dst_space),
+                lhs: CanonicalFusionBlockLastSpaceKey::from_space(lhs_space),
+                rhs: CanonicalFusionBlockLastSpaceKey::from_space(rhs_space),
+                axes: raw_axes,
+                plan: Arc::clone(&plan),
+            });
             return Ok(plan);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalFusionBlockContractLastEntry<RuleKey> {
+    rule: RuleKey,
+    dst: CanonicalFusionBlockLastSpaceKey,
+    lhs: CanonicalFusionBlockLastSpaceKey,
+    rhs: CanonicalFusionBlockLastSpaceKey,
+    axes: RawTensorContractAxisSpecKey,
+    plan: Arc<CanonicalFusionBlockContractPlan>,
+}
+
+impl<RuleKey> CanonicalFusionBlockContractLastEntry<RuleKey>
+where
+    RuleKey: Eq,
+{
+    fn matches(
+        &self,
+        rule: &RuleKey,
+        dst: &DynamicFusionMapSpace,
+        lhs: &DynamicFusionMapSpace,
+        rhs: &DynamicFusionMapSpace,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> bool {
+        &self.rule == rule
+            && self.dst.matches(dst)
+            && self.lhs.matches(lhs)
+            && self.rhs.matches(rhs)
+            && self.axes.matches(axes)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalFusionBlockLastSpaceKey {
+    nout: usize,
+    homspace: FusionTreeHomSpace,
+    structure: Arc<BlockStructure>,
+}
+
+impl CanonicalFusionBlockLastSpaceKey {
+    fn from_space(space: &DynamicFusionMapSpace) -> Self {
+        Self {
+            nout: space.nout(),
+            homspace: space.homspace().clone(),
+            structure: Arc::clone(space.structure()),
+        }
+    }
+
+    fn matches(&self, space: &DynamicFusionMapSpace) -> bool {
+        self.nout == space.nout()
+            && self.homspace == *space.homspace()
+            && Arc::ptr_eq(&self.structure, space.structure())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawTensorContractAxisSpecKey {
+    lhs_contracting_axes: Vec<usize>,
+    rhs_contracting_axes: Vec<usize>,
+    output_permutation: RawAxisPermutationKey,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+}
+
+impl RawTensorContractAxisSpecKey {
+    fn from_axes(axes: TensorContractAxisSpec<'_>) -> Self {
+        Self {
+            lhs_contracting_axes: axes.lhs_contracting_axes().to_vec(),
+            rhs_contracting_axes: axes.rhs_contracting_axes().to_vec(),
+            output_permutation: RawAxisPermutationKey::from_axes(axes.output_permutation()),
+            lhs_conjugate: axes.lhs_conjugate(),
+            rhs_conjugate: axes.rhs_conjugate(),
+        }
+    }
+
+    fn matches(&self, axes: TensorContractAxisSpec<'_>) -> bool {
+        self.lhs_contracting_axes == axes.lhs_contracting_axes()
+            && self.rhs_contracting_axes == axes.rhs_contracting_axes()
+            && self.output_permutation.matches(axes.output_permutation())
+            && self.lhs_conjugate == axes.lhs_conjugate()
+            && self.rhs_conjugate == axes.rhs_conjugate()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RawAxisPermutationKey {
+    Identity,
+    Axes(Vec<usize>),
+}
+
+impl RawAxisPermutationKey {
+    fn from_axes(axes: AxisPermutation<'_>) -> Self {
+        match axes {
+            AxisPermutation::Identity => Self::Identity,
+            AxisPermutation::Axes(axes) => Self::Axes(axes.to_vec()),
+        }
+    }
+
+    fn matches(&self, axes: AxisPermutation<'_>) -> bool {
+        match (self, axes) {
+            (Self::Identity, AxisPermutation::Identity) => true,
+            (Self::Axes(stored), AxisPermutation::Axes(axes)) => stored == axes,
+            _ => false,
         }
     }
 }
@@ -814,6 +927,7 @@ impl FusionBlockMatrixGroupBuilder {
                 .checked_mul(self.rows)
                 .and_then(|offset| offset.checked_add(row.offset))
                 .ok_or(OperationError::ElementCountOverflow)?;
+            let matrix_offset = offset_to_isize(matrix_offset)?;
             let coefficient = if let Some(rhs_contracting_axes) = rhs_contracting_axes {
                 rhs_contract_twist_factor(
                     rule,
@@ -825,7 +939,11 @@ impl FusionBlockMatrixGroupBuilder {
                 rule.scalar_one()
             };
             subblocks.push(FusionSubblockMatrixLayout {
-                block_index,
+                block: FusionStridedBlockLayout {
+                    shape: block.shape().to_vec(),
+                    strides: strides_to_isize(block.strides())?,
+                    offset: offset_to_isize(block.offset())?,
+                },
                 matrix_offset,
                 matrix_strides,
                 coefficient,
@@ -856,10 +974,41 @@ struct FusionBlockMatrixGroup {
 
 #[derive(Clone, Debug)]
 struct FusionSubblockMatrixLayout {
-    block_index: usize,
-    matrix_offset: usize,
+    block: FusionStridedBlockLayout,
+    matrix_offset: isize,
     matrix_strides: Vec<isize>,
     coefficient: f64,
+}
+
+#[derive(Clone, Debug)]
+struct FusionStridedBlockLayout {
+    shape: Vec<usize>,
+    strides: Vec<isize>,
+    offset: isize,
+}
+
+#[derive(Clone, Debug)]
+struct FusionScaleBlockLayout {
+    block: FusionStridedBlockLayout,
+    zero_strides: Vec<isize>,
+}
+
+fn fusion_scale_block_layouts(
+    structure: &BlockStructure,
+) -> Result<Vec<FusionScaleBlockLayout>, OperationError> {
+    let mut layouts = Vec::with_capacity(structure.block_count());
+    for block_index in 0..structure.block_count() {
+        let block = structure.block(block_index)?;
+        layouts.push(FusionScaleBlockLayout {
+            block: FusionStridedBlockLayout {
+                shape: block.shape().to_vec(),
+                strides: strides_to_isize(block.strides())?,
+                offset: offset_to_isize(block.offset())?,
+            },
+            zero_strides: vec![0isize; block.shape().len()],
+        });
+    }
+    Ok(layouts)
 }
 
 fn coupled_sector<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
@@ -871,7 +1020,6 @@ where
 
 fn pack_group<T>(
     group: &FusionBlockMatrixGroup,
-    structure: &BlockStructure,
     data: &[T],
     packed: &mut [T],
 ) -> Result<(), OperationError>
@@ -882,20 +1030,18 @@ where
         + strided_kernel::MaybeSendSync,
 {
     for layout in &group.subblocks {
-        let block = structure.block(layout.block_index)?;
-        let src_strides = strides_to_isize(block.strides())?;
         let mut dst = strided_kernel::StridedViewMut::new(
             packed,
-            block.shape(),
+            &layout.block.shape,
             &layout.matrix_strides,
-            offset_to_isize(layout.matrix_offset)?,
+            layout.matrix_offset,
         )
         .map_err(strided_error)?;
         let src = strided_kernel::StridedView::<T>::new(
             data,
-            block.shape(),
-            &src_strides,
-            offset_to_isize(block.offset())?,
+            &layout.block.shape,
+            &layout.block.strides,
+            layout.block.offset,
         )
         .map_err(strided_error)?;
         if layout.coefficient == 1.0 {
@@ -910,7 +1056,6 @@ where
 
 fn scatter_group<T>(
     group: &FusionBlockMatrixGroup,
-    structure: &BlockStructure,
     data: &mut [T],
     packed: &[T],
     alpha: T,
@@ -925,20 +1070,18 @@ where
         + strided_kernel::MaybeSendSync,
 {
     for layout in &group.subblocks {
-        let block = structure.block(layout.block_index)?;
-        let dst_strides = strides_to_isize(block.strides())?;
         let mut dst = strided_kernel::StridedViewMut::new(
             data,
-            block.shape(),
-            &dst_strides,
-            offset_to_isize(block.offset())?,
+            &layout.block.shape,
+            &layout.block.strides,
+            layout.block.offset,
         )
         .map_err(strided_error)?;
         let src = strided_kernel::StridedView::<T>::new(
             packed,
-            block.shape(),
+            &layout.block.shape,
             &layout.matrix_strides,
-            offset_to_isize(layout.matrix_offset)?,
+            layout.matrix_offset,
         )
         .map_err(strided_error)?;
         strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)?;
@@ -947,37 +1090,35 @@ where
 }
 
 fn scale_all_blocks<T>(
-    structure: &BlockStructure,
+    blocks: &[FusionScaleBlockLayout],
     data: &mut [T],
     beta: T,
 ) -> Result<(), OperationError>
 where
     T: Copy + std::ops::Mul<T, Output = T> + strided_kernel::MaybeSendSync,
 {
-    for block_index in 0..structure.block_count() {
-        let block = structure.block(block_index)?;
-        let strides = strides_to_isize(block.strides())?;
+    for layout in blocks {
         let mut dst = strided_kernel::StridedViewMut::new(
             data,
-            block.shape(),
-            &strides,
-            offset_to_isize(block.offset())?,
+            &layout.block.shape,
+            &layout.block.strides,
+            layout.block.offset,
         )
         .map_err(strided_error)?;
-        scale_view(&mut dst, beta)?;
+        scale_view(&mut dst, &layout.zero_strides, beta)?;
     }
     Ok(())
 }
 
 fn scale_view<T>(
     dst: &mut strided_kernel::StridedViewMut<'_, T>,
+    zero_strides: &[isize],
     beta: T,
 ) -> Result<(), OperationError>
 where
     T: Copy + std::ops::Mul<T, Output = T> + strided_kernel::MaybeSendSync,
 {
     let scalar = [beta];
-    let zero_strides = vec![0isize; dst.ndim()];
     let beta_view = strided_kernel::StridedView::<T>::new(&scalar, dst.dims(), &zero_strides, 0)
         .map_err(strided_error)?;
     strided_kernel::mul(dst, &beta_view).map_err(strided_error)

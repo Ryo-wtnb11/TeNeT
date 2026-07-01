@@ -1,9 +1,16 @@
+use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
-use tenet_core::{CoreError, MultiplicityFreeRigidSymbols, TensorMap};
+use tenet_core::{
+    BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace,
+    MultiplicityFreeRigidSymbols, TensorMap,
+};
 
-use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
-use crate::cache::{TensorContractStructureCache, TensorContractStructureCacheKey};
+use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use crate::cache::{
+    BlockStructureCacheKey, TensorContractStructureCache, TensorContractStructureCacheKey,
+};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
@@ -13,14 +20,14 @@ use crate::{
 
 use super::backend::TensorContractBackend;
 use super::dynamic::{
-    tensorcontract_fusion_dynamic_into_context,
-    tensorcontract_fusion_dynamic_into_context_profiled, DynamicFusionSpaceCache,
+    tensorcontract_fusion_dynamic_plan_into_context,
+    tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
-    tensorcontract_fusion_block_specs, tensorcontract_fusion_structure,
-    TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
-    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+    tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
+    tensorcontract_fusion_structure, TensorContractFusionExplicitPlan,
+    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
     is_canonical_fusion_block_contract, CanonicalFusionBlockContractCache,
@@ -107,6 +114,468 @@ pub struct TensorContractBlockPlanTerm {
     lhs_block: usize,
     rhs_block: usize,
     coefficient_bits: u64,
+}
+
+#[derive(Clone, Debug)]
+struct FusionDenseBlockSpecsCache<RuleKey> {
+    last: Option<FusionDenseBlockSpecsLastEntry<RuleKey>>,
+    entries: HashMap<FusionDenseBlockSpecsCacheKey<RuleKey>, FusionDenseBlockSpecsCacheEntry>,
+}
+
+impl<RuleKey> Default for FusionDenseBlockSpecsCache<RuleKey> {
+    fn default() -> Self {
+        Self {
+            last: None,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RawTensorContractAxisSpecKey {
+    lhs_contracting_axes: Vec<usize>,
+    rhs_contracting_axes: Vec<usize>,
+    output_permutation: RawAxisPermutationKey,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+}
+
+impl RawTensorContractAxisSpecKey {
+    fn from_axes(axes: TensorContractAxisSpec<'_>) -> Self {
+        Self {
+            lhs_contracting_axes: axes.lhs_contracting_axes().to_vec(),
+            rhs_contracting_axes: axes.rhs_contracting_axes().to_vec(),
+            output_permutation: RawAxisPermutationKey::from_axes(axes.output_permutation()),
+            lhs_conjugate: axes.lhs_conjugate(),
+            rhs_conjugate: axes.rhs_conjugate(),
+        }
+    }
+
+    fn matches(&self, axes: TensorContractAxisSpec<'_>) -> bool {
+        self.lhs_contracting_axes == axes.lhs_contracting_axes()
+            && self.rhs_contracting_axes == axes.rhs_contracting_axes()
+            && self.output_permutation.matches(axes.output_permutation())
+            && self.lhs_conjugate == axes.lhs_conjugate()
+            && self.rhs_conjugate == axes.rhs_conjugate()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RawAxisPermutationKey {
+    Identity,
+    Axes(Vec<usize>),
+}
+
+impl RawAxisPermutationKey {
+    fn from_axes(axes: AxisPermutation<'_>) -> Self {
+        match axes {
+            AxisPermutation::Identity => Self::Identity,
+            AxisPermutation::Axes(axes) => Self::Axes(axes.to_vec()),
+        }
+    }
+
+    fn matches(&self, axes: AxisPermutation<'_>) -> bool {
+        match (self, axes) {
+            (Self::Identity, AxisPermutation::Identity) => true,
+            (Self::Axes(stored), AxisPermutation::Axes(axes)) => stored == axes,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FusionDenseBlockSpecsLastEntry<RuleKey> {
+    rule: RuleKey,
+    dst_nout: usize,
+    dst_homspace: FusionTreeHomSpace,
+    dst_structure: Arc<BlockStructure>,
+    lhs_nout: usize,
+    lhs_homspace: FusionTreeHomSpace,
+    lhs_structure: Arc<BlockStructure>,
+    rhs_nout: usize,
+    rhs_homspace: FusionTreeHomSpace,
+    rhs_structure: Arc<BlockStructure>,
+    axes: RawTensorContractAxisSpecKey,
+    entry: FusionDenseBlockSpecsCacheEntry,
+}
+
+impl<RuleKey> FusionDenseBlockSpecsLastEntry<RuleKey>
+where
+    RuleKey: Eq,
+{
+    fn matches<
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+    >(
+        &self,
+        rule: &RuleKey,
+        dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+        lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+        rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> bool {
+        &self.rule == rule
+            && self.dst_nout == DST_NOUT
+            && self.lhs_nout == LHS_NOUT
+            && self.rhs_nout == RHS_NOUT
+            && Arc::ptr_eq(&self.dst_structure, dst.subblock_structure())
+            && Arc::ptr_eq(&self.lhs_structure, lhs.subblock_structure())
+            && Arc::ptr_eq(&self.rhs_structure, rhs.subblock_structure())
+            && self.dst_homspace == *dst.homspace()
+            && self.lhs_homspace == *lhs.homspace()
+            && self.rhs_homspace == *rhs.homspace()
+            && self.axes.matches(axes)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum FusionDenseBlockSpecsCacheEntry {
+    Specs {
+        block_specs: Arc<Vec<TensorContractBlockSpec>>,
+        _guards: FusionDenseBlockSpecsCacheGuards,
+    },
+    SourceTransformRequiresExplicit {
+        _guards: FusionDenseBlockSpecsCacheGuards,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct FusionDenseBlockSpecsCacheGuards {
+    _dst_structure: Arc<BlockStructure>,
+    _lhs_structure: Arc<BlockStructure>,
+    _rhs_structure: Arc<BlockStructure>,
+}
+
+#[derive(Clone, Debug)]
+struct FusionExplicitPlanCache<RuleKey> {
+    last: Option<FusionExplicitPlanLastEntry<RuleKey>>,
+    plans: HashMap<FusionExplicitPlanCacheKey<RuleKey>, Arc<TensorContractFusionExplicitPlan>>,
+}
+
+impl<RuleKey> Default for FusionExplicitPlanCache<RuleKey> {
+    fn default() -> Self {
+        Self {
+            last: None,
+            plans: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FusionExplicitPlanLastEntry<RuleKey> {
+    rule: RuleKey,
+    dst_nout: usize,
+    dst_nin: usize,
+    dst_rank: usize,
+    dst_homspace: FusionTreeHomSpace,
+    dst_structure: Arc<BlockStructure>,
+    lhs_nout: usize,
+    lhs_nin: usize,
+    lhs_rank: usize,
+    lhs_homspace: FusionTreeHomSpace,
+    lhs_structure: Arc<BlockStructure>,
+    rhs_nout: usize,
+    rhs_nin: usize,
+    rhs_rank: usize,
+    rhs_homspace: FusionTreeHomSpace,
+    rhs_structure: Arc<BlockStructure>,
+    axes: RawTensorContractAxisSpecKey,
+    plan: Arc<TensorContractFusionExplicitPlan>,
+}
+
+impl<RuleKey> FusionExplicitPlanLastEntry<RuleKey>
+where
+    RuleKey: Eq,
+{
+    fn matches<
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+    >(
+        &self,
+        rule: &RuleKey,
+        dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+        lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+        rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> bool {
+        &self.rule == rule
+            && self.dst_nout == DST_NOUT
+            && self.dst_nin == DST_NIN
+            && self.dst_rank == dst.subblock_structure().rank()
+            && self.lhs_nout == LHS_NOUT
+            && self.lhs_nin == LHS_NIN
+            && self.lhs_rank == lhs.subblock_structure().rank()
+            && self.rhs_nout == RHS_NOUT
+            && self.rhs_nin == RHS_NIN
+            && self.rhs_rank == rhs.subblock_structure().rank()
+            && Arc::ptr_eq(&self.dst_structure, dst.subblock_structure())
+            && Arc::ptr_eq(&self.lhs_structure, lhs.subblock_structure())
+            && Arc::ptr_eq(&self.rhs_structure, rhs.subblock_structure())
+            && self.dst_homspace == *dst.homspace()
+            && self.lhs_homspace == *lhs.homspace()
+            && self.rhs_homspace == *rhs.homspace()
+            && self.axes.matches(axes)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct FusionExplicitPlanCacheKey<RuleKey> {
+    rule: RuleKey,
+    dst_nout: usize,
+    dst_nin: usize,
+    dst_rank: usize,
+    dst_homspace: FusionTreeHomSpace,
+    lhs_nout: usize,
+    lhs_nin: usize,
+    lhs_rank: usize,
+    lhs_homspace: FusionTreeHomSpace,
+    rhs_nout: usize,
+    rhs_nin: usize,
+    rhs_rank: usize,
+    rhs_homspace: FusionTreeHomSpace,
+    axes: OwnedTensorContractAxisSpec,
+}
+
+impl<RuleKey> FusionExplicitPlanCache<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    fn get_or_compile<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+    >(
+        &mut self,
+        rule: &R,
+        dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+        lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+        rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Result<Arc<TensorContractFusionExplicitPlan>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(last) = &self.last {
+            if last.matches(&rule_key, dst, lhs, rhs, axes) {
+                return Ok(Arc::clone(&last.plan));
+            }
+        }
+        let raw_axes = RawTensorContractAxisSpecKey::from_axes(axes);
+        let axis_plan = TensorContractAxisPlan::compile(
+            lhs.subblock_structure().rank(),
+            rhs.subblock_structure().rank(),
+            dst.subblock_structure().rank(),
+            axes,
+        )?;
+        let axes_key = OwnedTensorContractAxisSpec::new_with_conjugation(
+            axis_plan.lhs_contracting_axes,
+            axis_plan.rhs_contracting_axes,
+            axis_plan.output_axes,
+            axis_plan.lhs_conjugate,
+            axis_plan.rhs_conjugate,
+        );
+        let key = FusionExplicitPlanCacheKey {
+            rule: rule_key.clone(),
+            dst_nout: DST_NOUT,
+            dst_nin: DST_NIN,
+            dst_rank: dst.subblock_structure().rank(),
+            dst_homspace: dst.homspace().clone(),
+            lhs_nout: LHS_NOUT,
+            lhs_nin: LHS_NIN,
+            lhs_rank: lhs.subblock_structure().rank(),
+            lhs_homspace: lhs.homspace().clone(),
+            rhs_nout: RHS_NOUT,
+            rhs_nin: RHS_NIN,
+            rhs_rank: rhs.subblock_structure().rank(),
+            rhs_homspace: rhs.homspace().clone(),
+            axes: axes_key,
+        };
+        if let Some(plan) = self.plans.get(&key) {
+            self.last = Some(FusionExplicitPlanLastEntry {
+                rule: rule_key,
+                dst_nout: DST_NOUT,
+                dst_nin: DST_NIN,
+                dst_rank: dst.subblock_structure().rank(),
+                dst_homspace: dst.homspace().clone(),
+                dst_structure: Arc::clone(dst.subblock_structure()),
+                lhs_nout: LHS_NOUT,
+                lhs_nin: LHS_NIN,
+                lhs_rank: lhs.subblock_structure().rank(),
+                lhs_homspace: lhs.homspace().clone(),
+                lhs_structure: Arc::clone(lhs.subblock_structure()),
+                rhs_nout: RHS_NOUT,
+                rhs_nin: RHS_NIN,
+                rhs_rank: rhs.subblock_structure().rank(),
+                rhs_homspace: rhs.homspace().clone(),
+                rhs_structure: Arc::clone(rhs.subblock_structure()),
+                axes: raw_axes,
+                plan: Arc::clone(plan),
+            });
+            return Ok(Arc::clone(plan));
+        }
+        let plan = Arc::new(tensorcontract_fusion_explicit_plan(
+            rule, dst, lhs, rhs, axes,
+        )?);
+        self.plans.insert(key, Arc::clone(&plan));
+        self.last = Some(FusionExplicitPlanLastEntry {
+            rule: rule_key,
+            dst_nout: DST_NOUT,
+            dst_nin: DST_NIN,
+            dst_rank: dst.subblock_structure().rank(),
+            dst_homspace: dst.homspace().clone(),
+            dst_structure: Arc::clone(dst.subblock_structure()),
+            lhs_nout: LHS_NOUT,
+            lhs_nin: LHS_NIN,
+            lhs_rank: lhs.subblock_structure().rank(),
+            lhs_homspace: lhs.homspace().clone(),
+            lhs_structure: Arc::clone(lhs.subblock_structure()),
+            rhs_nout: RHS_NOUT,
+            rhs_nin: RHS_NIN,
+            rhs_rank: rhs.subblock_structure().rank(),
+            rhs_homspace: rhs.homspace().clone(),
+            rhs_structure: Arc::clone(rhs.subblock_structure()),
+            axes: raw_axes,
+            plan: Arc::clone(&plan),
+        });
+        Ok(plan)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct FusionDenseBlockSpecsCacheKey<RuleKey> {
+    rule: RuleKey,
+    dst_nout: usize,
+    dst_homspace: FusionTreeHomSpace,
+    dst_structure: BlockStructureCacheKey,
+    lhs_nout: usize,
+    lhs_homspace: FusionTreeHomSpace,
+    lhs_structure: BlockStructureCacheKey,
+    rhs_nout: usize,
+    rhs_homspace: FusionTreeHomSpace,
+    rhs_structure: BlockStructureCacheKey,
+    axes: OwnedTensorContractAxisSpec,
+}
+
+impl<RuleKey> FusionDenseBlockSpecsCache<RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    fn get_or_compile<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+    >(
+        &mut self,
+        rule: &R,
+        dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
+        lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
+        rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Result<FusionDenseBlockSpecsCacheEntry, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let rule_key = rule.tree_transform_rule_cache_key();
+        if let Some(last) = &self.last {
+            if last.matches(&rule_key, dst, lhs, rhs, axes) {
+                return Ok(last.entry.clone());
+            }
+        }
+        let raw_axes = RawTensorContractAxisSpecKey::from_axes(axes);
+        let axis_plan = TensorContractAxisPlan::compile(
+            lhs.subblock_structure().rank(),
+            rhs.subblock_structure().rank(),
+            dst.subblock_structure().rank(),
+            axes,
+        )?;
+        let axes_key = OwnedTensorContractAxisSpec::new_with_conjugation(
+            axis_plan.lhs_contracting_axes,
+            axis_plan.rhs_contracting_axes,
+            axis_plan.output_axes,
+            axis_plan.lhs_conjugate,
+            axis_plan.rhs_conjugate,
+        );
+        let key = FusionDenseBlockSpecsCacheKey {
+            rule: rule_key.clone(),
+            dst_nout: DST_NOUT,
+            dst_homspace: dst.homspace().clone(),
+            dst_structure: BlockStructureCacheKey::from_structure(dst.subblock_structure())?,
+            lhs_nout: LHS_NOUT,
+            lhs_homspace: lhs.homspace().clone(),
+            lhs_structure: BlockStructureCacheKey::from_structure(lhs.subblock_structure())?,
+            rhs_nout: RHS_NOUT,
+            rhs_homspace: rhs.homspace().clone(),
+            rhs_structure: BlockStructureCacheKey::from_structure(rhs.subblock_structure())?,
+            axes: axes_key,
+        };
+        if let Some(entry) = self.entries.get(&key) {
+            self.last = Some(FusionDenseBlockSpecsLastEntry {
+                rule: rule_key,
+                dst_nout: DST_NOUT,
+                dst_homspace: dst.homspace().clone(),
+                dst_structure: Arc::clone(dst.subblock_structure()),
+                lhs_nout: LHS_NOUT,
+                lhs_homspace: lhs.homspace().clone(),
+                lhs_structure: Arc::clone(lhs.subblock_structure()),
+                rhs_nout: RHS_NOUT,
+                rhs_homspace: rhs.homspace().clone(),
+                rhs_structure: Arc::clone(rhs.subblock_structure()),
+                axes: raw_axes,
+                entry: entry.clone(),
+            });
+            return Ok(entry.clone());
+        }
+        let guards = FusionDenseBlockSpecsCacheGuards {
+            _dst_structure: Arc::clone(dst.subblock_structure()),
+            _lhs_structure: Arc::clone(lhs.subblock_structure()),
+            _rhs_structure: Arc::clone(rhs.subblock_structure()),
+        };
+        let entry = match tensorcontract_fusion_block_specs(rule, dst, lhs, rhs, axes) {
+            Ok(block_specs) => FusionDenseBlockSpecsCacheEntry::Specs {
+                block_specs: Arc::new(block_specs),
+                _guards: guards,
+            },
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+            }) => {
+                FusionDenseBlockSpecsCacheEntry::SourceTransformRequiresExplicit { _guards: guards }
+            }
+            Err(err) => return Err(err),
+        };
+        self.entries.insert(key, entry.clone());
+        self.last = Some(FusionDenseBlockSpecsLastEntry {
+            rule: rule_key,
+            dst_nout: DST_NOUT,
+            dst_homspace: dst.homspace().clone(),
+            dst_structure: Arc::clone(dst.subblock_structure()),
+            lhs_nout: LHS_NOUT,
+            lhs_homspace: lhs.homspace().clone(),
+            lhs_structure: Arc::clone(lhs.subblock_structure()),
+            rhs_nout: RHS_NOUT,
+            rhs_homspace: rhs.homspace().clone(),
+            rhs_structure: Arc::clone(rhs.subblock_structure()),
+            axes: raw_axes,
+            entry: entry.clone(),
+        });
+        Ok(entry)
+    }
 }
 
 impl TensorContractBlockPlanTerm {
@@ -460,9 +929,11 @@ pub struct TensorContractFusionExecutionContext<
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     dynamic_space_cache: DynamicFusionSpaceCache<RuleKey>,
+    explicit_plan_cache: FusionExplicitPlanCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
+    dense_block_specs_cache: FusionDenseBlockSpecsCache<RuleKey>,
     // TensorKit-style canonical block pack/GEMM/scatter plans. Automatic fusion
     // contractions replay through this cache directly instead of storing a
     // monolithic contraction execution plan.
@@ -494,9 +965,11 @@ where
         Self {
             tree_context,
             dynamic_space_cache: DynamicFusionSpaceCache::default(),
+            explicit_plan_cache: FusionExplicitPlanCache::default(),
             contract_backend,
             contract_workspace,
             contract_cache,
+            dense_block_specs_cache: FusionDenseBlockSpecsCache::default(),
             fusion_block_cache: CanonicalFusionBlockContractCache::default(),
             fusion_block_workspace: CanonicalFusionBlockContractWorkspace::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
@@ -737,17 +1210,22 @@ where
                 Err(OperationError::UnsupportedTensorContractScope {
                     message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
                 }) => {
+                    let plan = self
+                        .explicit_plan_cache
+                        .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
                     let Self {
                         tree_context,
                         dynamic_space_cache,
+                        explicit_plan_cache: _,
                         contract_backend,
                         contract_workspace,
                         contract_cache: _,
+                        dense_block_specs_cache: _,
                         fusion_block_cache,
                         fusion_block_workspace,
                         fusion_scratch,
                     } = self;
-                    return tensorcontract_fusion_dynamic_into_context(
+                    return tensorcontract_fusion_dynamic_plan_into_context(
                         tree_context,
                         contract_backend,
                         contract_workspace,
@@ -756,7 +1234,7 @@ where
                         fusion_block_workspace,
                         fusion_scratch,
                         rule,
-                        axes,
+                        plan.as_ref(),
                         dst,
                         lhs,
                         rhs,
@@ -768,14 +1246,17 @@ where
             }
         }
 
-        match tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes) {
-            Ok(block_specs) => {
+        match self
+            .dense_block_specs_cache
+            .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?
+        {
+            FusionDenseBlockSpecsCacheEntry::Specs { block_specs, .. } => {
                 let structure = self.contract_cache.get_or_compile_with_block_specs(
                     dst,
                     lhs,
                     rhs,
                     axes,
-                    &block_specs,
+                    block_specs.as_slice(),
                 )?;
                 self.contract_backend.tensorcontract_structure_into(
                     &mut self.contract_workspace,
@@ -787,20 +1268,23 @@ where
                     beta,
                 )
             }
-            Err(OperationError::UnsupportedTensorContractScope {
-                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-            }) => {
+            FusionDenseBlockSpecsCacheEntry::SourceTransformRequiresExplicit { .. } => {
+                let plan = self
+                    .explicit_plan_cache
+                    .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
                 let Self {
                     tree_context,
                     dynamic_space_cache,
+                    explicit_plan_cache: _,
                     contract_backend,
                     contract_workspace,
                     contract_cache: _,
+                    dense_block_specs_cache: _,
                     fusion_block_cache,
                     fusion_block_workspace,
                     fusion_scratch,
                 } = self;
-                return tensorcontract_fusion_dynamic_into_context(
+                return tensorcontract_fusion_dynamic_plan_into_context(
                     tree_context,
                     contract_backend,
                     contract_workspace,
@@ -809,7 +1293,7 @@ where
                     fusion_block_workspace,
                     fusion_scratch,
                     rule,
-                    axes,
+                    plan.as_ref(),
                     dst,
                     lhs,
                     rhs,
@@ -817,7 +1301,6 @@ where
                     beta,
                 );
             }
-            Err(err) => Err(err),
         }
     }
 
@@ -939,17 +1422,25 @@ where
                     message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
                 }) => {
                     profile.dense_structure_lookup += start.elapsed();
+                    let start = std::time::Instant::now();
+                    let plan = self
+                        .explicit_plan_cache
+                        .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+                    profile.explicit_plan += start.elapsed();
+                    profile.route = TensorContractFusionRoute::DynamicTreeCanonical;
                     let Self {
                         tree_context,
                         dynamic_space_cache,
+                        explicit_plan_cache: _,
                         contract_backend,
                         contract_workspace,
                         contract_cache: _,
+                        dense_block_specs_cache: _,
                         fusion_block_cache,
                         fusion_block_workspace,
                         fusion_scratch,
                     } = self;
-                    let result = tensorcontract_fusion_dynamic_into_context_profiled(
+                    let result = tensorcontract_fusion_dynamic_plan_into_context_profiled(
                         tree_context,
                         contract_backend,
                         contract_workspace,
@@ -958,7 +1449,7 @@ where
                         fusion_block_workspace,
                         fusion_scratch,
                         rule,
-                        axes,
+                        plan.as_ref(),
                         dst,
                         lhs,
                         rhs,
@@ -978,8 +1469,11 @@ where
         }
 
         let start = std::time::Instant::now();
-        match tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes) {
-            Ok(block_specs) => {
+        match self
+            .dense_block_specs_cache
+            .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?
+        {
+            FusionDenseBlockSpecsCacheEntry::Specs { block_specs, .. } => {
                 profile.route = TensorContractFusionRoute::DenseFusionStructure;
                 profile.dense_block_specs += start.elapsed();
                 let start = std::time::Instant::now();
@@ -988,7 +1482,7 @@ where
                     lhs,
                     rhs,
                     axes,
-                    &block_specs,
+                    block_specs.as_slice(),
                 )?;
                 profile.dense_structure_lookup += start.elapsed();
                 let start = std::time::Instant::now();
@@ -1005,21 +1499,27 @@ where
                 profile.total += total_start.elapsed();
                 result
             }
-            Err(OperationError::UnsupportedTensorContractScope {
-                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-            }) => {
+            FusionDenseBlockSpecsCacheEntry::SourceTransformRequiresExplicit { .. } => {
                 profile.dense_block_specs += start.elapsed();
+                let start = std::time::Instant::now();
+                let plan = self
+                    .explicit_plan_cache
+                    .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+                profile.explicit_plan += start.elapsed();
+                profile.route = TensorContractFusionRoute::DynamicTreeCanonical;
                 let Self {
                     tree_context,
                     dynamic_space_cache,
+                    explicit_plan_cache: _,
                     contract_backend,
                     contract_workspace,
                     contract_cache: _,
+                    dense_block_specs_cache: _,
                     fusion_block_cache,
                     fusion_block_workspace,
                     fusion_scratch,
                 } = self;
-                let result = tensorcontract_fusion_dynamic_into_context_profiled(
+                let result = tensorcontract_fusion_dynamic_plan_into_context_profiled(
                     tree_context,
                     contract_backend,
                     contract_workspace,
@@ -1028,7 +1528,7 @@ where
                     fusion_block_workspace,
                     fusion_scratch,
                     rule,
-                    axes,
+                    plan.as_ref(),
                     dst,
                     lhs,
                     rhs,
@@ -1038,11 +1538,6 @@ where
                 );
                 profile.total += total_start.elapsed();
                 result
-            }
-            Err(err) => {
-                profile.dense_block_specs += start.elapsed();
-                profile.total += total_start.elapsed();
-                Err(err)
             }
         }
     }

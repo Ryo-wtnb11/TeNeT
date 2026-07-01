@@ -35,6 +35,8 @@ pub use fusion::{
     tensorcontract_fusion_structure, TensorContractFusionExplicitPlan,
 };
 pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
+#[cfg(test)]
+pub(crate) use structure::TensorContractDenseRouteKind;
 pub use structure::{
     tensorcontract_structure, TensorContractBlockSpec, TensorContractStructure,
     TensorContractStructureTerm,

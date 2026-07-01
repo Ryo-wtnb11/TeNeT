@@ -54,6 +54,177 @@ fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
     assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
 }
 
+#[test]
+fn tensorcontract_dense_route_uses_tensorkit_forward_tie_order() {
+    let lhs_space = TensorMapSpace::<4, 0>::from_dims([5, 7, 3, 11], []).unwrap();
+    let rhs_space = TensorMapSpace::<4, 0>::from_dims([13, 3, 17, 5], []).unwrap();
+    let dst_space = TensorMapSpace::<4, 0>::from_dims([7, 11, 13, 17], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 4, 0>::from_vec(vec![1.0; lhs_space.dense_dim()], lhs_space).unwrap();
+    let rhs =
+        TensorMap::<f64, 4, 0>::from_vec(vec![1.0; rhs_space.dense_dim()], rhs_space).unwrap();
+    let dst = TensorMap::<f64, 4, 0>::filled(0.0, dst_space).unwrap();
+
+    let structure = TensorContractStructure::compile(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[2, 0], &[1, 3]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        structure.dense_route_kind(),
+        TensorContractDenseRouteKind::ForwardSortLhsContractingAxes
+    );
+    assert_eq!(structure.lhs_contracting_axes(), &[2, 0]);
+    assert_eq!(structure.rhs_contracting_axes(), &[1, 3]);
+    let (lhs_route_axes, rhs_route_axes) = structure.dense_route_contracting_axes();
+    assert_eq!(lhs_route_axes, &[0, 2]);
+    assert_eq!(rhs_route_axes, &[3, 1]);
+}
+
+#[test]
+fn tensorcontract_dense_route_sorted_by_rhs_matches_independent_oracle() {
+    let lhs_shape = [3usize, 2, 2, 3];
+    let lhs_strides = [10usize, 1, 5, 2];
+    let rhs_shape = [2usize, 2, 2, 3];
+    let rhs_strides = [5usize, 1, 10, 2];
+    let dst_shape = [2usize, 2, 2, 3];
+    let lhs_structure = dense_block_structure(&lhs_shape, &lhs_strides);
+    let rhs_structure = dense_block_structure(&rhs_shape, &rhs_strides);
+    let dst_structure = BlockStructure::trivial(&dst_shape).unwrap();
+    let lhs_space = TensorMapSpace::<4, 0>::from_dims(lhs_shape, []).unwrap();
+    let rhs_space = TensorMapSpace::<4, 0>::from_dims(rhs_shape, []).unwrap();
+    let dst_space = TensorMapSpace::<4, 0>::from_dims(dst_shape, []).unwrap();
+    let lhs_data = (0..strided_storage_len(&lhs_shape, &lhs_strides))
+        .map(|index| 1.0 + index as f64)
+        .collect::<Vec<_>>();
+    let rhs_data = (0..strided_storage_len(&rhs_shape, &rhs_strides))
+        .map(|index| -3.0 + 0.5 * index as f64)
+        .collect::<Vec<_>>();
+    let initial_dst = (0..dst_shape.iter().product::<usize>())
+        .map(|index| 0.25 * index as f64 - 1.0)
+        .collect::<Vec<_>>();
+    let lhs =
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(lhs_data.clone(), lhs_space, lhs_structure)
+            .unwrap();
+    let rhs =
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(rhs_data.clone(), rhs_space, rhs_structure)
+            .unwrap();
+    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        initial_dst.clone(),
+        dst_space,
+        dst_structure,
+    )
+    .unwrap();
+    let axes =
+        TensorContractAxisSpec::new(&[2, 0], &[1, 3], AxisPermutation::from_axes(&[2, 0, 3, 1]));
+    let alpha = -1.25;
+    let beta = 0.5;
+
+    let structure = TensorContractStructure::compile(&dst, &lhs, &rhs, axes).unwrap();
+    assert_eq!(
+        structure.dense_route_kind(),
+        TensorContractDenseRouteKind::ForwardSortRhsContractingAxes
+    );
+    let (lhs_route_axes, rhs_route_axes) = structure.dense_route_contracting_axes();
+    assert_eq!(lhs_route_axes, &[2, 0]);
+    assert_eq!(rhs_route_axes, &[1, 3]);
+
+    tensorcontract_into(&mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    let expected = rank4_contract_oracle(
+        &lhs_data,
+        &lhs_shape,
+        &lhs_strides,
+        &rhs_data,
+        &rhs_shape,
+        &rhs_strides,
+        &initial_dst,
+        &dst_shape,
+        &[2, 0, 3, 1],
+        alpha,
+        beta,
+    );
+    for (&actual, &expected) in dst.data().iter().zip(&expected) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+}
+
+fn dense_block_structure(shape: &[usize], strides: &[usize]) -> BlockStructure {
+    BlockStructure::from_blocks_with_rank(
+        shape.len(),
+        vec![
+            BlockSpec::with_key(BlockKey::trivial(), shape.to_vec(), strides.to_vec(), 0).unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+fn strided_storage_len(shape: &[usize], strides: &[usize]) -> usize {
+    1 + shape
+        .iter()
+        .zip(strides)
+        .map(|(&dim, &stride)| dim.saturating_sub(1) * stride)
+        .sum::<usize>()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rank4_contract_oracle(
+    lhs_data: &[f64],
+    lhs_shape: &[usize; 4],
+    lhs_strides: &[usize; 4],
+    rhs_data: &[f64],
+    rhs_shape: &[usize; 4],
+    rhs_strides: &[usize; 4],
+    initial_dst: &[f64],
+    dst_shape: &[usize; 4],
+    output_axes: &[usize; 4],
+    alpha: f64,
+    beta: f64,
+) -> Vec<f64> {
+    assert_eq!(lhs_shape[2], rhs_shape[1]);
+    assert_eq!(lhs_shape[0], rhs_shape[3]);
+    let mut out = vec![0.0; initial_dst.len()];
+    for d3 in 0..dst_shape[3] {
+        for d2 in 0..dst_shape[2] {
+            for d1 in 0..dst_shape[1] {
+                for d0 in 0..dst_shape[0] {
+                    let dst_coords = [d0, d1, d2, d3];
+                    let mut canonical = [0usize; 4];
+                    for (dst_axis, &canonical_axis) in output_axes.iter().enumerate() {
+                        canonical[canonical_axis] = dst_coords[dst_axis];
+                    }
+                    let mut sum = 0.0;
+                    for c1 in 0..lhs_shape[0] {
+                        for c0 in 0..lhs_shape[2] {
+                            let lhs_coords = [c1, canonical[0], c0, canonical[1]];
+                            let rhs_coords = [canonical[2], c0, canonical[3], c1];
+                            sum += lhs_data[strided_offset(&lhs_coords, lhs_strides)]
+                                * rhs_data[strided_offset(&rhs_coords, rhs_strides)];
+                        }
+                    }
+                    let dst_index =
+                        (((d3 * dst_shape[2] + d2) * dst_shape[1] + d1) * dst_shape[0]) + d0;
+                    out[dst_index] = beta * initial_dst[dst_index] + alpha * sum;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn strided_offset(coords: &[usize; 4], strides: &[usize; 4]) -> usize {
+    coords
+        .iter()
+        .zip(strides)
+        .map(|(&coord, &stride)| coord * stride)
+        .sum()
+}
+
 #[derive(Default)]
 struct MatmulOnlyDenseExecutor {
     matmul_into_calls: usize,

@@ -37,7 +37,8 @@ pub use cache::{
 };
 #[cfg(test)]
 pub(crate) use contract::{
-    contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+    contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
+    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
 };
 pub use contract::{
     tensorcontract_execute_with, tensorcontract_fusion_block_specs,
