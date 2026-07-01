@@ -117,14 +117,16 @@ fn bench_su2_noncanonical_source() {
         context.contract_cache().structure_len()
     );
     println!(
-        "dynamic_fusion_space_cache,hits={},misses={},len={}",
+        "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
         context.dynamic_fusion_space_cache_hits(),
+        context.dynamic_fusion_space_cache_fast_hits(),
         context.dynamic_fusion_space_cache_misses(),
         context.dynamic_fusion_space_cache_len()
     );
     println!(
-        "fusion_block_contract_cache,hits={},misses={},len={}",
+        "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
         context.fusion_block_contract_cache_hits(),
+        context.fusion_block_contract_cache_fast_hits(),
         context.fusion_block_contract_cache_misses(),
         context.fusion_block_contract_cache_len()
     );
@@ -180,14 +182,16 @@ fn bench_su2_output_scratch() {
         context.contract_cache().structure_len()
     );
     println!(
-        "dynamic_fusion_space_cache,hits={},misses={},len={}",
+        "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
         context.dynamic_fusion_space_cache_hits(),
+        context.dynamic_fusion_space_cache_fast_hits(),
         context.dynamic_fusion_space_cache_misses(),
         context.dynamic_fusion_space_cache_len()
     );
     println!(
-        "fusion_block_contract_cache,hits={},misses={},len={}",
+        "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
         context.fusion_block_contract_cache_hits(),
+        context.fusion_block_contract_cache_fast_hits(),
         context.fusion_block_contract_cache_misses(),
         context.fusion_block_contract_cache_len()
     );
@@ -236,8 +240,9 @@ fn bench_product_complex() {
         context.tree_context().cache().structure_len()
     );
     println!(
-        "dynamic_fusion_space_cache,hits={},misses={},len={}",
+        "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
         context.dynamic_fusion_space_cache_hits(),
+        context.dynamic_fusion_space_cache_fast_hits(),
         context.dynamic_fusion_space_cache_misses(),
         context.dynamic_fusion_space_cache_len()
     );
@@ -248,8 +253,9 @@ fn bench_product_complex() {
         context.contract_cache().structure_len()
     );
     println!(
-        "fusion_block_contract_cache,hits={},misses={},len={}",
+        "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
         context.fusion_block_contract_cache_hits(),
+        context.fusion_block_contract_cache_fast_hits(),
         context.fusion_block_contract_cache_misses(),
         context.fusion_block_contract_cache_len()
     );
@@ -1585,6 +1591,85 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
     println!(
         "profile_output_transform_ns,{:.3}",
         nanos_per(profile.output_transform, iterations)
+    );
+    println!(
+        "profile_tree_replay_total_ns,{:.3}",
+        nanos_per(profile.tree_replay.total, iterations)
+    );
+    println!(
+        "profile_tree_cache_plus_replay_ns,{:.3}",
+        nanos_per(
+            profile.tree_replay.cache_lookup + profile.tree_replay.total,
+            iterations
+        )
+    );
+    println!(
+        "profile_tree_cache_lookup_ns,{:.3}",
+        nanos_per(profile.tree_replay.cache_lookup, iterations)
+    );
+    println!(
+        "profile_tree_validate_ns,{:.3}",
+        nanos_per(profile.tree_replay.validate, iterations)
+    );
+    println!(
+        "profile_tree_single_total_ns,{:.3}",
+        nanos_per(profile.tree_replay.single_total, iterations)
+    );
+    println!(
+        "profile_tree_multi_workspace_prepare_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_workspace_prepare, iterations)
+    );
+    println!(
+        "profile_tree_multi_pack_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_pack, iterations)
+    );
+    println!(
+        "profile_tree_multi_coefficient_prepare_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_coefficient_prepare, iterations)
+    );
+    println!(
+        "profile_tree_multi_matmul_total_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_matmul_total, iterations)
+    );
+    println!(
+        "profile_tree_multi_dense_view_setup_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_dense_view_setup, iterations)
+    );
+    println!(
+        "profile_tree_multi_dense_matmul_call_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_dense_matmul_call, iterations)
+    );
+    println!(
+        "profile_tree_multi_scalar_recoupling_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_scalar_recoupling, iterations)
+    );
+    println!(
+        "profile_tree_multi_scatter_ns,{:.3}",
+        nanos_per(profile.tree_replay.multi_scatter, iterations)
+    );
+    println!(
+        "profile_tree_strided_view_setup_ns,{:.3}",
+        nanos_per(profile.tree_replay.strided_view_setup, iterations)
+    );
+    println!(
+        "profile_tree_strided_kernel_ns,{:.3}",
+        nanos_per(profile.tree_replay.strided_kernel, iterations)
+    );
+    println!(
+        "profile_tree_single_blocks,{}",
+        profile.tree_replay.single_blocks
+    );
+    println!(
+        "profile_tree_multi_blocks,{}",
+        profile.tree_replay.multi_blocks
+    );
+    println!(
+        "profile_tree_packed_columns,{}",
+        profile.tree_replay.packed_columns
+    );
+    println!(
+        "profile_tree_scattered_columns,{}",
+        profile.tree_replay.scattered_columns
     );
     println!(
         "profile_lhs_transform_calls,{}",

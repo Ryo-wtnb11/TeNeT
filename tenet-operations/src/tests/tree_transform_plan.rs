@@ -670,7 +670,7 @@ fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
     tree_transform_execute_with(
         &mut backend,
         &mut workspace,
-        structure,
+        &structure,
         &mut dst,
         &src,
         1.0,
@@ -775,7 +775,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
     tree_transform_execute_with(
         &mut backend,
         &mut workspace,
-        structure,
+        &structure,
         &mut dst,
         &src,
         1.0,
@@ -1436,7 +1436,7 @@ fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
     tree_transform_execute_with(
         &mut backend,
         &mut workspace,
-        structure,
+        &structure,
         &mut dst,
         &src,
         2.0,

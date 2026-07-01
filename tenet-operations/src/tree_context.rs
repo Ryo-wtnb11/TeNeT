@@ -1,5 +1,6 @@
 use core::ops::{Add, Mul};
 use std::hash::Hash;
+use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
@@ -12,6 +13,7 @@ use crate::scalar::TreeTransformScalar;
 use crate::tree_transform::{
     TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
 };
+use crate::{TreeTransformReplayProfile, TreeTransformStructure};
 
 #[derive(Debug)]
 pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
@@ -137,7 +139,28 @@ where
             cache,
         } = self;
         let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
-        backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+        backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
+    }
+
+    pub(crate) fn get_or_compile_tree_pair_structure_with_storage_conjugation<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        storage_conjugate: bool,
+    ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        self.cache
+            .get_or_compile_tree_pair_structures_with_storage_conjugation(
+                rule,
+                operation,
+                dst_structure,
+                src_structure,
+                storage_conjugate,
+            )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -170,6 +193,34 @@ where
         )?;
         backend.tree_transform_structure_into_raw(
             workspace,
+            &structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_pair_transform_structure_into_raw(
+        &mut self,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        let Self {
+            backend,
+            workspace,
+            cache: _,
+        } = self;
+        backend.tree_transform_structure_into_raw(
+            workspace,
             structure,
             dst_structure,
             src_structure,
@@ -177,6 +228,36 @@ where
             src_data,
             alpha,
             beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_pair_transform_structure_into_raw_profiled(
+        &mut self,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+        profile: &mut TreeTransformReplayProfile,
+    ) -> Result<(), OperationError> {
+        let Self {
+            backend,
+            workspace,
+            cache: _,
+        } = self;
+        backend.tree_transform_structure_into_raw_profiled(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+            profile,
         )
     }
 
@@ -206,6 +287,6 @@ where
             cache,
         } = self;
         let structure = cache.get_or_compile_all_codomain(rule, operation, dst, src)?;
-        backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+        backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
     }
 }

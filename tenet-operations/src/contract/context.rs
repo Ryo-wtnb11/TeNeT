@@ -524,6 +524,11 @@ where
     }
 
     #[inline]
+    pub fn dynamic_fusion_space_cache_fast_hits(&self) -> usize {
+        self.dynamic_space_cache.stats().fast_hits()
+    }
+
+    #[inline]
     pub fn dynamic_fusion_space_cache_misses(&self) -> usize {
         self.dynamic_space_cache.stats().misses()
     }
@@ -566,6 +571,11 @@ where
     #[inline]
     pub fn fusion_block_contract_cache_hits(&self) -> usize {
         self.fusion_block_cache.stats().hits()
+    }
+
+    #[inline]
+    pub fn fusion_block_contract_cache_fast_hits(&self) -> usize {
+        self.fusion_block_cache.stats().fast_hits()
     }
 
     #[inline]

@@ -232,7 +232,7 @@ impl<T> TreeTransformGroupPlanCache<T> {
 pub struct TreeTransformCache<T, RuleKey> {
     plans: HashMap<TreeTransformSectorPlanKey<RuleKey>, TreeTransformGroupPlan<T>>,
     structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
-    last_structure: Option<TreeTransformLastStructureKey<RuleKey>>,
+    last_structure: Option<TreeTransformLastStructure<T, RuleKey>>,
     stats: TreeTransformCacheStats,
 }
 
@@ -269,14 +269,14 @@ impl TreeTransformCacheStats {
 }
 
 #[derive(Clone, Debug)]
-struct TreeTransformLastStructureKey<RuleKey> {
+struct TreeTransformLastStructure<T, RuleKey> {
     rule: RuleKey,
     scope: TreeTransformPlanScope,
     operation: TreeTransformOperationKey,
     dst_ptr: *const BlockStructure,
     src_ptr: *const BlockStructure,
     storage_conjugate: bool,
-    structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
+    structure: Arc<TreeTransformStructure<T>>,
 }
 
 impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
@@ -322,7 +322,7 @@ where
         self.stats = TreeTransformCacheStats::default();
     }
 
-    fn fast_structure_key(
+    fn fast_structure(
         &mut self,
         rule_key: &RuleKey,
         scope: TreeTransformPlanScope,
@@ -330,7 +330,7 @@ where
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
-    ) -> Option<TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>> {
+    ) -> Option<Arc<TreeTransformStructure<T>>> {
         let last = self.last_structure.as_ref()?;
         if &last.rule == rule_key
             && last.scope == scope
@@ -341,13 +341,13 @@ where
         {
             self.stats.plan_hits += 1;
             self.stats.structure_hits += 1;
-            Some(last.structure_key.clone())
+            Some(Arc::clone(&last.structure))
         } else {
             None
         }
     }
 
-    fn remember_structure_key(
+    fn remember_structure(
         &mut self,
         rule: RuleKey,
         scope: TreeTransformPlanScope,
@@ -355,16 +355,16 @@ where
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
-        structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
+        structure: Arc<TreeTransformStructure<T>>,
     ) {
-        self.last_structure = Some(TreeTransformLastStructureKey {
+        self.last_structure = Some(TreeTransformLastStructure {
             rule,
             scope,
             operation,
             dst_ptr: Arc::as_ptr(dst_structure),
             src_ptr: Arc::as_ptr(src_structure),
             storage_conjugate,
-            structure_key,
+            structure,
         });
     }
 
@@ -384,13 +384,13 @@ where
         operation: TreeTransformOperationKey,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(structure_key) = self.fast_structure_key(
+        if let Some(structure) = self.fast_structure(
             &rule_key,
             TreeTransformPlanScope::TreePair,
             &operation,
@@ -398,10 +398,7 @@ where
             src.structure(),
             false,
         ) {
-            return Ok(self
-                .structures
-                .get(&structure_key)
-                .expect("last tree transform structure key must reference a cached structure"));
+            return Ok(structure);
         }
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
@@ -433,13 +430,13 @@ where
         operation: TreeTransformOperationKey,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(structure_key) = self.fast_structure_key(
+        if let Some(structure) = self.fast_structure(
             &rule_key,
             TreeTransformPlanScope::TreePair,
             &operation,
@@ -447,10 +444,7 @@ where
             src_structure,
             false,
         ) {
-            return Ok(self
-                .structures
-                .get(&structure_key)
-                .expect("last tree transform structure key must reference a cached structure"));
+            return Ok(structure);
         }
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
@@ -483,13 +477,13 @@ where
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(structure_key) = self.fast_structure_key(
+        if let Some(structure) = self.fast_structure(
             &rule_key,
             TreeTransformPlanScope::TreePair,
             &operation,
@@ -497,10 +491,7 @@ where
             src_structure,
             storage_conjugate,
         ) {
-            return Ok(self
-                .structures
-                .get(&structure_key)
-                .expect("last tree transform structure key must reference a cached structure"));
+            return Ok(structure);
         }
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
@@ -543,13 +534,13 @@ where
         operation: TreeTransformOperationKey,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(structure_key) = self.fast_structure_key(
+        if let Some(structure) = self.fast_structure(
             &rule_key,
             TreeTransformPlanScope::AllCodomain,
             &operation,
@@ -557,10 +548,7 @@ where
             src.structure(),
             false,
         ) {
-            return Ok(self
-                .structures
-                .get(&structure_key)
-                .expect("last tree transform structure key must reference a cached structure"));
+            return Ok(structure);
         }
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
@@ -606,7 +594,7 @@ where
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         T: Copy,
     {
@@ -626,19 +614,20 @@ where
             let structure = plan.compile(dst, src)?;
             self.structures.insert(structure_key.clone(), structure);
         }
-        self.remember_structure_key(
+        let structure = self
+            .structures
+            .get_arc(&structure_key)
+            .expect("tree transform structure inserted before return");
+        self.remember_structure(
             rule_key,
             scope,
             operation,
             dst.structure(),
             src.structure(),
             false,
-            structure_key.clone(),
+            Arc::clone(&structure),
         );
-        Ok(self
-            .structures
-            .get(&structure_key)
-            .expect("tree transform structure inserted before return"))
+        Ok(structure)
     }
 
     fn get_or_compile_structure_from_structures(
@@ -649,7 +638,7 @@ where
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         T: Copy,
     {
@@ -673,7 +662,7 @@ where
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
-    ) -> Result<&TreeTransformStructure<T>, OperationError>
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         T: Copy,
     {
@@ -707,18 +696,19 @@ where
             )?;
             self.structures.insert(structure_key.clone(), structure);
         }
-        self.remember_structure_key(
+        let structure = self
+            .structures
+            .get_arc(&structure_key)
+            .expect("tree transform structure inserted before return");
+        self.remember_structure(
             rule_key,
             scope,
             operation,
             dst_structure,
             src_structure,
             storage_conjugate,
-            structure_key.clone(),
+            Arc::clone(&structure),
         );
-        Ok(self
-            .structures
-            .get(&structure_key)
-            .expect("tree transform structure inserted before return"))
+        Ok(structure)
     }
 }

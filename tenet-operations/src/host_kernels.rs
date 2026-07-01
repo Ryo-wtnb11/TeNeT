@@ -12,7 +12,7 @@ use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
     ConjugateValue, DenseRecouplingScalar, HostAllocator, OperationError,
     RecouplingCoefficientAction, TensorAddStructure, TreeTransformBlock, TreeTransformLayout,
-    TreeTransformLayoutTable, TreeTransformStructure,
+    TreeTransformLayoutTable, TreeTransformReplayProfile, TreeTransformStructure,
 };
 
 #[derive(Clone, Debug)]
@@ -363,6 +363,89 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tree_transform_structure_with_dense_recoupling_raw_profiled<E, D, C>(
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy,
+{
+    let total_start = std::time::Instant::now();
+
+    let start = std::time::Instant::now();
+    structure.validate_replay_structures(dst_structure, src_structure)?;
+    profile.validate += start.elapsed();
+
+    for block in &structure.blocks {
+        match *block {
+            TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } => {
+                profile.single_blocks += 1;
+                let start = std::time::Instant::now();
+                tree_transform_single_with_strided_kernel_profiled(
+                    &mut workspace.zero_strides,
+                    &structure.layouts,
+                    structure.layouts.entry(dst_layout),
+                    structure.layouts.entry(src_layout),
+                    structure.coefficient(coefficient),
+                    structure.storage_conjugate(),
+                    dst_data,
+                    src_data,
+                    alpha,
+                    beta,
+                    profile,
+                )?;
+                profile.single_total += start.elapsed();
+            }
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+            } => {
+                profile.multi_blocks += 1;
+                tree_transform_multi_with_dense_recoupling_profiled(
+                    dense,
+                    workspace,
+                    &structure.layouts,
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    coefficient_start,
+                    element_count,
+                    &structure.coefficients_src_by_dst,
+                    structure.storage_conjugate(),
+                    dst_data,
+                    src_data,
+                    alpha,
+                    beta,
+                    profile,
+                )?;
+            }
+        }
+    }
+
+    profile.total += total_start.elapsed();
+    Ok(())
+}
+
 pub(crate) fn tensoradd_block_with_strided_kernel<T>(
     allocator: &mut HostAllocator,
     dst: BlockViewMut<'_, T>,
@@ -487,6 +570,69 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+fn tensoradd_raw_strided_kernel_profiled<T>(
+    zero_strides: &mut Vec<isize>,
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    if source_conjugate {
+        let start = std::time::Instant::now();
+        let result = tensoradd_raw_strided_conjugating_kernel(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            alpha,
+            beta,
+        );
+        profile.strided_kernel += start.elapsed();
+        return result;
+    }
+
+    let start = std::time::Instant::now();
+    let mut dst = strided_kernel::StridedViewMut::new(dst_data, shape, dst_strides, dst_offset)
+        .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(src_data, shape, src_strides, src_offset)
+        .map_err(strided_error)?;
+    profile.strided_view_setup += start.elapsed();
+
+    let start = std::time::Instant::now();
+    let result = if beta.is_zero() {
+        strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
+    } else {
+        if !beta.is_one() {
+            scale_destination(zero_strides, &mut dst, beta)?;
+        }
+        strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
+    };
+    profile.strided_kernel += start.elapsed();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
 fn tensoradd_raw_strided_conjugating_kernel<T>(
     zero_strides: &mut Vec<isize>,
     dst_data: &mut [T],
@@ -558,6 +704,50 @@ where
         source_conjugate,
         scale,
         beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_single_with_strided_kernel_profiled<D, C>(
+    zero_strides: &mut Vec<isize>,
+    layouts: &TreeTransformLayoutTable,
+    dst_layout: &TreeTransformLayout,
+    src_layout: &TreeTransformLayout,
+    coefficient: C,
+    source_conjugate: bool,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let shape = layouts.shape(dst_layout);
+    let scale = alpha.scale_by_coefficient(coefficient);
+    tensoradd_raw_strided_kernel_profiled(
+        zero_strides,
+        dst_data,
+        src_data,
+        shape,
+        layouts.strides(dst_layout),
+        layouts.strides(src_layout),
+        dst_layout.offset,
+        src_layout.offset,
+        source_conjugate,
+        scale,
+        beta,
+        profile,
     )
 }
 
@@ -723,6 +913,107 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+fn tree_transform_multi_with_dense_recoupling_profiled<E, D, C>(
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    layouts: &TreeTransformLayoutTable,
+    dst_layout_start: usize,
+    dst_count: usize,
+    src_layout_start: usize,
+    src_count: usize,
+    coefficient_start: usize,
+    element_count: usize,
+    coefficients_src_by_dst: &[C],
+    source_conjugate: bool,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy,
+{
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+
+    let start = std::time::Instant::now();
+    workspace.source.resize(source_len, D::zero());
+    workspace.destination.resize(destination_len, D::zero());
+    profile.multi_workspace_prepare += start.elapsed();
+
+    let start = std::time::Instant::now();
+    for src_index in 0..src_count {
+        let layout = layouts.entry(src_layout_start + src_index);
+        pack_layout_into_column_profiled(
+            layouts,
+            layout,
+            src_data,
+            &mut workspace.source,
+            src_index * element_count,
+            source_conjugate,
+            profile,
+        )?;
+        profile.packed_columns += 1;
+    }
+    profile.multi_pack += start.elapsed();
+
+    let coefficient_count = src_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_end = coefficient_start
+        .checked_add(coefficient_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if coefficients_src_by_dst.len() < coefficient_end {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: coefficient_end,
+            actual: coefficients_src_by_dst.len(),
+        });
+    }
+
+    let start = std::time::Instant::now();
+    workspace.prepare_coefficients_from(coefficients_src_by_dst);
+    profile.multi_coefficient_prepare += start.elapsed();
+
+    apply_recoupling_matrix_with_dense_executor_profiled(
+        dense,
+        &mut workspace.destination,
+        &workspace.source,
+        &workspace.coefficients,
+        coefficient_start,
+        element_count,
+        src_count,
+        dst_count,
+        profile,
+    )?;
+
+    let start = std::time::Instant::now();
+    for dst_index in 0..dst_count {
+        let layout = layouts.entry(dst_layout_start + dst_index);
+        scatter_column_into_layout_profiled(
+            &mut workspace.zero_strides,
+            layouts,
+            layout,
+            &workspace.destination,
+            dst_index * element_count,
+            dst_data,
+            alpha,
+            beta,
+            profile,
+        )?;
+        profile.scattered_columns += 1;
+    }
+    profile.multi_scatter += start.elapsed();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_recoupling_matrix_src_times_u_transpose<D, C>(
     destination: &mut [D],
     source: &[D],
@@ -862,6 +1153,91 @@ where
         .map_err(OperationError::Dense)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_recoupling_matrix_with_dense_executor_profiled<E, T>(
+    dense: &mut E,
+    destination: &mut [T],
+    source: &[T],
+    coefficients_src_by_dst: &[T],
+    coefficient_start: usize,
+    element_count: usize,
+    src_count: usize,
+    dst_count: usize,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    T: DenseRecouplingScalar,
+{
+    let total_start = std::time::Instant::now();
+
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_count = src_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_end = coefficient_start
+        .checked_add(coefficient_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+
+    if source.len() != source_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: source_len,
+            actual: source.len(),
+        });
+    }
+    if destination.len() != destination_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: destination_len,
+            actual: destination.len(),
+        });
+    }
+    if coefficients_src_by_dst.len() < coefficient_end {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: coefficient_end,
+            actual: coefficients_src_by_dst.len(),
+        });
+    }
+
+    let source_shape = [element_count, src_count];
+    let source_strides = [1, element_count];
+    let coefficient_shape = [src_count, dst_count];
+    let coefficient_strides = [1, src_count];
+    let destination_shape = [element_count, dst_count];
+    let destination_strides = [1, element_count];
+
+    let start = std::time::Instant::now();
+    let lhs = T::dense_read(
+        DenseView::new(source, &source_shape, &source_strides, 0).map_err(OperationError::Dense)?,
+    );
+    let rhs = T::dense_read(
+        DenseView::new(
+            coefficients_src_by_dst,
+            &coefficient_shape,
+            &coefficient_strides,
+            coefficient_start,
+        )
+        .map_err(OperationError::Dense)?,
+    );
+    let output = T::dense_write(
+        DenseViewMut::new(destination, &destination_shape, &destination_strides, 0)
+            .map_err(OperationError::Dense)?,
+    );
+    profile.multi_dense_view_setup += start.elapsed();
+
+    let start = std::time::Instant::now();
+    let result = dense
+        .matmul_into(output, lhs, rhs)
+        .map_err(OperationError::Dense);
+    profile.multi_dense_matmul_call += start.elapsed();
+    profile.multi_matmul_total += total_start.elapsed();
+    result
+}
+
 fn pack_layout_into_column<T>(
     layouts: &TreeTransformLayoutTable,
     layout: &TreeTransformLayout,
@@ -902,6 +1278,57 @@ where
     )
     .map_err(strided_error)?;
     strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
+}
+
+fn pack_layout_into_column_profiled<T>(
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    src_data: &[T],
+    packed: &mut [T],
+    packed_offset: usize,
+    source_conjugate: bool,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    T: Copy + ConjugateValue + strided_kernel::MaybeSendSync,
+{
+    let shape = layouts.shape(layout);
+    if source_conjugate {
+        let start = std::time::Instant::now();
+        let packed_offset = offset_to_isize(packed_offset)?;
+        let len = crate::strided::element_count(shape)?;
+        let packed_strides = layouts.packed_strides(layout);
+        let src_strides = layouts.strides(layout);
+        for linear in 0..len {
+            let dst_index = strided_offset(linear, shape, packed_strides, packed_offset)?;
+            let src_index = strided_offset(linear, shape, src_strides, layout.offset)?;
+            packed[dst_index] = src_data[src_index].maybe_conj(true);
+        }
+        profile.strided_kernel += start.elapsed();
+        return Ok(());
+    }
+
+    let start = std::time::Instant::now();
+    let mut dst = strided_kernel::StridedViewMut::new(
+        packed,
+        shape,
+        layouts.packed_strides(layout),
+        offset_to_isize(packed_offset)?,
+    )
+    .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(
+        src_data,
+        shape,
+        layouts.strides(layout),
+        layout.offset,
+    )
+    .map_err(strided_error)?;
+    profile.strided_view_setup += start.elapsed();
+
+    let start = std::time::Instant::now();
+    let result = strided_kernel::copy_into(&mut dst, &src).map_err(strided_error);
+    profile.strided_kernel += start.elapsed();
+    result
 }
 
 fn scatter_column_into_layout<T>(
@@ -947,6 +1374,58 @@ where
         }
         strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scatter_column_into_layout_profiled<T>(
+    zero_strides: &mut Vec<isize>,
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    packed: &[T],
+    packed_offset: usize,
+    dst_data: &mut [T],
+    alpha: T,
+    beta: T,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + strided_kernel::MaybeSendSync,
+{
+    let shape = layouts.shape(layout);
+    let start = std::time::Instant::now();
+    let mut dst = strided_kernel::StridedViewMut::new(
+        dst_data,
+        shape,
+        layouts.strides(layout),
+        layout.offset,
+    )
+    .map_err(strided_error)?;
+    let src = strided_kernel::StridedView::<T>::new(
+        packed,
+        shape,
+        layouts.packed_strides(layout),
+        offset_to_isize(packed_offset)?,
+    )
+    .map_err(strided_error)?;
+    profile.strided_view_setup += start.elapsed();
+
+    let start = std::time::Instant::now();
+    let result = if beta.is_zero() {
+        strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
+    } else {
+        if !beta.is_one() {
+            scale_destination(zero_strides, &mut dst, beta)?;
+        }
+        strided_kernel::axpy(&mut dst, &src, alpha).map_err(strided_error)
+    };
+    profile.strided_kernel += start.elapsed();
+    result
 }
 
 fn scale_destination<T>(

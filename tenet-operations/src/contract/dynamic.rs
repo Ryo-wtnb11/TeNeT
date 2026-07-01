@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionTreeHomSpace, MultiplicityFreeRigidSymbols, TensorMap,
@@ -13,7 +14,7 @@ use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{
     DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperationKey,
-    TreeTransformRuleCacheKey, TreeTransformWorkspace,
+    TreeTransformRuleCacheKey, TreeTransformStructure, TreeTransformWorkspace,
 };
 
 use super::backend::TensorContractBackend;
@@ -397,30 +398,32 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let (lhs_space, lhs_replay_structure) = dynamic_space_cache.get_or_compile_transformed_source(
+    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
         rule,
         lhs,
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     )?;
-    let (rhs_space, rhs_replay_structure) = dynamic_space_cache.get_or_compile_transformed_source(
+    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
         rule,
         rhs,
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     )?;
+    let lhs_space = lhs_transform.space.clone();
+    let rhs_space = rhs_transform.space.clone();
 
     {
         let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
         let lhs_scratch = scratch.prepare_lhs(lhs_space.clone())?;
-        tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
-            rule,
-            plan.lhs_transform().clone(),
+        tree_context.tree_pair_transform_structure_into_raw(
+            lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
-            &lhs_replay_structure,
+            &lhs_transform.replay_structure,
             lhs_scratch.data_mut(),
             lhs.data(),
-            plan.lhs_source_conjugate(),
             D::one(),
             D::zero(),
         )?;
@@ -428,14 +431,12 @@ where
     {
         let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
         let rhs_scratch = scratch.prepare_rhs(rhs_space.clone())?;
-        tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
-            rule,
-            plan.rhs_transform().clone(),
+        tree_context.tree_pair_transform_structure_into_raw(
+            rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
-            &rhs_replay_structure,
+            &rhs_transform.replay_structure,
             rhs_scratch.data_mut(),
             rhs.data(),
-            plan.rhs_source_conjugate(),
             D::one(),
             D::zero(),
         )?;
@@ -474,13 +475,15 @@ where
         dst.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
-    let canonical_dst_space = dynamic_space_cache.get_or_compile_canonical_dst(
+    let canonical_dst = dynamic_space_cache.get_or_compile_canonical_dst(
+        tree_context,
         rule,
         &lhs_space,
         &rhs_space,
         plan,
         &output_dst_space,
     )?;
+    let canonical_dst_space = canonical_dst.space.clone();
     let block_plan = fusion_block_cache.get_or_compile(
         rule,
         &canonical_dst_space,
@@ -507,14 +510,12 @@ where
         )?;
     }
     let dst_structure = std::sync::Arc::clone(dst.structure());
-    tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
-        rule,
-        plan.output_transform().clone(),
+    tree_context.tree_pair_transform_structure_into_raw(
+        canonical_dst.output_transform_structure.as_ref(),
         &dst_structure,
         &canonical_dst_structure,
         dst.data_mut(),
         scratch.dst().data(),
-        false,
         D::one(),
         beta,
     )
@@ -561,18 +562,22 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
     let start = std::time::Instant::now();
-    let (lhs_space, lhs_replay_structure) = dynamic_space_cache.get_or_compile_transformed_source(
+    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
         rule,
         lhs,
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     )?;
-    let (rhs_space, rhs_replay_structure) = dynamic_space_cache.get_or_compile_transformed_source(
+    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
         rule,
         rhs,
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     )?;
+    let lhs_space = lhs_transform.space.clone();
+    let rhs_space = rhs_transform.space.clone();
     profile.source_space_lookup += start.elapsed();
 
     {
@@ -582,16 +587,15 @@ where
         profile.lhs_scratch_prepare += start.elapsed();
 
         let start = std::time::Instant::now();
-        tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
-            rule,
-            plan.lhs_transform().clone(),
+        tree_context.tree_pair_transform_structure_into_raw_profiled(
+            lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
-            &lhs_replay_structure,
+            &lhs_transform.replay_structure,
             lhs_scratch.data_mut(),
             lhs.data(),
-            plan.lhs_source_conjugate(),
             D::one(),
             D::zero(),
+            &mut profile.tree_replay,
         )?;
         profile.lhs_transform += start.elapsed();
         profile.lhs_transform_calls += 1;
@@ -603,16 +607,15 @@ where
         profile.rhs_scratch_prepare += start.elapsed();
 
         let start = std::time::Instant::now();
-        tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
-            rule,
-            plan.rhs_transform().clone(),
+        tree_context.tree_pair_transform_structure_into_raw_profiled(
+            rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
-            &rhs_replay_structure,
+            &rhs_transform.replay_structure,
             rhs_scratch.data_mut(),
             rhs.data(),
-            plan.rhs_source_conjugate(),
             D::one(),
             D::zero(),
+            &mut profile.tree_replay,
         )?;
         profile.rhs_transform += start.elapsed();
         profile.rhs_transform_calls += 1;
@@ -656,13 +659,15 @@ where
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
     let start = std::time::Instant::now();
-    let canonical_dst_space = dynamic_space_cache.get_or_compile_canonical_dst(
+    let canonical_dst = dynamic_space_cache.get_or_compile_canonical_dst(
+        tree_context,
         rule,
         &lhs_space,
         &rhs_space,
         plan,
         &output_dst_space,
     )?;
+    let canonical_dst_space = canonical_dst.space.clone();
     profile.canonical_dst_space_lookup += start.elapsed();
 
     let start = std::time::Instant::now();
@@ -700,16 +705,15 @@ where
 
     let dst_structure = std::sync::Arc::clone(dst.structure());
     let start = std::time::Instant::now();
-    tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
-        rule,
-        plan.output_transform().clone(),
+    tree_context.tree_pair_transform_structure_into_raw_profiled(
+        canonical_dst.output_transform_structure.as_ref(),
         &dst_structure,
         &canonical_dst_structure,
         dst.data_mut(),
         scratch.dst().data(),
-        false,
         D::one(),
         beta,
+        &mut profile.tree_replay,
     )?;
     profile.output_transform += start.elapsed();
     profile.output_transform_calls += 1;
@@ -719,6 +723,7 @@ where
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DynamicFusionSpaceCacheStats {
     hits: usize,
+    fast_hits: usize,
     misses: usize,
 }
 
@@ -729,6 +734,11 @@ impl DynamicFusionSpaceCacheStats {
     }
 
     #[inline]
+    pub(crate) fn fast_hits(self) -> usize {
+        self.fast_hits
+    }
+
+    #[inline]
     pub(crate) fn misses(self) -> usize {
         self.misses
     }
@@ -736,18 +746,40 @@ impl DynamicFusionSpaceCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
+    fast_transformed_sources: HashMap<
+        DynamicFusionTransformedSourceFastKey<RuleKey>,
+        DynamicFusionTransformedSourceEntry,
+    >,
     transformed_sources: HashMap<
         DynamicFusionTransformedSourceSpaceKey<RuleKey>,
-        (DynamicFusionMapSpace, std::sync::Arc<BlockStructure>),
+        DynamicFusionTransformedSourceEntry,
     >,
-    canonical_dsts: HashMap<DynamicFusionCanonicalDstSpaceKey<RuleKey>, DynamicFusionMapSpace>,
+    fast_canonical_dsts:
+        HashMap<DynamicFusionCanonicalDstFastKey<RuleKey>, DynamicFusionCanonicalDstEntry>,
+    canonical_dsts:
+        HashMap<DynamicFusionCanonicalDstSpaceKey<RuleKey>, DynamicFusionCanonicalDstEntry>,
     stats: DynamicFusionSpaceCacheStats,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicFusionTransformedSourceEntry {
+    space: DynamicFusionMapSpace,
+    replay_structure: Arc<BlockStructure>,
+    transform_structure: Arc<TreeTransformStructure<f64>>,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicFusionCanonicalDstEntry {
+    space: DynamicFusionMapSpace,
+    output_transform_structure: Arc<TreeTransformStructure<f64>>,
 }
 
 impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
     fn default() -> Self {
         Self {
+            fast_transformed_sources: HashMap::new(),
             transformed_sources: HashMap::new(),
+            fast_canonical_dsts: HashMap::new(),
             canonical_dsts: HashMap::new(),
             stats: DynamicFusionSpaceCacheStats::default(),
         }
@@ -768,19 +800,31 @@ where
         self.stats
     }
 
-    fn get_or_compile_transformed_source<R, D, const SRC_NOUT: usize, const SRC_NIN: usize, SSrc>(
+    fn get_or_compile_transformed_source<
+        R,
+        D,
+        BT,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SSrc,
+    >(
         &mut self,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         rule: &R,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
         operation: &TreeTransformOperationKey,
         source_conjugate: bool,
-    ) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
+    ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar,
+        BT: TreeTransformBackend<D, f64>,
     {
         let src_fusion = src
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let rule_key = rule.tree_transform_rule_cache_key();
+        let nout = if source_conjugate { SRC_NIN } else { SRC_NOUT };
         let (homspace, replay_structure) = if source_conjugate {
             let adjoint = adjoint_fusion_space_view(src_fusion)?;
             (
@@ -793,17 +837,32 @@ where
                 std::sync::Arc::clone(src.structure()),
             )
         };
+        let fast_key = DynamicFusionTransformedSourceFastKey {
+            rule: rule_key.clone(),
+            nout,
+            homspace: homspace.clone(),
+            replay_structure_ptr: Arc::as_ptr(&replay_structure) as usize,
+            operation: operation.clone(),
+            source_conjugate,
+        };
+        if let Some(entry) = self.fast_transformed_sources.get(&fast_key) {
+            self.stats.hits += 1;
+            self.stats.fast_hits += 1;
+            return Ok(entry.clone());
+        }
         let key = DynamicFusionTransformedSourceSpaceKey {
-            rule: rule.tree_transform_rule_cache_key(),
-            nout: if source_conjugate { SRC_NIN } else { SRC_NOUT },
+            rule: rule_key,
+            nout,
             homspace,
             structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
             operation: operation.clone(),
             source_conjugate,
         };
-        if let Some((space, replay_structure)) = self.transformed_sources.get(&key) {
+        if let Some(entry) = self.transformed_sources.get(&key) {
             self.stats.hits += 1;
-            return Ok((space.clone(), std::sync::Arc::clone(replay_structure)));
+            self.fast_transformed_sources
+                .insert(fast_key, entry.clone());
+            return Ok(entry.clone());
         }
 
         self.stats.misses += 1;
@@ -813,26 +872,58 @@ where
         } else {
             DynamicFusionMapSpace::transformed_from_typed(rule, src_fusion, operation)?
         };
-        self.transformed_sources.insert(
-            key,
-            (space.clone(), std::sync::Arc::clone(&replay_structure)),
-        );
-        Ok((space, replay_structure))
+        let dst_structure = Arc::clone(space.structure());
+        let transform_structure = tree_context
+            .get_or_compile_tree_pair_structure_with_storage_conjugation(
+                rule,
+                operation.clone(),
+                &dst_structure,
+                &replay_structure,
+                source_conjugate,
+            )?;
+        let entry = DynamicFusionTransformedSourceEntry {
+            space,
+            replay_structure,
+            transform_structure,
+        };
+        self.transformed_sources.insert(key, entry.clone());
+        self.fast_transformed_sources
+            .insert(fast_key, entry.clone());
+        Ok(entry)
     }
 
-    fn get_or_compile_canonical_dst<R>(
+    fn get_or_compile_canonical_dst<R, D, BT>(
         &mut self,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         rule: &R,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         plan: &TensorContractFusionExplicitPlan,
         output_dst: &DynamicFusionMapSpace,
-    ) -> Result<DynamicFusionMapSpace, OperationError>
+    ) -> Result<DynamicFusionCanonicalDstEntry, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar,
+        BT: TreeTransformBackend<D, f64>,
     {
+        let rule_key = rule.tree_transform_rule_cache_key();
+        let fast_key = DynamicFusionCanonicalDstFastKey {
+            rule: rule_key.clone(),
+            lhs: DynamicFusionFastSpaceKey::from_space(lhs),
+            rhs: DynamicFusionFastSpaceKey::from_space(rhs),
+            canonical_axes: plan.canonical_axes().clone(),
+            canonical_dst_nout: plan.canonical_dst_nout(),
+            canonical_dst_nin: plan.canonical_dst_nin(),
+            output_transform: plan.output_transform().clone(),
+            output_dst: DynamicFusionFastSpaceKey::from_space(output_dst),
+        };
+        if let Some(entry) = self.fast_canonical_dsts.get(&fast_key) {
+            self.stats.hits += 1;
+            self.stats.fast_hits += 1;
+            return Ok(entry.clone());
+        }
         let key = DynamicFusionCanonicalDstSpaceKey {
-            rule: rule.tree_transform_rule_cache_key(),
+            rule: rule_key,
             lhs: DynamicFusionSpaceKey::from_space(lhs)?,
             rhs: DynamicFusionSpaceKey::from_space(rhs)?,
             canonical_axes: plan.canonical_axes().clone(),
@@ -841,16 +932,42 @@ where
             output_transform: plan.output_transform().clone(),
             output_dst: DynamicFusionSpaceKey::from_space(output_dst)?,
         };
-        if let Some(space) = self.canonical_dsts.get(&key) {
+        if let Some(entry) = self.canonical_dsts.get(&key) {
             self.stats.hits += 1;
-            return Ok(space.clone());
+            self.fast_canonical_dsts.insert(fast_key, entry.clone());
+            return Ok(entry.clone());
         }
 
         self.stats.misses += 1;
         let space = DynamicFusionMapSpace::canonical_dst(rule, lhs, rhs, plan, Some(output_dst))?;
-        self.canonical_dsts.insert(key, space.clone());
-        Ok(space)
+        let dst_structure = Arc::clone(output_dst.structure());
+        let src_structure = Arc::clone(space.structure());
+        let output_transform_structure = tree_context
+            .get_or_compile_tree_pair_structure_with_storage_conjugation(
+                rule,
+                plan.output_transform().clone(),
+                &dst_structure,
+                &src_structure,
+                false,
+            )?;
+        let entry = DynamicFusionCanonicalDstEntry {
+            space,
+            output_transform_structure,
+        };
+        self.canonical_dsts.insert(key, entry.clone());
+        self.fast_canonical_dsts.insert(fast_key, entry.clone());
+        Ok(entry)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct DynamicFusionTransformedSourceFastKey<RuleKey> {
+    rule: RuleKey,
+    nout: usize,
+    homspace: FusionTreeHomSpace,
+    replay_structure_ptr: usize,
+    operation: TreeTransformOperationKey,
+    source_conjugate: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -864,6 +981,18 @@ struct DynamicFusionTransformedSourceSpaceKey<RuleKey> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct DynamicFusionCanonicalDstFastKey<RuleKey> {
+    rule: RuleKey,
+    lhs: DynamicFusionFastSpaceKey,
+    rhs: DynamicFusionFastSpaceKey,
+    canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_dst_nout: usize,
+    canonical_dst_nin: usize,
+    output_transform: TreeTransformOperationKey,
+    output_dst: DynamicFusionFastSpaceKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct DynamicFusionCanonicalDstSpaceKey<RuleKey> {
     rule: RuleKey,
     lhs: DynamicFusionSpaceKey,
@@ -873,6 +1002,23 @@ struct DynamicFusionCanonicalDstSpaceKey<RuleKey> {
     canonical_dst_nin: usize,
     output_transform: TreeTransformOperationKey,
     output_dst: DynamicFusionSpaceKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct DynamicFusionFastSpaceKey {
+    nout: usize,
+    homspace: FusionTreeHomSpace,
+    structure_ptr: usize,
+}
+
+impl DynamicFusionFastSpaceKey {
+    fn from_space(space: &DynamicFusionMapSpace) -> Self {
+        Self {
+            nout: space.nout(),
+            homspace: space.homspace().clone(),
+            structure_ptr: Arc::as_ptr(space.structure()) as usize,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

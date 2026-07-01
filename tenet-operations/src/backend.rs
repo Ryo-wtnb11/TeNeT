@@ -10,8 +10,9 @@ use crate::{
     tensortrace_fusion_structure_with_strided_kernel, tensortrace_structure_with_strided_kernel,
     tree_transform_structure_with_dense_recoupling, tree_transform_structure_with_strided_kernel,
     ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoefficientAction,
-    TensorAddStructure, TensorTraceFusionStructure, TensorTraceStructure, TreeTransformScalar,
-    TreeTransformStructure, TreeTransformWorkspace,
+    TensorAddStructure, TensorTraceFusionStructure, TensorTraceStructure,
+    TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
+    TreeTransformWorkspace,
 };
 
 pub trait TreeTransformBackend<D, C>
@@ -49,6 +50,34 @@ where
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn tree_transform_structure_into_raw_profiled(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+        profile: &mut TreeTransformReplayProfile,
+    ) -> Result<(), OperationError> {
+        let start = std::time::Instant::now();
+        let result = self.tree_transform_structure_into_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        );
+        profile.total += start.elapsed();
+        result
+    }
 }
 
 pub trait TensorOperationsBackend {
@@ -398,6 +427,32 @@ where
             src_data,
             alpha,
             beta,
+        )
+    }
+
+    fn tree_transform_structure_into_raw_profiled(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+        profile: &mut TreeTransformReplayProfile,
+    ) -> Result<(), OperationError> {
+        crate::tree_transform_structure_with_dense_recoupling_raw_profiled(
+            &mut self.dense,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+            profile,
         )
     }
 }

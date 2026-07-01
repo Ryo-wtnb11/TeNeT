@@ -132,6 +132,8 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
     assert_eq!(profile.lhs_transform_calls, 0);
     assert_eq!(profile.rhs_transform_calls, 0);
     assert!(profile.canonical_contract_groups > 0);
+    assert_eq!(profile.tree_replay.single_blocks, 0);
+    assert_eq!(profile.tree_replay.multi_blocks, 0);
 }
 
 #[test]
@@ -2081,6 +2083,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         );
     }
 
+    let tree_stats_after_first = automatic_context.tree_context().cache().stats();
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
@@ -2101,16 +2104,12 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             "actual {actual} expected {expected}"
         );
     }
-    assert!(automatic_context.tree_context().cache().stats().plan_hits() > 0);
-    assert!(automatic_context.dynamic_fusion_space_cache_hits() > 0);
-    assert!(
-        automatic_context
-            .tree_context()
-            .cache()
-            .stats()
-            .structure_hits()
-            > 0
+    assert_eq!(
+        automatic_context.tree_context().cache().stats(),
+        tree_stats_after_first
     );
+    assert!(automatic_context.dynamic_fusion_space_cache_hits() > 0);
+    assert!(automatic_context.dynamic_fusion_space_cache_fast_hits() > 0);
     assert_eq!(automatic_context.contract_cache().structure_len(), 0);
     assert_eq!(
         automatic_context.contract_cache().stats().structure_hits(),
@@ -2125,6 +2124,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     );
     assert_eq!(automatic_context.fusion_block_contract_cache_len(), 1);
     assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 1);
+    assert_eq!(automatic_context.fusion_block_contract_cache_fast_hits(), 1);
     assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 1);
 
     automatic_context_dst
@@ -2157,6 +2157,13 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(profile.rhs_transform_calls, 1);
     assert_eq!(profile.output_transform_calls, 0);
     assert!(profile.canonical_contract_groups > 0);
+    assert_eq!(profile.tree_replay.cache_lookup.as_nanos(), 0);
+    assert!(profile.tree_replay.multi_blocks > 0);
+    assert!(profile.tree_replay.packed_columns > 0);
+    assert_eq!(
+        profile.tree_replay.packed_columns,
+        profile.tree_replay.scattered_columns
+    );
 }
 
 #[test]
@@ -2270,7 +2277,8 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
         }
     }
     assert!(context.tree_context().cache().stats().structure_misses() >= 3);
-    assert!(context.tree_context().cache().stats().structure_hits() > 0);
+    assert!(context.dynamic_fusion_space_cache_hits() > 0);
+    assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
     assert!(context.fusion_block_contract_cache_len() >= 1);
     assert!(context.fusion_block_contract_cache_misses() >= 1);
 }
@@ -2738,6 +2746,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         assert_eq!(context.fusion_block_contract_cache_len(), 0);
     }
 
+    let tree_stats_after_first = context.tree_context().cache().stats();
     context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context);
@@ -2751,9 +2760,15 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         );
     }
     if expects_dynamic_replay {
-        assert!(context.tree_context().cache().stats().structure_hits() > 0);
+        assert_eq!(
+            context.tree_context().cache().stats(),
+            tree_stats_after_first
+        );
+        assert!(context.dynamic_fusion_space_cache_hits() > 0);
+        assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
         assert_eq!(context.fusion_block_contract_cache_len(), 1);
         assert_eq!(context.fusion_block_contract_cache_hits(), 1);
+        assert_eq!(context.fusion_block_contract_cache_fast_hits(), 1);
         assert_eq!(context.fusion_block_contract_cache_misses(), 1);
     } else {
         assert_eq!(context.tree_context().cache().structure_len(), 0);

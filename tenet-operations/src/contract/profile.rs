@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::TreeTransformReplayProfile;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TensorContractFusionRoute {
     #[default]
@@ -41,6 +43,7 @@ pub struct TensorContractFusionProfile {
     pub rhs_transform_calls: usize,
     pub output_transform_calls: usize,
     pub canonical_contract_groups: usize,
+    pub tree_replay: TreeTransformReplayProfile,
 }
 
 impl TensorContractFusionProfile {
@@ -74,6 +77,7 @@ impl TensorContractFusionProfile {
         self.rhs_transform_calls += other.rhs_transform_calls;
         self.output_transform_calls += other.output_transform_calls;
         self.canonical_contract_groups += other.canonical_contract_groups;
+        self.tree_replay.accumulate(&other.tree_replay);
         if self.route == TensorContractFusionRoute::Unset {
             self.route = other.route;
         }

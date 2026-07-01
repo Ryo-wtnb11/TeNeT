@@ -20,6 +20,7 @@ mod structure_identity;
 mod tensoradd;
 mod tensortrace;
 mod tree_context;
+mod tree_profile;
 mod tree_structure;
 mod tree_transform;
 
@@ -73,6 +74,7 @@ pub(crate) use host_kernels::{
     copy_block_with_strided_kernel, tensoradd_raw_strided_kernel,
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_dense_recoupling,
     tree_transform_structure_with_dense_recoupling_raw,
+    tree_transform_structure_with_dense_recoupling_raw_profiled,
     tree_transform_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel_raw,
 };
 pub use scalar::{
@@ -90,6 +92,7 @@ pub use tensortrace::{
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
 };
 pub use tree_context::TreeTransformExecutionContext;
+pub use tree_profile::TreeTransformReplayProfile;
 pub use tree_structure::TreeTransformStructure;
 pub(crate) use tree_structure::{
     TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable,

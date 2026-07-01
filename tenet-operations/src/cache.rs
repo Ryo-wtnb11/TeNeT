@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use tenet_core::{BlockKey, BlockStructure};
 
@@ -127,7 +128,7 @@ where
 
 #[derive(Clone, Debug)]
 pub struct TreeTransformStructureCache<T, PlanKey> {
-    structures: HashMap<TreeTransformStructureCacheKey<PlanKey>, TreeTransformStructure<T>>,
+    structures: HashMap<TreeTransformStructureCacheKey<PlanKey>, Arc<TreeTransformStructure<T>>>,
 }
 
 impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey> {
@@ -254,14 +255,21 @@ where
         &self,
         key: &TreeTransformStructureCacheKey<PlanKey>,
     ) -> Option<&TreeTransformStructure<T>> {
-        self.structures.get(key)
+        self.structures.get(key).map(Arc::as_ref)
+    }
+
+    pub fn get_arc(
+        &self,
+        key: &TreeTransformStructureCacheKey<PlanKey>,
+    ) -> Option<Arc<TreeTransformStructure<T>>> {
+        self.structures.get(key).map(Arc::clone)
     }
 
     pub fn insert(
         &mut self,
         key: TreeTransformStructureCacheKey<PlanKey>,
         structure: TreeTransformStructure<T>,
-    ) -> Option<TreeTransformStructure<T>> {
-        self.structures.insert(key, structure)
+    ) -> Option<Arc<TreeTransformStructure<T>>> {
+        self.structures.insert(key, Arc::new(structure))
     }
 }

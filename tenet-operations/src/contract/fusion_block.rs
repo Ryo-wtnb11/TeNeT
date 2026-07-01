@@ -436,6 +436,7 @@ impl CanonicalFusionBlockContractGroupPlan {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CanonicalFusionBlockContractCacheStats {
     hits: usize,
+    fast_hits: usize,
     misses: usize,
 }
 
@@ -446,6 +447,11 @@ impl CanonicalFusionBlockContractCacheStats {
     }
 
     #[inline]
+    pub(crate) fn fast_hits(self) -> usize {
+        self.fast_hits
+    }
+
+    #[inline]
     pub(crate) fn misses(self) -> usize {
         self.misses
     }
@@ -453,6 +459,10 @@ impl CanonicalFusionBlockContractCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
+    fast_plans: HashMap<
+        CanonicalFusionBlockContractFastKey<RuleKey>,
+        Arc<CanonicalFusionBlockContractPlan>,
+    >,
     plans: HashMap<
         CanonicalFusionBlockContractCacheKey<RuleKey>,
         Arc<CanonicalFusionBlockContractPlan>,
@@ -463,6 +473,7 @@ pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
 impl<RuleKey> Default for CanonicalFusionBlockContractCache<RuleKey> {
     fn default() -> Self {
         Self {
+            fast_plans: HashMap::new(),
             plans: HashMap::new(),
             stats: CanonicalFusionBlockContractCacheStats::default(),
         }
@@ -494,21 +505,77 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let key = CanonicalFusionBlockContractCacheKey::from_spaces(
-            rule, dst_space, lhs_space, rhs_space, axes,
+        let axis_plan = TensorContractAxisPlan::compile(
+            lhs_space.rank(),
+            rhs_space.rank(),
+            dst_space.rank(),
+            axes,
         )?;
-        if self.plans.get(&key).is_some() {
+        let axes_key = OwnedTensorContractAxisSpec::new_with_conjugation(
+            axis_plan.lhs_contracting_axes,
+            axis_plan.rhs_contracting_axes,
+            axis_plan.output_axes,
+            axis_plan.lhs_conjugate,
+            axis_plan.rhs_conjugate,
+        );
+        let rule_key = rule.tree_transform_rule_cache_key();
+        let fast_key = CanonicalFusionBlockContractFastKey {
+            rule: rule_key.clone(),
+            dst: CanonicalFusionBlockFastSpaceKey::from_space(dst_space),
+            lhs: CanonicalFusionBlockFastSpaceKey::from_space(lhs_space),
+            rhs: CanonicalFusionBlockFastSpaceKey::from_space(rhs_space),
+            axes: axes_key.clone(),
+        };
+        if let Some(plan) = self.fast_plans.get(&fast_key) {
             self.stats.hits += 1;
+            self.stats.fast_hits += 1;
+            return Ok(Arc::clone(plan));
+        }
+
+        let key = CanonicalFusionBlockContractCacheKey::from_parts(
+            rule_key, dst_space, lhs_space, rhs_space, axes_key,
+        )?;
+        if let Some(plan) = self.plans.get(&key) {
+            self.stats.hits += 1;
+            let plan = Arc::clone(plan);
+            self.fast_plans.insert(fast_key, Arc::clone(&plan));
+            return Ok(plan);
         } else {
             self.stats.misses += 1;
             let plan = CanonicalFusionBlockContractPlan::compile(
                 rule, dst_space, lhs_space, rhs_space, axes,
             )?;
-            self.plans.insert(key.clone(), Arc::new(plan));
+            let plan = Arc::new(plan);
+            self.plans.insert(key, Arc::clone(&plan));
+            self.fast_plans.insert(fast_key, Arc::clone(&plan));
+            return Ok(plan);
         }
-        Ok(Arc::clone(self.plans.get(&key).expect(
-            "canonical fusion block contract plan inserted before replay",
-        )))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct CanonicalFusionBlockContractFastKey<RuleKey> {
+    rule: RuleKey,
+    dst: CanonicalFusionBlockFastSpaceKey,
+    lhs: CanonicalFusionBlockFastSpaceKey,
+    rhs: CanonicalFusionBlockFastSpaceKey,
+    axes: OwnedTensorContractAxisSpec,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct CanonicalFusionBlockFastSpaceKey {
+    nout: usize,
+    homspace: FusionTreeHomSpace,
+    structure_ptr: usize,
+}
+
+impl CanonicalFusionBlockFastSpaceKey {
+    fn from_space(space: &DynamicFusionMapSpace) -> Self {
+        Self {
+            nout: space.nout(),
+            homspace: space.homspace().clone(),
+            structure_ptr: Arc::as_ptr(space.structure()) as usize,
+        }
     }
 }
 
@@ -531,19 +598,15 @@ impl<RuleKey> CanonicalFusionBlockContractCacheKey<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
-    fn from_spaces<R>(
-        rule: &R,
+    fn from_parts(
+        rule: RuleKey,
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
-        axes: TensorContractAxisSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: TreeTransformRuleCacheKey<Key = RuleKey>,
-    {
-        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+        axes: OwnedTensorContractAxisSpec,
+    ) -> Result<Self, OperationError> {
         Ok(Self {
-            rule: rule.tree_transform_rule_cache_key(),
+            rule,
             dst_nout: dst.nout(),
             dst_homspace: dst.homspace().clone(),
             dst_structure: BlockStructureCacheKey::from_structure(dst.structure())?,
@@ -553,13 +616,7 @@ where
             rhs_nout: rhs.nout(),
             rhs_homspace: rhs.homspace().clone(),
             rhs_structure: BlockStructureCacheKey::from_structure(rhs.structure())?,
-            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
-                axis_plan.lhs_contracting_axes,
-                axis_plan.rhs_contracting_axes,
-                axis_plan.output_axes,
-                axis_plan.lhs_conjugate,
-                axis_plan.rhs_conjugate,
-            ),
+            axes,
         })
     }
 }
