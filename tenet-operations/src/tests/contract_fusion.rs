@@ -1468,9 +1468,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         );
     }
     assert_eq!(automatic_context.contract_cache().structure_len(), 1);
-    assert_eq!(automatic_context.fusion_plan_cache_len(), 0);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().hits(), 0);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().misses(), 0);
 
     let mut beta_only_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
         vec![7.0, 11.0],
@@ -1496,9 +1493,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
             .structure_misses(),
         1
     );
-    assert_eq!(automatic_context.fusion_plan_cache_len(), 0);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().hits(), 0);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().misses(), 0);
 }
 
 #[test]
@@ -1963,9 +1957,6 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     // fusion-block pack/GEMM/scatter executor, not the generic dense
     // TensorContractStructure cache.
     assert_eq!(automatic_context.contract_cache().structure_len(), 0);
-    assert_eq!(automatic_context.fusion_plan_cache_len(), 1);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().hits(), 0);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().misses(), 1);
     assert_eq!(
         automatic_context.contract_cache().stats().structure_hits(),
         0
@@ -2011,9 +2002,6 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         automatic_context.contract_cache().stats().structure_hits(),
         0
     );
-    assert_eq!(automatic_context.fusion_plan_cache_len(), 1);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().hits(), 1);
-    assert_eq!(automatic_context.fusion_plan_cache_stats().misses(), 1);
     assert_eq!(
         automatic_context
             .contract_cache()
@@ -2116,9 +2104,6 @@ fn tensorcontract_fusion_execution_plan_cache_distinguishes_block_structure() {
             );
         }
 
-        assert_eq!(context.fusion_plan_cache_len(), 1);
-        assert_eq!(context.fusion_plan_cache_stats().misses(), 1);
-        assert_eq!(context.fusion_plan_cache_stats().hits(), case_index);
         assert_eq!(context.fusion_execution_plan_cache_len(), case_index + 1);
         assert_eq!(context.fusion_execution_plan_cache_misses(), case_index + 1);
         assert_eq!(context.fusion_execution_plan_cache_hits(), 0);
@@ -2543,9 +2528,6 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     // generic TensorContractStructure cache is only used by dense/block-spec
     // contraction paths.
     assert_eq!(context.contract_cache().structure_len(), 0);
-    assert_eq!(context.fusion_plan_cache_len(), 1);
-    assert_eq!(context.fusion_plan_cache_stats().hits(), 0);
-    assert_eq!(context.fusion_plan_cache_stats().misses(), 1);
     assert_eq!(context.fusion_execution_plan_cache_len(), 1);
     assert_eq!(context.fusion_execution_plan_cache_hits(), 0);
     assert_eq!(context.fusion_execution_plan_cache_misses(), 1);
@@ -2560,7 +2542,6 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
     assert_eq!(context.contract_cache().stats().structure_hits(), 0);
-    assert_eq!(context.fusion_plan_cache_stats().hits(), 1);
     assert_eq!(context.fusion_execution_plan_cache_len(), 1);
     assert_eq!(context.fusion_execution_plan_cache_hits(), 1);
     assert_eq!(context.fusion_execution_plan_cache_misses(), 1);

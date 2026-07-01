@@ -92,12 +92,6 @@ fn bench_su2_noncanonical_source() {
         context.tree_context().cache().structure_len()
     );
     println!(
-        "fusion_plan_cache,hits={},misses={},len={}",
-        context.fusion_plan_cache_stats().hits(),
-        context.fusion_plan_cache_stats().misses(),
-        context.fusion_plan_cache_len()
-    );
-    println!(
         "contract_structure_cache,hits={},misses={},len={}",
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
@@ -152,12 +146,6 @@ fn bench_su2_output_scratch() {
         context.tree_context().cache().plan_len()
     );
     println!(
-        "fusion_plan_cache,hits={},misses={},len={}",
-        context.fusion_plan_cache_stats().hits(),
-        context.fusion_plan_cache_stats().misses(),
-        context.fusion_plan_cache_len()
-    );
-    println!(
         "contract_structure_cache,hits={},misses={},len={}",
         context.contract_cache().stats().structure_hits(),
         context.contract_cache().stats().structure_misses(),
@@ -209,12 +197,6 @@ fn bench_product_complex() {
         context.tree_context().cache().stats().plan_hits(),
         context.tree_context().cache().stats().plan_misses(),
         context.tree_context().cache().plan_len()
-    );
-    println!(
-        "fusion_plan_cache,hits={},misses={},len={}",
-        context.fusion_plan_cache_stats().hits(),
-        context.fusion_plan_cache_stats().misses(),
-        context.fusion_plan_cache_len()
     );
     println!(
         "contract_structure_cache,hits={},misses={},len={}",

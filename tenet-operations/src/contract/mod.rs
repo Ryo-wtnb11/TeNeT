@@ -22,8 +22,7 @@ pub use backend::{TensorContractBackend, TensorContractWorkspace};
 pub use context::{
     tensorcontract_into_with_context, TensorContractBlockPlanKey, TensorContractBlockPlanTerm,
     TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
-    TensorContractFusionExecutionContext, TensorContractFusionPlanCacheStats,
-    TensorContractPlanKey,
+    TensorContractFusionExecutionContext, TensorContractPlanKey,
 };
 #[cfg(test)]
 pub(crate) use fusion::{

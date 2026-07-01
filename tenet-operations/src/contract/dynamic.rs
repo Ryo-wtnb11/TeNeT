@@ -3,9 +3,9 @@ use std::hash::Hash;
 
 use tenet_core::{BlockStructure, CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
-use crate::axis::TensorContractAxisSpec;
+use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::BlockStructureCacheKey;
-use crate::lowering::adjoint_fusion_space_view;
+use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{
@@ -22,6 +22,7 @@ use super::fusion_block::{
     CanonicalFusionBlockContractWorkspace,
 };
 use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
+use super::structure::TensorContractAxisPlan;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
@@ -215,7 +216,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
+pub(crate) fn tensorcontract_fusion_dynamic_cached_into_context<
     RuleKey,
     BT,
     BC,
@@ -238,7 +239,63 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
-    plan: &TensorContractFusionExplicitPlan,
+    axes: TensorContractAxisSpec<'_>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<bool, OperationError>
+where
+    RuleKey: Clone + Eq + std::hash::Hash,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let Some(execution_plan) = execution_cache.get_cached(rule, axes, dst, lhs, rhs)? else {
+        return Ok(false);
+    };
+    execution_plan.execute(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        scratch,
+        dst,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )?;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_fusion_dynamic_into_context<
+    RuleKey,
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    execution_cache: &mut DynamicFusionExecutionPlanCache<RuleKey>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    rule: &R,
+    axes: TensorContractAxisSpec<'_>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
@@ -252,7 +309,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let execution_plan = execution_cache.get_or_compile(rule, plan, dst, lhs, rhs)?;
+    let execution_plan = execution_cache.get_or_compile(rule, axes, dst, lhs, rhs)?;
     execution_plan.execute(
         tree_context,
         contract_backend,
@@ -310,8 +367,45 @@ where
     }
 
     #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
+
+    #[inline]
     pub(crate) fn stats(&self) -> DynamicFusionExecutionPlanCacheStats {
         self.stats
+    }
+
+    pub(crate) fn get_cached<
+        R,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        &mut self,
+        rule: &R,
+        axes: TensorContractAxisSpec<'_>,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    ) -> Result<Option<&DynamicFusionExecutionPlan>, OperationError>
+    where
+        R: TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let key = DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
+        if let Some(plan) = self.plans.get(&key) {
+            self.stats.hits += 1;
+            Ok(Some(plan))
+        } else {
+            Ok(None)
+        }
     }
 
     pub(crate) fn get_or_compile<
@@ -329,7 +423,7 @@ where
     >(
         &mut self,
         rule: &R,
-        plan: &TensorContractFusionExplicitPlan,
+        axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
@@ -337,32 +431,26 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let dst_fusion = dst
-            .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-        let lhs_fusion = lhs
-            .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-        let rhs_fusion = rhs
-            .fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-        let key = DynamicFusionExecutionPlanCacheKey::from_spaces(
-            rule,
-            plan,
-            dst_fusion,
-            dst.structure(),
-            lhs_fusion,
-            lhs.structure(),
-            rhs_fusion,
-            rhs.structure(),
-        )?;
+        let key = DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
         if self.plans.get(&key).is_some() {
             self.stats.hits += 1;
         } else {
             self.stats.misses += 1;
+            let dst_fusion = dst
+                .fusion_space()
+                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            let lhs_fusion = lhs
+                .fusion_space()
+                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            let rhs_fusion = rhs
+                .fusion_space()
+                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+            let plan = tensorcontract_fusion_explicit_plan(
+                rule, dst_fusion, lhs_fusion, rhs_fusion, axes,
+            )?;
             let execution_plan = DynamicFusionExecutionPlan::compile(
                 rule,
-                plan,
+                &plan,
                 dst_fusion,
                 dst.structure(),
                 lhs,
@@ -705,12 +793,7 @@ struct DynamicFusionExecutionPlanCacheKey<RuleKey> {
     rhs_nout: usize,
     rhs_homspace: tenet_core::FusionTreeHomSpace,
     rhs_structure: BlockStructureCacheKey,
-    axes: crate::axis::OwnedTensorContractAxisSpec,
-    lhs_transform: TreeTransformOperationKey,
-    rhs_transform: TreeTransformOperationKey,
-    output_transform: TreeTransformOperationKey,
-    lhs_source_conjugate: bool,
-    rhs_source_conjugate: bool,
+    axes: OwnedTensorContractAxisSpec,
 }
 
 impl<RuleKey> DynamicFusionExecutionPlanCacheKey<RuleKey>
@@ -718,44 +801,64 @@ where
     RuleKey: Clone + Eq + Hash,
 {
     #[allow(clippy::too_many_arguments)]
-    fn from_spaces<
+    fn from_inputs<
         R,
+        D,
         const DST_NOUT: usize,
         const DST_NIN: usize,
         const LHS_NOUT: usize,
         const LHS_NIN: usize,
         const RHS_NOUT: usize,
         const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
     >(
         rule: &R,
-        plan: &TensorContractFusionExplicitPlan,
-        dst: &tenet_core::FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-        dst_structure: &BlockStructure,
-        lhs: &tenet_core::FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-        lhs_structure: &BlockStructure,
-        rhs: &tenet_core::FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
-        rhs_structure: &BlockStructure,
+        axes: TensorContractAxisSpec<'_>,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
     ) -> Result<Self, OperationError>
     where
         R: TreeTransformRuleCacheKey<Key = RuleKey>,
     {
+        let dst_fusion = dst
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let lhs_fusion = lhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let rhs_fusion = rhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let lowered_axes =
+            lower_tensorcontract_adjoint_axes::<LHS_NOUT, LHS_NIN, RHS_NOUT, RHS_NIN>(axes)?;
+        let lowered_spec = lowered_axes.as_spec();
+        let axis_plan = TensorContractAxisPlan::compile(
+            lhs.structure().rank(),
+            rhs.structure().rank(),
+            dst.structure().rank(),
+            lowered_spec,
+        )?;
         Ok(Self {
             rule: rule.tree_transform_rule_cache_key(),
             dst_nout: DST_NOUT,
-            dst_homspace: dst.homspace().clone(),
-            dst_structure: BlockStructureCacheKey::from_structure(dst_structure)?,
+            dst_homspace: dst_fusion.homspace().clone(),
+            dst_structure: BlockStructureCacheKey::from_structure(dst.structure())?,
             lhs_nout: LHS_NOUT,
-            lhs_homspace: lhs.homspace().clone(),
-            lhs_structure: BlockStructureCacheKey::from_structure(lhs_structure)?,
+            lhs_homspace: lhs_fusion.homspace().clone(),
+            lhs_structure: BlockStructureCacheKey::from_structure(lhs.structure())?,
             rhs_nout: RHS_NOUT,
-            rhs_homspace: rhs.homspace().clone(),
-            rhs_structure: BlockStructureCacheKey::from_structure(rhs_structure)?,
-            axes: plan.canonical_axes().clone(),
-            lhs_transform: plan.lhs_transform().clone(),
-            rhs_transform: plan.rhs_transform().clone(),
-            output_transform: plan.output_transform().clone(),
-            lhs_source_conjugate: plan.lhs_source_conjugate(),
-            rhs_source_conjugate: plan.rhs_source_conjugate(),
+            rhs_homspace: rhs_fusion.homspace().clone(),
+            rhs_structure: BlockStructureCacheKey::from_structure(rhs.structure())?,
+            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
+                axis_plan.lhs_contracting_axes,
+                axis_plan.rhs_contracting_axes,
+                axis_plan.output_axes,
+                lowered_spec.lhs_conjugate(),
+                lowered_spec.rhs_conjugate(),
+            ),
         })
     }
 }
