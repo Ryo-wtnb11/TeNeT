@@ -89,9 +89,9 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert_eq!(context.fusion_execution_plan_cache_len(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_len(), 1);
     assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_compiles(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_hits(), 0);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
@@ -109,11 +109,11 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert_eq!(context.fusion_execution_plan_cache_len(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 0);
-    assert_eq!(context.fusion_execution_plan_cache_compiles(), 0);
+    assert_eq!(context.fusion_execution_plan_cache_len(), 1);
+    assert_eq!(context.fusion_execution_plan_cache_replay_hits(), 1);
+    assert_eq!(context.fusion_execution_plan_cache_compiles(), 1);
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
-    assert_eq!(context.fusion_block_contract_cache_hits(), 1);
+    assert_eq!(context.fusion_block_contract_cache_hits(), 0);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
 }
 

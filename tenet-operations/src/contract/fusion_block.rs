@@ -369,7 +369,10 @@ impl CanonicalFusionBlockContractCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CanonicalFusionBlockContractCache<RuleKey> {
-    plans: HashMap<CanonicalFusionBlockContractCacheKey<RuleKey>, CanonicalFusionBlockContractPlan>,
+    plans: HashMap<
+        CanonicalFusionBlockContractCacheKey<RuleKey>,
+        Arc<CanonicalFusionBlockContractPlan>,
+    >,
     stats: CanonicalFusionBlockContractCacheStats,
 }
 
@@ -403,7 +406,7 @@ where
         lhs_space: &DynamicFusionMapSpace,
         rhs_space: &DynamicFusionMapSpace,
         axes: TensorContractAxisSpec<'_>,
-    ) -> Result<&CanonicalFusionBlockContractPlan, OperationError>
+    ) -> Result<Arc<CanonicalFusionBlockContractPlan>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
@@ -417,12 +420,11 @@ where
             let plan = CanonicalFusionBlockContractPlan::compile(
                 rule, dst_space, lhs_space, rhs_space, axes,
             )?;
-            self.plans.insert(key.clone(), plan);
+            self.plans.insert(key.clone(), Arc::new(plan));
         }
-        Ok(self
-            .plans
-            .get(&key)
-            .expect("canonical fusion block contract plan inserted before replay"))
+        Ok(Arc::clone(self.plans.get(&key).expect(
+            "canonical fusion block contract plan inserted before replay",
+        )))
     }
 }
 

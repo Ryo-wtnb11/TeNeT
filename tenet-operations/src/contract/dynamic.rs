@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use tenet_core::{BlockStructure, CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 
@@ -18,8 +19,8 @@ use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
 use super::fusion_block::{
-    tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractPlan,
-    CanonicalFusionBlockContractWorkspace,
+    tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractCache,
+    CanonicalFusionBlockContractPlan, CanonicalFusionBlockContractWorkspace,
 };
 use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
 use super::structure::TensorContractAxisPlan;
@@ -234,12 +235,12 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     SRhs,
 >(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    execution_cache: &mut DynamicFusionExecutionPlanCache<RuleKey>,
+    execution_cache: &mut FusionExecutionPlanCache<RuleKey>,
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
-    precomputed_key: Option<DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>>,
+    precomputed_key: Option<FusionExecutionPlanPreparedCacheKey<RuleKey>>,
     rule: &R,
     axes: TensorContractAxisSpec<'_>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -255,8 +256,14 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let execution_plan =
-        execution_cache.get_or_compile_with_key(precomputed_key, rule, axes, dst, lhs, rhs)?;
+    let execution_plan = execution_cache.get_or_compile_dynamic_with_key(
+        precomputed_key,
+        rule,
+        axes,
+        dst,
+        lhs,
+        rhs,
+    )?;
     execution_plan.execute(
         tree_context,
         contract_backend,
@@ -272,12 +279,12 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DynamicFusionExecutionPlanCacheStats {
+pub(crate) struct FusionExecutionPlanCacheStats {
     hits: usize,
     misses: usize,
 }
 
-impl DynamicFusionExecutionPlanCacheStats {
+impl FusionExecutionPlanCacheStats {
     #[inline]
     pub(crate) fn hits(self) -> usize {
         self.hits
@@ -290,24 +297,31 @@ impl DynamicFusionExecutionPlanCacheStats {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DynamicFusionExecutionPlanCache<RuleKey> {
-    plans: HashMap<DynamicFusionExecutionPlanCacheKey<RuleKey>, DynamicFusionExecutionPlan>,
-    last_plan: Option<DynamicFusionExecutionPlanLastKey<RuleKey>>,
-    stats: DynamicFusionExecutionPlanCacheStats,
+pub(crate) struct FusionExecutionPlanCache<RuleKey> {
+    plans: HashMap<FusionExecutionPlanCacheKey<RuleKey>, FusionExecutionPlan>,
+    last_plan: Option<FusionExecutionPlanLastKey<RuleKey>>,
+    stats: FusionExecutionPlanCacheStats,
 }
 
-impl<RuleKey> Default for DynamicFusionExecutionPlanCache<RuleKey> {
+impl<RuleKey> Default for FusionExecutionPlanCache<RuleKey> {
     fn default() -> Self {
         Self {
             plans: HashMap::new(),
             last_plan: None,
-            stats: DynamicFusionExecutionPlanCacheStats::default(),
+            stats: FusionExecutionPlanCacheStats::default(),
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub(crate) enum FusionExecutionPlanRoute {
+    Canonical,
+    Dynamic,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DynamicFusionExecutionPlanRawFastKey<RuleKey> {
+struct FusionExecutionPlanRawFastKey<RuleKey> {
+    route: FusionExecutionPlanRoute,
     rule: RuleKey,
     dst_nout: usize,
     lhs_nout: usize,
@@ -326,23 +340,23 @@ struct DynamicFusionExecutionPlanRawFastKey<RuleKey> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DynamicFusionExecutionPlanPreparedCacheKey<RuleKey> {
-    raw_fast: DynamicFusionExecutionPlanRawFastKey<RuleKey>,
-    full: DynamicFusionExecutionPlanCacheKey<RuleKey>,
+pub(crate) struct FusionExecutionPlanPreparedCacheKey<RuleKey> {
+    raw_fast: FusionExecutionPlanRawFastKey<RuleKey>,
+    full: FusionExecutionPlanCacheKey<RuleKey>,
 }
 
 #[derive(Clone, Debug)]
-struct DynamicFusionExecutionPlanLastKey<RuleKey> {
-    raw_fast: DynamicFusionExecutionPlanRawFastKey<RuleKey>,
-    full: DynamicFusionExecutionPlanCacheKey<RuleKey>,
+struct FusionExecutionPlanLastKey<RuleKey> {
+    raw_fast: FusionExecutionPlanRawFastKey<RuleKey>,
+    full: FusionExecutionPlanCacheKey<RuleKey>,
 }
 
-pub(crate) enum DynamicFusionExecutionPlanCacheLookup<'a, RuleKey> {
-    Hit(&'a DynamicFusionExecutionPlan),
-    Miss(DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>),
+pub(crate) enum FusionExecutionPlanCacheLookup<'a, RuleKey> {
+    Hit(&'a FusionExecutionPlan),
+    Miss(FusionExecutionPlanPreparedCacheKey<RuleKey>),
 }
 
-impl<RuleKey> DynamicFusionExecutionPlanCache<RuleKey>
+impl<RuleKey> FusionExecutionPlanCache<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
@@ -357,7 +371,7 @@ where
     }
 
     #[inline]
-    pub(crate) fn stats(&self) -> DynamicFusionExecutionPlanCacheStats {
+    pub(crate) fn stats(&self) -> FusionExecutionPlanCacheStats {
         self.stats
     }
 
@@ -375,20 +389,20 @@ where
         SRhs,
     >(
         &mut self,
+        route: FusionExecutionPlanRoute,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-    ) -> Result<DynamicFusionExecutionPlanCacheLookup<'_, RuleKey>, OperationError>
+    ) -> Result<FusionExecutionPlanCacheLookup<'_, RuleKey>, OperationError>
     where
         R: TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        if self
-            .last_plan
-            .as_ref()
-            .is_some_and(|last| last.raw_fast.matches_inputs(rule, axes, dst, lhs, rhs))
-        {
+        if self.last_plan.as_ref().is_some_and(|last| {
+            last.raw_fast
+                .matches_inputs(route, rule, axes, dst, lhs, rhs)
+        }) {
             let key = self
                 .last_plan
                 .as_ref()
@@ -396,30 +410,30 @@ where
                 .full
                 .clone();
             self.stats.hits += 1;
-            return Ok(DynamicFusionExecutionPlanCacheLookup::Hit(
+            return Ok(FusionExecutionPlanCacheLookup::Hit(
                 self.plans
                     .get(&key)
-                    .expect("last dynamic fusion plan key must reference a cached plan"),
+                    .expect("last fusion execution plan key must reference a cached plan"),
             ));
         }
         let prepared =
-            DynamicFusionExecutionPlanPreparedCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?;
+            FusionExecutionPlanPreparedCacheKey::from_inputs(route, rule, axes, dst, lhs, rhs)?;
         if self.plans.get(&prepared.full).is_some() {
             self.stats.hits += 1;
-            self.last_plan = Some(DynamicFusionExecutionPlanLastKey {
+            self.last_plan = Some(FusionExecutionPlanLastKey {
                 raw_fast: prepared.raw_fast.clone(),
                 full: prepared.full.clone(),
             });
-            return Ok(DynamicFusionExecutionPlanCacheLookup::Hit(
+            return Ok(FusionExecutionPlanCacheLookup::Hit(
                 self.plans
                     .get(&prepared.full)
-                    .expect("dynamic fusion plan found before replay"),
+                    .expect("fusion execution plan found before replay"),
             ));
         }
-        Ok(DynamicFusionExecutionPlanCacheLookup::Miss(prepared))
+        Ok(FusionExecutionPlanCacheLookup::Miss(prepared))
     }
 
-    pub(crate) fn get_or_compile_with_key<
+    pub(crate) fn get_or_compile_dynamic_with_key<
         R,
         D,
         const DST_NOUT: usize,
@@ -433,21 +447,26 @@ where
         SRhs,
     >(
         &mut self,
-        key: Option<DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>>,
+        key: Option<FusionExecutionPlanPreparedCacheKey<RuleKey>>,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-    ) -> Result<&DynamicFusionExecutionPlan, OperationError>
+    ) -> Result<&FusionExecutionPlan, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let prepared = match key {
             Some(key) => key,
-            None => {
-                DynamicFusionExecutionPlanPreparedCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?
-            }
+            None => FusionExecutionPlanPreparedCacheKey::from_inputs(
+                FusionExecutionPlanRoute::Dynamic,
+                rule,
+                axes,
+                dst,
+                lhs,
+                rhs,
+            )?,
         };
         if self.plans.get(&prepared.full).is_some() {
             self.stats.hits += 1;
@@ -473,16 +492,154 @@ where
                 lhs,
                 rhs,
             )?;
-            self.plans.insert(prepared.full.clone(), execution_plan);
+            self.plans.insert(
+                prepared.full.clone(),
+                FusionExecutionPlan::Dynamic(execution_plan),
+            );
         }
-        self.last_plan = Some(DynamicFusionExecutionPlanLastKey {
+        self.last_plan = Some(FusionExecutionPlanLastKey {
             raw_fast: prepared.raw_fast.clone(),
             full: prepared.full.clone(),
         });
         Ok(self
             .plans
             .get(&prepared.full)
-            .expect("dynamic fusion execution plan inserted before replay"))
+            .expect("fusion execution plan inserted before replay"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_or_compile_canonical_with_key<
+        R,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        &mut self,
+        key: Option<FusionExecutionPlanPreparedCacheKey<RuleKey>>,
+        canonical_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+        rule: &R,
+        axes: TensorContractAxisSpec<'_>,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        dst_space: &DynamicFusionMapSpace,
+        lhs_space: &DynamicFusionMapSpace,
+        rhs_space: &DynamicFusionMapSpace,
+    ) -> Result<&FusionExecutionPlan, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let prepared = match key {
+            Some(key) => key,
+            None => FusionExecutionPlanPreparedCacheKey::from_inputs(
+                FusionExecutionPlanRoute::Canonical,
+                rule,
+                axes,
+                dst,
+                lhs,
+                rhs,
+            )?,
+        };
+        if self.plans.get(&prepared.full).is_some() {
+            self.stats.hits += 1;
+        } else {
+            self.stats.misses += 1;
+            let plan =
+                canonical_cache.get_or_compile(rule, dst_space, lhs_space, rhs_space, axes)?;
+            self.plans
+                .insert(prepared.full.clone(), FusionExecutionPlan::Canonical(plan));
+        }
+        self.last_plan = Some(FusionExecutionPlanLastKey {
+            raw_fast: prepared.raw_fast.clone(),
+            full: prepared.full.clone(),
+        });
+        Ok(self
+            .plans
+            .get(&prepared.full)
+            .expect("canonical fusion execution plan inserted before replay"))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum FusionExecutionPlan {
+    Canonical(Arc<CanonicalFusionBlockContractPlan>),
+    Dynamic(DynamicFusionExecutionPlan),
+}
+
+impl FusionExecutionPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute<
+        BT,
+        BC,
+        D,
+        RuleKey,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        &self,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        contract_backend: &mut BC,
+        contract_workspace: &mut BC::Workspace,
+        fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+        scratch: &mut DynamicFusionScratchWorkspace<D>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        RuleKey: Clone + Eq + Hash,
+        BT: TreeTransformBackend<D, f64>,
+        BC: TensorContractBackend<D, f64>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        match self {
+            Self::Canonical(plan) => {
+                let dst_structure = std::sync::Arc::clone(dst.structure());
+                let lhs_structure = std::sync::Arc::clone(lhs.structure());
+                let rhs_structure = std::sync::Arc::clone(rhs.structure());
+                plan.execute_raw(
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    &dst_structure,
+                    dst.data_mut(),
+                    &lhs_structure,
+                    lhs.data(),
+                    &rhs_structure,
+                    rhs.data(),
+                    alpha,
+                    beta,
+                )
+            }
+            Self::Dynamic(plan) => plan.execute(
+                tree_context,
+                contract_backend,
+                contract_workspace,
+                fusion_block_workspace,
+                scratch,
+                dst,
+                lhs,
+                rhs,
+                alpha,
+                beta,
+            ),
+        }
     }
 }
 
@@ -803,7 +960,8 @@ where
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub(crate) struct DynamicFusionExecutionPlanCacheKey<RuleKey> {
+pub(crate) struct FusionExecutionPlanCacheKey<RuleKey> {
+    route: FusionExecutionPlanRoute,
     rule: RuleKey,
     dst_nout: usize,
     dst_homspace: tenet_core::FusionTreeHomSpace,
@@ -817,7 +975,7 @@ pub(crate) struct DynamicFusionExecutionPlanCacheKey<RuleKey> {
     axes: OwnedTensorContractAxisSpec,
 }
 
-impl<RuleKey> DynamicFusionExecutionPlanCacheKey<RuleKey>
+impl<RuleKey> FusionExecutionPlanCacheKey<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
@@ -835,6 +993,7 @@ where
         SLhs,
         SRhs,
     >(
+        route: FusionExecutionPlanRoute,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -863,6 +1022,7 @@ where
             lowered_spec,
         )?;
         Ok(Self {
+            route,
             rule: rule.tree_transform_rule_cache_key(),
             dst_nout: DST_NOUT,
             dst_homspace: dst_fusion.homspace().clone(),
@@ -884,7 +1044,7 @@ where
     }
 }
 
-impl<RuleKey> DynamicFusionExecutionPlanRawFastKey<RuleKey>
+impl<RuleKey> FusionExecutionPlanRawFastKey<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
@@ -902,6 +1062,7 @@ where
         SLhs,
         SRhs,
     >(
+        route: FusionExecutionPlanRoute,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -921,6 +1082,7 @@ where
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
         Ok(Self {
+            route,
             rule: rule.tree_transform_rule_cache_key(),
             dst_nout: DST_NOUT,
             lhs_nout: LHS_NOUT,
@@ -957,6 +1119,7 @@ where
         SRhs,
     >(
         &self,
+        route: FusionExecutionPlanRoute,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -975,7 +1138,8 @@ where
         let Some(rhs_fusion) = rhs.fusion_space() else {
             return false;
         };
-        self.rule == rule.tree_transform_rule_cache_key()
+        self.route == route
+            && self.rule == rule.tree_transform_rule_cache_key()
             && self.dst_nout == DST_NOUT
             && self.lhs_nout == LHS_NOUT
             && self.rhs_nout == RHS_NOUT
@@ -997,7 +1161,7 @@ where
     }
 }
 
-impl<RuleKey> DynamicFusionExecutionPlanPreparedCacheKey<RuleKey>
+impl<RuleKey> FusionExecutionPlanPreparedCacheKey<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
@@ -1015,6 +1179,7 @@ where
         SLhs,
         SRhs,
     >(
+        route: FusionExecutionPlanRoute,
         rule: &R,
         axes: TensorContractAxisSpec<'_>,
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst>,
@@ -1025,8 +1190,8 @@ where
         R: TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         Ok(Self {
-            raw_fast: DynamicFusionExecutionPlanRawFastKey::from_inputs(rule, axes, dst, lhs, rhs)?,
-            full: DynamicFusionExecutionPlanCacheKey::from_inputs(rule, axes, dst, lhs, rhs)?,
+            raw_fast: FusionExecutionPlanRawFastKey::from_inputs(route, rule, axes, dst, lhs, rhs)?,
+            full: FusionExecutionPlanCacheKey::from_inputs(route, rule, axes, dst, lhs, rhs)?,
         })
     }
 }

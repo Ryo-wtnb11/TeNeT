@@ -13,8 +13,8 @@ use crate::{
 
 use super::backend::TensorContractBackend;
 use super::dynamic::{
-    tensorcontract_fusion_dynamic_into_context, DynamicFusionExecutionPlanCache,
-    DynamicFusionExecutionPlanCacheLookup,
+    tensorcontract_fusion_dynamic_into_context, FusionExecutionPlanCache,
+    FusionExecutionPlanCacheLookup, FusionExecutionPlanPreparedCacheKey, FusionExecutionPlanRoute,
 };
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
@@ -458,18 +458,16 @@ pub struct TensorContractFusionExecutionContext<
     BC: TensorContractBackend<D, f64>,
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    // Full dynamic fallback replay plan: source tree transforms, canonical
-    // fusion-block contraction, and optional output tree transform.  This is
-    // intentionally not the cache for canonical compose contractions; those
-    // stay in `fusion_block_cache`, matching TensorKit's separate space/tree
-    // transformation and block contraction layers.
-    fusion_execution_plan_cache: DynamicFusionExecutionPlanCache<RuleKey>,
+    // Top-level full replay plan cache.  Canonical compose and dynamic
+    // noncanonical contractions both enter here, but tree-transform and
+    // canonical block caches remain as compile-time helper caches.
+    fusion_execution_plan_cache: FusionExecutionPlanCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
-    // Canonical compose pack/GEMM/scatter plans.  Do not fold this into the
-    // dynamic full execution cache: canonical calls should not pay for source
-    // transform/output transform planning or dynamic scratch spaces.
+    // Canonical compose pack/GEMM/scatter plans used while compiling a
+    // top-level canonical full replay plan.  Warm replay hits should bypass
+    // this cache and execute the already compiled full plan.
     fusion_block_cache: CanonicalFusionBlockContractCache<RuleKey>,
     fusion_block_workspace: CanonicalFusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
@@ -481,6 +479,73 @@ pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecut
     HostTensorOperations,
     DenseTreeTransformOperations,
 >;
+
+enum FusionExecutionCacheProbe<RuleKey> {
+    Executed,
+    Miss(Option<FusionExecutionPlanPreparedCacheKey<RuleKey>>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_execute_cached_fusion_execution_plan<
+    D,
+    RuleKey,
+    BT,
+    BC,
+    R,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    fusion_execution_plan_cache: &mut FusionExecutionPlanCache<RuleKey>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+    fusion_scratch: &mut DynamicFusionScratchWorkspace<D>,
+    route: FusionExecutionPlanRoute,
+    rule: &R,
+    axes: TensorContractAxisSpec<'_>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<FusionExecutionCacheProbe<RuleKey>, OperationError>
+where
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    RuleKey: Clone + Eq + Hash,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+{
+    if fusion_execution_plan_cache.is_empty() {
+        return Ok(FusionExecutionCacheProbe::Miss(None));
+    }
+    match fusion_execution_plan_cache.get_cached_or_key(route, rule, axes, dst, lhs, rhs)? {
+        FusionExecutionPlanCacheLookup::Hit(execution_plan) => {
+            execution_plan.execute(
+                tree_context,
+                contract_backend,
+                contract_workspace,
+                fusion_block_workspace,
+                fusion_scratch,
+                dst,
+                lhs,
+                rhs,
+                alpha,
+                beta,
+            )?;
+            Ok(FusionExecutionCacheProbe::Executed)
+        }
+        FusionExecutionPlanCacheLookup::Miss(key) => Ok(FusionExecutionCacheProbe::Miss(Some(key))),
+    }
+}
 
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
@@ -497,7 +562,7 @@ where
     ) -> Self {
         Self {
             tree_context,
-            fusion_execution_plan_cache: DynamicFusionExecutionPlanCache::default(),
+            fusion_execution_plan_cache: FusionExecutionPlanCache::default(),
             contract_backend,
             contract_workspace,
             contract_cache,
@@ -661,40 +726,6 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        let mut dynamic_cache_key = None;
-        if !self.fusion_execution_plan_cache.is_empty() {
-            let Self {
-                tree_context,
-                fusion_execution_plan_cache,
-                contract_backend,
-                contract_workspace,
-                contract_cache: _,
-                fusion_block_cache: _,
-                fusion_block_workspace,
-                fusion_scratch,
-            } = self;
-            match fusion_execution_plan_cache.get_cached_or_key(rule, axes, dst, lhs, rhs)? {
-                DynamicFusionExecutionPlanCacheLookup::Hit(execution_plan) => {
-                    execution_plan.execute(
-                        tree_context,
-                        contract_backend,
-                        contract_workspace,
-                        fusion_block_workspace,
-                        fusion_scratch,
-                        dst,
-                        lhs,
-                        rhs,
-                        alpha,
-                        beta,
-                    )?;
-                    return Ok(());
-                }
-                DynamicFusionExecutionPlanCacheLookup::Miss(key) => {
-                    dynamic_cache_key = Some(key);
-                }
-            }
-        }
-
         let dst_fusion = dst
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
@@ -718,29 +749,60 @@ where
                 axes,
             )?
         {
-            let plan = self.fusion_block_cache.get_or_compile(
+            let Self {
+                tree_context,
+                fusion_execution_plan_cache,
+                contract_backend,
+                contract_workspace,
+                contract_cache: _,
+                fusion_block_cache,
+                fusion_block_workspace,
+                fusion_scratch,
+            } = self;
+            let prepared_key = match try_execute_cached_fusion_execution_plan(
+                tree_context,
+                fusion_execution_plan_cache,
+                contract_backend,
+                contract_workspace,
+                fusion_block_workspace,
+                fusion_scratch,
+                FusionExecutionPlanRoute::Canonical,
                 rule,
+                axes,
+                dst,
+                lhs,
+                rhs,
+                alpha,
+                beta,
+            )? {
+                FusionExecutionCacheProbe::Executed => return Ok(()),
+                FusionExecutionCacheProbe::Miss(key) => key,
+            };
+            let execution_plan = fusion_execution_plan_cache.get_or_compile_canonical_with_key(
+                prepared_key,
+                fusion_block_cache,
+                rule,
+                axes,
+                dst,
+                lhs,
+                rhs,
                 &dst_dynamic,
                 &lhs_dynamic,
                 &rhs_dynamic,
-                axes,
             )?;
-            let dst_structure = std::sync::Arc::clone(dst.structure());
-            let lhs_structure = std::sync::Arc::clone(lhs.structure());
-            let rhs_structure = std::sync::Arc::clone(rhs.structure());
-            return plan.execute_raw(
-                &mut self.contract_backend,
-                &mut self.contract_workspace,
-                &mut self.fusion_block_workspace,
-                &dst_structure,
-                dst.data_mut(),
-                &lhs_structure,
-                lhs.data(),
-                &rhs_structure,
-                rhs.data(),
+            execution_plan.execute(
+                tree_context,
+                contract_backend,
+                contract_workspace,
+                fusion_block_workspace,
+                fusion_scratch,
+                dst,
+                lhs,
+                rhs,
                 alpha,
                 beta,
-            );
+            )?;
+            return Ok(());
         }
 
         if axes.lhs_conjugate() || axes.rhs_conjugate() {
@@ -769,6 +831,25 @@ where
                         fusion_block_workspace,
                         fusion_scratch,
                     } = self;
+                    let prepared_key = match try_execute_cached_fusion_execution_plan(
+                        tree_context,
+                        fusion_execution_plan_cache,
+                        contract_backend,
+                        contract_workspace,
+                        fusion_block_workspace,
+                        fusion_scratch,
+                        FusionExecutionPlanRoute::Dynamic,
+                        rule,
+                        axes,
+                        dst,
+                        lhs,
+                        rhs,
+                        alpha,
+                        beta,
+                    )? {
+                        FusionExecutionCacheProbe::Executed => return Ok(()),
+                        FusionExecutionCacheProbe::Miss(key) => key,
+                    };
                     return tensorcontract_fusion_dynamic_into_context(
                         tree_context,
                         fusion_execution_plan_cache,
@@ -776,7 +857,7 @@ where
                         contract_workspace,
                         fusion_block_workspace,
                         fusion_scratch,
-                        dynamic_cache_key.take(),
+                        prepared_key,
                         rule,
                         axes,
                         dst,
@@ -822,6 +903,25 @@ where
                     fusion_block_workspace,
                     fusion_scratch,
                 } = self;
+                let prepared_key = match try_execute_cached_fusion_execution_plan(
+                    tree_context,
+                    fusion_execution_plan_cache,
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                    FusionExecutionPlanRoute::Dynamic,
+                    rule,
+                    axes,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                )? {
+                    FusionExecutionCacheProbe::Executed => return Ok(()),
+                    FusionExecutionCacheProbe::Miss(key) => key,
+                };
                 return tensorcontract_fusion_dynamic_into_context(
                     tree_context,
                     fusion_execution_plan_cache,
@@ -829,7 +929,7 @@ where
                     contract_workspace,
                     fusion_block_workspace,
                     fusion_scratch,
-                    dynamic_cache_key.take(),
+                    prepared_key,
                     rule,
                     axes,
                     dst,
