@@ -95,6 +95,8 @@ pub(crate) const PLAIN_TENSORTRACE_FUSION_REQUIRES_FUSION_API: &str =
     "plain tensortrace does not lower fusion-tree blocks; use tensortrace_fusion_*";
 pub(crate) const PLAIN_TENSORTRACE_BLOCK_SPARSE_UNSUPPORTED: &str =
     "block-sparse tensortrace enumeration is not implemented yet";
+pub(crate) const FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING: &str =
+    "fusion tensortrace requires symmetric braiding";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorTraceFusionStructure<C> {
@@ -153,6 +155,11 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        if !rule.braiding_style().is_symmetric() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
+            });
+        }
         let dst_structure = Arc::clone(dst.subblock_structure());
         let src_structure = Arc::clone(src.subblock_structure());
         let axis_plan =

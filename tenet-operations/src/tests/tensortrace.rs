@@ -493,6 +493,142 @@ fn tensortrace_fusion_scales_destination_once_for_multiple_source_terms() {
 }
 
 #[test]
+fn tensortrace_fusion_fermion_open_output_matches_tensorkit_oracle() {
+    let rule = FermionParityFusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = || SectorLeg::new([even, odd], false);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+        src_hom,
+        &rule,
+        (0..8).map(|_| vec![1, 1, 1, 1]),
+    )
+    .unwrap();
+    let src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
+        (1..=8).map(|value| value as f64).collect(),
+        src_space,
+    )
+    .unwrap();
+
+    let dst_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        dst_hom,
+        &rule,
+        [vec![1, 1], vec![1, 1]],
+    )
+    .unwrap();
+    let mut dst: TensorMap<f64, 1, 1> =
+        TensorMap::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
+
+    tensortrace_fusion_into(
+        &rule,
+        &mut dst,
+        &src,
+        // TensorKit 1-based: output ((1,), (3,)), trace ((2,), (4,)).
+        TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[16.0, 62.0]);
+}
+
+#[test]
+fn tensortrace_fusion_fermion_two_trace_pairs_match_tensorkit_oracle() {
+    let rule = FermionParityFusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = || SectorLeg::new([even, odd], false);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+        src_hom,
+        &rule,
+        (0..8).map(|_| vec![1, 1, 1, 1]),
+    )
+    .unwrap();
+    let src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
+        (1..=8).map(|value| value as f64).collect(),
+        src_space,
+    )
+    .unwrap();
+
+    let dst_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        FusionProductSpace::new(Vec::<SectorLeg>::new()),
+    );
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        dst_hom,
+        &rule,
+        [vec![]],
+    )
+    .unwrap();
+    let mut dst: TensorMap<f64, 0, 0> =
+        TensorMap::from_vec_with_fusion_space(vec![5.0], dst_space).unwrap();
+
+    tensortrace_fusion_into(
+        &rule,
+        &mut dst,
+        &src,
+        // TensorKit 1-based: output ((), ()), trace ((1, 2), (3, 4)).
+        TensorTraceAxisSpec::new(&[], &[0, 1], &[2, 3]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[-1.0]);
+}
+
+#[test]
+fn tensortrace_fusion_rejects_nonsymmetric_braiding_like_tensorkit_tensortrace() {
+    let rule = UniqueAnyonicRule;
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([1], [1]),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let src: TensorMap<f64, 1, 1> =
+        TensorMap::from_vec_with_fusion_space(vec![2.0], src_space).unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([], []),
+        &rule,
+        [vec![]],
+    )
+    .unwrap();
+    let dst: TensorMap<f64, 0, 0> =
+        TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
+
+    let err =
+        tensortrace_fusion_structure(&rule, &dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[1]))
+            .unwrap_err();
+
+    assert_eq!(
+        err,
+        OperationError::UnsupportedTensorContractScope {
+            message: "fusion tensortrace requires symmetric braiding"
+        }
+    );
+}
+
+#[test]
 fn tensortrace_fusion_su2_includes_quantum_dimension_factor() {
     let rule = SU2FusionRule;
     let half = SU2Irrep::from_twice_spin(1).sector_id();

@@ -121,6 +121,13 @@ TeNeT fixed coverage:
 - Fusion `tensoradd` has lazy source-adjoint lowering and context replay tests.
 - Fusion `tensortrace` has fermionic supertrace, degeneracy diagonal, lazy
   adjoint, beta-once, and SU2 quantum-dimension coverage.
+- Fusion `tensortrace` rejects nonsymmetric braiding for ordinary trace
+  semantics, matching TensorKit/TensorOperations `tensortrace!` rather than
+  treating an anyonic braid as a symmetric permute.
+- Fusion `tensortrace` has TensorKit oracle coverage for a non-scalar
+  FermionParity output trace with nonadjacent traced axes, and for a two-pair
+  FermionParity supertrace. The oracle script is
+  `tenet-operations/benchmarks/tensorkit_tensortrace_oracles.jl`.
 - Fusion `tensorcontract` has lazy `lhs_conj`, `rhs_conj`, and `both_conj`
   coverage for scalar fusion blocks.
 - Fusion `tensorcontract` has Z2 and FermionParity 2x2 degeneracy block
