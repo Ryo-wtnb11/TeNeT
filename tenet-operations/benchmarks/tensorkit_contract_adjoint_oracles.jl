@@ -102,10 +102,7 @@ function assert_close(label, actual, expected; atol = 1.0e-12)
     end
 end
 
-function print_su2_noncanonical_both_adjoint_oracle()
-    V = SU2Space(1//2 => 2)
-    A = zeros(ComplexF64, V ⊗ V ⊗ V ← V)
-    B = zeros(ComplexF64, V ← V ⊗ V ⊗ V)
+function fill_su2_noncanonical_data!(A, B, C)
     A.data .= [
         complex(1 + 0.125 * (k - 1), -0.5 + 0.0625 * (k - 1)) for
             k in eachindex(A.data)
@@ -114,8 +111,71 @@ function print_su2_noncanonical_both_adjoint_oracle()
         complex(-3 + 0.25 * (k - 1), 0.75 - 0.03125 * (k - 1)) for
             k in eachindex(B.data)
     ]
-    C = zeros(ComplexF64, V ← V)
     C.data .= ComplexF64[2 - 1im, -1 + 0.5im, 4 + 2im, -3 - 0.25im]
+end
+
+function print_su2_noncanonical_lhs_adjoint_oracle()
+    V = SU2Space(1//2 => 2)
+    A = zeros(ComplexF64, V ⊗ V ⊗ V ← V)
+    B = zeros(ComplexF64, dual(V) ← dual(V) ⊗ dual(V) ⊗ dual(V))
+    C = zeros(ComplexF64, V ← V)
+    fill_su2_noncanonical_data!(A, B, C)
+    TensorKit.TO.tensorcontract!(
+        C,
+        A,
+        ((4,), (1, 2, 3)),
+        true,
+        B,
+        ((2, 3, 4), (1,)),
+        false,
+        ((1,), (2,)),
+        complex(-1.5, 0.25),
+        complex(0.25, -0.125),
+    )
+    expected = ComplexF64[
+        -63.125 + 16.5390625im,
+        -105.6875 + 28.9140625im,
+        -73.6875 + 20.24609375im,
+        -127.71875 + 41.55859375im,
+    ]
+    assert_close("SU2 noncanonical lhs_conj", C.data, expected)
+    println("SU2Irrep,noncanonical_lhs_conj,$(collect(C.data))")
+end
+
+function print_su2_noncanonical_rhs_adjoint_oracle()
+    V = SU2Space(1//2 => 2)
+    A = zeros(ComplexF64, V ⊗ V ⊗ V ← dual(V))
+    B = zeros(ComplexF64, V ← dual(V) ⊗ dual(V) ⊗ dual(V))
+    C = zeros(ComplexF64, V ← V)
+    fill_su2_noncanonical_data!(A, B, C)
+    TensorKit.TO.tensorcontract!(
+        C,
+        A,
+        ((4,), (1, 2, 3)),
+        false,
+        B,
+        ((2, 3, 4), (1,)),
+        true,
+        ((1,), (2,)),
+        complex(-1.5, 0.25),
+        complex(0.25, -0.125),
+    )
+    expected = ComplexF64[
+        65.96875 - 4.9765625im,
+        108.90625 - 6.8515625im,
+        78.703125 - 5.15234375im,
+        132.671875 - 1.83984375im,
+    ]
+    assert_close("SU2 noncanonical rhs_conj", C.data, expected)
+    println("SU2Irrep,noncanonical_rhs_conj,$(collect(C.data))")
+end
+
+function print_su2_noncanonical_both_adjoint_oracle()
+    V = SU2Space(1//2 => 2)
+    A = zeros(ComplexF64, V ⊗ V ⊗ V ← V)
+    B = zeros(ComplexF64, V ← V ⊗ V ⊗ V)
+    C = zeros(ComplexF64, V ← V)
+    fill_su2_noncanonical_data!(A, B, C)
     TensorKit.TO.tensorcontract!(
         C,
         A,
@@ -183,5 +243,7 @@ function print_product_fz2_u1_su2_contract_oracle()
     println("FermionParityxU1xSU2,component_contract,$(collect(C.data))")
 end
 
+print_su2_noncanonical_lhs_adjoint_oracle()
+print_su2_noncanonical_rhs_adjoint_oracle()
 print_su2_noncanonical_both_adjoint_oracle()
 print_product_fz2_u1_su2_contract_oracle()

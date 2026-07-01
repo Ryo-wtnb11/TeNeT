@@ -132,12 +132,14 @@ TeNeT fixed coverage:
   fermionic twist for these three matrix-contract fixtures. TensorKit only
   inserts the tensorcontract twist when the effective contracted `B` leg is
   dual.
-- Fusion `tensorcontract` has a noncanonical SU2 source-transform fixture with
-  lazy `conjA && conjB`. The Rust test compares explicit-plan execution against
-  the literal lowered sequence: source `tensoradd_fusion_into(...,
-  source_conjugate=true)` transforms, then canonical contraction.
+- Fusion `tensorcontract` has noncanonical SU2 source-transform fixtures with
+  lazy `lhs_conj`, `rhs_conj`, and `both_conj`. The one-sided fixtures use
+  TensorKit-matching dual-oriented source spaces, e.g. `dual(V)` legs for the
+  non-adjoint side when needed. The Rust tests compare explicit-plan execution
+  against the literal lowered sequence: source `tensoradd_fusion_into(...,
+  source_conjugate=...)` transforms, then canonical contraction.
 - The Julia oracle script records the corresponding TensorKit direct
-  `tensorcontract!` result for the SU2 fixture. TeNeT's internal fusion-tree
+  `tensorcontract!` result for the SU2 fixtures. TeNeT's internal fusion-tree
   block storage is not flat-order identical to TensorKit's `C.data` for that
   multi-tree SU2 case, so the Rust assertion uses the TeNeT explicit reference
   sequence rather than direct flat-data equality.

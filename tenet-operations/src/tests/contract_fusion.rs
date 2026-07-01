@@ -2055,48 +2055,104 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
 }
 
 #[test]
+fn tensorcontract_fusion_noncanonical_su2_lhs_adjoint_explicit_plan_matches_reference_sequence() {
+    assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+        su2_three_to_one_homspace(false, false),
+        su2_one_to_three_homspace(true, true),
+        true,
+        false,
+    );
+}
+
+#[test]
+fn tensorcontract_fusion_noncanonical_su2_rhs_adjoint_explicit_plan_matches_reference_sequence() {
+    assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+        su2_three_to_one_homspace(false, true),
+        su2_one_to_three_homspace(false, true),
+        false,
+        true,
+    );
+}
+
+#[test]
 fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_reference_sequence() {
+    assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+        su2_three_to_one_homspace(false, false),
+        su2_one_to_three_homspace(false, false),
+        true,
+        true,
+    );
+}
+
+fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+    lhs_hom: FusionTreeHomSpace,
+    rhs_hom: FusionTreeHomSpace,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+) {
     let rule = SU2FusionRule;
-    let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
-    let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
-    let axes =
-        TensorContractAxisSpec::canonical_with_conjugation(&[0, 1, 2], &[1, 2, 3], true, true);
+    let source_lhs_contracting_axes = [0, 1, 2];
+    let source_rhs_contracting_axes = [1, 2, 3];
+    let axes = TensorContractAxisSpec::canonical_with_conjugation(
+        &source_lhs_contracting_axes,
+        &source_rhs_contracting_axes,
+        lhs_conjugate,
+        rhs_conjugate,
+    );
 
     let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
-        lhs_hom,
+        lhs_hom.clone(),
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
-        rhs_hom,
+        rhs_hom.clone(),
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
     let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
     let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
-    let lowered_lhs_axes = [1, 2, 3];
-    let lowered_rhs_axes = [0, 1, 2];
+    let lowered_lhs_axes = maybe_adjoint_axes::<3, 1>(&source_lhs_contracting_axes, lhs_conjugate);
+    let lowered_rhs_axes = maybe_adjoint_axes::<1, 3>(&source_rhs_contracting_axes, rhs_conjugate);
+    let lowered_lhs_open_axes = complement_axes(4, &lowered_lhs_axes);
+    let lowered_rhs_open_axes = complement_axes(4, &lowered_rhs_axes);
+    let effective_lhs_hom = if lhs_conjugate {
+        lhs_adjoint_space.homspace()
+    } else {
+        &lhs_hom
+    };
+    let effective_rhs_hom = if rhs_conjugate {
+        rhs_adjoint_space.homspace()
+    } else {
+        &rhs_hom
+    };
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
-        lhs_adjoint_space.homspace(),
-        rhs_adjoint_space.homspace(),
-        &lowered_lhs_axes,
-        &lowered_rhs_axes,
+        effective_lhs_hom,
+        effective_rhs_hom,
+        lowered_lhs_axes.as_slice(),
+        lowered_rhs_axes.as_slice(),
         &[0, 1],
         1,
     )
     .unwrap();
-    let lhs_canonical_hom = lhs_adjoint_space
-        .homspace()
-        .permute(&rule, &[0], &lowered_lhs_axes)
+    let lhs_canonical_hom = effective_lhs_hom
+        .permute(
+            &rule,
+            lowered_lhs_open_axes.as_slice(),
+            lowered_lhs_axes.as_slice(),
+        )
         .unwrap();
-    let rhs_canonical_hom = rhs_adjoint_space
-        .homspace()
-        .permute(&rule, &lowered_rhs_axes, &[3])
+    let rhs_canonical_hom = effective_rhs_hom
+        .permute(
+            &rule,
+            lowered_rhs_axes.as_slice(),
+            lowered_rhs_open_axes.as_slice(),
+        )
         .unwrap();
     let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
@@ -2158,7 +2214,7 @@ fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_ref
         &mut lhs_canonical,
         &lhs,
         TreeTransformOperationKey::permute([3], [0, 1, 2]),
-        true,
+        lhs_conjugate,
         Complex64::one(),
         Complex64::zero(),
     )
@@ -2168,7 +2224,7 @@ fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_ref
         &mut rhs_canonical,
         &rhs,
         TreeTransformOperationKey::permute([1, 2, 3], [0]),
-        true,
+        rhs_conjugate,
         Complex64::one(),
         Complex64::zero(),
     )
@@ -2194,8 +2250,10 @@ fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_ref
         axes,
     )
     .unwrap();
-    assert!(plan.lhs_source_conjugate());
-    assert!(plan.rhs_source_conjugate());
+    assert_eq!(plan.lhs_source_conjugate(), lhs_conjugate);
+    assert_eq!(plan.rhs_source_conjugate(), rhs_conjugate);
+    assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[1, 2, 3]);
+    assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[0, 1, 2]);
 
     let mut explicit_lhs_canonical = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
         vec![Complex64::zero(); lhs_canonical_space.required_len().unwrap()],
@@ -2226,6 +2284,47 @@ fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_ref
             "actual {actual} expected {expected}"
         );
     }
+}
+
+fn maybe_adjoint_axes<const NOUT: usize, const NIN: usize>(
+    axes: &[usize],
+    source_conjugate: bool,
+) -> Vec<usize> {
+    if source_conjugate {
+        axes.iter()
+            .map(|&axis| crate::lowering::adjoint_tensor_axis(NOUT, NIN, axis).unwrap())
+            .collect()
+    } else {
+        axes.to_vec()
+    }
+}
+
+fn complement_axes(rank: usize, axes: &[usize]) -> Vec<usize> {
+    (0..rank).filter(|axis| !axes.contains(axis)).collect()
+}
+
+fn su2_three_to_one_homspace(codomain_dual: bool, domain_dual: bool) -> FusionTreeHomSpace {
+    let half = SectorId::new(1);
+    FusionTreeHomSpace::new(
+        FusionProductSpace::new([
+            SectorLeg::new([half], codomain_dual),
+            SectorLeg::new([half], codomain_dual),
+            SectorLeg::new([half], codomain_dual),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([half], domain_dual)]),
+    )
+}
+
+fn su2_one_to_three_homspace(codomain_dual: bool, domain_dual: bool) -> FusionTreeHomSpace {
+    let half = SectorId::new(1);
+    FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([half], codomain_dual)]),
+        FusionProductSpace::new([
+            SectorLeg::new([half], domain_dual),
+            SectorLeg::new([half], domain_dual),
+            SectorLeg::new([half], domain_dual),
+        ]),
+    )
 }
 
 #[test]
