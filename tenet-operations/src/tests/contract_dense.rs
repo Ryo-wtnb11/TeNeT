@@ -54,6 +54,78 @@ fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
     assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
 }
 
+#[derive(Default)]
+struct MatmulOnlyDenseExecutor {
+    matmul_into_calls: usize,
+}
+
+impl DenseExecutor for MatmulOnlyDenseExecutor {
+    fn svd(&mut self, _input: DenseRead<'_>) -> Result<Vec<tenet_dense::DenseTensor>, DenseError> {
+        unreachable!("rank-2 matmul boundary does not call svd")
+    }
+
+    fn qr(&mut self, _input: DenseRead<'_>) -> Result<Vec<tenet_dense::DenseTensor>, DenseError> {
+        unreachable!("rank-2 matmul boundary does not call qr")
+    }
+
+    fn eigh(&mut self, _input: DenseRead<'_>) -> Result<Vec<tenet_dense::DenseTensor>, DenseError> {
+        unreachable!("rank-2 matmul boundary does not call eigh")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _output: DenseWrite<'_>,
+        _lhs: DenseRead<'_>,
+        _rhs: DenseRead<'_>,
+        _config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("rank-2 fusion-block matmul must call matmul_into directly")
+    }
+
+    fn matmul_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+    ) -> Result<(), DenseError> {
+        self.matmul_into_calls += 1;
+        let (mut output, lhs, rhs) = match (output, lhs, rhs) {
+            (DenseWrite::F64(output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                (output, lhs, rhs)
+            }
+            _ => panic!("test only covers f64 canonical fusion block matmul"),
+        };
+        assert_eq!(lhs.shape(), &[2, 3]);
+        assert_eq!(lhs.strides(), &[1, 2]);
+        assert_eq!(rhs.shape(), &[3, 2]);
+        assert_eq!(rhs.strides(), &[1, 3]);
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_eq!(output.strides(), &[1, 2]);
+        output
+            .data_mut()
+            .copy_from_slice(&[76.0, 100.0, 103.0, 136.0]);
+        Ok(())
+    }
+}
+
+#[test]
+fn tensorcontract_backend_rank2_matmul_uses_matmul_boundary_not_descriptor_replay() {
+    let mut backend = DenseTreeTransformOperations::new(MatmulOnlyDenseExecutor::default());
+    let mut workspace = TensorContractWorkspace::<f64>::default();
+    let lhs = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let rhs = vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+    let mut dst = vec![0.0; 4];
+
+    <DenseTreeTransformOperations<MatmulOnlyDenseExecutor> as TensorContractBackend<
+        f64,
+        f64,
+    >>::matmul_rank2_into_raw(&mut backend, &mut workspace, &mut dst, &lhs, &rhs, 2, 3, 2)
+    .unwrap();
+
+    assert_eq!(backend.dense().matmul_into_calls, 1);
+    assert_eq!(dst, vec![76.0, 100.0, 103.0, 136.0]);
+}
+
 #[test]
 fn tensorcontract_execution_context_replays_without_recompiling() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();

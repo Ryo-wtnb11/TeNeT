@@ -24,6 +24,7 @@ pub enum DenseDType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DenseBackend {
     Tenferro,
+    Strided,
 }
 
 #[derive(Debug)]
@@ -456,6 +457,7 @@ pub use tenferro_adapter::DefaultDenseExecutor;
 mod tenferro_adapter {
     use super::*;
 
+    use num_traits::{One, Zero};
     use tenferro_cpu::CpuBackend;
     use tenferro_linalg::LinalgBackend;
     use tenferro_tensor::{
@@ -535,13 +537,91 @@ mod tenferro_adapter {
             lhs: DenseRead<'_>,
             rhs: DenseRead<'_>,
         ) -> Result<(), DenseError> {
-            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
-            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
-            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
-            self.backend
-                .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
-                .map_err(|err| tenferro_error("dot_general_read_into", err))
+            match (output, lhs, rhs) {
+                (DenseWrite::F32(output), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
+                    direct_strided_matmul_into(output, lhs, rhs)
+                }
+                (DenseWrite::F64(output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                    direct_strided_matmul_into(output, lhs, rhs)
+                }
+                (DenseWrite::C32(output), DenseRead::C32(lhs), DenseRead::C32(rhs)) => {
+                    direct_strided_matmul_into(output, lhs, rhs)
+                }
+                (DenseWrite::C64(output), DenseRead::C64(lhs), DenseRead::C64(rhs)) => {
+                    direct_strided_matmul_into(output, lhs, rhs)
+                }
+                (output, lhs, rhs) => {
+                    let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+                    let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+                    let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+                    self.backend
+                        .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
+                        .map_err(|err| tenferro_error("dot_general_read_into", err))
+                }
+            }
         }
+    }
+
+    fn direct_strided_matmul_into<T>(
+        mut output: DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+    ) -> Result<(), DenseError>
+    where
+        T: strided_einsum2::Scalar + One + Zero,
+    {
+        let lhs_shape = rank2_shape(lhs.shape(), "lhs")?;
+        let rhs_shape = rank2_shape(rhs.shape(), "rhs")?;
+        let output_shape = rank2_shape(output.shape(), "output")?;
+        if lhs_shape[1] != rhs_shape[0] {
+            return Err(shape_error(format!(
+                "lhs columns {} do not match rhs rows {}",
+                lhs_shape[1], rhs_shape[0]
+            )));
+        }
+        let expected_output = [lhs_shape[0], rhs_shape[1]];
+        if output_shape != expected_output {
+            return Err(shape_error(format!(
+                "output shape {:?} does not match matmul shape {:?}",
+                output_shape, expected_output
+            )));
+        }
+
+        let lhs_strides = rank2_strides_to_isize(lhs.strides(), "lhs")?;
+        let rhs_strides = rank2_strides_to_isize(rhs.strides(), "rhs")?;
+        let output_strides = rank2_strides_to_isize(output.strides(), "output")?;
+        let lhs_offset = offset_to_isize(lhs.offset())?;
+        let rhs_offset = offset_to_isize(rhs.offset())?;
+        let output_offset = offset_to_isize(output.offset())?;
+
+        let lhs_view =
+            strided_einsum2::StridedView::new(lhs.data(), &lhs_shape, &lhs_strides, lhs_offset)
+                .map_err(strided_error)?;
+        let rhs_view =
+            strided_einsum2::StridedView::new(rhs.data(), &rhs_shape, &rhs_strides, rhs_offset)
+                .map_err(strided_error)?;
+        let output_view = strided_einsum2::StridedViewMut::new(
+            output.data_mut(),
+            &output_shape,
+            &output_strides,
+            output_offset,
+        )
+        .map_err(strided_error)?;
+        let config = strided_einsum2::DotGeneralConfig {
+            lhs_contracting_dims: &[1],
+            rhs_contracting_dims: &[0],
+            lhs_batch_dims: &[],
+            rhs_batch_dims: &[],
+        };
+        strided_einsum2::dot_general_into(
+            output_view,
+            &lhs_view,
+            &rhs_view,
+            &config,
+            T::one(),
+            T::zero(),
+        )
+        .map_err(strided_error)
     }
 
     fn wrap_outputs(outputs: Vec<Tensor>) -> Vec<DenseTensor> {
@@ -608,6 +688,52 @@ mod tenferro_adapter {
             rhs_contracting_dims: config.rhs_contracting_dims().to_vec(),
             lhs_batch_dims: config.lhs_batch_dims().to_vec(),
             rhs_batch_dims: config.rhs_batch_dims().to_vec(),
+        }
+    }
+
+    fn offset_to_isize(offset: usize) -> Result<isize, DenseError> {
+        isize::try_from(offset).map_err(|_| DenseError::OffsetOverflow { value: offset })
+    }
+
+    fn rank2_shape(shape: &[usize], label: &'static str) -> Result<[usize; 2], DenseError> {
+        match shape {
+            [rows, cols] => Ok([*rows, *cols]),
+            _ => Err(shape_error(format!(
+                "{label} rank {} is not rank-2",
+                shape.len()
+            ))),
+        }
+    }
+
+    fn rank2_strides_to_isize(
+        strides: &[usize],
+        label: &'static str,
+    ) -> Result<[isize; 2], DenseError> {
+        match strides {
+            [row, col] => Ok([
+                isize::try_from(*row).map_err(|_| DenseError::StrideOverflow { value: *row })?,
+                isize::try_from(*col).map_err(|_| DenseError::StrideOverflow { value: *col })?,
+            ]),
+            _ => Err(shape_error(format!(
+                "{label} stride rank {} is not rank-2",
+                strides.len()
+            ))),
+        }
+    }
+
+    fn shape_error(message: String) -> DenseError {
+        DenseError::Backend {
+            backend: DenseBackend::Strided,
+            op: "matmul_into",
+            message,
+        }
+    }
+
+    fn strided_error(err: impl std::fmt::Display) -> DenseError {
+        DenseError::Backend {
+            backend: DenseBackend::Strided,
+            op: "matmul_into",
+            message: err.to_string(),
         }
     }
 }

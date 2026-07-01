@@ -23,7 +23,7 @@ use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{reject_fusion_contract_conjugation, rhs_contract_twist_factor};
 use super::profile::TensorContractFusionProfile;
-use super::structure::{TensorContractAxisPlan, TensorContractStructure};
+use super::structure::TensorContractAxisPlan;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_canonical_fusion_blocks_into_raw<B, R, D>(
@@ -387,10 +387,6 @@ struct CanonicalFusionBlockContractGroupPlan {
     lhs: FusionBlockMatrixGroup,
     rhs: FusionBlockMatrixGroup,
     dst: FusionBlockMatrixGroup,
-    matmul_dst_structure: Arc<BlockStructure>,
-    matmul_lhs_structure: Arc<BlockStructure>,
-    matmul_rhs_structure: Arc<BlockStructure>,
-    matmul_structure: TensorContractStructure,
 }
 
 impl CanonicalFusionBlockContractGroupPlan {
@@ -412,24 +408,7 @@ impl CanonicalFusionBlockContractGroupPlan {
             });
         }
 
-        let matmul_lhs_structure = Arc::new(BlockStructure::trivial(&[lhs.rows, lhs.cols])?);
-        let matmul_rhs_structure = Arc::new(BlockStructure::trivial(&[lhs.cols, rhs.cols])?);
-        let matmul_dst_structure = Arc::new(BlockStructure::trivial(&[lhs.rows, rhs.cols])?);
-        let matmul_structure = TensorContractStructure::compile_structures(
-            &matmul_dst_structure,
-            &matmul_lhs_structure,
-            &matmul_rhs_structure,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
-        )?;
-        Ok(Self {
-            lhs,
-            rhs,
-            dst,
-            matmul_dst_structure,
-            matmul_lhs_structure,
-            matmul_rhs_structure,
-            matmul_structure,
-        })
+        Ok(Self { lhs, rhs, dst })
     }
 }
 
@@ -1016,16 +995,13 @@ where
     B: TensorContractBackend<D, f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
-    backend.tensorcontract_structure_into_raw(
+    backend.matmul_rank2_into_raw(
         workspace,
-        &group.matmul_structure,
-        &group.matmul_dst_structure,
-        &group.matmul_lhs_structure,
-        &group.matmul_rhs_structure,
         dst,
         lhs,
         rhs,
-        D::one(),
-        D::zero(),
+        group.lhs.rows,
+        group.lhs.cols,
+        group.rhs.cols,
     )
 }
