@@ -136,12 +136,9 @@ impl DynamicFusionMapSpace {
         }
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::new();
         for key in homspace.fusion_tree_keys(rule) {
-            let shape = inferred_shapes.get(&key).cloned().ok_or_else(|| {
-                OperationError::MissingBlockKey {
-                    key: BlockKey::from(key.clone()),
-                }
-            })?;
-            blocks.push((BlockKey::from(key), shape));
+            if let Some(shape) = inferred_shapes.get(&key).cloned() {
+                blocks.push((BlockKey::from(key), shape));
+            }
         }
         let subblock_structure = Arc::new(BlockStructure::packed_column_major_with_keys(
             nout + nin,
@@ -295,7 +292,9 @@ where
                     canonical_rank,
                     "output",
                 )?;
-                merge_inferred_shape(shapes, src_tree_key.clone(), candidate)?;
+                if shapes.contains_key(src_tree_key) {
+                    merge_inferred_shape(shapes, src_tree_key.clone(), candidate)?;
+                }
             }
         }
     }
