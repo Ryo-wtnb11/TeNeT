@@ -23,6 +23,7 @@ use super::fusion_block::{
     tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractCache,
     CanonicalFusionBlockContractWorkspace,
 };
+use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
 
 #[allow(clippy::too_many_arguments)]
@@ -285,6 +286,79 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
+    RuleKey,
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    rule: &R,
+    axes: TensorContractAxisSpec<'_>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+    profile: &mut TensorContractFusionProfile,
+) -> Result<(), OperationError>
+where
+    RuleKey: Clone + Eq + std::hash::Hash,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    profile.route = TensorContractFusionRoute::DynamicTreeCanonical;
+    let start = std::time::Instant::now();
+    let plan = tensorcontract_fusion_explicit_plan(
+        rule,
+        dst.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        lhs.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        rhs.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        axes,
+    )?;
+    profile.explicit_plan += start.elapsed();
+
+    tensorcontract_fusion_dynamic_plan_into_context_profiled(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        dynamic_space_cache,
+        fusion_block_cache,
+        fusion_block_workspace,
+        scratch,
+        rule,
+        &plan,
+        dst,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     RuleKey,
     BT,
@@ -444,6 +518,202 @@ where
         D::one(),
         beta,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context_profiled<
+    RuleKey,
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    rule: &R,
+    plan: &TensorContractFusionExplicitPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    alpha: D,
+    beta: D,
+    profile: &mut TensorContractFusionProfile,
+) -> Result<(), OperationError>
+where
+    RuleKey: Clone + Eq + std::hash::Hash,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let start = std::time::Instant::now();
+    let (lhs_space, lhs_replay_structure) = dynamic_space_cache.get_or_compile_transformed_source(
+        rule,
+        lhs,
+        plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
+    )?;
+    let (rhs_space, rhs_replay_structure) = dynamic_space_cache.get_or_compile_transformed_source(
+        rule,
+        rhs,
+        plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
+    )?;
+    profile.source_space_lookup += start.elapsed();
+
+    {
+        let start = std::time::Instant::now();
+        let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
+        let lhs_scratch = scratch.prepare_lhs(lhs_space.clone())?;
+        profile.lhs_scratch_prepare += start.elapsed();
+
+        let start = std::time::Instant::now();
+        tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
+            rule,
+            plan.lhs_transform().clone(),
+            &lhs_dst_structure,
+            &lhs_replay_structure,
+            lhs_scratch.data_mut(),
+            lhs.data(),
+            plan.lhs_source_conjugate(),
+            D::one(),
+            D::zero(),
+        )?;
+        profile.lhs_transform += start.elapsed();
+        profile.lhs_transform_calls += 1;
+    }
+    {
+        let start = std::time::Instant::now();
+        let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
+        let rhs_scratch = scratch.prepare_rhs(rhs_space.clone())?;
+        profile.rhs_scratch_prepare += start.elapsed();
+
+        let start = std::time::Instant::now();
+        tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
+            rule,
+            plan.rhs_transform().clone(),
+            &rhs_dst_structure,
+            &rhs_replay_structure,
+            rhs_scratch.data_mut(),
+            rhs.data(),
+            plan.rhs_source_conjugate(),
+            D::one(),
+            D::zero(),
+        )?;
+        profile.rhs_transform += start.elapsed();
+        profile.rhs_transform_calls += 1;
+    }
+
+    if plan.output_transform_is_identity() {
+        let dst_space = DynamicFusionMapSpace::from_typed(
+            dst.fusion_space()
+                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        );
+        let start = std::time::Instant::now();
+        let block_plan = fusion_block_cache.get_or_compile(
+            rule,
+            &dst_space,
+            &lhs_space,
+            &rhs_space,
+            plan.canonical_axes().as_spec(),
+        )?;
+        profile.fusion_block_plan_lookup += start.elapsed();
+
+        let dst_structure = std::sync::Arc::clone(dst.structure());
+        let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
+        return block_plan.execute_raw_profiled(
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            &dst_structure,
+            dst.data_mut(),
+            lhs_canonical.space().structure(),
+            lhs_canonical.data(),
+            rhs_canonical.space().structure(),
+            rhs_canonical.data(),
+            alpha,
+            beta,
+            profile,
+        );
+    }
+
+    let output_dst_space = DynamicFusionMapSpace::from_typed(
+        dst.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let start = std::time::Instant::now();
+    let canonical_dst_space = dynamic_space_cache.get_or_compile_canonical_dst(
+        rule,
+        &lhs_space,
+        &rhs_space,
+        plan,
+        &output_dst_space,
+    )?;
+    profile.canonical_dst_space_lookup += start.elapsed();
+
+    let start = std::time::Instant::now();
+    let block_plan = fusion_block_cache.get_or_compile(
+        rule,
+        &canonical_dst_space,
+        &lhs_space,
+        &rhs_space,
+        plan.canonical_axes().as_spec(),
+    )?;
+    profile.fusion_block_plan_lookup += start.elapsed();
+
+    let canonical_dst_structure = std::sync::Arc::clone(canonical_dst_space.structure());
+    let start = std::time::Instant::now();
+    scratch.prepare_dst(canonical_dst_space.clone())?;
+    profile.dst_scratch_prepare += start.elapsed();
+
+    {
+        let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
+        block_plan.execute_raw_profiled(
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            &canonical_dst_structure,
+            canonical_dst.data_mut(),
+            lhs_canonical.space().structure(),
+            lhs_canonical.data(),
+            rhs_canonical.space().structure(),
+            rhs_canonical.data(),
+            alpha,
+            D::zero(),
+            profile,
+        )?;
+    }
+
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    let start = std::time::Instant::now();
+    tree_context.tree_pair_transform_into_raw_with_storage_conjugation(
+        rule,
+        plan.output_transform().clone(),
+        &dst_structure,
+        &canonical_dst_structure,
+        dst.data_mut(),
+        scratch.dst().data(),
+        false,
+        D::one(),
+        beta,
+    )?;
+    profile.output_transform += start.elapsed();
+    profile.output_transform_calls += 1;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

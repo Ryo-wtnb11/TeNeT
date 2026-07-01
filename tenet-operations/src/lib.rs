@@ -52,7 +52,8 @@ pub use contract::{
     tensorproduct_into_with_conjugation, HostTreeFusionExecutionContext, TensorContractBackend,
     TensorContractBlockPlanKey, TensorContractBlockPlanTerm, TensorContractBlockSpec,
     TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
-    TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan, TensorContractPlanKey,
+    TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
+    TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use error::OperationError;

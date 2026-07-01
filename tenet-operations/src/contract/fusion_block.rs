@@ -22,6 +22,7 @@ use crate::{
 use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{reject_fusion_contract_conjugation, rhs_contract_twist_factor};
+use super::profile::TensorContractFusionProfile;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
 
 #[allow(clippy::too_many_arguments)]
@@ -283,6 +284,89 @@ impl CanonicalFusionBlockContractPlan {
                 alpha,
             )?;
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_raw_profiled<B, D>(
+        &self,
+        backend: &mut B,
+        workspace: &mut B::Workspace,
+        fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+        profile: &mut TensorContractFusionProfile,
+    ) -> Result<(), OperationError>
+    where
+        B: TensorContractBackend<D, f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    {
+        let total_start = std::time::Instant::now();
+
+        let start = std::time::Instant::now();
+        self.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+        profile.canonical_validate += start.elapsed();
+
+        let start = std::time::Instant::now();
+        scale_all_blocks(dst_structure, dst_data, beta)?;
+        profile.canonical_scale += start.elapsed();
+
+        for group in &self.groups {
+            profile.canonical_contract_groups += 1;
+
+            let start = std::time::Instant::now();
+            fusion_workspace
+                .buffers
+                .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            profile.canonical_workspace_prepare += start.elapsed();
+
+            let start = std::time::Instant::now();
+            pack_group(
+                &group.lhs,
+                lhs_structure,
+                lhs_data,
+                &mut fusion_workspace.buffers.lhs,
+            )?;
+            profile.canonical_pack_lhs += start.elapsed();
+
+            let start = std::time::Instant::now();
+            pack_group(
+                &group.rhs,
+                rhs_structure,
+                rhs_data,
+                &mut fusion_workspace.buffers.rhs,
+            )?;
+            profile.canonical_pack_rhs += start.elapsed();
+
+            let start = std::time::Instant::now();
+            matmul_group_plan(
+                backend,
+                workspace,
+                group,
+                &fusion_workspace.buffers.lhs,
+                &fusion_workspace.buffers.rhs,
+                &mut fusion_workspace.buffers.dst,
+            )?;
+            profile.canonical_matmul += start.elapsed();
+
+            let start = std::time::Instant::now();
+            scatter_group(
+                &group.dst,
+                dst_structure,
+                dst_data,
+                &fusion_workspace.buffers.dst,
+                alpha,
+            )?;
+            profile.canonical_scatter += start.elapsed();
+        }
+
+        profile.canonical_contract_total += total_start.elapsed();
         Ok(())
     }
 

@@ -12,8 +12,8 @@ use tenet_operations::{
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
     tree_pair_transform_into_with_context, AxisPermutation, HostTensorOperations,
     HostTreeFusionExecutionContext, TensorContractAxisSpec, TensorContractFusionExecutionContext,
-    TensorContractFusionExplicitPlan, TreeTransformBuiltinRuleCacheKey,
-    TreeTransformExecutionContext, TreeTransformRuleCacheKey,
+    TensorContractFusionExplicitPlan, TensorContractFusionProfile,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
 
 static LHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
@@ -25,6 +25,7 @@ const MANUAL_ITERS: usize = 20_000;
 const ONESHOT_ITERS: usize = 5_000;
 const COLD_CONTEXT_ITERS: usize = 2_000;
 const WARM_CONTEXT_ITERS: usize = 100_000;
+const PROFILE_ITERS: usize = 20_000;
 
 type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
 type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
@@ -58,6 +59,8 @@ fn bench_su2_noncanonical_source() {
     assert_close(&warm_host_tree_data, &expected);
     let (canonical_contract, contract_data) = fixture.time_canonical_contract(WARM_CONTEXT_ITERS);
     assert_close(&contract_data, &expected);
+    let (profile, profiled_data) = fixture.time_context_warm_profiled(PROFILE_ITERS);
+    assert_close(&profiled_data, &expected);
 
     println!("fusion contraction timing (release)");
     println!("fixture,su2_noncanonical_source_degeneracy");
@@ -92,6 +95,7 @@ fn bench_su2_noncanonical_source() {
         "canonical_contract_warm_ns,{:.3}",
         nanos_per(canonical_contract, WARM_CONTEXT_ITERS)
     );
+    print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum(&warm_data));
     println!("source_transform_checksum,{source_checksum:.12}");
     println!(
@@ -140,6 +144,8 @@ fn bench_su2_output_scratch() {
     assert_close(&warm_data, &expected);
     let (output_transform, output_data) = fixture.time_output_transform(WARM_CONTEXT_ITERS);
     assert_close(&output_data, &expected);
+    let (profile, profiled_data) = fixture.time_context_warm_profiled(PROFILE_ITERS);
+    assert_close(&profiled_data, &expected);
 
     println!();
     println!("fixture,su2_output_transform_canonical_dst_scratch");
@@ -153,6 +159,7 @@ fn bench_su2_output_scratch() {
         "output_transform_warm_ns,{:.3}",
         nanos_per(output_transform, WARM_CONTEXT_ITERS)
     );
+    print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum(&warm_data));
     println!(
         "tree_plan_cache,hits={},misses={},len={}",
@@ -202,6 +209,8 @@ fn bench_product_complex() {
     assert_close_complex(&fixture.context_warm_once(&mut context), &expected);
     let (warm, warm_data) = fixture.time_context_warm(&mut context, WARM_CONTEXT_ITERS);
     assert_close_complex(&warm_data, &expected);
+    let (profile, profiled_data) = fixture.time_context_warm_profiled(PROFILE_ITERS);
+    assert_close_complex(&profiled_data, &expected);
 
     println!();
     println!("fixture,product_fz2_u1_su2_complex");
@@ -212,6 +221,7 @@ fn bench_product_complex() {
         nanos_per(context_cold, COLD_CONTEXT_ITERS)
     );
     println!("context_warm_ns,{:.3}", nanos_per(warm, WARM_CONTEXT_ITERS));
+    print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum_complex(&warm_data));
     println!(
         "tree_plan_cache,hits={},misses={},len={}",
@@ -431,6 +441,48 @@ impl Su2NoncanonicalFixture {
             black_box(checksum(dst.data()));
         });
         (elapsed, dst.data().to_vec())
+    }
+
+    fn time_context_warm_profiled(
+        &self,
+        iterations: usize,
+    ) -> (TensorContractFusionProfile, Vec<f64>) {
+        let rule = SU2FusionRule;
+        let mut dst = self.dst();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        context
+            .tensorcontract_fusion_into(
+                &rule,
+                &mut dst,
+                &self.lhs,
+                &self.rhs,
+                axes(),
+                self.alpha,
+                self.beta,
+            )
+            .unwrap();
+        let mut total_profile = TensorContractFusionProfile::default();
+        for _ in 0..iterations {
+            dst.data_mut().copy_from_slice(&self.initial_dst);
+            let mut profile = TensorContractFusionProfile::default();
+            context
+                .tensorcontract_fusion_into_profiled(
+                    &rule,
+                    &mut dst,
+                    &self.lhs,
+                    &self.rhs,
+                    axes(),
+                    self.alpha,
+                    self.beta,
+                    &mut profile,
+                )
+                .unwrap();
+            total_profile.accumulate(&profile);
+            black_box(checksum(dst.data()));
+        }
+        (total_profile, dst.data().to_vec())
     }
 
     fn time_context_warm_host_tree(&self, iterations: usize) -> (Duration, Vec<f64>) {
@@ -883,6 +935,48 @@ impl Su2OutputScratchFixture {
         (elapsed, dst.data().to_vec())
     }
 
+    fn time_context_warm_profiled(
+        &self,
+        iterations: usize,
+    ) -> (TensorContractFusionProfile, Vec<f64>) {
+        let rule = SU2FusionRule;
+        let mut dst = self.dst();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        context
+            .tensorcontract_fusion_into(
+                &rule,
+                &mut dst,
+                &self.lhs,
+                &self.rhs,
+                output_axes(),
+                self.alpha,
+                self.beta,
+            )
+            .unwrap();
+        let mut total_profile = TensorContractFusionProfile::default();
+        for _ in 0..iterations {
+            dst.data_mut().copy_from_slice(&self.initial_dst);
+            let mut profile = TensorContractFusionProfile::default();
+            context
+                .tensorcontract_fusion_into_profiled(
+                    &rule,
+                    &mut dst,
+                    &self.lhs,
+                    &self.rhs,
+                    output_axes(),
+                    self.alpha,
+                    self.beta,
+                    &mut profile,
+                )
+                .unwrap();
+            total_profile.accumulate(&profile);
+            black_box(checksum(dst.data()));
+        }
+        (total_profile, dst.data().to_vec())
+    }
+
     fn time_output_transform(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let mut dst = self.dst();
         let mut canonical_dst = self.canonical_dst();
@@ -1178,6 +1272,48 @@ impl ProductComplexFixture {
         (elapsed, dst.data().to_vec())
     }
 
+    fn time_context_warm_profiled(
+        &self,
+        iterations: usize,
+    ) -> (TensorContractFusionProfile, Vec<Complex64>) {
+        let mut dst = self.dst();
+        let mut context = TensorContractFusionExecutionContext::<
+            Complex64,
+            <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key,
+        >::default();
+        context
+            .tensorcontract_fusion_into(
+                &self.rule,
+                &mut dst,
+                &self.lhs,
+                &self.rhs,
+                product_axes(),
+                self.alpha,
+                self.beta,
+            )
+            .unwrap();
+        let mut total_profile = TensorContractFusionProfile::default();
+        for _ in 0..iterations {
+            dst.data_mut().copy_from_slice(&self.initial_dst);
+            let mut profile = TensorContractFusionProfile::default();
+            context
+                .tensorcontract_fusion_into_profiled(
+                    &self.rule,
+                    &mut dst,
+                    &self.lhs,
+                    &self.rhs,
+                    product_axes(),
+                    self.alpha,
+                    self.beta,
+                    &mut profile,
+                )
+                .unwrap();
+            total_profile.accumulate(&profile);
+            black_box(checksum_complex(dst.data()));
+        }
+        (total_profile, dst.data().to_vec())
+    }
+
     fn context_warm_once(
         &self,
         context: &mut TensorContractFusionExecutionContext<
@@ -1350,6 +1486,122 @@ where
 
 fn nanos_per(duration: Duration, iterations: usize) -> f64 {
     duration.as_secs_f64() * 1.0e9 / iterations as f64
+}
+
+fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: usize) {
+    println!("profile_route,{:?}", profile.route);
+    println!(
+        "profile_total_ns,{:.3}",
+        nanos_per(profile.total, iterations)
+    );
+    println!(
+        "profile_typed_space_setup_ns,{:.3}",
+        nanos_per(profile.typed_space_setup, iterations)
+    );
+    println!(
+        "profile_canonical_route_check_ns,{:.3}",
+        nanos_per(profile.canonical_route_check, iterations)
+    );
+    println!(
+        "profile_dense_block_specs_ns,{:.3}",
+        nanos_per(profile.dense_block_specs, iterations)
+    );
+    println!(
+        "profile_dense_structure_lookup_ns,{:.3}",
+        nanos_per(profile.dense_structure_lookup, iterations)
+    );
+    println!(
+        "profile_dense_contract_ns,{:.3}",
+        nanos_per(profile.dense_contract, iterations)
+    );
+    println!(
+        "profile_explicit_plan_ns,{:.3}",
+        nanos_per(profile.explicit_plan, iterations)
+    );
+    println!(
+        "profile_source_space_lookup_ns,{:.3}",
+        nanos_per(profile.source_space_lookup, iterations)
+    );
+    println!(
+        "profile_lhs_scratch_prepare_ns,{:.3}",
+        nanos_per(profile.lhs_scratch_prepare, iterations)
+    );
+    println!(
+        "profile_rhs_scratch_prepare_ns,{:.3}",
+        nanos_per(profile.rhs_scratch_prepare, iterations)
+    );
+    println!(
+        "profile_lhs_transform_ns,{:.3}",
+        nanos_per(profile.lhs_transform, iterations)
+    );
+    println!(
+        "profile_rhs_transform_ns,{:.3}",
+        nanos_per(profile.rhs_transform, iterations)
+    );
+    println!(
+        "profile_canonical_dst_space_lookup_ns,{:.3}",
+        nanos_per(profile.canonical_dst_space_lookup, iterations)
+    );
+    println!(
+        "profile_dst_scratch_prepare_ns,{:.3}",
+        nanos_per(profile.dst_scratch_prepare, iterations)
+    );
+    println!(
+        "profile_fusion_block_plan_lookup_ns,{:.3}",
+        nanos_per(profile.fusion_block_plan_lookup, iterations)
+    );
+    println!(
+        "profile_canonical_contract_total_ns,{:.3}",
+        nanos_per(profile.canonical_contract_total, iterations)
+    );
+    println!(
+        "profile_canonical_validate_ns,{:.3}",
+        nanos_per(profile.canonical_validate, iterations)
+    );
+    println!(
+        "profile_canonical_scale_ns,{:.3}",
+        nanos_per(profile.canonical_scale, iterations)
+    );
+    println!(
+        "profile_canonical_workspace_prepare_ns,{:.3}",
+        nanos_per(profile.canonical_workspace_prepare, iterations)
+    );
+    println!(
+        "profile_canonical_pack_lhs_ns,{:.3}",
+        nanos_per(profile.canonical_pack_lhs, iterations)
+    );
+    println!(
+        "profile_canonical_pack_rhs_ns,{:.3}",
+        nanos_per(profile.canonical_pack_rhs, iterations)
+    );
+    println!(
+        "profile_canonical_matmul_ns,{:.3}",
+        nanos_per(profile.canonical_matmul, iterations)
+    );
+    println!(
+        "profile_canonical_scatter_ns,{:.3}",
+        nanos_per(profile.canonical_scatter, iterations)
+    );
+    println!(
+        "profile_output_transform_ns,{:.3}",
+        nanos_per(profile.output_transform, iterations)
+    );
+    println!(
+        "profile_lhs_transform_calls,{}",
+        profile.lhs_transform_calls
+    );
+    println!(
+        "profile_rhs_transform_calls,{}",
+        profile.rhs_transform_calls
+    );
+    println!(
+        "profile_output_transform_calls,{}",
+        profile.output_transform_calls
+    );
+    println!(
+        "profile_canonical_contract_groups,{}",
+        profile.canonical_contract_groups
+    );
 }
 
 fn checksum(data: &[f64]) -> f64 {

@@ -109,6 +109,29 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
     assert_eq!(context.fusion_block_contract_cache_len(), 1);
     assert_eq!(context.fusion_block_contract_cache_hits(), 1);
     assert_eq!(context.fusion_block_contract_cache_misses(), 1);
+
+    context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
+    let mut profile = TensorContractFusionProfile::default();
+    context
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut context_dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+            2.0,
+            3.0,
+            &mut profile,
+        )
+        .unwrap();
+    assert_eq!(context_dst.data(), &[50.0, 102.0]);
+    assert_eq!(
+        profile.route,
+        TensorContractFusionRoute::CanonicalFusionBlocks
+    );
+    assert_eq!(profile.lhs_transform_calls, 0);
+    assert_eq!(profile.rhs_transform_calls, 0);
+    assert!(profile.canonical_contract_groups > 0);
 }
 
 #[test]
@@ -2103,6 +2126,37 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(automatic_context.fusion_block_contract_cache_len(), 1);
     assert_eq!(automatic_context.fusion_block_contract_cache_hits(), 1);
     assert_eq!(automatic_context.fusion_block_contract_cache_misses(), 1);
+
+    automatic_context_dst
+        .data_mut()
+        .copy_from_slice(&initial_dst_for_context_replay);
+    let mut profile = TensorContractFusionProfile::default();
+    automatic_context
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut automatic_context_dst,
+            &lhs,
+            &rhs,
+            axes,
+            alpha,
+            beta,
+            &mut profile,
+        )
+        .unwrap();
+    for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "actual {actual} expected {expected}"
+        );
+    }
+    assert_eq!(
+        profile.route,
+        TensorContractFusionRoute::DynamicTreeCanonical
+    );
+    assert_eq!(profile.lhs_transform_calls, 1);
+    assert_eq!(profile.rhs_transform_calls, 1);
+    assert_eq!(profile.output_transform_calls, 0);
+    assert!(profile.canonical_contract_groups > 0);
 }
 
 #[test]

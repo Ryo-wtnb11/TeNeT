@@ -12,7 +12,10 @@ use crate::{
 };
 
 use super::backend::TensorContractBackend;
-use super::dynamic::{tensorcontract_fusion_dynamic_into_context, DynamicFusionSpaceCache};
+use super::dynamic::{
+    tensorcontract_fusion_dynamic_into_context,
+    tensorcontract_fusion_dynamic_into_context_profiled, DynamicFusionSpaceCache,
+};
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_structure,
@@ -23,6 +26,7 @@ use super::fusion_block::{
     is_canonical_fusion_block_contract, CanonicalFusionBlockContractCache,
     CanonicalFusionBlockContractWorkspace,
 };
+use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
 
@@ -804,6 +808,232 @@ where
                 );
             }
             Err(err) => Err(err),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_into_profiled<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+    >(
+        &mut self,
+        rule: &R,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        axes: TensorContractAxisSpec<'_>,
+        alpha: D,
+        beta: D,
+        profile: &mut TensorContractFusionProfile,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        let total_start = std::time::Instant::now();
+
+        let start = std::time::Instant::now();
+        let dst_fusion = dst
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let lhs_fusion = lhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let rhs_fusion = rhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
+        let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
+        let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+        profile.typed_space_setup += start.elapsed();
+
+        let start = std::time::Instant::now();
+        let canonical = !axes.lhs_conjugate()
+            && !axes.rhs_conjugate()
+            && is_canonical_fusion_block_contract(
+                rule,
+                &dst_dynamic,
+                &lhs_dynamic,
+                &rhs_dynamic,
+                axes,
+            )?;
+        profile.canonical_route_check += start.elapsed();
+        if canonical {
+            profile.route = TensorContractFusionRoute::CanonicalFusionBlocks;
+            let Self {
+                contract_backend,
+                contract_workspace,
+                fusion_block_cache,
+                fusion_block_workspace,
+                ..
+            } = self;
+            let start = std::time::Instant::now();
+            let block_plan = fusion_block_cache.get_or_compile(
+                rule,
+                &dst_dynamic,
+                &lhs_dynamic,
+                &rhs_dynamic,
+                axes,
+            )?;
+            profile.fusion_block_plan_lookup += start.elapsed();
+            let dst_structure = std::sync::Arc::clone(dst.structure());
+            let lhs_structure = std::sync::Arc::clone(lhs.structure());
+            let rhs_structure = std::sync::Arc::clone(rhs.structure());
+            let result = block_plan.execute_raw_profiled(
+                contract_backend,
+                contract_workspace,
+                fusion_block_workspace,
+                &dst_structure,
+                dst.data_mut(),
+                &lhs_structure,
+                lhs.data(),
+                &rhs_structure,
+                rhs.data(),
+                alpha,
+                beta,
+                profile,
+            );
+            profile.total += total_start.elapsed();
+            return result;
+        }
+
+        if axes.lhs_conjugate() || axes.rhs_conjugate() {
+            let start = std::time::Instant::now();
+            match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
+                Ok(structure) => {
+                    profile.route = TensorContractFusionRoute::DenseConjugateStructure;
+                    profile.dense_structure_lookup += start.elapsed();
+                    let start = std::time::Instant::now();
+                    let result = self.contract_backend.tensorcontract_structure_into(
+                        &mut self.contract_workspace,
+                        &structure,
+                        dst,
+                        lhs,
+                        rhs,
+                        alpha,
+                        beta,
+                    );
+                    profile.dense_contract += start.elapsed();
+                    profile.total += total_start.elapsed();
+                    return result;
+                }
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => {
+                    profile.dense_structure_lookup += start.elapsed();
+                    let Self {
+                        tree_context,
+                        dynamic_space_cache,
+                        contract_backend,
+                        contract_workspace,
+                        contract_cache: _,
+                        fusion_block_cache,
+                        fusion_block_workspace,
+                        fusion_scratch,
+                    } = self;
+                    let result = tensorcontract_fusion_dynamic_into_context_profiled(
+                        tree_context,
+                        contract_backend,
+                        contract_workspace,
+                        dynamic_space_cache,
+                        fusion_block_cache,
+                        fusion_block_workspace,
+                        fusion_scratch,
+                        rule,
+                        axes,
+                        dst,
+                        lhs,
+                        rhs,
+                        alpha,
+                        beta,
+                        profile,
+                    );
+                    profile.total += total_start.elapsed();
+                    return result;
+                }
+                Err(err) => {
+                    profile.dense_structure_lookup += start.elapsed();
+                    profile.total += total_start.elapsed();
+                    return Err(err);
+                }
+            }
+        }
+
+        let start = std::time::Instant::now();
+        match tensorcontract_fusion_block_specs(rule, dst_fusion, lhs_fusion, rhs_fusion, axes) {
+            Ok(block_specs) => {
+                profile.route = TensorContractFusionRoute::DenseFusionStructure;
+                profile.dense_block_specs += start.elapsed();
+                let start = std::time::Instant::now();
+                let structure = self.contract_cache.get_or_compile_with_block_specs(
+                    dst,
+                    lhs,
+                    rhs,
+                    axes,
+                    &block_specs,
+                )?;
+                profile.dense_structure_lookup += start.elapsed();
+                let start = std::time::Instant::now();
+                let result = self.contract_backend.tensorcontract_structure_into(
+                    &mut self.contract_workspace,
+                    structure,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                );
+                profile.dense_contract += start.elapsed();
+                profile.total += total_start.elapsed();
+                result
+            }
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+            }) => {
+                profile.dense_block_specs += start.elapsed();
+                let Self {
+                    tree_context,
+                    dynamic_space_cache,
+                    contract_backend,
+                    contract_workspace,
+                    contract_cache: _,
+                    fusion_block_cache,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                } = self;
+                let result = tensorcontract_fusion_dynamic_into_context_profiled(
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    dynamic_space_cache,
+                    fusion_block_cache,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                    rule,
+                    axes,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                    profile,
+                );
+                profile.total += total_start.elapsed();
+                result
+            }
+            Err(err) => {
+                profile.dense_block_specs += start.elapsed();
+                profile.total += total_start.elapsed();
+                Err(err)
+            }
         }
     }
 
