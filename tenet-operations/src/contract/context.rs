@@ -16,9 +16,10 @@ use crate::{
 };
 
 use super::backend::TensorContractBackend;
-use super::dynamic::tensorcontract_fusion_dynamic_plan_into_context;
+use super::dynamic::{
+    tensorcontract_fusion_dynamic_plan_into_context, DynamicFusionExecutionPlanCache,
+};
 use super::dynamic_space::DynamicFusionMapSpace;
-use super::dynamic_space_cache::{DynamicFusionSpaceCache, TensorContractFusionSpaceCacheStats};
 use super::fusion::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
     tensorcontract_fusion_structure, TensorContractFusionExplicitPlan,
@@ -633,6 +634,7 @@ pub struct TensorContractFusionExecutionContext<
     BC: TensorContractBackend<D, f64>,
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    fusion_execution_plan_cache: DynamicFusionExecutionPlanCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
@@ -640,7 +642,6 @@ pub struct TensorContractFusionExecutionContext<
     fusion_block_workspace: CanonicalFusionBlockContractWorkspace<D>,
     fusion_plan_cache: TensorContractFusionPlanCache<RuleKey>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
-    fusion_space_cache: DynamicFusionSpaceCache<RuleKey>,
 }
 
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
@@ -658,6 +659,7 @@ where
     ) -> Self {
         Self {
             tree_context,
+            fusion_execution_plan_cache: DynamicFusionExecutionPlanCache::default(),
             contract_backend,
             contract_workspace,
             contract_cache,
@@ -665,7 +667,6 @@ where
             fusion_block_workspace: CanonicalFusionBlockContractWorkspace::default(),
             fusion_plan_cache: TensorContractFusionPlanCache::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
-            fusion_space_cache: DynamicFusionSpaceCache::default(),
         }
     }
 
@@ -677,6 +678,21 @@ where
     #[inline]
     pub fn tree_context_mut(&mut self) -> &mut TreeTransformExecutionContext<D, RuleKey, f64, BT> {
         &mut self.tree_context
+    }
+
+    #[inline]
+    pub fn fusion_execution_plan_cache_len(&self) -> usize {
+        self.fusion_execution_plan_cache.len()
+    }
+
+    #[inline]
+    pub fn fusion_execution_plan_cache_hits(&self) -> usize {
+        self.fusion_execution_plan_cache.stats().hits()
+    }
+
+    #[inline]
+    pub fn fusion_execution_plan_cache_misses(&self) -> usize {
+        self.fusion_execution_plan_cache.stats().misses()
     }
 
     #[inline]
@@ -734,26 +750,6 @@ where
         self.fusion_plan_cache.stats()
     }
 
-    #[inline]
-    pub fn fusion_space_cache_len(&self) -> usize {
-        self.fusion_space_cache.len()
-    }
-
-    #[inline]
-    pub fn fusion_transformed_space_cache_len(&self) -> usize {
-        self.fusion_space_cache.transformed_len()
-    }
-
-    #[inline]
-    pub fn fusion_canonical_dst_space_cache_len(&self) -> usize {
-        self.fusion_space_cache.canonical_dst_len()
-    }
-
-    #[inline]
-    pub fn fusion_space_cache_stats(&self) -> TensorContractFusionSpaceCacheStats {
-        self.fusion_space_cache.stats()
-    }
-
     pub fn into_parts(
         self,
     ) -> (
@@ -764,6 +760,8 @@ where
     ) {
         (
             self.tree_context,
+            // The fusion-specific replay cache is an implementation detail of
+            // this context and is intentionally not exposed through into_parts.
             self.contract_backend,
             self.contract_workspace,
             self.contract_cache,
@@ -889,26 +887,25 @@ where
             if self.fusion_plan_cache.contains_key(&plan_key) {
                 let Self {
                     tree_context,
+                    fusion_execution_plan_cache,
                     contract_backend,
                     contract_workspace,
                     contract_cache: _,
-                    fusion_block_cache,
+                    fusion_block_cache: _,
                     fusion_block_workspace,
                     fusion_plan_cache,
                     fusion_scratch,
-                    fusion_space_cache,
                 } = self;
                 let plan = fusion_plan_cache
                     .get_cached_by_key(&plan_key)
                     .expect("fusion plan cache key was present before replay");
                 return tensorcontract_fusion_dynamic_plan_into_context(
                     tree_context,
+                    fusion_execution_plan_cache,
                     contract_backend,
                     contract_workspace,
-                    fusion_block_cache,
                     fusion_block_workspace,
                     fusion_scratch,
-                    fusion_space_cache,
                     rule,
                     plan,
                     dst,
@@ -938,25 +935,24 @@ where
                 }) => {
                     let Self {
                         tree_context,
+                        fusion_execution_plan_cache,
                         contract_backend,
                         contract_workspace,
                         contract_cache: _,
-                        fusion_block_cache,
+                        fusion_block_cache: _,
                         fusion_block_workspace,
                         fusion_plan_cache,
                         fusion_scratch,
-                        fusion_space_cache,
                     } = self;
                     let plan = fusion_plan_cache
                         .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
                     return tensorcontract_fusion_dynamic_plan_into_context(
                         tree_context,
+                        fusion_execution_plan_cache,
                         contract_backend,
                         contract_workspace,
-                        fusion_block_cache,
                         fusion_block_workspace,
                         fusion_scratch,
-                        fusion_space_cache,
                         rule,
                         plan,
                         dst,
@@ -994,25 +990,24 @@ where
             }) => {
                 let Self {
                     tree_context,
+                    fusion_execution_plan_cache,
                     contract_backend,
                     contract_workspace,
                     contract_cache: _,
-                    fusion_block_cache,
+                    fusion_block_cache: _,
                     fusion_block_workspace,
                     fusion_plan_cache,
                     fusion_scratch,
-                    fusion_space_cache,
                 } = self;
                 let plan = fusion_plan_cache
                     .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
                 return tensorcontract_fusion_dynamic_plan_into_context(
                     tree_context,
+                    fusion_execution_plan_cache,
                     contract_backend,
                     contract_workspace,
-                    fusion_block_cache,
                     fusion_block_workspace,
                     fusion_scratch,
-                    fusion_space_cache,
                     rule,
                     plan,
                     dst,

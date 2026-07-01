@@ -6,7 +6,6 @@ use tenet_core::{
     FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
 };
 
-use crate::cache::BlockStructureCacheKey;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{OperationError, TreeTransformOperationKey};
 
@@ -178,40 +177,6 @@ impl DynamicFusionMapSpace {
 
     pub(crate) fn required_len(&self) -> Result<usize, CoreError> {
         self.subblock_structure.required_len()
-    }
-
-    pub(super) fn cache_key(&self) -> Result<DynamicFusionMapSpaceCacheKey, OperationError> {
-        DynamicFusionMapSpaceCacheKey::from_dynamic_space(self)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub(super) struct DynamicFusionMapSpaceCacheKey {
-    nout: usize,
-    nin: usize,
-    homspace: FusionTreeHomSpace,
-    structure: BlockStructureCacheKey,
-}
-
-impl DynamicFusionMapSpaceCacheKey {
-    pub(super) fn from_typed_space<const NOUT: usize, const NIN: usize>(
-        space: &FusionTensorMapSpace<NOUT, NIN>,
-    ) -> Result<Self, OperationError> {
-        Ok(Self {
-            nout: NOUT,
-            nin: NIN,
-            homspace: space.homspace().clone(),
-            structure: BlockStructureCacheKey::from_structure(space.subblock_structure())?,
-        })
-    }
-
-    fn from_dynamic_space(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
-        Ok(Self {
-            nout: space.nout,
-            nin: space.nin,
-            homspace: space.homspace.clone(),
-            structure: BlockStructureCacheKey::from_structure(space.subblock_structure.as_ref())?,
-        })
     }
 }
 

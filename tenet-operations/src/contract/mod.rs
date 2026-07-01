@@ -3,7 +3,6 @@ mod backend;
 mod context;
 mod dynamic;
 mod dynamic_space;
-mod dynamic_space_cache;
 mod fusion;
 mod fusion_block;
 mod scratch;
@@ -26,7 +25,6 @@ pub use context::{
     TensorContractFusionExecutionContext, TensorContractFusionPlanCacheStats,
     TensorContractPlanKey,
 };
-pub use dynamic_space_cache::TensorContractFusionSpaceCacheStats;
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
