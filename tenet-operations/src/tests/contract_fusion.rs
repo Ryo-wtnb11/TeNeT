@@ -140,6 +140,40 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
 }
 
 #[test]
+fn tensorcontract_fusion_default_host_api_accepts_custom_host_storage() {
+    let rule = Z2FusionRule;
+    let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+    let fusion_space = || {
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+    let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+    let mut dst = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], fusion_space());
+
+    tensorcontract_fusion_into(
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[50.0, 102.0]);
+}
+
+#[test]
 fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     let rule = Z2FusionRule;
     let even = SectorId::new(0);

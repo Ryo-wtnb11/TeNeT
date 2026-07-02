@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tenet_core::{
     multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
     FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
-    MultiplicityFreeRigidSymbols, SectorId, TensorMap,
+    MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
 use crate::axis::TensorContractAxisSpec;
@@ -28,15 +28,21 @@ pub fn tensorcontract_fusion_structure<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     rule: &R,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractAxisSpec<'_>,
 ) -> Result<TensorContractStructure, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    DDst: TensorStorage<TDst>,
+    DLhs: TensorStorage<TLhs>,
+    DRhs: TensorStorage<TRhs>,
 {
     let dst_fusion = dst
         .fusion_space()

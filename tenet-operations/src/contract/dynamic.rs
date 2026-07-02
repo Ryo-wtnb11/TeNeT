@@ -3,7 +3,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionTreeHomSpace, MultiplicityFreeRigidSymbols, TensorMap,
+    BlockStructure, CoreError, FusionTreeHomSpace, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -41,13 +42,16 @@ pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractAxisSpec<'_>,
     alpha: D,
     beta: D,
@@ -56,6 +60,9 @@ where
     B: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let plan = tensorcontract_fusion_explicit_plan(
         rule,
@@ -99,6 +106,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_with<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
@@ -106,9 +116,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_with<
     contract_workspace: &mut BC::Workspace,
     rule: &R,
     plan: &TensorContractFusionExplicitPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -117,6 +127,9 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let (lhs_space, lhs_replay_structure) = transformed_source_space_and_structure(
         rule,
@@ -1509,14 +1522,22 @@ impl DynamicFusionSpaceKey {
     }
 }
 
-fn transformed_source_space_and_structure<R, D, const SRC_NOUT: usize, const SRC_NIN: usize, SSrc>(
+fn transformed_source_space_and_structure<
+    R,
+    D,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SSrc,
+    DSrc,
+>(
     rule: &R,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     operation: &TreeTransformOperationKey,
     source_conjugate: bool,
 ) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    DSrc: TensorStorage<D>,
 {
     let src_fusion = src
         .fusion_space()
@@ -1540,13 +1561,14 @@ fn tree_pair_transform_typed_to_dynamic<
     const SRC_NOUT: usize,
     const SRC_NIN: usize,
     SSrc,
+    DSrc,
 >(
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     rule: &R,
     operation: TreeTransformOperationKey,
     dst: &mut DynamicFusionScratch<D>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     src_replay_structure: &std::sync::Arc<BlockStructure>,
     source_conjugate: bool,
     alpha: D,
@@ -1556,6 +1578,7 @@ where
     BT: TreeTransformBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DSrc: HostReadableStorage<D>,
 {
     dst.fill_zero();
     let plan = build_tree_pair_transform_group_plan(rule, operation, src_replay_structure)?;
@@ -1584,12 +1607,13 @@ fn tree_pair_transform_dynamic_to_typed<
     const DST_NOUT: usize,
     const DST_NIN: usize,
     SDst,
+    DDst,
 >(
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &DynamicFusionScratch<D>,
     alpha: D,
     beta: D,
@@ -1598,6 +1622,7 @@ where
     BT: TreeTransformBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src.space().structure())?;
     let structure = plan.compile_structures(dst.structure(), src.space().structure())?;

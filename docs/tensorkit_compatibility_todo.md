@@ -263,6 +263,10 @@ TeNeT fixed coverage:
 - Tree-pair transform plan/cache/context APIs and tensoradd-fusion convenience
   APIs accept non-`Vec` host storage while still compiling transformer
   structures only from categorical/block metadata.
+- Fusion contraction convenience, explicit-plan, and dynamic fallback APIs
+  accept non-`Vec` host storage. Dynamic scratch and canonical replay remain
+  host-backed internally, so the API uses host readable/writable bounds rather
+  than pretending to support device storage.
 - Tests include custom writable/read-only host storage wrappers to assert that
   typed structure compile and replay do not accidentally rely on `Vec<T>` and
   do not require source tensors to be writable.
