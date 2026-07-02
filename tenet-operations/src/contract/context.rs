@@ -1277,6 +1277,7 @@ where
                 let lhs_structure = std::sync::Arc::clone(lhs.structure());
                 let rhs_structure = std::sync::Arc::clone(rhs.structure());
                 block_plan.execute_raw(
+                    &mut crate::StridedHostKernelAdapter,
                     contract_backend,
                     contract_workspace,
                     fusion_block_workspace,
@@ -1500,6 +1501,7 @@ where
             let lhs_structure = std::sync::Arc::clone(lhs.structure());
             let rhs_structure = std::sync::Arc::clone(rhs.structure());
             let result = block_plan.execute_raw_profiled(
+                &mut crate::StridedHostKernelAdapter,
                 contract_backend,
                 contract_workspace,
                 fusion_block_workspace,
@@ -1870,6 +1872,7 @@ where
         let lhs_structure = std::sync::Arc::clone(lhs_canonical.structure());
         let rhs_structure = std::sync::Arc::clone(rhs_canonical.structure());
         block_plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter,
             &mut self.contract_backend,
             &mut self.contract_workspace,
             &mut self.fusion_block_workspace,

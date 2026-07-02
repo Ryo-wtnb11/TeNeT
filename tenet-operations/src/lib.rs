@@ -88,10 +88,9 @@ pub(crate) use host_kernels::{
 pub use host_kernels::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub(crate) use host_scalar_kernels::{
     axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
-    copy_scale_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
-    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
-    tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
-    tensortrace_raw_strided_kernel_add_with_coefficient,
+    copy_scale_raw_strided_kernel_with_conjugate_trusted, scale_raw_strided_kernel_trusted,
+    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted,
+    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
 };
 pub(crate) use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;

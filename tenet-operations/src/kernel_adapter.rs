@@ -4,8 +4,8 @@ use num_traits::{One, Zero};
 
 use crate::{
     axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
-    tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
-    RecouplingCoefficientAction,
+    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel_trusted, ConjugateValue,
+    OperationError, RecouplingCoefficientAction,
 };
 
 /// Backend-neutral low-level kernel adapter for host-slice replay.
@@ -66,6 +66,17 @@ pub(crate) trait HostKernelAdapter<T> {
         src_offset: isize,
         source_conjugate: bool,
         alpha: T,
+    ) -> Result<(), OperationError>;
+
+    /// `dst = beta * dst` over a strided block (inactive-block scale
+    /// primitive).
+    fn scale_strided(
+        &mut self,
+        dst_data: &mut [T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        dst_offset: isize,
+        beta: T,
     ) -> Result<(), OperationError>;
 
     /// `destination[:, dst] = Σ_src coefficient[dst, src] * source[:, src]`
@@ -187,6 +198,17 @@ where
             source_conjugate,
             alpha,
         )
+    }
+
+    fn scale_strided(
+        &mut self,
+        dst_data: &mut [T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        dst_offset: isize,
+        beta: T,
+    ) -> Result<(), OperationError> {
+        scale_raw_strided_kernel_trusted(dst_data, shape, dst_strides, dst_offset, beta)
     }
 
     fn recoupling_src_times_u_transpose<C>(

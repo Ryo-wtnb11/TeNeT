@@ -22,9 +22,8 @@ use crate::strided::{
 };
 use crate::structure_identity::validate_structure_identity;
 use crate::{
-    axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_trusted,
-    scale_raw_strided_kernel_trusted, ConjugateValue, DenseBlockScalar, OperationError,
-    RecouplingCoefficientAction, ReportsPlacement, TreeTransformRuleCacheKey,
+    DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction,
+    ReportsPlacement, TreeTransformRuleCacheKey,
 };
 
 use super::backend::TensorContractBackend;
@@ -34,7 +33,8 @@ use super::profile::TensorContractFusionProfile;
 use super::structure::TensorContractAxisPlan;
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_canonical_fusion_blocks_into_raw<B, R, D>(
+pub(crate) fn tensorcontract_canonical_fusion_blocks_into_raw<A, B, R, D>(
+    kernels: &mut A,
     backend: &mut B,
     workspace: &mut B::Workspace,
     rule: &R,
@@ -49,6 +49,7 @@ pub(crate) fn tensorcontract_canonical_fusion_blocks_into_raw<B, R, D>(
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     B: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
@@ -57,6 +58,7 @@ where
         CanonicalFusionBlockContractPlan::compile(rule, dst_space, lhs_space, rhs_space, axes)?;
     let mut fusion_workspace = CanonicalFusionBlockContractWorkspace::<D>::default();
     plan.execute_raw(
+        kernels,
         backend,
         workspace,
         &mut fusion_workspace,
@@ -362,6 +364,7 @@ mod tests {
         >::default();
 
         plan.execute_storage_workspace(
+            &mut crate::StridedHostKernelAdapter,
             &mut backend,
             &mut workspace,
             &mut fusion_workspace,
@@ -478,8 +481,9 @@ impl CanonicalFusionBlockContractPlan {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn execute_raw<B, D>(
+    pub(crate) fn execute_raw<A, B, D>(
         &self,
+        kernels: &mut A,
         backend: &mut B,
         workspace: &mut B::Workspace,
         fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
@@ -493,6 +497,7 @@ impl CanonicalFusionBlockContractPlan {
         beta: D,
     ) -> Result<(), OperationError>
     where
+        A: HostKernelAdapter<D>,
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
@@ -504,7 +509,7 @@ impl CanonicalFusionBlockContractPlan {
             rhs_structure,
             rhs_data.len(),
         )?;
-        scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
+        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         for group in &self.groups {
             fusion_workspace
@@ -514,6 +519,7 @@ impl CanonicalFusionBlockContractPlan {
                 .buffers
                 .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
             execute_group_with_scratch_buffers(
+                kernels,
                 backend,
                 workspace,
                 group,
@@ -529,8 +535,9 @@ impl CanonicalFusionBlockContractPlan {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn execute_raw_profiled<B, D>(
+    pub(crate) fn execute_raw_profiled<A, B, D>(
         &self,
+        kernels: &mut A,
         backend: &mut B,
         workspace: &mut B::Workspace,
         fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
@@ -545,6 +552,7 @@ impl CanonicalFusionBlockContractPlan {
         profile: &mut TensorContractFusionProfile,
     ) -> Result<(), OperationError>
     where
+        A: HostKernelAdapter<D>,
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
@@ -562,7 +570,7 @@ impl CanonicalFusionBlockContractPlan {
         profile.canonical_validate += start.elapsed();
 
         let start = std::time::Instant::now();
-        scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
+        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
         profile.canonical_scale += start.elapsed();
 
         for group in &self.groups {
@@ -579,6 +587,7 @@ impl CanonicalFusionBlockContractPlan {
 
             let start = std::time::Instant::now();
             pack_group(
+                kernels,
                 &group.lhs,
                 lhs_data,
                 fusion_workspace.buffers.packed.lhs_mut().as_mut_slice(),
@@ -587,6 +596,7 @@ impl CanonicalFusionBlockContractPlan {
 
             let start = std::time::Instant::now();
             pack_group(
+                kernels,
                 &group.rhs,
                 rhs_data,
                 fusion_workspace.buffers.packed.rhs_mut().as_mut_slice(),
@@ -609,6 +619,7 @@ impl CanonicalFusionBlockContractPlan {
 
             let start = std::time::Instant::now();
             scatter_group(
+                kernels,
                 &group.dst,
                 dst_data,
                 fusion_workspace.buffers.packed.destination().as_slice(),
@@ -625,6 +636,7 @@ impl CanonicalFusionBlockContractPlan {
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_storage_workspace<
+        A,
         B,
         D,
         const DST_NOUT: usize,
@@ -641,6 +653,7 @@ impl CanonicalFusionBlockContractPlan {
         DRhs,
     >(
         &self,
+        kernels: &mut A,
         backend: &mut B,
         workspace: &mut B::Workspace,
         fusion_workspace: &mut StorageFusionBlockContractWorkspace<
@@ -655,6 +668,7 @@ impl CanonicalFusionBlockContractPlan {
         beta: D,
     ) -> Result<(), OperationError>
     where
+        A: HostKernelAdapter<D>,
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
         DDst: HostWritableStorage<D> + SimilarStorage<D>,
@@ -675,7 +689,12 @@ impl CanonicalFusionBlockContractPlan {
             &rhs_structure,
             rhs.storage().len(),
         )?;
-        scale_all_blocks(&self.inactive_dst_scale_blocks, dst.data_mut(), beta)?;
+        scale_all_blocks(
+            kernels,
+            &self.inactive_dst_scale_blocks,
+            dst.data_mut(),
+            beta,
+        )?;
 
         let lhs_data = lhs.data();
         let rhs_data = rhs.data();
@@ -692,6 +711,7 @@ impl CanonicalFusionBlockContractPlan {
                 D::zero(),
             );
             execute_group_with_scratch_buffers(
+                kernels,
                 backend,
                 workspace,
                 group,
@@ -714,8 +734,9 @@ impl CanonicalFusionBlockContractPlan {
     /// scratch from `dst_alloc`, while replay itself consumes the raw slices.
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn execute_storage_raw<B, D, SLhs, SRhs, SDst>(
+    pub(crate) fn execute_storage_raw<A, B, D, SLhs, SRhs, SDst>(
         &self,
+        kernels: &mut A,
         backend: &mut B,
         workspace: &mut B::Workspace,
         fusion_workspace: &mut StorageFusionBlockContractWorkspace<
@@ -736,6 +757,7 @@ impl CanonicalFusionBlockContractPlan {
         beta: D,
     ) -> Result<(), OperationError>
     where
+        A: HostKernelAdapter<D>,
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
         SLhs: SimilarStorage<D>,
@@ -753,7 +775,7 @@ impl CanonicalFusionBlockContractPlan {
             rhs_structure,
             rhs_data.len(),
         )?;
-        scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
+        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         for group in &self.groups {
             let lens =
@@ -768,6 +790,7 @@ impl CanonicalFusionBlockContractPlan {
                 D::zero(),
             );
             execute_group_with_scratch_buffers(
+                kernels,
                 backend,
                 workspace,
                 group,
@@ -792,6 +815,7 @@ impl CanonicalFusionBlockContractPlan {
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_storage_raw_sources<
+        A,
         B,
         D,
         const DST_NOUT: usize,
@@ -802,6 +826,7 @@ impl CanonicalFusionBlockContractPlan {
         DDst,
     >(
         &self,
+        kernels: &mut A,
         backend: &mut B,
         workspace: &mut B::Workspace,
         fusion_workspace: &mut StorageFusionBlockContractWorkspace<
@@ -820,6 +845,7 @@ impl CanonicalFusionBlockContractPlan {
         beta: D,
     ) -> Result<(), OperationError>
     where
+        A: HostKernelAdapter<D>,
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
         SLhs: SimilarStorage<D>,
@@ -838,7 +864,12 @@ impl CanonicalFusionBlockContractPlan {
             rhs_structure,
             rhs_data.len(),
         )?;
-        scale_all_blocks(&self.inactive_dst_scale_blocks, dst.data_mut(), beta)?;
+        scale_all_blocks(
+            kernels,
+            &self.inactive_dst_scale_blocks,
+            dst.data_mut(),
+            beta,
+        )?;
 
         for group in &self.groups {
             let lens =
@@ -853,6 +884,7 @@ impl CanonicalFusionBlockContractPlan {
                 D::zero(),
             );
             execute_group_with_scratch_buffers(
+                kernels,
                 backend,
                 workspace,
                 group,
@@ -1729,21 +1761,18 @@ where
     tree.coupled().unwrap_or_else(|| rule.vacuum())
 }
 
-fn pack_group<T>(
+fn pack_group<A, T>(
+    kernels: &mut A,
     group: &FusionBlockMatrixGroup,
     data: &[T],
     packed: &mut [T],
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + std::ops::Add<T, Output = T>
-        + std::ops::Mul<T, Output = T>
-        + ConjugateValue
-        + RecouplingCoefficientAction<f64>
-        + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy + RecouplingCoefficientAction<f64>,
 {
     for layout in &group.subblocks {
-        copy_scale_raw_strided_kernel_trusted(
+        kernels.copy_scale_strided(
             packed,
             data,
             &layout.block.shape,
@@ -1751,6 +1780,7 @@ where
             &layout.block.strides,
             layout.matrix_offset,
             layout.block.offset,
+            false,
             T::coefficient_as_data(layout.coefficient),
         )?;
     }
@@ -1758,7 +1788,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_group_with_scratch_buffers<B, D, LhsScratch, RhsScratch, DestinationScratch>(
+fn execute_group_with_scratch_buffers<A, B, D, LhsScratch, RhsScratch, DestinationScratch>(
+    kernels: &mut A,
     backend: &mut B,
     workspace: &mut B::Workspace,
     group: &CanonicalFusionBlockContractGroupPlan,
@@ -1770,14 +1801,25 @@ fn execute_group_with_scratch_buffers<B, D, LhsScratch, RhsScratch, DestinationS
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     B: TensorContractBackend<D, f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     LhsScratch: HostWritableStorage<D>,
     RhsScratch: HostWritableStorage<D>,
     DestinationScratch: HostWritableStorage<D>,
 {
-    pack_group(&group.lhs, lhs_data, scratch.lhs_mut().as_mut_slice())?;
-    pack_group(&group.rhs, rhs_data, scratch.rhs_mut().as_mut_slice())?;
+    pack_group(
+        kernels,
+        &group.lhs,
+        lhs_data,
+        scratch.lhs_mut().as_mut_slice(),
+    )?;
+    pack_group(
+        kernels,
+        &group.rhs,
+        rhs_data,
+        scratch.rhs_mut().as_mut_slice(),
+    )?;
     {
         let (lhs, rhs, dst) = scratch.inputs_and_destination_mut();
         matmul_group_plan(
@@ -1790,6 +1832,7 @@ where
         )?;
     }
     scatter_group(
+        kernels,
         &group.dst,
         dst_data,
         scratch.destination().as_slice(),
@@ -1798,7 +1841,8 @@ where
     )
 }
 
-fn scatter_group<T>(
+fn scatter_group<A, T>(
+    kernels: &mut A,
     group: &FusionBlockMatrixGroup,
     data: &mut [T],
     packed: &[T],
@@ -1806,17 +1850,11 @@ fn scatter_group<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + std::ops::Add<T, Output = T>
-        + std::ops::Mul<T, Output = T>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy,
 {
     for layout in &group.subblocks {
-        axpby_raw_strided_kernel_trusted(
+        kernels.axpby_strided(
             data,
             packed,
             &layout.block.shape,
@@ -1831,19 +1869,21 @@ where
     Ok(())
 }
 
-fn scale_all_blocks<T>(
+fn scale_all_blocks<A, T>(
+    kernels: &mut A,
     blocks: &[FusionScaleBlockLayout],
     data: &mut [T],
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy + std::ops::Mul<T, Output = T> + PartialEq + Zero + One + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy + One + PartialEq,
 {
     if beta.is_one() {
         return Ok(());
     }
     for layout in blocks {
-        scale_raw_strided_kernel_trusted(
+        kernels.scale_strided(
             data,
             &layout.block.shape,
             &layout.block.strides,

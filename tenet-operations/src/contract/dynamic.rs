@@ -493,6 +493,7 @@ where
         let dst_structure = std::sync::Arc::clone(dst.structure());
         let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
         return block_plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -532,6 +533,7 @@ where
     {
         let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -678,6 +680,7 @@ where
         )?;
         let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
         return block_plan.execute_storage_raw_sources(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -718,6 +721,7 @@ where
     {
         let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_storage_raw(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -870,6 +874,7 @@ where
         let dst_structure = std::sync::Arc::clone(dst.structure());
         let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
         return block_plan.execute_raw_profiled(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -919,6 +924,7 @@ where
     {
         let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_raw_profiled(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             fusion_block_workspace,
@@ -1879,6 +1885,7 @@ where
 {
     let _ = dst_structure;
     tensorcontract_canonical_fusion_blocks_into_raw(
+        &mut crate::StridedHostKernelAdapter,
         backend,
         workspace,
         rule,

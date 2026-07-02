@@ -895,6 +895,7 @@ where
         && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
     {
         return tensorcontract_canonical_fusion_blocks_into_raw(
+            &mut crate::StridedHostKernelAdapter,
             backend,
             workspace,
             rule,
@@ -980,6 +981,7 @@ where
         && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
     {
         return tensorcontract_canonical_fusion_blocks_into_raw(
+            &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
             rule,

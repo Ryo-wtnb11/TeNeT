@@ -2847,6 +2847,7 @@ struct RecordingKernelAdapter {
     add_calls: usize,
     axpby_calls: usize,
     copy_scale_calls: usize,
+    scale_calls: usize,
     recoupling_calls: usize,
 }
 
@@ -2930,6 +2931,24 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
             src_offset,
             source_conjugate,
             alpha,
+        )
+    }
+
+    fn scale_strided(
+        &mut self,
+        dst_data: &mut [f64],
+        shape: &[usize],
+        dst_strides: &[isize],
+        dst_offset: isize,
+        beta: f64,
+    ) -> Result<(), OperationError> {
+        self.scale_calls += 1;
+        crate::StridedHostKernelAdapter.scale_strided(
+            dst_data,
+            shape,
+            dst_strides,
+            dst_offset,
+            beta,
         )
     }
 
@@ -3027,4 +3046,5 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
     assert_eq!(adapter.recoupling_calls, 1);
     assert_eq!(adapter.axpby_calls, 2);
     assert_eq!(adapter.add_calls, 0);
+    assert_eq!(adapter.scale_calls, 0);
 }
