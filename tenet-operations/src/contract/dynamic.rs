@@ -249,6 +249,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
@@ -259,9 +262,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
     axes: TensorContractAxisSpec<'_>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -271,6 +274,9 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let plan = tensorcontract_fusion_explicit_plan(
         rule,
@@ -317,6 +323,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
@@ -327,9 +336,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
     axes: TensorContractAxisSpec<'_>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
     profile: &mut TensorContractFusionProfile,
@@ -340,6 +349,9 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     profile.route = TensorContractFusionRoute::DynamicTreeCanonical;
     let start = std::time::Instant::now();
@@ -390,6 +402,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
@@ -400,9 +415,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
     plan: &TensorContractFusionExplicitPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -412,6 +427,9 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
         tree_context,
@@ -552,6 +570,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context_profiled<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
@@ -562,9 +583,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context_profiled<
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
     plan: &TensorContractFusionExplicitPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
     profile: &mut TensorContractFusionProfile,
@@ -575,6 +596,9 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let start = std::time::Instant::now();
     let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
@@ -1056,11 +1080,12 @@ where
         const SRC_NOUT: usize,
         const SRC_NIN: usize,
         SSrc,
+        DSrc,
     >(
         &mut self,
         tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         rule: &R,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         operation: &TreeTransformOperationKey,
         source_conjugate: bool,
     ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
@@ -1068,6 +1093,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar,
         BT: TreeTransformBackend<D, f64>,
+        DSrc: TensorStorage<D>,
     {
         let src_fusion = src
             .fusion_space()

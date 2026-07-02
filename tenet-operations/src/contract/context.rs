@@ -3,8 +3,8 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, TensorMap,
+    BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -1072,12 +1072,15 @@ where
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &mut self,
         rule: &R,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractAxisSpec<'_>,
         alpha: D,
         beta: D,
@@ -1085,6 +1088,9 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
     {
         let dst_fusion = dst
             .fusion_space()
@@ -1276,12 +1282,15 @@ where
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &mut self,
         rule: &R,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractAxisSpec<'_>,
         alpha: D,
         beta: D,
@@ -1290,6 +1299,9 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
     {
         let total_start = std::time::Instant::now();
 

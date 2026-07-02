@@ -534,10 +534,12 @@ pub fn tensortrace_fusion_into<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     rule: &R,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     axes: TensorTraceAxisSpec<'_>,
     alpha: T,
     beta: T,
@@ -559,6 +561,8 @@ where
         + ConjugateValue
         + RecouplingCoefficientAction<R::Scalar>
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
@@ -584,12 +588,14 @@ pub fn tensortrace_fusion_into_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     allocator: &mut B::Allocator,
     rule: &R,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     axes: TensorTraceAxisSpec<'_>,
     alpha: T,
     beta: T,
@@ -612,6 +618,8 @@ where
         + ConjugateValue
         + RecouplingCoefficientAction<R::Scalar>
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let structure = tensortrace_fusion_structure(rule, dst, src, axes)?;
     tensortrace_fusion_execute_with(backend, allocator, &structure, dst, src, alpha, beta)

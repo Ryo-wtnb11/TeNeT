@@ -267,6 +267,8 @@ TeNeT fixed coverage:
   accept non-`Vec` host storage. Dynamic scratch and canonical replay remain
   host-backed internally, so the API uses host readable/writable bounds rather
   than pretending to support device storage.
+- Fusion tensortrace convenience APIs and `TensorContractFusionExecutionContext`
+  methods accept non-`Vec` host storage under the same host-read/write boundary.
 - Tests include custom writable/read-only host storage wrappers to assert that
   typed structure compile and replay do not accidentally rely on `Vec<T>` and
   do not require source tensors to be writable.

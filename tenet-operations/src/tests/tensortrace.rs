@@ -366,6 +366,49 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
 }
 
 #[test]
+fn tensortrace_fusion_default_host_api_accepts_custom_host_storage() {
+    let rule = FermionParityFusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+    );
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        src_hom,
+        &rule,
+        [vec![1, 1], vec![1, 1]],
+    )
+    .unwrap();
+    let src = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], src_space);
+    let dst_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        FusionProductSpace::new(Vec::<SectorLeg>::new()),
+    );
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        dst_hom,
+        &rule,
+        [vec![]],
+    )
+    .unwrap();
+    let mut dst = test_host_fusion_tensor_map(vec![0.0_f64], dst_space);
+
+    tensortrace_fusion_into(
+        &rule,
+        &mut dst,
+        &src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[-1.0]);
+}
+
+#[test]
 fn tensortrace_fusion_fermion_supertrace_uses_degeneracy_diagonals() {
     let rule = FermionParityFusionRule;
     let even = SectorId::new(0);
