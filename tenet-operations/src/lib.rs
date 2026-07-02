@@ -14,6 +14,7 @@ mod error;
 mod facade;
 mod host_kernels;
 mod host_scalar_kernels;
+mod host_scratch;
 mod lowering;
 mod placement;
 mod scalar;

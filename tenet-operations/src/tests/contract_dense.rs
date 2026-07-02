@@ -796,6 +796,104 @@ fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutati
 }
 
 #[test]
+fn tensorcontract_workspace_reuse_overwrites_dense_route_output() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_a =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0], lhs_space.clone()).unwrap();
+    let rhs_a =
+        TensorMap::<f64, 2, 0>::from_vec(vec![5.0, 6.0, 7.0, 8.0], rhs_space.clone()).unwrap();
+    let lhs_b = TensorMap::<f64, 2, 0>::from_vec(vec![2.0, 0.0, 0.0, 3.0], lhs_space).unwrap();
+    let rhs_b = TensorMap::<f64, 2, 0>::from_vec(vec![11.0, 13.0, 17.0, 19.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let structure = TensorContractStructure::compile(
+        &dst,
+        &lhs_a,
+        &rhs_a,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+    )
+    .unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TensorContractWorkspace::default();
+
+    tensorcontract_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &lhs_a,
+        &rhs_a,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    tensorcontract_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &lhs_b,
+        &rhs_b,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[22.0, 39.0, 34.0, 57.0]);
+    assert_eq!(workspace.output_len(), 4);
+}
+
+#[test]
+fn tensorcontract_workspace_reuse_clears_conjugating_route_output() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs_a =
+        TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0], lhs_space.clone()).unwrap();
+    let rhs_a =
+        TensorMap::<f64, 2, 0>::from_vec(vec![5.0, 6.0, 7.0, 8.0], rhs_space.clone()).unwrap();
+    let lhs_b = TensorMap::<f64, 2, 0>::from_vec(vec![2.0, 0.0, 0.0, 3.0], lhs_space).unwrap();
+    let rhs_b = TensorMap::<f64, 2, 0>::from_vec(vec![11.0, 13.0, 17.0, 19.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let structure = TensorContractStructure::compile(
+        &dst,
+        &lhs_a,
+        &rhs_a,
+        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[0], true, false),
+    )
+    .unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TensorContractWorkspace::default();
+
+    tensorcontract_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &lhs_a,
+        &rhs_a,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    tensorcontract_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &lhs_b,
+        &rhs_b,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[22.0, 39.0, 34.0, 57.0]);
+    assert_eq!(workspace.output_len(), 4);
+}
+
+#[test]
 fn tensorcontract_dense_backend_covers_all_gemm_dtypes() {
     assert_tensorcontract_scalar_dtype(2.0_f32, 3.0_f32, 5.0_f32, 27.0_f32);
     assert_tensorcontract_scalar_dtype(2.0_f64, 3.0_f64, 5.0_f64, 27.0_f64);

@@ -8,6 +8,7 @@ use tenet_core::{
 };
 use tenet_dense::DenseExecutor;
 
+use crate::host_scratch::HostScratchBuffer;
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
@@ -75,42 +76,6 @@ impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
-    }
-}
-
-#[derive(Clone, Debug)]
-struct HostScratchBuffer<T> {
-    data: Vec<T>,
-}
-
-impl<T> Default for HostScratchBuffer<T> {
-    fn default() -> Self {
-        Self { data: Vec::new() }
-    }
-}
-
-impl<T> HostScratchBuffer<T> {
-    #[inline]
-    fn resize_filled(&mut self, len: usize, value: T)
-    where
-        T: Clone,
-    {
-        self.data.resize(len, value);
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [T] {
-        &mut self.data
     }
 }
 

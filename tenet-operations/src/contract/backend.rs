@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
+use crate::host_scratch::HostScratchBuffer;
 use crate::{
     tensoradd_raw_strided_kernel, ConjugateValue, DenseBlockScalar, DenseTreeTransformOperations,
     OperationError, RecouplingCoefficientAction, ReportsPlacement,
@@ -111,7 +112,7 @@ where
 /// storage behind this type.
 #[derive(Clone, Debug)]
 pub struct HostTensorContractWorkspace<T> {
-    output: Vec<T>,
+    output: HostScratchBuffer<T>,
     zero_strides: Vec<isize>,
 }
 
@@ -120,7 +121,7 @@ pub type TensorContractWorkspace<T> = HostTensorContractWorkspace<T>;
 impl<T> Default for HostTensorContractWorkspace<T> {
     fn default() -> Self {
         Self {
-            output: Vec::new(),
+            output: HostScratchBuffer::default(),
             zero_strides: Vec::new(),
         }
     }
@@ -140,6 +141,13 @@ impl<T> HostTensorContractWorkspace<T> {
     #[inline]
     pub fn output_len(&self) -> usize {
         self.output.len()
+    }
+
+    fn prepare_output(&mut self, len: usize, zero: T)
+    where
+        T: Clone,
+    {
+        self.output.resize_filled(len, zero);
     }
 }
 
@@ -333,12 +341,12 @@ where
     structure.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
     let descriptor = structure.descriptor();
     for term in descriptor.terms() {
-        workspace.output.resize(term.workspace_len, D::zero());
+        workspace.prepare_output(term.workspace_len, D::zero());
         if descriptor.lhs_conjugate() || descriptor.rhs_conjugate() {
             tensorcontract_conjugating_dot_into_workspace(
                 descriptor,
                 term,
-                &mut workspace.output,
+                workspace.output.as_mut_slice(),
                 lhs_data,
                 rhs_data,
             )?;
@@ -367,7 +375,7 @@ where
             };
             let output = D::dense_write(
                 DenseViewMut::new(
-                    &mut workspace.output,
+                    workspace.output.as_mut_slice(),
                     descriptor.output_shape(term),
                     descriptor.output_strides(term),
                     0,
@@ -384,7 +392,7 @@ where
         tensoradd_raw_strided_kernel(
             &mut workspace.zero_strides,
             dst_data,
-            &workspace.output,
+            workspace.output.as_slice(),
             descriptor.scatter_shape(term),
             descriptor.dst_strides(term),
             descriptor.workspace_strides(term),
