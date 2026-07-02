@@ -18,6 +18,7 @@ mod host_scratch;
 mod lowering;
 mod placement;
 mod scalar;
+mod storage_scratch;
 mod strided;
 mod structure_identity;
 mod tensoradd;

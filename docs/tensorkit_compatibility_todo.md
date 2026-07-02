@@ -77,6 +77,11 @@ Storage-aware workspace target:
   buffers must be allocated from the destination/source storage placement,
   using `SimilarStorage::similar_filled`, analogous to TensorKit's
   `similar(tdst.data, sz)` behavior.
+- `tenet-operations` keeps this as a crate-internal adapter,
+  `SamePlacementScratchAllocator`, rather than a public operations API for now.
+  This avoids freezing a workspace trait before tree-transform, contraction,
+  canonical fusion-block, and dynamic fusion scratch agree on one storage-aware
+  shape.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic

@@ -1,3 +1,5 @@
+use crate::storage_scratch::SamePlacementScratchAllocator;
+
 /// Host-owned scratch buffer used by current raw host-slice replay paths.
 ///
 /// This keeps direct `Vec<T>` ownership out of categorical replay workspaces.
@@ -20,8 +22,10 @@ impl<T> HostScratchBuffer<T> {
     where
         T: Clone,
     {
+        let reference = Vec::<T>::new();
+        let allocator = SamePlacementScratchAllocator;
         Self {
-            data: vec![value; len],
+            data: allocator.filled_like(&reference, len, value),
         }
     }
 
