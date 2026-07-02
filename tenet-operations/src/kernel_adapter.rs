@@ -2,11 +2,36 @@ use core::ops::{Add, Mul};
 
 use num_traits::{One, Zero};
 
+use crate::strided::error as strided_error;
 use crate::{
-    axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
-    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel_trusted, ConjugateValue,
-    OperationError, RecouplingCoefficientAction,
+    axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
+    tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
+    RecouplingCoefficientAction,
 };
+
+fn read_view<'a, T>(
+    data: &'a [T],
+    shape: &[usize],
+    strides: &[isize],
+    offset: isize,
+) -> Result<strided_kernel::StridedView<'a, T>, OperationError>
+where
+    T: Copy,
+{
+    strided_kernel::StridedView::new(data, shape, strides, offset).map_err(strided_error)
+}
+
+fn write_view<'a, T>(
+    data: &'a mut [T],
+    shape: &[usize],
+    strides: &[isize],
+    offset: isize,
+) -> Result<strided_kernel::StridedViewMut<'a, T>, OperationError>
+where
+    T: Copy,
+{
+    strided_kernel::StridedViewMut::new(data, shape, strides, offset).map_err(strided_error)
+}
 
 /// Backend-neutral low-level kernel adapter for host-slice replay.
 ///
@@ -135,6 +160,18 @@ where
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
+        if beta.is_zero() || beta.is_one() {
+            let src = read_view(src_data, shape, src_strides, src_offset)?;
+            let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
+            let result = match (beta.is_zero(), source_conjugate) {
+                (true, false) => strided_kernel::copy_scale(&mut dst, &src, alpha),
+                (true, true) => strided_kernel::copy_scale(&mut dst, &src.conj(), alpha),
+                (false, false) => strided_kernel::axpy(&mut dst, &src, alpha),
+                (false, true) => strided_kernel::axpy(&mut dst, &src.conj(), alpha),
+            };
+            zero_strides.clear();
+            return result.map_err(strided_error);
+        }
         tensoradd_raw_strided_kernel_trusted(
             zero_strides,
             dst_data,
@@ -162,6 +199,16 @@ where
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
+        if beta.is_zero() || beta.is_one() {
+            let src = read_view(src_data, shape, src_strides, src_offset)?;
+            let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
+            let result = if beta.is_zero() {
+                strided_kernel::copy_scale(&mut dst, &src, alpha)
+            } else {
+                strided_kernel::axpy(&mut dst, &src, alpha)
+            };
+            return result.map_err(strided_error);
+        }
         axpby_raw_strided_kernel_trusted(
             dst_data,
             src_data,
@@ -187,17 +234,13 @@ where
         source_conjugate: bool,
         alpha: T,
     ) -> Result<(), OperationError> {
-        copy_scale_raw_strided_kernel_with_conjugate_trusted(
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            source_conjugate,
-            alpha,
-        )
+        let src = read_view(src_data, shape, src_strides, src_offset)?;
+        let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
+        if source_conjugate {
+            strided_kernel::copy_scale(&mut dst, &src.conj(), alpha).map_err(strided_error)
+        } else {
+            strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
+        }
     }
 
     fn scale_strided(

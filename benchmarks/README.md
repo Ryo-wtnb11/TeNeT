@@ -106,6 +106,28 @@ tree-transform replay itself (TensorKit's permute-equivalent costs ~2.2 ms on
 the same workload), which is the next optimization target — the same
 pack/recoupling/scatter machinery now behind `HostKernelAdapter`.
 
+## strided-rs replay kernels (tensor4all/strided-rs 4ea9acb)
+
+Switching `StridedHostKernelAdapter`'s copy/axpy paths from the in-crate
+scalar odometer loops to strided-rs `copy_scale`/`axpy` (dimension fusion +
+SIMD fast paths, upstream #133/#134) removes most of the remaining
+tree-transform replay cost. µs per iteration, Accelerate both sides,
+coupled layout:
+
+| symmetry | workload | before | after | TensorKit | after/TK |
+|---|---|---:|---:|---:|---:|
+| U1 | swap d=16 | 15 908 | 3 406 | 4 033 | **0.84** |
+| U1 | swap+out d=16 | 18 463 | 2 976 | 4 709 | **0.63** |
+| fZ2 | swap d=16 | 7 771 | 1 346 | 1 415 | **0.95** |
+| SU2 | swap d=16 | 58 380 | 16 402 | 15 779 | 1.04 |
+| SU2 | swap+out d=16 | 84 734 | 21 635 | 19 914 | 1.09 |
+| U1 | swap d=4 | 90.9 | 42.9 | 20.0 | 2.1 |
+| SU2 | swap d=4 | 285.7 | 126.1 | 44.1 | 2.9 |
+
+At d=16 every workload is now at or better than TensorKit. The remaining
+small-block (d=4) gap of 1.5-3x is per-call overhead (plan lookups, view
+setup, route dispatch) and no longer any single dominant stage.
+
 ## Conclusions
 
 - **With identical BLAS, TeNeT is 3.6–42x slower**; the gap is the per-call

@@ -4,7 +4,7 @@ use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use tenet_dense::{DenseRead, DenseView, DenseViewMut, DenseWrite};
 
-pub trait ConjugateValue: Copy {
+pub trait ConjugateValue: Copy + strided_kernel::ElementOpApply {
     fn maybe_conj(self, conjugate: bool) -> Self;
 }
 
