@@ -143,6 +143,49 @@ impl<SourceScratch, DestinationScratch>
     }
 }
 
+/// Storage-aware dense-contraction replay workspace.
+///
+/// The output scratch is allocated from destination storage, because it is the
+/// dense contraction result scattered into the destination tensor layout.
+#[derive(Clone, Debug)]
+pub(crate) struct StorageTensorContractWorkspace<OutputScratch> {
+    output: Option<OutputScratch>,
+    zero_strides: Vec<isize>,
+}
+
+impl<OutputScratch> Default for StorageTensorContractWorkspace<OutputScratch> {
+    fn default() -> Self {
+        Self {
+            output: None,
+            zero_strides: Vec::new(),
+        }
+    }
+}
+
+impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
+    pub(crate) fn prepare_from_dst_storage<T, DDst>(
+        &mut self,
+        dst_storage: &DDst,
+        len: usize,
+        zero: T,
+    ) where
+        T: Clone,
+        DDst: SimilarStorage<T, Similar = OutputScratch>,
+    {
+        self.output = Some(dst_storage.similar_filled(len, zero));
+    }
+
+    #[inline]
+    pub(crate) fn replay_parts_mut(&mut self) -> (&mut Vec<isize>, &mut OutputScratch) {
+        (
+            &mut self.zero_strides,
+            self.output
+                .as_mut()
+                .expect("storage tensor-contract output scratch prepared before replay"),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

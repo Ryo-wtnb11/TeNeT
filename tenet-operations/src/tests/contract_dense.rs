@@ -54,6 +54,164 @@ fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
     assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ContractScratchAllocation {
+    label: &'static str,
+    len: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ContractTrackingStorage<T> {
+    data: Vec<T>,
+    label: &'static str,
+    allocations: std::rc::Rc<std::cell::RefCell<Vec<ContractScratchAllocation>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ContractTrackingScratch<T> {
+    data: Vec<T>,
+}
+
+impl<T> ContractTrackingStorage<T> {
+    fn new(
+        data: Vec<T>,
+        label: &'static str,
+        allocations: std::rc::Rc<std::cell::RefCell<Vec<ContractScratchAllocation>>>,
+    ) -> Self {
+        Self {
+            data,
+            label,
+            allocations,
+        }
+    }
+}
+
+impl<T> TensorStorage<T> for ContractTrackingStorage<T> {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for ContractTrackingStorage<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<T> HostWritableStorage<T> for ContractTrackingStorage<T> {
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+impl<T: Clone> SimilarStorage<T> for ContractTrackingStorage<T> {
+    type Similar = ContractTrackingScratch<T>;
+
+    fn similar_filled(&self, len: usize, value: T) -> Self::Similar
+    where
+        T: Clone,
+    {
+        self.allocations
+            .borrow_mut()
+            .push(ContractScratchAllocation {
+                label: self.label,
+                len,
+            });
+        ContractTrackingScratch {
+            data: vec![value; len],
+        }
+    }
+}
+
+impl<T> TensorStorage<T> for ContractTrackingScratch<T> {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for ContractTrackingScratch<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<T> HostWritableStorage<T> for ContractTrackingScratch<T> {
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+#[test]
+fn tensorcontract_storage_workspace_allocates_output_scratch_from_destination_storage() {
+    let allocations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs =
+        TensorMap::<f64, 2, 0, Trivial, ContractTrackingStorage<f64>>::from_storage_with_structure(
+            ContractTrackingStorage::new(
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "lhs",
+                allocations.clone(),
+            ),
+            lhs_space,
+            BlockStructure::trivial(&[2, 3]).unwrap(),
+        )
+        .unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0, Trivial, ContractTrackingStorage<f64>>::from_storage_with_structure(
+            ContractTrackingStorage::new(
+                vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                "rhs",
+                allocations.clone(),
+            ),
+            rhs_space,
+            BlockStructure::trivial(&[3, 2]).unwrap(),
+        )
+        .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0, Trivial, ContractTrackingStorage<f64>>::from_storage_with_structure(
+            ContractTrackingStorage::new(vec![1.0; 4], "destination", allocations.clone()),
+            dst_space,
+            BlockStructure::trivial(&[2, 2]).unwrap(),
+        )
+        .unwrap();
+    let mut context = TensorContractExecutionContext::<f64>::default();
+    let mut storage_workspace = crate::storage_scratch::StorageTensorContractWorkspace::<
+        ContractTrackingScratch<f64>,
+    >::default();
+
+    context
+        .tensorcontract_into_storage_workspace(
+            &mut storage_workspace,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
+    assert_eq!(
+        allocations.borrow().as_slice(),
+        &[ContractScratchAllocation {
+            label: "destination",
+            len: 4,
+        }],
+    );
+}
+
 #[test]
 fn tensorcontract_default_host_api_accepts_custom_host_storage() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();

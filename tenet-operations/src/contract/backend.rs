@@ -1,15 +1,21 @@
 use num_traits::One;
 use std::sync::Arc;
-use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
+use tenet_core::{
+    BlockStructure, HostReadableStorage, HostWritableStorage, Placement, SimilarStorage, TensorMap,
+};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::host_scratch::HostScratchBuffer;
+use crate::storage_scratch::StorageTensorContractWorkspace;
 use crate::{
     tensoradd_raw_strided_kernel, ConjugateValue, DenseBlockScalar, DenseTreeTransformOperations,
     OperationError, RecouplingCoefficientAction, ReportsPlacement,
 };
 
-use super::structure::{TensorContractDenseRouteOrder, TensorContractStructure};
+use super::structure::{
+    TensorContractDenseRouteOrder, TensorContractDescriptor, TensorContractDescriptorTerm,
+    TensorContractStructure,
+};
 
 /// Legacy/current tensor-contraction execution contract over host-accessible data.
 ///
@@ -342,67 +348,162 @@ where
     let descriptor = structure.descriptor();
     for term in descriptor.terms() {
         workspace.prepare_output(term.workspace_len, D::zero());
-        if descriptor.lhs_conjugate() || descriptor.rhs_conjugate() {
-            tensorcontract_conjugating_dot_into_workspace(
-                descriptor,
-                term,
-                workspace.output.as_mut_slice(),
-                lhs_data,
-                rhs_data,
-            )?;
-        } else {
-            let logical_lhs = DenseView::new(
-                lhs_data,
-                descriptor.lhs_shape(term),
-                descriptor.lhs_strides(term),
-                term.lhs_offset,
-            )
-            .map_err(OperationError::Dense)?;
-            let logical_rhs = DenseView::new(
-                rhs_data,
-                descriptor.rhs_shape(term),
-                descriptor.rhs_strides(term),
-                term.rhs_offset,
-            )
-            .map_err(OperationError::Dense)?;
-            let (lhs, rhs) = match descriptor.dense_route_order() {
-                TensorContractDenseRouteOrder::LhsRhs => {
-                    (D::dense_read(logical_lhs), D::dense_read(logical_rhs))
-                }
-                TensorContractDenseRouteOrder::RhsLhs => {
-                    (D::dense_read(logical_rhs), D::dense_read(logical_lhs))
-                }
-            };
-            let output = D::dense_write(
-                DenseViewMut::new(
-                    workspace.output.as_mut_slice(),
-                    descriptor.output_shape(term),
-                    descriptor.output_strides(term),
-                    0,
-                )
-                .map_err(OperationError::Dense)?,
-            );
-            dense
-                .dot_general_into(output, lhs, rhs, descriptor.dot_config())
-                .map_err(OperationError::Dense)?;
-        }
-
-        let term_alpha = alpha.scale_by_coefficient(term.coefficient);
-        let term_beta = if term.apply_beta { beta } else { D::one() };
-        tensoradd_raw_strided_kernel(
+        tensorcontract_descriptor_term_with_output_scratch(
+            dense,
             &mut workspace.zero_strides,
+            descriptor,
+            term,
             dst_data,
-            workspace.output.as_slice(),
-            descriptor.scatter_shape(term),
-            descriptor.dst_strides(term),
-            descriptor.workspace_strides(term),
-            term.dst_offset,
-            0,
-            false,
-            term_alpha,
-            term_beta,
+            workspace.output.as_mut_slice(),
+            lhs_data,
+            rhs_data,
+            alpha,
+            beta,
         )?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_structure_with_storage_workspace_dense_executor<
+    E,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    dense: &mut E,
+    workspace: &mut StorageTensorContractWorkspace<DDst::Similar>,
+    structure: &TensorContractStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let lhs_structure = Arc::clone(lhs.structure());
+    let rhs_structure = Arc::clone(rhs.structure());
+    structure.validate_replay_structures(&dst_structure, &lhs_structure, &rhs_structure)?;
+    let descriptor = structure.descriptor();
+    let lhs_data = lhs.data();
+    let rhs_data = rhs.data();
+    for term in descriptor.terms() {
+        workspace.prepare_from_dst_storage(dst.storage(), term.workspace_len, D::zero());
+        let (zero_strides, output_scratch) = workspace.replay_parts_mut();
+        tensorcontract_descriptor_term_with_output_scratch(
+            dense,
+            zero_strides,
+            descriptor,
+            term,
+            dst.data_mut(),
+            output_scratch.as_mut_slice(),
+            lhs_data,
+            rhs_data,
+            alpha,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tensorcontract_descriptor_term_with_output_scratch<E, D, C>(
+    dense: &mut E,
+    zero_strides: &mut Vec<isize>,
+    descriptor: &TensorContractDescriptor<C>,
+    term: &TensorContractDescriptorTerm<C>,
+    dst_data: &mut [D],
+    output_scratch: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+    C: Copy + One,
+{
+    if descriptor.lhs_conjugate() || descriptor.rhs_conjugate() {
+        tensorcontract_conjugating_dot_into_workspace(
+            descriptor,
+            term,
+            output_scratch,
+            lhs_data,
+            rhs_data,
+        )?;
+    } else {
+        let logical_lhs = DenseView::new(
+            lhs_data,
+            descriptor.lhs_shape(term),
+            descriptor.lhs_strides(term),
+            term.lhs_offset,
+        )
+        .map_err(OperationError::Dense)?;
+        let logical_rhs = DenseView::new(
+            rhs_data,
+            descriptor.rhs_shape(term),
+            descriptor.rhs_strides(term),
+            term.rhs_offset,
+        )
+        .map_err(OperationError::Dense)?;
+        let (lhs, rhs) = match descriptor.dense_route_order() {
+            TensorContractDenseRouteOrder::LhsRhs => {
+                (D::dense_read(logical_lhs), D::dense_read(logical_rhs))
+            }
+            TensorContractDenseRouteOrder::RhsLhs => {
+                (D::dense_read(logical_rhs), D::dense_read(logical_lhs))
+            }
+        };
+        let output = D::dense_write(
+            DenseViewMut::new(
+                output_scratch,
+                descriptor.output_shape(term),
+                descriptor.output_strides(term),
+                0,
+            )
+            .map_err(OperationError::Dense)?,
+        );
+        dense
+            .dot_general_into(output, lhs, rhs, descriptor.dot_config())
+            .map_err(OperationError::Dense)?;
+    }
+
+    let term_alpha = alpha.scale_by_coefficient(term.coefficient);
+    let term_beta = if term.apply_beta { beta } else { D::one() };
+    tensoradd_raw_strided_kernel(
+        zero_strides,
+        dst_data,
+        output_scratch,
+        descriptor.scatter_shape(term),
+        descriptor.dst_strides(term),
+        descriptor.workspace_strides(term),
+        term.dst_offset,
+        0,
+        false,
+        term_alpha,
+        term_beta,
+    )?;
     Ok(())
 }
 

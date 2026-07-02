@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, SimilarStorage, TensorMap,
+    TensorStorage,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -13,6 +14,7 @@ use crate::cache::{
     TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::lowering::adjoint_fusion_space_view;
+use crate::storage_scratch::StorageTensorContractWorkspace;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
@@ -20,7 +22,9 @@ use crate::{
     OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
 };
 
-use super::backend::TensorContractBackend;
+use super::backend::{
+    tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,
+};
 use super::dynamic::{
     tensorcontract_fusion_dynamic_plan_into_context,
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
@@ -580,13 +584,21 @@ impl TensorContractCache<TensorContractPlanKey> {
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &mut self,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractAxisSpec<'_>,
-    ) -> Result<&TensorContractStructure, OperationError> {
+    ) -> Result<&TensorContractStructure, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DLhs: TensorStorage<TLhs>,
+        DRhs: TensorStorage<TRhs>,
+    {
         let plan_key = TensorContractPlanKey::from_axes(
             lhs.structure().rank(),
             rhs.structure().rank(),
@@ -640,14 +652,22 @@ impl TensorContractCache<TensorContractBlockPlanKey> {
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &mut self,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractAxisSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
-    ) -> Result<&TensorContractStructure, OperationError> {
+    ) -> Result<&TensorContractStructure, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DLhs: TensorStorage<TLhs>,
+        DRhs: TensorStorage<TRhs>,
+    {
         let plan_key = TensorContractBlockPlanKey::from_block_specs(
             lhs.structure().rank(),
             rhs.structure().rank(),
@@ -836,6 +856,55 @@ where
         } = self;
         let structure = cache.get_or_compile(dst, lhs, rhs, axes)?;
         backend.tensorcontract_structure_into(workspace, structure, dst, lhs, rhs, alpha, beta)
+    }
+}
+
+impl<D> TensorContractExecutionContext<D, DenseTreeTransformOperations>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tensorcontract_into_storage_workspace<
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+        DLhs,
+        DRhs,
+    >(
+        &mut self,
+        storage_workspace: &mut StorageTensorContractWorkspace<DDst::Similar>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        axes: TensorContractAxisSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        DDst: HostWritableStorage<D> + SimilarStorage<D>,
+        DDst::Similar: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
+    {
+        let structure = self.cache.get_or_compile(dst, lhs, rhs, axes)?;
+        tensorcontract_structure_with_storage_workspace_dense_executor(
+            self.backend.dense_mut(),
+            storage_workspace,
+            structure,
+            dst,
+            lhs,
+            rhs,
+            alpha,
+            beta,
+        )
     }
 }
 

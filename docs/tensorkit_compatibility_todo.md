@@ -96,6 +96,11 @@ Storage-aware workspace target:
   because arbitrary `SimilarStorage` does not yet expose safe resize/reuse.
   `TreeTransformBackend` and the public `TreeTransformWorkspace<T>` alias
   remain the legacy host-slice route.
+- Plain dense tensor contraction now has the same staged boundary:
+  `StorageTensorContractWorkspace<OutputScratch>` allocates dense output
+  scratch from destination storage before host-slice replay. Canonical fusion
+  `lhs`/`rhs`/`dst` pack scratch and dynamic fusion scratch are still separate
+  host boundaries and should be generalized in their own patches.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic
