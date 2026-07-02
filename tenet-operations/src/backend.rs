@@ -15,9 +15,9 @@ use crate::{
     tensortrace_fusion_structure_with_strided_kernel, tensortrace_structure_with_strided_kernel,
     tree_transform_structure_with_strided_kernel,
     tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
-    OperationError, RecouplingCoefficientAction, TensorAddStructure, TensorTraceFusionStructure,
-    TensorTraceStructure, TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
-    TreeTransformWorkspace,
+    OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter, TensorAddStructure,
+    TensorTraceFusionStructure, TensorTraceStructure, TreeTransformReplayProfile,
+    TreeTransformScalar, TreeTransformStructure, TreeTransformWorkspace,
 };
 
 /// Legacy/current tree-transform execution contract over host-accessible data.
@@ -468,7 +468,15 @@ where
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {
-        tree_transform_structure_with_strided_kernel(workspace, structure, dst, src, alpha, beta)
+        tree_transform_structure_with_strided_kernel(
+            &mut StridedHostKernelAdapter,
+            workspace,
+            structure,
+            dst,
+            src,
+            alpha,
+            beta,
+        )
     }
 
     fn tree_transform_structure_into_raw(
@@ -483,6 +491,7 @@ where
         beta: D,
     ) -> Result<(), OperationError> {
         crate::tree_transform_structure_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter,
             workspace,
             structure,
             dst_structure,
@@ -526,6 +535,7 @@ where
         DSrc: HostReadableStorage<D>,
     {
         tree_transform_structure_with_structural_recoupling(
+            &mut StridedHostKernelAdapter,
             &mut self.dense,
             workspace,
             structure,
@@ -548,6 +558,7 @@ where
         beta: D,
     ) -> Result<(), OperationError> {
         crate::tree_transform_structure_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter,
             &mut self.dense,
             workspace,
             structure,
@@ -573,6 +584,7 @@ where
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
         crate::tree_transform_structure_with_structural_recoupling_raw_profiled(
+            &mut StridedHostKernelAdapter,
             &mut self.dense,
             workspace,
             structure,

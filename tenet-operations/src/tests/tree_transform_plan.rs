@@ -2391,6 +2391,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     >::default();
 
     crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel(
+        &mut crate::StridedHostKernelAdapter,
         &mut workspace,
         &structure,
         &mut dst,
@@ -2445,6 +2446,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     .unwrap();
 
     crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel(
+        &mut crate::StridedHostKernelAdapter,
         &mut workspace,
         &structure2,
         &mut dst2,
@@ -2838,4 +2840,191 @@ fn tree_transform_rejects_mismatched_multi_tree_element_count() {
             actual: 4,
         }
     );
+}
+
+#[derive(Debug, Default)]
+struct RecordingKernelAdapter {
+    add_calls: usize,
+    axpby_calls: usize,
+    copy_scale_calls: usize,
+    recoupling_calls: usize,
+}
+
+impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
+    fn add_strided(
+        &mut self,
+        zero_strides: &mut Vec<isize>,
+        dst_data: &mut [f64],
+        src_data: &[f64],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: f64,
+        beta: f64,
+    ) -> Result<(), OperationError> {
+        self.add_calls += 1;
+        crate::StridedHostKernelAdapter.add_strided(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            alpha,
+            beta,
+        )
+    }
+
+    fn axpby_strided(
+        &mut self,
+        dst_data: &mut [f64],
+        src_data: &[f64],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        alpha: f64,
+        beta: f64,
+    ) -> Result<(), OperationError> {
+        self.axpby_calls += 1;
+        crate::StridedHostKernelAdapter.axpby_strided(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            alpha,
+            beta,
+        )
+    }
+
+    fn copy_scale_strided(
+        &mut self,
+        dst_data: &mut [f64],
+        src_data: &[f64],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: f64,
+    ) -> Result<(), OperationError> {
+        self.copy_scale_calls += 1;
+        crate::StridedHostKernelAdapter.copy_scale_strided(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            alpha,
+        )
+    }
+
+    fn recoupling_src_times_u_transpose<C>(
+        &mut self,
+        destination: &mut [f64],
+        source: &[f64],
+        coefficients_src_by_dst: &[C],
+        coefficient_start: usize,
+        element_count: usize,
+        src_count: usize,
+        dst_count: usize,
+    ) -> Result<(), OperationError>
+    where
+        C: Copy,
+        f64: RecouplingCoefficientAction<C>,
+    {
+        self.recoupling_calls += 1;
+        crate::StridedHostKernelAdapter.recoupling_src_times_u_transpose(
+            destination,
+            source,
+            coefficients_src_by_dst,
+            coefficient_start,
+            element_count,
+            src_count,
+            dst_count,
+        )
+    }
+}
+
+#[test]
+fn tree_transform_replay_dispatches_through_kernel_adapter() {
+    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
+    let key10 = BlockKey::sector_ids([10]);
+    let key20 = BlockKey::sector_ids([20]);
+    let key100 = BlockKey::sector_ids([100]);
+    let key200 = BlockKey::sector_ids([200]);
+    let key300 = BlockKey::sector_ids([300]);
+    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [
+            (key100.clone(), vec![2, 1]),
+            (key300.clone(), vec![2, 1]),
+            (key200.clone(), vec![2, 1]),
+        ],
+    )
+    .unwrap();
+    let dst_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
+    )
+    .unwrap();
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        src_space,
+        src_structure,
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 4], dst_space, dst_structure)
+            .unwrap();
+    let structure = TreeTransformStructure::compile_grouped(
+        &dst,
+        &src,
+        &[TreeTransformGroupBlockSpec::multi(
+            group_key,
+            [key10, key20],
+            [key100, key200, key300],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+        )],
+    )
+    .unwrap();
+    let dst_block_structure = std::sync::Arc::clone(dst.structure());
+    let src_block_structure = std::sync::Arc::clone(src.structure());
+    let mut workspace = crate::TreeTransformWorkspace::<f64>::default();
+    let mut adapter = RecordingKernelAdapter::default();
+
+    crate::host_kernels::tree_transform_structure_with_strided_kernel_raw(
+        &mut adapter,
+        &mut workspace,
+        &structure,
+        &dst_block_structure,
+        &src_block_structure,
+        dst.data_mut(),
+        src.data(),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[7020.0, 9240.0, 3510.0, 4620.0]);
+    assert_eq!(adapter.copy_scale_calls, 3);
+    assert_eq!(adapter.recoupling_calls, 1);
+    assert_eq!(adapter.axpby_calls, 2);
+    assert_eq!(adapter.add_calls, 0);
 }

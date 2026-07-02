@@ -4,7 +4,7 @@ use num_traits::{One, Zero};
 use tenet_core::{BlockView, BlockViewMut};
 
 use crate::strided::{error as strided_error, read as strided_read, write as strided_write};
-use crate::{ConjugateValue, OperationError, TreeTransformReplayProfile};
+use crate::{ConjugateValue, OperationError};
 
 /// Host scalar strided kernel boundary.
 ///
@@ -125,66 +125,6 @@ where
         alpha,
         beta,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensoradd_raw_strided_kernel_profiled<T>(
-    zero_strides: &mut Vec<isize>,
-    dst_data: &mut [T],
-    src_data: &[T],
-    shape: &[usize],
-    dst_strides: &[isize],
-    src_strides: &[isize],
-    dst_offset: isize,
-    src_offset: isize,
-    source_conjugate: bool,
-    alpha: T,
-    beta: T,
-    profile: &mut TreeTransformReplayProfile,
-) -> Result<(), OperationError>
-where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
-{
-    if source_conjugate {
-        let start = std::time::Instant::now();
-        let result = tensoradd_raw_strided_conjugating_kernel_trusted(
-            zero_strides,
-            dst_data,
-            src_data,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_offset,
-            src_offset,
-            alpha,
-            beta,
-        );
-        profile.strided_kernel += start.elapsed();
-        return result;
-    }
-
-    let start = std::time::Instant::now();
-    let result = axpby_raw_strided_kernel_trusted(
-        dst_data,
-        src_data,
-        shape,
-        dst_strides,
-        src_strides,
-        dst_offset,
-        src_offset,
-        alpha,
-        beta,
-    );
-    profile.strided_kernel += start.elapsed();
-    zero_strides.clear();
-    result
 }
 
 #[allow(clippy::too_many_arguments)]

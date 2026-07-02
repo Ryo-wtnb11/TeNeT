@@ -217,6 +217,7 @@ where
             .cache
             .get_or_compile_tree_pair(rule, operation, dst, src)?;
         tree_transform_structure_with_storage_workspace_strided_kernel(
+            &mut crate::StridedHostKernelAdapter,
             storage_workspace,
             &structure,
             dst,

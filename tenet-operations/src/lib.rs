@@ -15,6 +15,7 @@ mod facade;
 mod host_kernels;
 mod host_scalar_kernels;
 mod host_scratch;
+mod kernel_adapter;
 mod lowering;
 mod placement;
 mod scalar;
@@ -89,9 +90,10 @@ pub(crate) use host_scalar_kernels::{
     axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
     copy_scale_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
     scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
-    tensoradd_raw_strided_kernel_profiled, tensoradd_raw_strided_kernel_trusted,
-    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
+    tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
+    tensortrace_raw_strided_kernel_add_with_coefficient,
 };
+pub(crate) use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,

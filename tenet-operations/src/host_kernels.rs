@@ -13,11 +13,10 @@ use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratch
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
-    axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
-    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_profiled,
-    tensoradd_raw_strided_kernel_trusted, ConjugateValue, DenseRecouplingScalar, HostAllocator,
-    OperationError, RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure,
-    TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
+    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, ConjugateValue,
+    DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
+    RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TreeTransformBlock,
+    TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
 
@@ -142,6 +141,7 @@ where
 }
 
 pub(crate) fn tree_transform_structure_with_strided_kernel<
+    A,
     D,
     C,
     const DST_NOUT: usize,
@@ -153,6 +153,7 @@ pub(crate) fn tree_transform_structure_with_strided_kernel<
     DDst,
     DSrc,
 >(
+    kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
@@ -161,6 +162,7 @@ pub(crate) fn tree_transform_structure_with_strided_kernel<
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     D: Copy
         + Add<D, Output = D>
         + Mul<D, Output = D>
@@ -177,6 +179,7 @@ where
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
     tree_transform_structure_with_strided_kernel_raw(
+        kernels,
         workspace,
         structure,
         &dst_structure,
@@ -189,6 +192,7 @@ where
 }
 
 pub(crate) fn tree_transform_structure_with_storage_workspace_strided_kernel<
+    A,
     D,
     C,
     const DST_NOUT: usize,
@@ -200,6 +204,7 @@ pub(crate) fn tree_transform_structure_with_storage_workspace_strided_kernel<
     DDst,
     DSrc,
 >(
+    kernels: &mut A,
     workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
     structure: &TreeTransformStructure<C>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
@@ -208,6 +213,7 @@ pub(crate) fn tree_transform_structure_with_storage_workspace_strided_kernel<
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     D: Copy
         + Add<D, Output = D>
         + Mul<D, Output = D>
@@ -237,6 +243,7 @@ where
                 src_layout,
                 coefficient,
             } => tree_transform_single_with_strided_kernel(
+                kernels,
                 workspace.zero_strides_mut(),
                 &structure.layouts,
                 structure.layouts.entry(dst_layout),
@@ -271,6 +278,7 @@ where
                 );
                 let (zero_strides, scratch) = workspace.replay_parts_mut();
                 tree_transform_multi_with_scratch_buffers(
+                    kernels,
                     zero_strides,
                     scratch,
                     &structure.layouts,
@@ -294,7 +302,8 @@ where
 }
 
 /// Replays a prepared tree-transform structure on host slices.
-pub(crate) fn tree_transform_structure_with_strided_kernel_raw<D, C>(
+pub(crate) fn tree_transform_structure_with_strided_kernel_raw<A, D, C>(
+    kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
     dst_structure: &Arc<BlockStructure>,
@@ -305,6 +314,7 @@ pub(crate) fn tree_transform_structure_with_strided_kernel_raw<D, C>(
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     D: Copy
         + Add<D, Output = D>
         + Mul<D, Output = D>
@@ -326,6 +336,7 @@ where
                 src_layout,
                 coefficient,
             } => tree_transform_single_with_strided_kernel(
+                kernels,
                 &mut workspace.zero_strides,
                 &structure.layouts,
                 structure.layouts.entry(dst_layout),
@@ -345,6 +356,7 @@ where
                 coefficient_start,
                 element_count,
             } => tree_transform_multi_with_pack_gemm_scatter(
+                kernels,
                 workspace,
                 &structure.layouts,
                 dst_layout_start,
@@ -366,6 +378,7 @@ where
 }
 
 pub(crate) fn tree_transform_structure_with_structural_recoupling<
+    A,
     E,
     D,
     C,
@@ -378,6 +391,7 @@ pub(crate) fn tree_transform_structure_with_structural_recoupling<
     DDst,
     DSrc,
 >(
+    kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -387,6 +401,7 @@ pub(crate) fn tree_transform_structure_with_structural_recoupling<
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
@@ -396,6 +411,7 @@ where
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
     tree_transform_structure_with_structural_recoupling_raw(
+        kernels,
         dense,
         workspace,
         structure,
@@ -409,7 +425,8 @@ where
 }
 
 /// Replays a prepared structural-recoupling tree transform on host slices.
-pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<E, D, C>(
+pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
+    kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -421,6 +438,7 @@ pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<E, D, C>(
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
@@ -435,6 +453,7 @@ where
                 src_layout,
                 coefficient,
             } => tree_transform_single_with_strided_kernel(
+                kernels,
                 &mut workspace.zero_strides,
                 &structure.layouts,
                 structure.layouts.entry(dst_layout),
@@ -454,6 +473,7 @@ where
                 coefficient_start,
                 element_count,
             } => tree_transform_multi_with_structural_recoupling(
+                kernels,
                 dense,
                 workspace,
                 &structure.layouts,
@@ -476,7 +496,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tree_transform_structure_with_structural_recoupling_raw_profiled<E, D, C>(
+pub(crate) fn tree_transform_structure_with_structural_recoupling_raw_profiled<A, E, D, C>(
+    kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -489,6 +510,7 @@ pub(crate) fn tree_transform_structure_with_structural_recoupling_raw_profiled<E
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
@@ -511,6 +533,7 @@ where
                 profile.single_blocks += 1;
                 let start = std::time::Instant::now();
                 tree_transform_single_with_strided_kernel_profiled(
+                    kernels,
                     &mut workspace.zero_strides,
                     &structure.layouts,
                     structure.layouts.entry(dst_layout),
@@ -535,6 +558,7 @@ where
             } => {
                 profile.multi_blocks += 1;
                 tree_transform_multi_with_structural_recoupling_profiled(
+                    kernels,
                     dense,
                     workspace,
                     &structure.layouts,
@@ -658,7 +682,9 @@ fn validate_replay_storage_len(
     Ok(())
 }
 
-fn tree_transform_single_with_strided_kernel<D, C>(
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_single_with_strided_kernel<A, D, C>(
+    kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
     dst_layout: &TreeTransformLayout,
@@ -671,20 +697,13 @@ fn tree_transform_single_with_strided_kernel<D, C>(
     beta: D,
 ) -> Result<(), OperationError>
 where
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync
-        + RecouplingCoefficientAction<C>,
+    A: HostKernelAdapter<D>,
+    D: Copy + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     let shape = layouts.shape(dst_layout);
     let scale = alpha.scale_by_coefficient(coefficient);
-    tensoradd_raw_strided_kernel_trusted(
+    kernels.add_strided(
         zero_strides,
         dst_data,
         src_data,
@@ -700,7 +719,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_single_with_strided_kernel_profiled<D, C>(
+fn tree_transform_single_with_strided_kernel_profiled<A, D, C>(
+    kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
     dst_layout: &TreeTransformLayout,
@@ -714,20 +734,14 @@ fn tree_transform_single_with_strided_kernel_profiled<D, C>(
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
 where
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync
-        + RecouplingCoefficientAction<C>,
+    A: HostKernelAdapter<D>,
+    D: Copy + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     let shape = layouts.shape(dst_layout);
     let scale = alpha.scale_by_coefficient(coefficient);
-    tensoradd_raw_strided_kernel_profiled(
+    let start = std::time::Instant::now();
+    let result = kernels.add_strided(
         zero_strides,
         dst_data,
         src_data,
@@ -739,12 +753,14 @@ where
         source_conjugate,
         scale,
         beta,
-        profile,
-    )
+    );
+    profile.strided_kernel += start.elapsed();
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_pack_gemm_scatter<D, C>(
+fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
+    kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
@@ -761,15 +777,8 @@ fn tree_transform_multi_with_pack_gemm_scatter<D, C>(
     beta: D,
 ) -> Result<(), OperationError>
 where
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync
-        + RecouplingCoefficientAction<C>,
+    A: HostKernelAdapter<D>,
+    D: Copy + Zero + One + RecouplingCoefficientAction<C>,
     C: Copy,
 {
     let source_len = element_count
@@ -780,6 +789,7 @@ where
         .ok_or(OperationError::ElementCountOverflow)?;
     workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
     tree_transform_multi_with_scratch_buffers(
+        kernels,
         &mut workspace.zero_strides,
         &mut workspace.packed,
         layouts,
@@ -799,7 +809,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_scratch_buffers<D, C, SourceScratch, DestinationScratch>(
+fn tree_transform_multi_with_scratch_buffers<A, D, C, SourceScratch, DestinationScratch>(
+    kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     scratch: &mut TreeTransformScratchBuffers<SourceScratch, DestinationScratch>,
     layouts: &TreeTransformLayoutTable,
@@ -817,15 +828,8 @@ fn tree_transform_multi_with_scratch_buffers<D, C, SourceScratch, DestinationScr
     beta: D,
 ) -> Result<(), OperationError>
 where
-    D: Copy
-        + Add<D, Output = D>
-        + Mul<D, Output = D>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync
-        + RecouplingCoefficientAction<C>,
+    A: HostKernelAdapter<D>,
+    D: Copy + One + RecouplingCoefficientAction<C>,
     C: Copy,
     SourceScratch: HostWritableStorage<D>,
     DestinationScratch: HostWritableStorage<D>,
@@ -833,6 +837,7 @@ where
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
         pack_layout_into_column(
+            kernels,
             layouts,
             layout,
             src_data,
@@ -844,7 +849,7 @@ where
 
     {
         let (source, destination) = scratch.source_and_destination_mut();
-        apply_recoupling_matrix_src_times_u_transpose(
+        kernels.recoupling_src_times_u_transpose(
             destination.as_mut_slice(),
             source.as_slice(),
             coefficients_src_by_dst,
@@ -858,6 +863,7 @@ where
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
         scatter_column_into_layout(
+            kernels,
             zero_strides,
             layouts,
             layout,
@@ -872,7 +878,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_structural_recoupling<E, D, C>(
+fn tree_transform_multi_with_structural_recoupling<A, E, D, C>(
+    kernels: &mut A,
     _dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
@@ -890,6 +897,7 @@ fn tree_transform_multi_with_structural_recoupling<E, D, C>(
     beta: D,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
@@ -905,6 +913,7 @@ where
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
         pack_layout_into_column(
+            kernels,
             layouts,
             layout,
             src_data,
@@ -916,7 +925,7 @@ where
 
     {
         let (source, destination) = workspace.packed.source_and_destination_mut();
-        apply_recoupling_matrix_src_times_u_transpose(
+        kernels.recoupling_src_times_u_transpose(
             destination.as_mut_slice(),
             source.as_slice(),
             coefficients_src_by_dst,
@@ -930,6 +939,7 @@ where
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
         scatter_column_into_layout(
+            kernels,
             &mut workspace.zero_strides,
             layouts,
             layout,
@@ -944,7 +954,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_structural_recoupling_profiled<E, D, C>(
+fn tree_transform_multi_with_structural_recoupling_profiled<A, E, D, C>(
+    kernels: &mut A,
     _dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
@@ -963,6 +974,7 @@ fn tree_transform_multi_with_structural_recoupling_profiled<E, D, C>(
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
 where
+    A: HostKernelAdapter<D>,
     E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
@@ -982,6 +994,7 @@ where
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
         pack_layout_into_column_profiled(
+            kernels,
             layouts,
             layout,
             src_data,
@@ -997,7 +1010,7 @@ where
     let start = std::time::Instant::now();
     {
         let (source, destination) = workspace.packed.source_and_destination_mut();
-        apply_recoupling_matrix_src_times_u_transpose(
+        kernels.recoupling_src_times_u_transpose(
             destination.as_mut_slice(),
             source.as_slice(),
             coefficients_src_by_dst,
@@ -1015,6 +1028,7 @@ where
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
         scatter_column_into_layout_profiled(
+            kernels,
             &mut workspace.zero_strides,
             layouts,
             layout,
@@ -1031,72 +1045,8 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_recoupling_matrix_src_times_u_transpose<D, C>(
-    destination: &mut [D],
-    source: &[D],
-    coefficients_src_by_dst: &[C],
-    coefficient_start: usize,
-    element_count: usize,
-    src_count: usize,
-    dst_count: usize,
-) -> Result<(), OperationError>
-where
-    D: Copy + Add<D, Output = D> + Zero + RecouplingCoefficientAction<C>,
-    C: Copy,
-{
-    let source_len = element_count
-        .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination_len = element_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_count = src_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-
-    if source.len() != source_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: source_len,
-            actual: source.len(),
-        });
-    }
-    if destination.len() != destination_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: destination_len,
-            actual: destination.len(),
-        });
-    }
-    if coefficients_src_by_dst.len() < coefficient_end {
-        return Err(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
-            actual: coefficients_src_by_dst.len(),
-        });
-    }
-
-    // TensorKit's dense-vector GenericTreeTransformer uses `U[dst, src]` and
-    // computes `buffer_dst = buffer_src * transpose(U)` after packing source
-    // trees as columns. Keep this as the backend-replaceable boundary.
-    for dst_index in 0..dst_count {
-        let dst_column_start = dst_index * element_count;
-        let coefficient_row_start = coefficient_start + dst_index * src_count;
-        for element in 0..element_count {
-            let mut sum = D::zero();
-            for src_index in 0..src_count {
-                let coeff = coefficients_src_by_dst[coefficient_row_start + src_index];
-                let src_value = source[element + src_index * element_count];
-                sum = sum + src_value.scale_by_coefficient(coeff);
-            }
-            destination[dst_column_start + element] = sum;
-        }
-    }
-    Ok(())
-}
-
-fn pack_layout_into_column<T>(
+fn pack_layout_into_column<A, T>(
+    kernels: &mut A,
     layouts: &TreeTransformLayoutTable,
     layout: &TreeTransformLayout,
     src_data: &[T],
@@ -1105,16 +1055,12 @@ fn pack_layout_into_column<T>(
     source_conjugate: bool,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy + One,
 {
     let shape = layouts.shape(layout);
     let packed_offset = offset_to_isize(packed_offset)?;
-    copy_scale_raw_strided_kernel_with_conjugate_trusted(
+    kernels.copy_scale_strided(
         packed,
         src_data,
         shape,
@@ -1127,7 +1073,9 @@ where
     )
 }
 
-fn pack_layout_into_column_profiled<T>(
+#[allow(clippy::too_many_arguments)]
+fn pack_layout_into_column_profiled<A, T>(
+    kernels: &mut A,
     layouts: &TreeTransformLayoutTable,
     layout: &TreeTransformLayout,
     src_data: &[T],
@@ -1137,17 +1085,13 @@ fn pack_layout_into_column_profiled<T>(
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy + One,
 {
     let shape = layouts.shape(layout);
     let start = std::time::Instant::now();
     let packed_offset = offset_to_isize(packed_offset)?;
-    let result = copy_scale_raw_strided_kernel_with_conjugate_trusted(
+    let result = kernels.copy_scale_strided(
         packed,
         src_data,
         shape,
@@ -1162,7 +1106,9 @@ where
     result
 }
 
-fn scatter_column_into_layout<T>(
+#[allow(clippy::too_many_arguments)]
+fn scatter_column_into_layout<A, T>(
+    kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
     layout: &TreeTransformLayout,
@@ -1173,18 +1119,12 @@ fn scatter_column_into_layout<T>(
     beta: T,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy,
 {
     let shape = layouts.shape(layout);
     zero_strides.clear();
-    axpby_raw_strided_kernel_trusted(
+    kernels.axpby_strided(
         dst_data,
         packed,
         shape,
@@ -1198,7 +1138,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scatter_column_into_layout_profiled<T>(
+fn scatter_column_into_layout_profiled<A, T>(
+    kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
     layout: &TreeTransformLayout,
@@ -1210,19 +1151,13 @@ fn scatter_column_into_layout_profiled<T>(
     profile: &mut TreeTransformReplayProfile,
 ) -> Result<(), OperationError>
 where
-    T: Copy
-        + Add<T, Output = T>
-        + Mul<T, Output = T>
-        + PartialEq
-        + Zero
-        + One
-        + ConjugateValue
-        + strided_kernel::MaybeSendSync,
+    A: HostKernelAdapter<T>,
+    T: Copy,
 {
     let shape = layouts.shape(layout);
     let start = std::time::Instant::now();
     let packed_offset = offset_to_isize(packed_offset)?;
-    let result = axpby_raw_strided_kernel_trusted(
+    let result = kernels.axpby_strided(
         dst_data,
         packed,
         shape,
