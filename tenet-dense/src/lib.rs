@@ -594,13 +594,21 @@ mod tenferro_adapter {
         let rhs_offset = offset_to_isize(rhs.offset())?;
         let output_offset = offset_to_isize(output.offset())?;
 
-        let lhs_view =
-            strided_einsum2::StridedView::new(lhs.data(), &lhs_shape, &lhs_strides, lhs_offset)
-                .map_err(strided_error)?;
-        let rhs_view =
-            strided_einsum2::StridedView::new(rhs.data(), &rhs_shape, &rhs_strides, rhs_offset)
-                .map_err(strided_error)?;
-        let mut output_view = strided_einsum2::StridedViewMut::new(
+        let lhs_view = strided_einsum2::bgemm_faer::RawStridedRef::new(
+            lhs.data(),
+            &lhs_shape,
+            &lhs_strides,
+            lhs_offset,
+        )
+        .map_err(strided_error)?;
+        let rhs_view = strided_einsum2::bgemm_faer::RawStridedRef::new(
+            rhs.data(),
+            &rhs_shape,
+            &rhs_strides,
+            rhs_offset,
+        )
+        .map_err(strided_error)?;
+        let output_view = strided_einsum2::bgemm_faer::RawStridedMut::new(
             output.data_mut(),
             &output_shape,
             &output_strides,
@@ -610,10 +618,10 @@ mod tenferro_adapter {
         // This is the dense backend's rank-2 `mul!` equivalent.  The public
         // dot-general path rebuilds an einsum plan every call; canonical
         // fusion-block contraction has already compiled the rank-2 layout.
-        strided_einsum2::bgemm_faer::bgemm_strided_into(
-            &mut output_view,
-            &lhs_view,
-            &rhs_view,
+        strided_einsum2::bgemm_faer::bgemm_raw_strided_into(
+            output_view,
+            lhs_view,
+            rhs_view,
             0,
             1,
             1,
