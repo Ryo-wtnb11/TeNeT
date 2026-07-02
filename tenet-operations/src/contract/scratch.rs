@@ -1,6 +1,6 @@
 use num_traits::Zero;
 use std::sync::Arc;
-use tenet_core::Placement;
+use tenet_core::{Placement, SimilarStorage};
 
 use crate::{host_scratch::HostScratchBuffer, OperationError, ReportsPlacement};
 
@@ -150,6 +150,177 @@ impl<T> ReportsPlacement for HostDynamicFusionScratchWorkspace<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
+    }
+}
+
+/// Storage-origin scratch tensor for dynamic fusion-space lowering.
+///
+/// The buffer type is the `SimilarStorage::Similar` of the storage the scratch
+/// was allocated from, so the allocation origin (and therefore placement) is
+/// carried in the type instead of being fixed to a host buffer.
+#[derive(Clone, Debug)]
+pub(crate) struct StorageDynamicFusionScratch<Buf> {
+    space: Arc<DynamicFusionMapSpace>,
+    data: Buf,
+}
+
+impl<Buf> StorageDynamicFusionScratch<Buf> {
+    pub(crate) fn from_storage<T, S>(
+        space: Arc<DynamicFusionMapSpace>,
+        storage: &S,
+        zero: T,
+    ) -> Result<Self, OperationError>
+    where
+        T: Clone,
+        S: SimilarStorage<T, Similar = Buf>,
+    {
+        let len = space.required_len()?;
+        Ok(Self {
+            space,
+            data: storage.similar_filled(len, zero),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn space(&self) -> &DynamicFusionMapSpace {
+        self.space.as_ref()
+    }
+
+    #[inline]
+    pub(crate) fn buffer(&self) -> &Buf {
+        &self.data
+    }
+
+    #[inline]
+    pub(crate) fn buffer_mut(&mut self) -> &mut Buf {
+        &mut self.data
+    }
+}
+
+/// Storage-origin scratch workspace for dynamic fusion-space lowering.
+///
+/// Each slot is allocated from the storage of the operand it lowers: LHS
+/// canonical scratch from LHS storage, RHS canonical scratch from RHS storage,
+/// and canonical destination scratch from destination storage. The dynamic
+/// fusion-space cache stays placement-neutral; these buffers are execution-time
+/// allocations.
+#[derive(Clone, Debug)]
+pub(crate) struct StorageDynamicFusionScratchWorkspace<LhsScratch, RhsScratch, DstScratch> {
+    lhs: Option<StorageDynamicFusionScratch<LhsScratch>>,
+    rhs: Option<StorageDynamicFusionScratch<RhsScratch>>,
+    dst: Option<StorageDynamicFusionScratch<DstScratch>>,
+}
+
+impl<LhsScratch, RhsScratch, DstScratch> Default
+    for StorageDynamicFusionScratchWorkspace<LhsScratch, RhsScratch, DstScratch>
+{
+    fn default() -> Self {
+        Self {
+            lhs: None,
+            rhs: None,
+            dst: None,
+        }
+    }
+}
+
+impl<LhsScratch, RhsScratch, DstScratch>
+    StorageDynamicFusionScratchWorkspace<LhsScratch, RhsScratch, DstScratch>
+{
+    pub(crate) fn prepare_lhs_from_storage<T, S>(
+        &mut self,
+        space: Arc<DynamicFusionMapSpace>,
+        storage: &S,
+        zero: T,
+    ) -> Result<&mut StorageDynamicFusionScratch<LhsScratch>, OperationError>
+    where
+        T: Clone,
+        S: SimilarStorage<T, Similar = LhsScratch>,
+    {
+        self.lhs = Some(StorageDynamicFusionScratch::from_storage(
+            space, storage, zero,
+        )?);
+        Ok(self
+            .lhs
+            .as_mut()
+            .expect("lhs storage dynamic scratch prepared before return"))
+    }
+
+    pub(crate) fn prepare_rhs_from_storage<T, S>(
+        &mut self,
+        space: Arc<DynamicFusionMapSpace>,
+        storage: &S,
+        zero: T,
+    ) -> Result<&mut StorageDynamicFusionScratch<RhsScratch>, OperationError>
+    where
+        T: Clone,
+        S: SimilarStorage<T, Similar = RhsScratch>,
+    {
+        self.rhs = Some(StorageDynamicFusionScratch::from_storage(
+            space, storage, zero,
+        )?);
+        Ok(self
+            .rhs
+            .as_mut()
+            .expect("rhs storage dynamic scratch prepared before return"))
+    }
+
+    pub(crate) fn prepare_dst_from_storage<T, S>(
+        &mut self,
+        space: Arc<DynamicFusionMapSpace>,
+        storage: &S,
+        zero: T,
+    ) -> Result<&mut StorageDynamicFusionScratch<DstScratch>, OperationError>
+    where
+        T: Clone,
+        S: SimilarStorage<T, Similar = DstScratch>,
+    {
+        self.dst = Some(StorageDynamicFusionScratch::from_storage(
+            space, storage, zero,
+        )?);
+        Ok(self
+            .dst
+            .as_mut()
+            .expect("dst storage dynamic scratch prepared before return"))
+    }
+
+    pub(crate) fn dst(&self) -> &StorageDynamicFusionScratch<DstScratch> {
+        self.dst
+            .as_ref()
+            .expect("dst storage dynamic scratch prepared before replay")
+    }
+
+    pub(crate) fn lhs_rhs(
+        &self,
+    ) -> (
+        &StorageDynamicFusionScratch<LhsScratch>,
+        &StorageDynamicFusionScratch<RhsScratch>,
+    ) {
+        (
+            self.lhs
+                .as_ref()
+                .expect("lhs storage dynamic scratch prepared before replay"),
+            self.rhs
+                .as_ref()
+                .expect("rhs storage dynamic scratch prepared before replay"),
+        )
+    }
+
+    pub(crate) fn lhs_rhs_dst_mut(
+        &mut self,
+    ) -> (
+        &StorageDynamicFusionScratch<LhsScratch>,
+        &StorageDynamicFusionScratch<RhsScratch>,
+        &mut StorageDynamicFusionScratch<DstScratch>,
+    ) {
+        let Self { lhs, rhs, dst } = self;
+        (
+            lhs.as_ref()
+                .expect("lhs storage dynamic scratch prepared before replay"),
+            rhs.as_ref()
+                .expect("rhs storage dynamic scratch prepared before replay"),
+            dst.as_mut()
+                .expect("dst storage dynamic scratch prepared before replay"),
+        )
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionTreeHomSpace, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
+    MultiplicityFreeRigidSymbols, SimilarStorage, TensorMap, TensorStorage,
 };
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -26,7 +26,10 @@ use super::fusion_block::{
     CanonicalFusionBlockContractWorkspace,
 };
 use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
-use super::scratch::{DynamicFusionScratch, DynamicFusionScratchWorkspace};
+use super::scratch::{
+    DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratchWorkspace,
+};
+use crate::storage_scratch::StorageFusionBlockContractWorkspace;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
@@ -549,6 +552,195 @@ where
         &canonical_dst_structure,
         dst.data_mut(),
         scratch.dst().data(),
+        D::one(),
+        beta,
+    )
+}
+
+/// Storage-aware dynamic canonical route.
+///
+/// Scratch allocation origins are explicit: the LHS canonical scratch comes
+/// from LHS storage, the RHS canonical scratch from RHS storage, and the
+/// canonical destination scratch from destination storage. Structure caches
+/// (`DynamicFusionSpaceCache`, fusion-block plans, tree-transform structures)
+/// stay placement-neutral. Replay still runs on host slices; this boundary does
+/// not imply device execution.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
+    RuleKey,
+    BT,
+    BC,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+    SDst,
+    SLhs,
+    SRhs,
+    DDst,
+    DLhs,
+    DRhs,
+>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_workspace: &mut StorageFusionBlockContractWorkspace<
+        DLhs::Similar,
+        DRhs::Similar,
+        DDst::Similar,
+    >,
+    scratch: &mut StorageDynamicFusionScratchWorkspace<DLhs::Similar, DRhs::Similar, DDst::Similar>,
+    rule: &R,
+    plan: &TensorContractFusionExplicitPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    RuleKey: Clone + Eq + std::hash::Hash,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D> + SimilarStorage<D>,
+    DLhs::Similar: HostWritableStorage<D>,
+    DRhs: HostReadableStorage<D> + SimilarStorage<D>,
+    DRhs::Similar: HostWritableStorage<D>,
+{
+    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
+        rule,
+        lhs,
+        plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
+    )?;
+    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
+        rule,
+        rhs,
+        plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
+    )?;
+    let lhs_space = lhs_transform.space.clone();
+    let rhs_space = rhs_transform.space.clone();
+
+    {
+        let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
+        let lhs_scratch =
+            scratch.prepare_lhs_from_storage(lhs_space.clone(), lhs.storage(), D::zero())?;
+        tree_context.tree_pair_transform_structure_into_raw(
+            lhs_transform.transform_structure.as_ref(),
+            &lhs_dst_structure,
+            &lhs_transform.replay_structure,
+            lhs_scratch.buffer_mut().as_mut_slice(),
+            lhs.data(),
+            D::one(),
+            D::zero(),
+        )?;
+    }
+    {
+        let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
+        let rhs_scratch =
+            scratch.prepare_rhs_from_storage(rhs_space.clone(), rhs.storage(), D::zero())?;
+        tree_context.tree_pair_transform_structure_into_raw(
+            rhs_transform.transform_structure.as_ref(),
+            &rhs_dst_structure,
+            &rhs_transform.replay_structure,
+            rhs_scratch.buffer_mut().as_mut_slice(),
+            rhs.data(),
+            D::one(),
+            D::zero(),
+        )?;
+    }
+
+    if plan.output_transform_is_identity() {
+        let dst_space = DynamicFusionMapSpace::from_typed(
+            dst.fusion_space()
+                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+        );
+        let block_plan = fusion_block_cache.get_or_compile(
+            rule,
+            &dst_space,
+            &lhs_space,
+            &rhs_space,
+            plan.canonical_axes().as_spec(),
+        )?;
+        let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
+        return block_plan.execute_storage_raw_sources(
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            lhs.storage(),
+            rhs.storage(),
+            dst,
+            lhs_canonical.space().structure(),
+            lhs_canonical.buffer().as_slice(),
+            rhs_canonical.space().structure(),
+            rhs_canonical.buffer().as_slice(),
+            alpha,
+            beta,
+        );
+    }
+
+    let output_dst_space = DynamicFusionMapSpace::from_typed(
+        dst.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let canonical_dst = dynamic_space_cache.get_or_compile_canonical_dst(
+        tree_context,
+        rule,
+        &lhs_space,
+        &rhs_space,
+        plan,
+        &output_dst_space,
+    )?;
+    let canonical_dst_space = canonical_dst.space.clone();
+    let block_plan = fusion_block_cache.get_or_compile(
+        rule,
+        &canonical_dst_space,
+        &lhs_space,
+        &rhs_space,
+        plan.canonical_axes().as_spec(),
+    )?;
+    let canonical_dst_structure = std::sync::Arc::clone(canonical_dst_space.structure());
+    scratch.prepare_dst_from_storage(canonical_dst_space.clone(), dst.storage(), D::zero())?;
+    {
+        let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
+        block_plan.execute_storage_raw(
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            lhs.storage(),
+            rhs.storage(),
+            dst.storage(),
+            &canonical_dst_structure,
+            canonical_dst.buffer_mut().as_mut_slice(),
+            lhs_canonical.space().structure(),
+            lhs_canonical.buffer().as_slice(),
+            rhs_canonical.space().structure(),
+            rhs_canonical.buffer().as_slice(),
+            alpha,
+            D::zero(),
+        )?;
+    }
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    tree_context.tree_pair_transform_structure_into_raw(
+        canonical_dst.output_transform_structure.as_ref(),
+        &dst_structure,
+        &canonical_dst_structure,
+        dst.data_mut(),
+        scratch.dst().buffer().as_slice(),
         D::one(),
         beta,
     )
@@ -1700,4 +1892,447 @@ where
         alpha,
         beta,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use tenet_core::{
+        BlockKey, FusionProductSpace, FusionTensorMapSpace, Placement, SU2FusionRule, SectorId,
+        SectorLeg, TensorMapSpace, Trivial, Z2FusionRule,
+    };
+
+    use crate::axis::AxisPermutation;
+    use crate::storage_scratch::StorageFusionBlockContractWorkspace;
+    use crate::tree_context::TreeTransformExecutionContext;
+    use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
+
+    use super::super::fusion_block::CanonicalFusionBlockContractWorkspace;
+    use super::super::scratch::StorageDynamicFusionScratchWorkspace;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ScratchAllocation {
+        label: &'static str,
+        len: usize,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TrackingStorage<T> {
+        data: Vec<T>,
+        label: &'static str,
+        allocations: Rc<RefCell<Vec<ScratchAllocation>>>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TrackingScratch<T> {
+        data: Vec<T>,
+    }
+
+    impl<T> TrackingStorage<T> {
+        fn new(
+            data: Vec<T>,
+            label: &'static str,
+            allocations: Rc<RefCell<Vec<ScratchAllocation>>>,
+        ) -> Self {
+            Self {
+                data,
+                label,
+                allocations,
+            }
+        }
+    }
+
+    impl<T> TensorStorage<T> for TrackingStorage<T> {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl<T> tenet_core::HostReadableStorage<T> for TrackingStorage<T> {
+        fn as_slice(&self) -> &[T] {
+            &self.data
+        }
+    }
+
+    impl<T> tenet_core::HostWritableStorage<T> for TrackingStorage<T> {
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            &mut self.data
+        }
+    }
+
+    impl<T: Clone> SimilarStorage<T> for TrackingStorage<T> {
+        type Similar = TrackingScratch<T>;
+
+        fn similar_filled(&self, len: usize, value: T) -> Self::Similar
+        where
+            T: Clone,
+        {
+            self.allocations.borrow_mut().push(ScratchAllocation {
+                label: self.label,
+                len,
+            });
+            TrackingScratch {
+                data: vec![value; len],
+            }
+        }
+    }
+
+    impl<T> TensorStorage<T> for TrackingScratch<T> {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl<T> tenet_core::HostReadableStorage<T> for TrackingScratch<T> {
+        fn as_slice(&self) -> &[T] {
+            &self.data
+        }
+    }
+
+    impl<T> tenet_core::HostWritableStorage<T> for TrackingScratch<T> {
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            &mut self.data
+        }
+    }
+
+    #[test]
+    fn dynamic_storage_context_identity_output_allocates_scratch_from_operand_storages() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let fusion_space = || {
+            FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([leg()]),
+                    FusionProductSpace::new([leg()]),
+                ),
+                &rule,
+                [vec![1, 1], vec![1, 1]],
+            )
+            .unwrap()
+        };
+        let allocations = Rc::new(RefCell::new(Vec::new()));
+        let lhs =
+            TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![2.0, 3.0], "lhs", allocations.clone()),
+                fusion_space(),
+            )
+            .unwrap();
+        let rhs =
+            TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![5.0, 7.0], "rhs", allocations.clone()),
+                fusion_space(),
+            )
+            .unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![10.0, 20.0], "destination", allocations.clone()),
+                fusion_space(),
+            )
+            .unwrap();
+        let plan = tensorcontract_fusion_explicit_plan(
+            &rule,
+            dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+        assert!(plan.output_transform_is_identity());
+
+        let mut expected_dst =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], fusion_space())
+                .unwrap();
+        let expected_lhs =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0, 3.0], fusion_space())
+                .unwrap();
+        let expected_rhs =
+            TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0, 7.0], fusion_space())
+                .unwrap();
+        run_host_reference(
+            &rule,
+            &plan,
+            &mut expected_dst,
+            &expected_lhs,
+            &expected_rhs,
+            2.0,
+            3.0,
+        );
+
+        let mut tree_context =
+            TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+        let mut contract_backend = DenseTreeTransformOperations::default();
+        let mut contract_workspace = TensorContractWorkspace::default();
+        let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
+        let mut fusion_block_cache = CanonicalFusionBlockContractCache::default();
+        let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+        >::default();
+        let mut scratch = StorageDynamicFusionScratchWorkspace::<
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+        >::default();
+
+        tensorcontract_fusion_dynamic_plan_into_storage_context(
+            &mut tree_context,
+            &mut contract_backend,
+            &mut contract_workspace,
+            &mut dynamic_space_cache,
+            &mut fusion_block_cache,
+            &mut fusion_block_workspace,
+            &mut scratch,
+            &rule,
+            &plan,
+            &mut dst,
+            &lhs,
+            &rhs,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected_dst.data());
+        let allocations = allocations.borrow();
+        assert_eq!(
+            allocations[..2],
+            [
+                ScratchAllocation {
+                    label: "lhs",
+                    len: 2,
+                },
+                ScratchAllocation {
+                    label: "rhs",
+                    len: 2,
+                },
+            ]
+        );
+        let pack_allocations = &allocations[2..];
+        assert!(!pack_allocations.is_empty());
+        assert!(pack_allocations
+            .iter()
+            .all(|allocation| ["lhs", "rhs", "destination"].contains(&allocation.label)));
+        assert!(pack_allocations
+            .iter()
+            .any(|allocation| allocation.label == "destination"));
+    }
+
+    #[test]
+    fn dynamic_storage_context_output_transform_allocates_canonical_dst_from_destination_storage() {
+        let rule = SU2FusionRule;
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []);
+        let lhs_keys = lhs_hom.fusion_tree_keys(&rule);
+        assert_eq!(lhs_keys.len(), 2);
+        let src_tree = lhs_keys
+            .iter()
+            .find(|key| key.codomain_tree().innerlines() == [SectorId::new(0), SectorId::new(1)])
+            .expect("SU2 fixture should contain the reference source tree")
+            .clone();
+        let recoupled_tree = lhs_keys
+            .iter()
+            .find(|key| **key != src_tree)
+            .expect("SU2 fixture should contain the recoupled output tree")
+            .clone();
+        let lhs_space = || {
+            FusionTensorMapSpace::new(
+                TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+                lhs_hom.clone(),
+                BlockStructure::packed_column_major_with_keys(
+                    4,
+                    [(BlockKey::from(src_tree.clone()), vec![1, 1, 1, 1])],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let rhs_space = || {
+            FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+                FusionTreeHomSpace::from_sector_ids([], []),
+                &rule,
+                [vec![]],
+            )
+            .unwrap()
+        };
+        let dst_space = || {
+            FusionTensorMapSpace::new(
+                TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+                lhs_hom.clone(),
+                BlockStructure::packed_column_major_with_keys(
+                    4,
+                    [
+                        (BlockKey::from(src_tree.clone()), vec![1, 1, 1, 1]),
+                        (BlockKey::from(recoupled_tree.clone()), vec![1, 1, 1, 1]),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let allocations = Rc::new(RefCell::new(Vec::new()));
+        let lhs =
+            TensorMap::<f64, 4, 0, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![10.0], "lhs", allocations.clone()),
+                lhs_space(),
+            )
+            .unwrap();
+        let rhs =
+            TensorMap::<f64, 0, 0, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![5.0], "rhs", allocations.clone()),
+                rhs_space(),
+            )
+            .unwrap();
+        let mut dst =
+            TensorMap::<f64, 4, 0, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![1.0, 2.0], "destination", allocations.clone()),
+                dst_space(),
+            )
+            .unwrap();
+        let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3]));
+        let plan = tensorcontract_fusion_explicit_plan(
+            &rule,
+            dst.fusion_space().unwrap(),
+            lhs.fusion_space().unwrap(),
+            rhs.fusion_space().unwrap(),
+            axes,
+        )
+        .unwrap();
+        assert!(!plan.output_transform_is_identity());
+
+        let mut expected_dst =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space())
+                .unwrap();
+        let expected_lhs =
+            TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![10.0], lhs_space()).unwrap();
+        let expected_rhs =
+            TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![5.0], rhs_space()).unwrap();
+        run_host_reference(
+            &rule,
+            &plan,
+            &mut expected_dst,
+            &expected_lhs,
+            &expected_rhs,
+            2.0,
+            3.0,
+        );
+
+        let mut tree_context =
+            TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+        let mut contract_backend = DenseTreeTransformOperations::default();
+        let mut contract_workspace = TensorContractWorkspace::default();
+        let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
+        let mut fusion_block_cache = CanonicalFusionBlockContractCache::default();
+        let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+        >::default();
+        let mut scratch = StorageDynamicFusionScratchWorkspace::<
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+        >::default();
+
+        tensorcontract_fusion_dynamic_plan_into_storage_context(
+            &mut tree_context,
+            &mut contract_backend,
+            &mut contract_workspace,
+            &mut dynamic_space_cache,
+            &mut fusion_block_cache,
+            &mut fusion_block_workspace,
+            &mut scratch,
+            &rule,
+            &plan,
+            &mut dst,
+            &lhs,
+            &rhs,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), expected_dst.data());
+        let allocations = allocations.borrow();
+        assert_eq!(
+            allocations[..3],
+            [
+                ScratchAllocation {
+                    label: "lhs",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "rhs",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "destination",
+                    len: 1,
+                },
+            ]
+        );
+        let pack_allocations = &allocations[3..];
+        assert!(!pack_allocations.is_empty());
+        assert!(pack_allocations
+            .iter()
+            .all(|allocation| ["lhs", "rhs", "destination"].contains(&allocation.label)));
+    }
+
+    fn run_host_reference<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+    >(
+        rule: &R,
+        plan: &TensorContractFusionExplicitPlan,
+        dst: &mut TensorMap<f64, DST_NOUT, DST_NIN>,
+        lhs: &TensorMap<f64, LHS_NOUT, LHS_NIN>,
+        rhs: &TensorMap<f64, RHS_NOUT, RHS_NIN>,
+        alpha: f64,
+        beta: f64,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + TreeTransformRuleCacheKey<Key = crate::tree_transform::TreeTransformBuiltinRuleCacheKey>,
+    {
+        let mut tree_context =
+            TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+        let mut contract_backend = DenseTreeTransformOperations::default();
+        let mut contract_workspace = TensorContractWorkspace::default();
+        let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
+        let mut fusion_block_cache = CanonicalFusionBlockContractCache::default();
+        let mut fusion_block_workspace = CanonicalFusionBlockContractWorkspace::<f64>::default();
+        let mut scratch = DynamicFusionScratchWorkspace::<f64>::default();
+        tensorcontract_fusion_dynamic_plan_into_context(
+            &mut tree_context,
+            &mut contract_backend,
+            &mut contract_workspace,
+            &mut dynamic_space_cache,
+            &mut fusion_block_cache,
+            &mut fusion_block_workspace,
+            &mut scratch,
+            rule,
+            plan,
+            dst,
+            lhs,
+            rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+    }
 }

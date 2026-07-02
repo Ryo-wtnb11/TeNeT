@@ -706,6 +706,167 @@ impl CanonicalFusionBlockContractPlan {
         Ok(())
     }
 
+    /// Storage-aware raw replay for callers whose operands are scratch buffers
+    /// rather than `TensorMap`s (the dynamic canonical route).
+    ///
+    /// Pack scratch allocation origins are passed explicitly: LHS pack scratch
+    /// from `lhs_alloc`, RHS pack scratch from `rhs_alloc`, and matmul output
+    /// scratch from `dst_alloc`, while replay itself consumes the raw slices.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_storage_raw<B, D, SLhs, SRhs, SDst>(
+        &self,
+        backend: &mut B,
+        workspace: &mut B::Workspace,
+        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
+            SLhs::Similar,
+            SRhs::Similar,
+            SDst::Similar,
+        >,
+        lhs_alloc: &SLhs,
+        rhs_alloc: &SRhs,
+        dst_alloc: &SDst,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        B: TensorContractBackend<D, f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        SLhs: SimilarStorage<D>,
+        SLhs::Similar: HostWritableStorage<D>,
+        SRhs: SimilarStorage<D>,
+        SRhs::Similar: HostWritableStorage<D>,
+        SDst: SimilarStorage<D>,
+        SDst::Similar: HostWritableStorage<D>,
+    {
+        self.validate_replay_inputs(
+            dst_structure,
+            dst_data.len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
+        scale_all_blocks(&self.inactive_dst_scale_blocks, dst_data, beta)?;
+
+        for group in &self.groups {
+            let lens =
+                fusion_block_group_scratch_lens(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            fusion_workspace.prepare_from_storages(
+                lhs_alloc,
+                rhs_alloc,
+                dst_alloc,
+                lens.lhs,
+                lens.rhs,
+                lens.destination,
+                D::zero(),
+            );
+            execute_group_with_scratch_buffers(
+                backend,
+                workspace,
+                group,
+                fusion_workspace.buffers_mut(),
+                dst_data,
+                lhs_data,
+                rhs_data,
+                alpha,
+                beta,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Storage-aware replay writing into a destination `TensorMap` while the
+    /// LHS/RHS operands are raw canonical scratch slices (the dynamic route
+    /// with an identity output transform).
+    ///
+    /// Pack scratch allocation origins: LHS pack from `lhs_alloc`, RHS pack
+    /// from `rhs_alloc`, and matmul output scratch from the destination
+    /// tensor's own storage.
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_storage_raw_sources<
+        B,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+    >(
+        &self,
+        backend: &mut B,
+        workspace: &mut B::Workspace,
+        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
+            SLhs::Similar,
+            SRhs::Similar,
+            DDst::Similar,
+        >,
+        lhs_alloc: &SLhs,
+        rhs_alloc: &SRhs,
+        dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        B: TensorContractBackend<D, f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        SLhs: SimilarStorage<D>,
+        SLhs::Similar: HostWritableStorage<D>,
+        SRhs: SimilarStorage<D>,
+        SRhs::Similar: HostWritableStorage<D>,
+        DDst: HostWritableStorage<D> + SimilarStorage<D>,
+        DDst::Similar: HostWritableStorage<D>,
+    {
+        let dst_structure = Arc::clone(dst.structure());
+        self.validate_replay_inputs(
+            &dst_structure,
+            dst.storage().len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
+        scale_all_blocks(&self.inactive_dst_scale_blocks, dst.data_mut(), beta)?;
+
+        for group in &self.groups {
+            let lens =
+                fusion_block_group_scratch_lens(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            fusion_workspace.prepare_from_storages(
+                lhs_alloc,
+                rhs_alloc,
+                dst.storage(),
+                lens.lhs,
+                lens.rhs,
+                lens.destination,
+                D::zero(),
+            );
+            execute_group_with_scratch_buffers(
+                backend,
+                workspace,
+                group,
+                fusion_workspace.buffers_mut(),
+                dst.data_mut(),
+                lhs_data,
+                rhs_data,
+                alpha,
+                beta,
+            )?;
+        }
+        Ok(())
+    }
+
     fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
