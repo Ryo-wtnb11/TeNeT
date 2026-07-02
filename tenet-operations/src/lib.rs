@@ -12,6 +12,7 @@ mod cache;
 mod contract;
 mod error;
 mod facade;
+mod factorize;
 mod host_kernels;
 mod host_scalar_kernels;
 mod host_scratch;
@@ -78,6 +79,7 @@ pub use facade::{
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with,
 };
+pub use factorize::{tsvd_fusion, FusionSvd, SectorSingularValues};
 pub(crate) use host_kernels::{
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
     tree_transform_structure_with_strided_kernel_raw,
@@ -88,9 +90,9 @@ pub(crate) use host_kernels::{
 pub use host_kernels::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub(crate) use host_scalar_kernels::{
     axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
-    copy_scale_raw_strided_kernel_with_conjugate_trusted, scale_raw_strided_kernel_trusted,
-    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted,
-    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
+    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
+    tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
+    tensortrace_raw_strided_kernel_add_with_coefficient,
 };
 pub(crate) use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;

@@ -1345,6 +1345,7 @@ impl DenseExecutor for PanicDenseExecutor {
 }
 
 mod copy;
+mod factorize;
 
 mod contract_dense;
 
