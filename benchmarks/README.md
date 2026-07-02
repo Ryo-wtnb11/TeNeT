@@ -128,6 +128,30 @@ At d=16 every workload is now at or better than TensorKit. The remaining
 small-block (d=4) gap of 1.5-3x is per-call overhead (plan lookups, view
 setup, route dispatch) and no longer any single dominant stage.
 
+## Allocation-free fused replay loops (small-tensor overhead)
+
+The strided-rs view entry points allocate owned metadata (`Arc::from(dims)`,
+plan building) per call — ~0.8 µs per tiny copy, which dominated d=4 replay.
+`StridedHostKernelAdapter` now runs copy/axpy through a stack-allocated fused
+loop nest (axes sorted by destination stride, adjacent axes fused, contiguous
+inner runs as plain slice loops; rank > 8 falls back to strided-rs). µs per
+iteration, Accelerate both sides, coupled layout:
+
+| symmetry | workload | before | after | TensorKit | after/TK |
+|---|---|---:|---:|---:|---:|
+| U1 | swap d=4 | 42.9 | 13.3 | 20.0 | **0.66** |
+| U1 | swap+out d=4 | 52.2 | 10.6 | 34.5 | **0.31** |
+| fZ2 | swap d=4 | 20.0 | 5.8 | 8.5 | **0.68** |
+| SU2 | swap d=4 | 126.1 | 35.7 | 44.1 | **0.81** |
+| SU2 | swap+out d=4 | 186.6 | 51.8 | 78.4 | **0.66** |
+| U1 | swap d=16 | 3 406 | 2 965 | 4 033 | **0.74** |
+| SU2 | swap d=16 | 16 402 | 14 250 | 15 779 | **0.90** |
+| SU2 | swap+out d=16 | 21 635 | 18 353 | 19 914 | **0.92** |
+
+Every workload at both sizes is now at or faster than TensorKit except
+`compose` at d=4 (6.2 vs 4.0 µs), which is five Accelerate GEMM calls plus
+~1.4 µs of validation/lookup — no longer dominated by any replay stage.
+
 ## Conclusions
 
 - **With identical BLAS, TeNeT is 3.6–42x slower**; the gap is the per-call

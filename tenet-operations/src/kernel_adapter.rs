@@ -33,6 +33,142 @@ where
     strided_kernel::StridedViewMut::new(data, shape, strides, offset).map_err(strided_error)
 }
 
+const FUSED_RANK_LIMIT: usize = 8;
+
+/// Allocation-free fused loop layout for one (destination, source) view pair.
+///
+/// Axes with extent 1 are dropped, the rest are ordered by destination stride
+/// and adjacent axes are fused when both stride patterns are contiguous, so
+/// small replay copies avoid per-call heap allocation and plan building.
+#[derive(Clone, Copy, Debug)]
+struct FusedPairLayout {
+    rank: usize,
+    dims: [usize; FUSED_RANK_LIMIT],
+    dst_strides: [isize; FUSED_RANK_LIMIT],
+    src_strides: [isize; FUSED_RANK_LIMIT],
+}
+
+fn fuse_pair_layout(
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+) -> Option<FusedPairLayout> {
+    if shape.len() > FUSED_RANK_LIMIT {
+        return None;
+    }
+    let mut layout = FusedPairLayout {
+        rank: 0,
+        dims: [1; FUSED_RANK_LIMIT],
+        dst_strides: [0; FUSED_RANK_LIMIT],
+        src_strides: [0; FUSED_RANK_LIMIT],
+    };
+    for axis in 0..shape.len() {
+        if shape[axis] == 1 {
+            continue;
+        }
+        if shape[axis] == 0 {
+            return Some(FusedPairLayout {
+                rank: 1,
+                dims: [0; FUSED_RANK_LIMIT],
+                dst_strides: [0; FUSED_RANK_LIMIT],
+                src_strides: [0; FUSED_RANK_LIMIT],
+            });
+        }
+        let mut position = layout.rank;
+        while position > 0 && layout.dst_strides[position - 1] > dst_strides[axis] {
+            layout.dims[position] = layout.dims[position - 1];
+            layout.dst_strides[position] = layout.dst_strides[position - 1];
+            layout.src_strides[position] = layout.src_strides[position - 1];
+            position -= 1;
+        }
+        layout.dims[position] = shape[axis];
+        layout.dst_strides[position] = dst_strides[axis];
+        layout.src_strides[position] = src_strides[axis];
+        layout.rank += 1;
+    }
+    if layout.rank == 0 {
+        layout.rank = 1;
+        layout.dims[0] = 1;
+    }
+    let mut fused = 0usize;
+    for axis in 1..layout.rank {
+        let extent = layout.dims[fused] as isize;
+        if layout.dst_strides[fused] * extent == layout.dst_strides[axis]
+            && layout.src_strides[fused] * extent == layout.src_strides[axis]
+        {
+            layout.dims[fused] *= layout.dims[axis];
+        } else {
+            fused += 1;
+            layout.dims[fused] = layout.dims[axis];
+            layout.dst_strides[fused] = layout.dst_strides[axis];
+            layout.src_strides[fused] = layout.src_strides[axis];
+        }
+    }
+    layout.rank = fused + 1;
+    Some(layout)
+}
+
+/// Applies `dst = combine(dst, alpha * op(src))` over a fused layout with a
+/// plain loop nest; safe indexing keeps out-of-bounds layouts a panic rather
+/// than undefined behavior.
+#[allow(clippy::too_many_arguments)]
+fn apply_fused_pair<T, Apply, ElementOp>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    layout: &FusedPairLayout,
+    dst_offset: isize,
+    src_offset: isize,
+    apply: Apply,
+    op: ElementOp,
+) where
+    T: Copy,
+    Apply: Fn(&mut T, T),
+    ElementOp: Fn(T) -> T,
+{
+    if layout.dims[..layout.rank].iter().any(|&dim| dim == 0) {
+        return;
+    }
+    let inner_len = layout.dims[0];
+    let inner_dst = layout.dst_strides[0];
+    let inner_src = layout.src_strides[0];
+    let mut index = [0usize; FUSED_RANK_LIMIT];
+    let mut dst_base = dst_offset;
+    let mut src_base = src_offset;
+    loop {
+        if inner_dst == 1 && inner_src == 1 {
+            let dst_start = dst_base as usize;
+            let src_start = src_base as usize;
+            let dst = &mut dst_data[dst_start..dst_start + inner_len];
+            let src = &src_data[src_start..src_start + inner_len];
+            for position in 0..inner_len {
+                apply(&mut dst[position], op(src[position]));
+            }
+        } else {
+            for position in 0..inner_len {
+                let dst_position = (dst_base + position as isize * inner_dst) as usize;
+                let src_position = (src_base + position as isize * inner_src) as usize;
+                apply(&mut dst_data[dst_position], op(src_data[src_position]));
+            }
+        }
+        let mut axis = 1;
+        loop {
+            if axis >= layout.rank {
+                return;
+            }
+            index[axis] += 1;
+            dst_base += layout.dst_strides[axis];
+            src_base += layout.src_strides[axis];
+            if index[axis] < layout.dims[axis] {
+                break;
+            }
+            dst_base -= layout.dims[axis] as isize * layout.dst_strides[axis];
+            src_base -= layout.dims[axis] as isize * layout.src_strides[axis];
+            index[axis] = 0;
+            axis += 1;
+        }
+    }
+}
+
 /// Backend-neutral low-level kernel adapter for host-slice replay.
 ///
 /// Replay drivers (tree-transform pack/recoupling/scatter, fusion-block
@@ -161,6 +297,26 @@ where
         beta: T,
     ) -> Result<(), OperationError> {
         if beta.is_zero() || beta.is_one() {
+            if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
+                let assign = beta.is_zero();
+                apply_fused_pair(
+                    dst_data,
+                    src_data,
+                    &layout,
+                    dst_offset,
+                    src_offset,
+                    |dst, value| {
+                        if assign {
+                            *dst = value;
+                        } else {
+                            *dst = *dst + value;
+                        }
+                    },
+                    |value: T| alpha * value.maybe_conj(source_conjugate),
+                );
+                zero_strides.clear();
+                return Ok(());
+            }
             let src = read_view(src_data, shape, src_strides, src_offset)?;
             let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
             let result = match (beta.is_zero(), source_conjugate) {
@@ -200,6 +356,25 @@ where
         beta: T,
     ) -> Result<(), OperationError> {
         if beta.is_zero() || beta.is_one() {
+            if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
+                let assign = beta.is_zero();
+                apply_fused_pair(
+                    dst_data,
+                    src_data,
+                    &layout,
+                    dst_offset,
+                    src_offset,
+                    |dst, value| {
+                        if assign {
+                            *dst = value;
+                        } else {
+                            *dst = *dst + value;
+                        }
+                    },
+                    |value: T| alpha * value,
+                );
+                return Ok(());
+            }
             let src = read_view(src_data, shape, src_strides, src_offset)?;
             let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
             let result = if beta.is_zero() {
@@ -234,6 +409,18 @@ where
         source_conjugate: bool,
         alpha: T,
     ) -> Result<(), OperationError> {
+        if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
+            apply_fused_pair(
+                dst_data,
+                src_data,
+                &layout,
+                dst_offset,
+                src_offset,
+                |dst, value| *dst = value,
+                |value: T| alpha * value.maybe_conj(source_conjugate),
+            );
+            return Ok(());
+        }
         let src = read_view(src_data, shape, src_strides, src_offset)?;
         let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
         if source_conjugate {
