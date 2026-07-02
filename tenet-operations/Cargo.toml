@@ -12,6 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense" }
-strided-kernel = { git = "https://github.com/Ryo-wtnb11/strided-rs", rev = "89de91b6fe755ec59cc8d9283c7ccbd285dbc9d2", version = "0.1.0", features = ["parallel"] }
+strided-kernel = { git = "https://github.com/Ryo-wtnb11/strided-rs", rev = "1af3f531ba5145123d087f8a39de6d17abe7fe76", version = "0.1.0", features = ["parallel"] }
 num-traits = "0.2"
 num-complex = "0.4"
