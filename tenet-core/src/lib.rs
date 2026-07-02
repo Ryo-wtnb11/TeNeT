@@ -5196,6 +5196,9 @@ impl<'a> BlockRef<'a> {
 pub struct BlockStructure {
     sector: SectorStructure,
     degeneracy: DegeneracyStructure,
+    // Cached at construction; replay validation checks this against storage
+    // lengths on every call and must not re-scan all blocks.
+    required_len: usize,
 }
 
 impl BlockStructure {
@@ -5213,6 +5216,7 @@ impl BlockStructure {
                 rank,
                 blocks: Vec::new(),
             },
+            required_len: 0,
         }
     }
 
@@ -5252,7 +5256,12 @@ impl BlockStructure {
                 actual: degeneracy.block_count(),
             });
         }
-        Ok(Self { sector, degeneracy })
+        let required_len = degeneracy.required_len()?;
+        Ok(Self {
+            sector,
+            degeneracy,
+            required_len,
+        })
     }
 
     pub fn packed_column_major<I>(rank: usize, shapes: I) -> Result<Self, CoreError>
@@ -5387,7 +5396,7 @@ impl BlockStructure {
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {
-        self.degeneracy.required_len()
+        Ok(self.required_len)
     }
 }
 
