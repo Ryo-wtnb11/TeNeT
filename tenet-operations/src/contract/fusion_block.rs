@@ -152,7 +152,7 @@ fn is_canonical_output(
 /// Device execution needs a separate device workspace.
 #[derive(Clone, Debug)]
 pub(crate) struct HostCanonicalFusionBlockContractWorkspace<T> {
-    buffers: FusionBlockContractBuffers<T>,
+    buffers: HostFusionBlockContractBuffers<T>,
 }
 
 pub(crate) type CanonicalFusionBlockContractWorkspace<T> =
@@ -161,19 +161,19 @@ pub(crate) type CanonicalFusionBlockContractWorkspace<T> =
 impl<T> Default for HostCanonicalFusionBlockContractWorkspace<T> {
     fn default() -> Self {
         Self {
-            buffers: FusionBlockContractBuffers::default(),
+            buffers: HostFusionBlockContractBuffers::default(),
         }
     }
 }
 
 #[derive(Clone, Debug)]
-struct FusionBlockContractBuffers<T> {
+struct HostFusionBlockContractBuffers<T> {
     lhs: Vec<T>,
     rhs: Vec<T>,
     dst: Vec<T>,
 }
 
-impl<T> Default for FusionBlockContractBuffers<T> {
+impl<T> Default for HostFusionBlockContractBuffers<T> {
     fn default() -> Self {
         Self {
             lhs: Vec::new(),
@@ -896,7 +896,7 @@ where
     }
 }
 
-impl<T> FusionBlockContractBuffers<T>
+impl<T> HostFusionBlockContractBuffers<T>
 where
     T: Clone + Zero,
 {
