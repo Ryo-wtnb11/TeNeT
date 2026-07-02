@@ -260,6 +260,9 @@ TeNeT fixed coverage:
   tree-transform, and tensorcontract accept non-`Vec` host storage.
 - Plain default host facades for tensoradd, tensortrace, and tensorcontract
   also accept non-`Vec` host storage.
+- Tree-pair transform plan/cache/context APIs and tensoradd-fusion convenience
+  APIs accept non-`Vec` host storage while still compiling transformer
+  structures only from categorical/block metadata.
 - Tests include custom writable/read-only host storage wrappers to assert that
   typed structure compile and replay do not accidentally rely on `Vec<T>` and
   do not require source tensors to be writable.

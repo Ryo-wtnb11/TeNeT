@@ -87,6 +87,13 @@ fn test_host_tensor_map_with_structure<T, const NOUT: usize, const NIN: usize>(
     TensorMap::from_storage_with_structure(TestHostStorage::new(data), space, structure).unwrap()
 }
 
+fn test_host_fusion_tensor_map<T, const NOUT: usize, const NIN: usize>(
+    data: Vec<T>,
+    fusion_space: FusionTensorMapSpace<NOUT, NIN>,
+) -> TensorMap<T, NOUT, NIN, Trivial, TestHostStorage<T>> {
+    TensorMap::from_storage_with_fusion_space(TestHostStorage::new(data), fusion_space).unwrap()
+}
+
 fn test_host_read_tensor_map<T, const NOUT: usize, const NIN: usize>(
     data: Vec<T>,
     space: TensorMapSpace<NOUT, NIN>,
@@ -103,6 +110,13 @@ fn test_host_read_tensor_map_with_structure<T, const NOUT: usize, const NIN: usi
 ) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
     TensorMap::from_storage_with_structure(TestHostReadStorage::new(data), space, structure)
         .unwrap()
+}
+
+fn test_host_read_fusion_tensor_map<T, const NOUT: usize, const NIN: usize>(
+    data: Vec<T>,
+    fusion_space: FusionTensorMapSpace<NOUT, NIN>,
+) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
+    TensorMap::from_storage_with_fusion_space(TestHostReadStorage::new(data), fusion_space).unwrap()
 }
 
 fn fusion_tree_test_key<

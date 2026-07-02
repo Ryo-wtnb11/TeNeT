@@ -8,7 +8,7 @@ use tenet_core::{
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
     multiplicity_free_transpose_tree_pair, BlockKey, BlockStructure, FusionRule,
     FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, TensorMap,
+    MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -336,11 +336,17 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &self,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
-    ) -> Result<TreeTransformStructure<T>, OperationError> {
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    ) -> Result<TreeTransformStructure<T>, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         TreeTransformStructure::compile_grouped(dst, src, &self.specs)
     }
 

@@ -4,7 +4,7 @@ use std::hash::Hash;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockView, BlockViewMut, CoreError, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 
 use crate::axis::{AxisPermutation, TensorTraceAxisSpec};
@@ -224,10 +224,12 @@ pub fn tensoradd_fusion_into<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     operation: TreeTransformOperationKey,
     source_conjugate: bool,
     alpha: D,
@@ -237,6 +239,8 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
@@ -264,12 +268,14 @@ pub fn tensoradd_fusion_into_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     operation: TreeTransformOperationKey,
     source_conjugate: bool,
     alpha: D,
@@ -280,6 +286,8 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let src_fusion = src
         .fusion_space()
@@ -346,11 +354,13 @@ pub fn tensoradd_fusion_into_with_context<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     operation: TreeTransformOperationKey,
     source_conjugate: bool,
     alpha: D,
@@ -362,6 +372,8 @@ where
     RuleKey: Clone + Eq + Hash,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let src_fusion = src
         .fusion_space()
@@ -699,15 +711,19 @@ pub fn tree_pair_transform_structure<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
 {
     let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
     plan.compile(dst, src)
@@ -727,11 +743,13 @@ pub fn tree_pair_transform_into<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -739,6 +757,8 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
@@ -773,13 +793,15 @@ pub fn tree_pair_transform_into_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -788,6 +810,8 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let structure = tree_pair_transform_structure(rule, operation, dst, src)?;
     tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
@@ -804,12 +828,14 @@ pub fn tree_pair_transform_into_with_context<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -819,6 +845,8 @@ where
     RuleKey: Clone + Eq + Hash,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     context.tree_pair_transform_into(rule, operation, dst, src, alpha, beta)
 }
@@ -834,12 +862,14 @@ pub fn all_codomain_tree_transform_into_with_context<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
     operation: TreeTransformOperationKey,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -849,6 +879,8 @@ where
     RuleKey: Clone + Eq + Hash,
     R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     context.all_codomain_tree_transform_into(rule, operation, dst, src, alpha, beta)
 }

@@ -1485,6 +1485,39 @@ fn tree_pair_transform_structure_replays_product_without_recompiling() {
 }
 
 #[test]
+fn tree_pair_transform_context_accepts_custom_host_storage() {
+    let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let src = test_host_read_fusion_tensor_map(vec![10.0_f64, 20.0], src_space);
+    let mut dst = test_host_fusion_tensor_map(vec![1.0_f64, 2.0], dst_space);
+    let plan =
+        build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
+    let expected = expected_single_tree_pair_replay(
+        &plan,
+        dst.structure(),
+        src.structure(),
+        dst.data(),
+        src.data(),
+        2.0,
+        3.0,
+    );
+    let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
+
+    tree_pair_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, 2.0, 3.0)
+        .unwrap();
+
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+    for (actual, expected) in dst.data().iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual {actual} != expected {expected}"
+        );
+    }
+}
+
+#[test]
 fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;

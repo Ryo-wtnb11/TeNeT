@@ -6,7 +6,7 @@ use std::sync::Arc;
 use num_traits::Zero;
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -462,16 +462,20 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
@@ -648,16 +652,20 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
@@ -717,17 +725,21 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         rule_key: RuleKey,
         scope: TreeTransformPlanScope,
         operation: TreeTransformOperationKey,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         T: Copy,
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
     {
         let structure_key = TreeTransformStructureCacheKey::from_structures(
             plan_key.clone(),

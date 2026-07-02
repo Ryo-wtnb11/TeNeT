@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockStructure, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
+    BlockStructure, HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, TensorMap,
 };
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
@@ -129,17 +130,21 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        DDst: HostWritableStorage<D>,
+        DSrc: HostReadableStorage<D>,
     {
         let Self {
             backend,
@@ -277,17 +282,21 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         rule: &R,
         operation: TreeTransformOperationKey,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeFusionSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        DDst: HostWritableStorage<D>,
+        DSrc: HostReadableStorage<D>,
     {
         let Self {
             backend,
