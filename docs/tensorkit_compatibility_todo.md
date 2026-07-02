@@ -5,6 +5,72 @@ or leaves unsupported until the categorical semantics are fixed. These items are
 not optimization notes; they are semantic boundaries for the TensorKit-compatible
 baseline.
 
+## Storage-centric backend dispatch
+
+TensorKit ecosystem behavior:
+
+- `TensorMap` owns dense block storage as a storage type parameter. CPU tensors
+  use host arrays and CUDA tensors use `CuArray` storage.
+- `TreeTransformer` objects cache categorical block structure, recoupling
+  matrices, and packed strided structures. They are not CPU/GPU backend objects.
+- Tree-transform replay allocates temporary buffers with `similar(tdst.data,
+  sz)` / `similar(tsrc.data, sz)`, so workspace placement follows tensor
+  storage.
+- Dense replay calls `StridedView`/`mul!`/`tensoradd!`; Julia dispatch then
+  routes CPU storage to BLAS/Strided and GPU storage to CUDA/cuBLAS/cuTENSOR
+  extensions.
+- TensorOperations explicit backend/allocator arguments remain escape hatches,
+  but ordinary tensor operations infer the execution path from the array
+  storage and allocator.
+
+TeNeT baseline:
+
+- TensorMap-level code must not expose concrete runtimes such as strided-rs,
+  MKL, cuBLAS, CUDA driver handles, or tenferro tensor types.
+- Fusion-tree enumeration, sector matching, tree-pair recoupling, dense-axis
+  permutations, and block replay descriptors remain TeNeT categorical data.
+- Dense execution is selected from storage placement. Host storage currently
+  uses the host dense executor; future CUDA storage must use device workspaces
+  and device kernels without host `as_slice()` fallbacks.
+- Low-level implementations such as strided-rs, tenferro, C++ BLAS, CUDA C++,
+  cuBLAS, or cuTENSOR are private implementation details below the storage
+  dispatch boundary.
+
+Current TeNeT status:
+
+- `tenet-dense` exposes host `DenseView` / `DenseViewMut` with
+  `DensePlacement::Host`.
+- `DefaultDenseExecutor` is no longer a public generic over a kernel adapter.
+  The strided host matmul path is hidden behind the default host executor.
+- Cargo features now forward CPU provider selection consistently to both
+  tenferro and strided-rs:
+  - `cpu-faer`
+  - `cpu-blas`
+  - `blas-accelerate`
+  - `blas-openblas`
+  - `blas-mkl`
+  - `provider-inject`
+
+Next required refactor:
+
+- Generalize `TreeTransformBackend` and `TensorContractBackend` over storage
+  types instead of assuming host `Vec<T>`.
+- Make public non-`*_with` facades dispatch from destination/source placement.
+  Keep `*_with` APIs as explicit testing and override hooks.
+- Make tree-transform and contraction workspaces storage-aware, mirroring
+  TensorKit's `similar(tdst.data, ...)` behavior.
+- Add CUDA storage only after host storage-generic tests pass. A `cuda` Cargo
+  feature must not be exposed until tree replay and contraction actually use
+  device-resident workspaces and kernels.
+
+Known temporary mismatch:
+
+- Until the raw strided-rs API is merged upstream and tenferro-rs is updated to
+  the same strided-rs source/revision, TeNeT can pull two `strided-einsum2`
+  crates: one through tenferro-rs and one through TeNeT's raw-kernel adapter.
+  This is a dependency hygiene issue, not a semantic difference; remove it by
+  converging on the upstream raw API revision.
+
 ## AdjointTensorMap with explicit braid
 
 TensorKit source:

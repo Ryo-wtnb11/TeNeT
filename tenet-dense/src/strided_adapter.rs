@@ -6,7 +6,7 @@ use crate::{
 use num_traits::{One, Zero};
 
 #[derive(Clone, Debug, Default)]
-pub struct StridedKernelBackend;
+pub(super) struct StridedKernelBackend;
 
 impl StridedKernelBackend {
     pub fn new() -> Self {
@@ -15,10 +15,6 @@ impl StridedKernelBackend {
 }
 
 impl DenseKernelBackend for StridedKernelBackend {
-    fn backend(&self) -> DenseBackend {
-        DenseBackend::Strided
-    }
-
     fn supports_matmul(&self, dtype: DenseDType) -> bool {
         matches!(
             dtype,

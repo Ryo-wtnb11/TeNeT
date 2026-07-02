@@ -2,9 +2,10 @@
 
 //! Dense block execution boundary for TeNeT.
 //!
-//! Symmetric tensor algorithms should lower to this crate through TeNeT-owned
-//! view and executor types. Concrete dense runtimes such as tenferro stay behind
-//! the adapter boundary.
+//! Symmetric tensor algorithms lower to this crate through TeNeT-owned storage
+//! views and executors. The storage placement determines the execution path:
+//! host views use host kernels, and future device views should use device
+//! kernels without exposing concrete runtimes to TensorMap-level code.
 
 use core::fmt;
 
@@ -25,6 +26,11 @@ pub enum DenseDType {
 pub enum DenseBackend {
     Tenferro,
     Strided,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DensePlacement {
+    Host,
 }
 
 #[derive(Debug)]
@@ -78,6 +84,11 @@ impl<'a, T> DenseView<'a, T> {
     pub fn offset(&self) -> usize {
         self.offset
     }
+
+    #[inline]
+    pub fn placement(&self) -> DensePlacement {
+        DensePlacement::Host
+    }
 }
 
 #[derive(Debug)]
@@ -128,6 +139,11 @@ impl<'a, T> DenseViewMut<'a, T> {
     pub fn offset(&self) -> usize {
         self.offset
     }
+
+    #[inline]
+    pub fn placement(&self) -> DensePlacement {
+        DensePlacement::Host
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -165,6 +181,18 @@ impl DenseRead<'_> {
             Self::C64(view) => view.shape(),
         }
     }
+
+    pub fn placement(&self) -> DensePlacement {
+        match self {
+            Self::F32(view) => view.placement(),
+            Self::F64(view) => view.placement(),
+            Self::I32(view) => view.placement(),
+            Self::I64(view) => view.placement(),
+            Self::Bool(view) => view.placement(),
+            Self::C32(view) => view.placement(),
+            Self::C64(view) => view.placement(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -200,6 +228,18 @@ impl DenseWrite<'_> {
             Self::Bool(view) => view.shape(),
             Self::C32(view) => view.shape(),
             Self::C64(view) => view.shape(),
+        }
+    }
+
+    pub fn placement(&self) -> DensePlacement {
+        match self {
+            Self::F32(view) => view.placement(),
+            Self::F64(view) => view.placement(),
+            Self::I32(view) => view.placement(),
+            Self::I64(view) => view.placement(),
+            Self::Bool(view) => view.placement(),
+            Self::C32(view) => view.placement(),
+            Self::C64(view) => view.placement(),
         }
     }
 }
@@ -367,16 +407,7 @@ pub trait DenseExecutor {
     }
 }
 
-/// Low-level dense kernel boundary.
-///
-/// `DenseExecutor` owns high-level dense operations such as decomposition and
-/// dot-general lowering. This trait is the narrower backend boundary for hot
-/// kernels that symmetric tensor replay wants to call directly. Concrete
-/// implementations may be backed by strided-rs, C++ BLAS, CUDA/cuBLAS, or
-/// another runtime, but callers only see TeNeT-owned dense views.
-pub trait DenseKernelBackend {
-    fn backend(&self) -> DenseBackend;
-
+trait DenseKernelBackend {
     fn supports_matmul(&self, dtype: DenseDType) -> bool;
 
     fn matmul_into(
@@ -490,13 +521,12 @@ pub use tenferro_adapter::DefaultDenseExecutor;
 
 #[cfg(feature = "tenferro")]
 mod strided_adapter;
-#[cfg(feature = "tenferro")]
-pub use strided_adapter::StridedKernelBackend;
 
 #[cfg(feature = "tenferro")]
 mod tenferro_adapter {
     use super::*;
 
+    use super::strided_adapter::StridedKernelBackend;
     use tenferro_cpu::CpuBackend;
     use tenferro_linalg::LinalgBackend;
     use tenferro_tensor::{
@@ -505,20 +535,27 @@ mod tenferro_adapter {
     };
 
     #[derive(Debug)]
-    pub struct DefaultDenseExecutor<K = StridedKernelBackend> {
+    pub(super) struct DenseExecutorImpl<K> {
         backend: CpuBackend,
         kernel: K,
         matmul_config: DotGeneralConfig,
     }
 
-    impl DefaultDenseExecutor<StridedKernelBackend> {
+    #[derive(Debug)]
+    pub struct DefaultDenseExecutor {
+        inner: DenseExecutorImpl<StridedKernelBackend>,
+    }
+
+    impl DefaultDenseExecutor {
         pub fn new() -> Self {
-            Self::with_kernel_backend(StridedKernelBackend::new())
+            Self {
+                inner: DenseExecutorImpl::with_kernel_backend(StridedKernelBackend::new()),
+            }
         }
     }
 
-    impl<K> DefaultDenseExecutor<K> {
-        pub fn with_kernel_backend(kernel: K) -> Self {
+    impl<K> DenseExecutorImpl<K> {
+        pub(super) fn with_kernel_backend(kernel: K) -> Self {
             Self {
                 backend: CpuBackend::new(),
                 kernel,
@@ -531,22 +568,52 @@ mod tenferro_adapter {
             }
         }
 
-        pub fn kernel_backend(&self) -> &K {
+        #[cfg(test)]
+        pub(super) fn kernel_backend(&self) -> &K {
             &self.kernel
-        }
-
-        pub fn kernel_backend_mut(&mut self) -> &mut K {
-            &mut self.kernel
         }
     }
 
-    impl Default for DefaultDenseExecutor<StridedKernelBackend> {
+    impl Default for DefaultDenseExecutor {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl<K> DenseExecutor for DefaultDenseExecutor<K>
+    impl DenseExecutor for DefaultDenseExecutor {
+        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.inner.svd(input)
+        }
+
+        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.inner.qr(input)
+        }
+
+        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.inner.eigh(input)
+        }
+
+        fn dot_general_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            config: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            self.inner.dot_general_into(output, lhs, rhs, config)
+        }
+
+        fn matmul_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+        ) -> Result<(), DenseError> {
+            self.inner.matmul_into(output, lhs, rhs)
+        }
+    }
+
+    impl<K> DenseExecutor for DenseExecutorImpl<K>
     where
         K: DenseKernelBackend,
     {
@@ -604,7 +671,7 @@ mod tenferro_adapter {
         }
     }
 
-    impl<K> DefaultDenseExecutor<K>
+    impl<K> DenseExecutorImpl<K>
     where
         K: DenseKernelBackend,
     {
@@ -930,10 +997,6 @@ mod tests {
 
     #[cfg(feature = "tenferro")]
     impl DenseKernelBackend for CountingKernelBackend {
-        fn backend(&self) -> DenseBackend {
-            DenseBackend::Strided
-        }
-
         fn supports_matmul(&self, dtype: DenseDType) -> bool {
             dtype == DenseDType::F64
         }
@@ -966,8 +1029,9 @@ mod tests {
         let shape = [2, 2];
         let strides = [1, 2];
 
-        let mut executor =
-            DefaultDenseExecutor::with_kernel_backend(CountingKernelBackend::default());
+        let mut executor = tenferro_adapter::DenseExecutorImpl::with_kernel_backend(
+            CountingKernelBackend::default(),
+        );
         executor
             .matmul_into(
                 DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
