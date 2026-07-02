@@ -1618,6 +1618,63 @@ fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
 }
 
 #[test]
+fn tree_pair_transform_context_storage_workspace_replays_and_caches_product_transform() {
+    let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let allocations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let src =
+        TensorMap::<f64, 2, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+            TrackingStorage::new(vec![10.0, 20.0], "source_ctx", allocations.clone()),
+            src_space,
+        )
+        .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+            TrackingStorage::new(vec![1.0, 2.0], "destination_ctx", allocations),
+            dst_space,
+        )
+        .unwrap();
+    let plan =
+        build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
+    let expected = expected_single_tree_pair_replay(
+        &plan,
+        dst.structure(),
+        src.structure(),
+        dst.data(),
+        src.data(),
+        2.0,
+        3.0,
+    );
+    let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
+    let mut storage_workspace = crate::storage_scratch::StorageTreeTransformWorkspace::<
+        TrackingScratch<f64>,
+        TrackingScratch<f64>,
+    >::default();
+
+    context
+        .tree_pair_transform_into_storage_workspace(
+            &mut storage_workspace,
+            &rule,
+            operation,
+            &mut dst,
+            &src,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+    for (actual, expected) in dst.data().iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual {actual} != expected {expected}"
+        );
+    }
+}
+
+#[test]
 fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
@@ -2328,9 +2385,18 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
         )],
     )
     .unwrap();
+    let mut workspace = crate::storage_scratch::StorageTreeTransformWorkspace::<
+        TrackingScratch<f64>,
+        TrackingScratch<f64>,
+    >::default();
 
-    crate::host_kernels::tree_transform_structure_with_storage_scratch_strided_kernel(
-        &structure, &mut dst, &src, 1.0, 0.0,
+    crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel(
+        &mut workspace,
+        &structure,
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
     )
     .unwrap();
 
@@ -2345,6 +2411,68 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
             ScratchAllocation {
                 label: "destination",
                 len: 4,
+            },
+        ],
+    );
+
+    let src_space2 = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    let dst_space2 = TensorMapSpace::<1, 0>::from_dims([3], []).unwrap();
+    let src_structure2 = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+    let dst_structure2 =
+        BlockStructure::packed_column_major(1, [vec![1], vec![1], vec![1]]).unwrap();
+    let src2 = TensorMap::<f64, 1, 0, Trivial, TrackingStorage<f64>>::from_storage_with_structure(
+        TrackingStorage::new(vec![5.0, 7.0], "source2", allocations.clone()),
+        src_space2,
+        src_structure2,
+    )
+    .unwrap();
+    let mut dst2 =
+        TensorMap::<f64, 1, 0, Trivial, TrackingStorage<f64>>::from_storage_with_structure(
+            TrackingStorage::new(vec![0.0; 3], "destination2", allocations.clone()),
+            dst_space2,
+            dst_structure2,
+        )
+        .unwrap();
+    let structure2 = TreeTransformStructure::compile(
+        &dst2,
+        &src2,
+        &[TreeTransformBlockSpec::multi(
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0],
+        )],
+    )
+    .unwrap();
+
+    crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel(
+        &mut workspace,
+        &structure2,
+        &mut dst2,
+        &src2,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst2.data(), &[75.0, 150.0, 225.0]);
+    assert_eq!(
+        allocations.borrow().as_slice(),
+        &[
+            ScratchAllocation {
+                label: "source",
+                len: 6,
+            },
+            ScratchAllocation {
+                label: "destination",
+                len: 4,
+            },
+            ScratchAllocation {
+                label: "source2",
+                len: 2,
+            },
+            ScratchAllocation {
+                label: "destination2",
+                len: 3,
             },
         ],
     );

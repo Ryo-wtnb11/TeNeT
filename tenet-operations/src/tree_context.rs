@@ -5,17 +5,22 @@ use std::sync::Arc;
 use num_traits::Zero;
 use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, TensorMap,
+    MultiplicityFreeRigidSymbols, Placement, SimilarStorage, TensorMap,
 };
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
 use crate::cache::OperationCachePolicy;
 use crate::error::OperationError;
+use crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel;
 use crate::scalar::TreeTransformScalar;
+use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
     TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
 };
-use crate::{ReportsPlacement, TreeTransformReplayProfile, TreeTransformStructure};
+use crate::{
+    RecouplingCoefficientAction, ReportsPlacement, TreeTransformReplayProfile,
+    TreeTransformStructure,
+};
 
 #[derive(Debug)]
 pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
@@ -176,6 +181,49 @@ where
         } = self;
         let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
         backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn tree_pair_transform_into_storage_workspace<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+        DDst,
+        DSrc,
+    >(
+        &mut self,
+        storage_workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
+        rule: &R,
+        operation: TreeTransformOperationKey,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        C: Clone,
+        D: RecouplingCoefficientAction<C>,
+        DDst: HostWritableStorage<D> + SimilarStorage<D>,
+        DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+        DDst::Similar: HostWritableStorage<D>,
+        DSrc::Similar: HostWritableStorage<D>,
+    {
+        let structure = self
+            .cache
+            .get_or_compile_tree_pair(rule, operation, dst, src)?;
+        tree_transform_structure_with_storage_workspace_strided_kernel(
+            storage_workspace,
+            &structure,
+            dst,
+            src,
+            alpha,
+            beta,
+        )
     }
 
     pub(crate) fn get_or_compile_tree_pair_structure_with_storage_conjugation<R>(

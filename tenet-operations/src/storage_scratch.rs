@@ -45,7 +45,6 @@ where
 }
 
 impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
-    #[cfg(test)]
     #[inline]
     pub(crate) fn from_parts(source: Source, destination: Destination) -> Self {
         Self {
@@ -77,6 +76,70 @@ impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
     #[inline]
     pub(crate) fn source_and_destination_mut(&mut self) -> (&Source, &mut Destination) {
         (&self.source, &mut self.destination)
+    }
+}
+
+/// Storage-aware tree-transform replay workspace.
+///
+/// This is the crate-private production boundary for TensorKit-style
+/// `similar(src.data, ...)` / `similar(dst.data, ...)` scratch allocation. It
+/// still feeds the host-slice replay kernels; it does not imply device replay.
+#[derive(Clone, Debug)]
+pub(crate) struct StorageTreeTransformWorkspace<SourceScratch, DestinationScratch> {
+    zero_strides: Vec<isize>,
+    packed: Option<TreeTransformScratchBuffers<SourceScratch, DestinationScratch>>,
+}
+
+impl<SourceScratch, DestinationScratch> Default
+    for StorageTreeTransformWorkspace<SourceScratch, DestinationScratch>
+{
+    fn default() -> Self {
+        Self {
+            zero_strides: Vec::new(),
+            packed: None,
+        }
+    }
+}
+
+impl<SourceScratch, DestinationScratch>
+    StorageTreeTransformWorkspace<SourceScratch, DestinationScratch>
+{
+    pub(crate) fn prepare_from_storages<T, DSrc, DDst>(
+        &mut self,
+        src_storage: &DSrc,
+        dst_storage: &DDst,
+        source_len: usize,
+        destination_len: usize,
+        zero: T,
+    ) where
+        T: Clone,
+        DSrc: SimilarStorage<T, Similar = SourceScratch>,
+        DDst: SimilarStorage<T, Similar = DestinationScratch>,
+    {
+        self.packed = Some(TreeTransformScratchBuffers::from_parts(
+            src_storage.similar_filled(source_len, zero.clone()),
+            dst_storage.similar_filled(destination_len, zero),
+        ));
+    }
+
+    #[inline]
+    pub(crate) fn zero_strides_mut(&mut self) -> &mut Vec<isize> {
+        &mut self.zero_strides
+    }
+
+    #[inline]
+    pub(crate) fn replay_parts_mut(
+        &mut self,
+    ) -> (
+        &mut Vec<isize>,
+        &mut TreeTransformScratchBuffers<SourceScratch, DestinationScratch>,
+    ) {
+        (
+            &mut self.zero_strides,
+            self.packed
+                .as_mut()
+                .expect("storage tree-transform scratch prepared before replay"),
+        )
     }
 }
 

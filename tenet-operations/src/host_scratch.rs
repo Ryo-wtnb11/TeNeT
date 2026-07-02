@@ -1,4 +1,5 @@
 use crate::storage_scratch::SamePlacementScratchAllocator;
+use tenet_core::{HostReadableStorage, HostWritableStorage, Placement, TensorStorage};
 
 /// Host-owned scratch buffer used by current raw host-slice replay paths.
 ///
@@ -57,6 +58,32 @@ impl<T> HostScratchBuffer<T> {
 
     #[inline]
     pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+impl<T> TensorStorage<T> for HostScratchBuffer<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for HostScratchBuffer<T> {
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<T> HostWritableStorage<T> for HostScratchBuffer<T> {
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.data
     }
 }

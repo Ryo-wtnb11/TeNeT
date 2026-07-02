@@ -90,6 +90,12 @@ Storage-aware workspace target:
   TensorKit allocation semantics: source pack scratch is allocated from source
   storage and destination pack scratch is allocated from destination storage,
   while raw replay remains host-slice based.
+- The storage-aware tree-transform boundary is now a crate-private production
+  object, `StorageTreeTransformWorkspace<SourceScratch, DestinationScratch>`.
+  It reallocates scratch from source/destination storage on each prepare,
+  because arbitrary `SimilarStorage` does not yet expose safe resize/reuse.
+  `TreeTransformBackend` and the public `TreeTransformWorkspace<T>` alias
+  remain the legacy host-slice route.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic

@@ -2,16 +2,14 @@ use core::ops::{Add, Mul};
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
-#[cfg(test)]
-use tenet_core::SimilarStorage;
 use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
-    TensorMap,
+    SimilarStorage, TensorMap,
 };
 use tenet_dense::DenseExecutor;
 
 use crate::host_scratch::HostScratchBuffer;
-use crate::storage_scratch::TreeTransformScratchBuffers;
+use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
@@ -190,8 +188,7 @@ where
     )
 }
 
-#[cfg(test)]
-pub(crate) fn tree_transform_structure_with_storage_scratch_strided_kernel<
+pub(crate) fn tree_transform_structure_with_storage_workspace_strided_kernel<
     D,
     C,
     const DST_NOUT: usize,
@@ -203,6 +200,7 @@ pub(crate) fn tree_transform_structure_with_storage_scratch_strided_kernel<
     DDst,
     DSrc,
 >(
+    workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
     structure: &TreeTransformStructure<C>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
@@ -231,7 +229,6 @@ where
     validate_replay_storage_len(&dst_structure, dst.storage().len())?;
     validate_replay_storage_len(&src_structure, src.storage().len())?;
 
-    let mut zero_strides = Vec::new();
     let src_data = src.data();
     for block in &structure.blocks {
         match *block {
@@ -240,7 +237,7 @@ where
                 src_layout,
                 coefficient,
             } => tree_transform_single_with_strided_kernel(
-                &mut zero_strides,
+                workspace.zero_strides_mut(),
                 &structure.layouts,
                 structure.layouts.entry(dst_layout),
                 structure.layouts.entry(src_layout),
@@ -265,49 +262,31 @@ where
                 let destination_len = element_count
                     .checked_mul(dst_count)
                     .ok_or(OperationError::ElementCountOverflow)?;
-                let mut scratch = TreeTransformScratchBuffers::from_parts(
-                    src.similar_storage_filled(source_len, D::zero()),
-                    dst.similar_storage_filled(destination_len, D::zero()),
+                workspace.prepare_from_storages(
+                    src.storage(),
+                    dst.storage(),
+                    source_len,
+                    destination_len,
+                    D::zero(),
                 );
-
-                for src_index in 0..src_count {
-                    let layout = structure.layouts.entry(src_layout_start + src_index);
-                    pack_layout_into_column(
-                        &structure.layouts,
-                        layout,
-                        src_data,
-                        scratch.source_mut().as_mut_slice(),
-                        src_index * element_count,
-                        structure.storage_conjugate(),
-                    )?;
-                }
-
-                {
-                    let (source, destination) = scratch.source_and_destination_mut();
-                    apply_recoupling_matrix_src_times_u_transpose(
-                        destination.as_mut_slice(),
-                        source.as_slice(),
-                        &structure.coefficients_src_by_dst,
-                        coefficient_start,
-                        element_count,
-                        src_count,
-                        dst_count,
-                    )?;
-                }
-
-                for dst_index in 0..dst_count {
-                    let layout = structure.layouts.entry(dst_layout_start + dst_index);
-                    scatter_column_into_layout(
-                        &mut zero_strides,
-                        &structure.layouts,
-                        layout,
-                        scratch.destination().as_slice(),
-                        dst_index * element_count,
-                        dst.data_mut(),
-                        alpha,
-                        beta,
-                    )?;
-                }
+                let (zero_strides, scratch) = workspace.replay_parts_mut();
+                tree_transform_multi_with_scratch_buffers(
+                    zero_strides,
+                    scratch,
+                    &structure.layouts,
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    coefficient_start,
+                    element_count,
+                    &structure.coefficients_src_by_dst,
+                    structure.storage_conjugate(),
+                    dst.data_mut(),
+                    src_data,
+                    alpha,
+                    beta,
+                )?;
             }
         }
     }
@@ -800,21 +779,71 @@ where
         .checked_mul(dst_count)
         .ok_or(OperationError::ElementCountOverflow)?;
     workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
+    tree_transform_multi_with_scratch_buffers(
+        &mut workspace.zero_strides,
+        &mut workspace.packed,
+        layouts,
+        dst_layout_start,
+        dst_count,
+        src_layout_start,
+        src_count,
+        coefficient_start,
+        element_count,
+        coefficients_src_by_dst,
+        source_conjugate,
+        dst_data,
+        src_data,
+        alpha,
+        beta,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_multi_with_scratch_buffers<D, C, SourceScratch, DestinationScratch>(
+    zero_strides: &mut Vec<isize>,
+    scratch: &mut TreeTransformScratchBuffers<SourceScratch, DestinationScratch>,
+    layouts: &TreeTransformLayoutTable,
+    dst_layout_start: usize,
+    dst_count: usize,
+    src_layout_start: usize,
+    src_count: usize,
+    coefficient_start: usize,
+    element_count: usize,
+    coefficients_src_by_dst: &[C],
+    source_conjugate: bool,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    SourceScratch: HostWritableStorage<D>,
+    DestinationScratch: HostWritableStorage<D>,
+{
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
         pack_layout_into_column(
             layouts,
             layout,
             src_data,
-            workspace.packed.source_mut().as_mut_slice(),
+            scratch.source_mut().as_mut_slice(),
             src_index * element_count,
             source_conjugate,
         )?;
     }
 
     {
-        let (source, destination) = workspace.packed.source_and_destination_mut();
+        let (source, destination) = scratch.source_and_destination_mut();
         apply_recoupling_matrix_src_times_u_transpose(
             destination.as_mut_slice(),
             source.as_slice(),
@@ -829,10 +858,10 @@ where
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
         scatter_column_into_layout(
-            &mut workspace.zero_strides,
+            zero_strides,
             layouts,
             layout,
-            workspace.packed.destination().as_slice(),
+            scratch.destination().as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,
