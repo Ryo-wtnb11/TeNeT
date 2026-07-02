@@ -24,6 +24,14 @@ impl<T> HostScratchBuffer<T> {
     }
 
     #[inline]
+    pub(crate) fn fill(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        self.data.fill(value);
+    }
+
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.data.len()
     }

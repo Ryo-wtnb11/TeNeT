@@ -12,6 +12,7 @@ use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAx
 use crate::cache::{
     rebuild_lru_order_from_keys, touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
 };
+use crate::host_scratch::HostScratchBuffer;
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
     strides_to_isize,
@@ -175,17 +176,17 @@ impl<T> ReportsPlacement for HostCanonicalFusionBlockContractWorkspace<T> {
 
 #[derive(Clone, Debug)]
 struct HostFusionBlockContractBuffers<T> {
-    lhs: Vec<T>,
-    rhs: Vec<T>,
-    dst: Vec<T>,
+    lhs: HostScratchBuffer<T>,
+    rhs: HostScratchBuffer<T>,
+    dst: HostScratchBuffer<T>,
 }
 
 impl<T> Default for HostFusionBlockContractBuffers<T> {
     fn default() -> Self {
         Self {
-            lhs: Vec::new(),
-            rhs: Vec::new(),
-            dst: Vec::new(),
+            lhs: HostScratchBuffer::default(),
+            rhs: HostScratchBuffer::default(),
+            dst: HostScratchBuffer::default(),
         }
     }
 }
@@ -312,20 +313,28 @@ impl CanonicalFusionBlockContractPlan {
             fusion_workspace
                 .buffers
                 .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
-            pack_group(&group.lhs, lhs_data, &mut fusion_workspace.buffers.lhs)?;
-            pack_group(&group.rhs, rhs_data, &mut fusion_workspace.buffers.rhs)?;
+            pack_group(
+                &group.lhs,
+                lhs_data,
+                fusion_workspace.buffers.lhs.as_mut_slice(),
+            )?;
+            pack_group(
+                &group.rhs,
+                rhs_data,
+                fusion_workspace.buffers.rhs.as_mut_slice(),
+            )?;
             matmul_group_plan(
                 backend,
                 workspace,
                 group,
-                &fusion_workspace.buffers.lhs,
-                &fusion_workspace.buffers.rhs,
-                &mut fusion_workspace.buffers.dst,
+                fusion_workspace.buffers.lhs.as_slice(),
+                fusion_workspace.buffers.rhs.as_slice(),
+                fusion_workspace.buffers.dst.as_mut_slice(),
             )?;
             scatter_group(
                 &group.dst,
                 dst_data,
-                &fusion_workspace.buffers.dst,
+                fusion_workspace.buffers.dst.as_slice(),
                 alpha,
                 beta,
             )?;
@@ -383,11 +392,19 @@ impl CanonicalFusionBlockContractPlan {
             profile.canonical_workspace_prepare += start.elapsed();
 
             let start = std::time::Instant::now();
-            pack_group(&group.lhs, lhs_data, &mut fusion_workspace.buffers.lhs)?;
+            pack_group(
+                &group.lhs,
+                lhs_data,
+                fusion_workspace.buffers.lhs.as_mut_slice(),
+            )?;
             profile.canonical_pack_lhs += start.elapsed();
 
             let start = std::time::Instant::now();
-            pack_group(&group.rhs, rhs_data, &mut fusion_workspace.buffers.rhs)?;
+            pack_group(
+                &group.rhs,
+                rhs_data,
+                fusion_workspace.buffers.rhs.as_mut_slice(),
+            )?;
             profile.canonical_pack_rhs += start.elapsed();
 
             let start = std::time::Instant::now();
@@ -395,9 +412,9 @@ impl CanonicalFusionBlockContractPlan {
                 backend,
                 workspace,
                 group,
-                &fusion_workspace.buffers.lhs,
-                &fusion_workspace.buffers.rhs,
-                &mut fusion_workspace.buffers.dst,
+                fusion_workspace.buffers.lhs.as_slice(),
+                fusion_workspace.buffers.rhs.as_slice(),
+                fusion_workspace.buffers.dst.as_mut_slice(),
             )?;
             profile.canonical_matmul += start.elapsed();
 
@@ -405,7 +422,7 @@ impl CanonicalFusionBlockContractPlan {
             scatter_group(
                 &group.dst,
                 dst_data,
-                &fusion_workspace.buffers.dst,
+                fusion_workspace.buffers.dst.as_slice(),
                 alpha,
                 beta,
             )?;
@@ -937,9 +954,9 @@ where
         let dst_len = lhs_rows
             .checked_mul(rhs_cols)
             .ok_or(OperationError::ElementCountOverflow)?;
-        self.lhs.resize(lhs_len, T::zero());
-        self.rhs.resize(rhs_len, T::zero());
-        self.dst.resize(dst_len, T::zero());
+        self.lhs.resize_filled(lhs_len, T::zero());
+        self.rhs.resize_filled(rhs_len, T::zero());
+        self.dst.resize_filled(dst_len, T::zero());
         Ok(())
     }
 
