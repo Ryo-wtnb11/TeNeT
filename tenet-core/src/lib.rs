@@ -30,6 +30,20 @@ pub trait TensorStorage<T> {
     }
 }
 
+/// Storage-backed scratch allocation matching the source storage placement.
+///
+/// This is the TensorKit `similar(data, len)` boundary in TeNeT-owned terms.
+/// Implementations should allocate temporary storage with the same placement as
+/// `self`; host storage returns host buffers, and future device storage should
+/// return device-resident buffers.
+pub trait SimilarStorage<T>: TensorStorage<T> {
+    type Similar: TensorStorage<T>;
+
+    fn similar_filled(&self, len: usize, value: T) -> Self::Similar
+    where
+        T: Clone;
+}
+
 pub trait HostReadableStorage<T>: TensorStorage<T> {
     fn as_slice(&self) -> &[T];
 }
@@ -49,6 +63,18 @@ impl<T> TensorStorage<T> for Vec<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
+    }
+}
+
+impl<T> SimilarStorage<T> for Vec<T> {
+    type Similar = Vec<T>;
+
+    #[inline]
+    fn similar_filled(&self, len: usize, value: T) -> Self::Similar
+    where
+        T: Clone,
+    {
+        vec![value; len]
     }
 }
 
@@ -5278,6 +5304,15 @@ where
     }
 
     #[inline]
+    pub fn similar_storage_filled(&self, len: usize, value: T) -> D::Similar
+    where
+        D: SimilarStorage<T>,
+        T: Clone,
+    {
+        self.storage.similar_filled(len, value)
+    }
+
+    #[inline]
     pub fn space(&self) -> &TensorMapSpace<NOUT, NIN> {
         &self.space
     }
@@ -8585,6 +8620,25 @@ mod tests {
                 actual: 5
             }
         );
+    }
+
+    #[test]
+    fn vec_storage_allocates_similar_host_scratch() {
+        let storage = vec![1.0_f64, 2.0];
+        let scratch = storage.similar_filled(4, 0.5);
+
+        assert_eq!(scratch, vec![0.5; 4]);
+        assert_eq!(scratch.placement(), Placement::Host);
+    }
+
+    #[test]
+    fn tensormap_allocates_similar_storage_from_backing_storage() {
+        let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+        let tensor = TensorMap::<f64, 1, 0>::from_vec(vec![1.0, 2.0], space).unwrap();
+        let scratch = tensor.similar_storage_filled(3, 0.0);
+
+        assert_eq!(scratch, vec![0.0; 3]);
+        assert_eq!(scratch.placement(), tensor.placement());
     }
 
     #[test]

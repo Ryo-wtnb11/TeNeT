@@ -35,6 +35,10 @@ TeNeT baseline:
 - Low-level implementations such as strided-rs, tenferro, C++ BLAS, CUDA C++,
   cuBLAS, or cuTENSOR are private implementation details below the storage
   dispatch boundary.
+- `SimilarStorage::similar_filled` is the core storage allocation hook matching
+  TensorKit's `similar(data, sz)` idea. The host `Vec<T>` implementation returns
+  host `Vec<T>` scratch; future device storage should implement the same hook
+  with device-resident scratch.
 
 Current TeNeT status:
 
@@ -71,7 +75,8 @@ Storage-aware workspace target:
 - The TensorKit-equivalent step is to separate structure/transformer caches
   from scratch allocation. Cached structures remain placement-neutral; scratch
   buffers must be allocated from the destination/source storage placement,
-  analogous to TensorKit's `similar(tdst.data, sz)` behavior.
+  using `SimilarStorage::similar_filled`, analogous to TensorKit's
+  `similar(tdst.data, sz)` behavior.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic
