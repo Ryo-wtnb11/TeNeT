@@ -728,6 +728,170 @@ where
     Ok(())
 }
 
+/// Computes coupled-sector matrix block specs for fusion-tree subblocks.
+///
+/// Keys must arrive grouped by coupled sector (the `fusion_tree_keys`
+/// enumeration order). Within one coupled sector every codomain tree defines a
+/// row block and every domain tree a column block of one column-major sector
+/// matrix; the subblock for `(codomain tree, domain tree)` is the strided view
+/// at that (row block, column block) position. Full coverage of the
+/// `rows × columns` grid is required so the sector matrix has no
+/// uninitialized holes.
+fn coupled_sector_matrix_block_specs<R>(
+    rule: &R,
+    nout: usize,
+    rank: usize,
+    keys: &[FusionTreeBlockKey],
+    shapes: &[Vec<usize>],
+) -> Result<Vec<BlockSpec>, CoreError>
+where
+    R: FusionRule,
+{
+    for shape in shapes {
+        if shape.len() != rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: rank,
+                actual: shape.len(),
+            });
+        }
+    }
+
+    let mut specs = Vec::with_capacity(keys.len());
+    let mut seen_sectors: Vec<SectorId> = Vec::new();
+    let mut sector_offset = 0usize;
+    let mut run_start = 0usize;
+    while run_start < keys.len() {
+        let coupled = coupled_or_vacuum(rule, keys[run_start].codomain_tree());
+        if seen_sectors.contains(&coupled) {
+            return Err(CoreError::MalformedFusionTree {
+                message: "coupled sectors must be contiguous in fusion tree key order",
+            });
+        }
+        seen_sectors.push(coupled);
+        let mut run_end = run_start;
+        while run_end < keys.len()
+            && coupled_or_vacuum(rule, keys[run_end].codomain_tree()) == coupled
+        {
+            if coupled_or_vacuum(rule, keys[run_end].domain_tree()) != coupled {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "codomain and domain trees must share the coupled sector",
+                });
+            }
+            run_end += 1;
+        }
+
+        let mut row_blocks: Vec<(&FusionTreeKey, usize, usize)> = Vec::new();
+        let mut col_blocks: Vec<(&FusionTreeKey, usize, usize)> = Vec::new();
+        for index in run_start..run_end {
+            let key = &keys[index];
+            let shape = &shapes[index];
+            let row_dim = shape[..nout].iter().product::<usize>();
+            let col_dim = shape[nout..].iter().product::<usize>();
+            match row_blocks
+                .iter()
+                .find(|(tree, _, _)| *tree == key.codomain_tree())
+            {
+                Some(&(_, _, existing)) if existing != row_dim => {
+                    return Err(CoreError::DimensionMismatch {
+                        expected: existing,
+                        actual: row_dim,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    let offset = row_blocks
+                        .last()
+                        .map(|(_, start, dim)| start + dim)
+                        .unwrap_or(0);
+                    row_blocks.push((key.codomain_tree(), offset, row_dim));
+                }
+            }
+            match col_blocks
+                .iter()
+                .find(|(tree, _, _)| *tree == key.domain_tree())
+            {
+                Some(&(_, _, existing)) if existing != col_dim => {
+                    return Err(CoreError::DimensionMismatch {
+                        expected: existing,
+                        actual: col_dim,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    let offset = col_blocks
+                        .last()
+                        .map(|(_, start, dim)| start + dim)
+                        .unwrap_or(0);
+                    col_blocks.push((key.domain_tree(), offset, col_dim));
+                }
+            }
+        }
+        if run_end - run_start != row_blocks.len() * col_blocks.len() {
+            return Err(CoreError::BlockCountMismatch {
+                expected: row_blocks.len() * col_blocks.len(),
+                actual: run_end - run_start,
+            });
+        }
+        let matrix_rows = row_blocks
+            .last()
+            .map(|(_, start, dim)| start + dim)
+            .unwrap_or(0);
+        let matrix_cols = col_blocks
+            .last()
+            .map(|(_, start, dim)| start + dim)
+            .unwrap_or(0);
+
+        for index in run_start..run_end {
+            let key = &keys[index];
+            let shape = &shapes[index];
+            let (_, row_start, _) = row_blocks
+                .iter()
+                .find(|(tree, _, _)| *tree == key.codomain_tree())
+                .expect("row block registered above");
+            let (_, col_start, _) = col_blocks
+                .iter()
+                .find(|(tree, _, _)| *tree == key.domain_tree())
+                .expect("column block registered above");
+            let mut strides = Vec::with_capacity(rank);
+            let mut stride = 1usize;
+            for &dim in &shape[..nout] {
+                strides.push(stride);
+                stride = stride
+                    .checked_mul(dim)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            }
+            let mut stride = matrix_rows;
+            for &dim in &shape[nout..] {
+                strides.push(stride);
+                stride = stride
+                    .checked_mul(dim)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            }
+            let offset = sector_offset
+                + row_start
+                + matrix_rows
+                    .checked_mul(*col_start)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            specs.push(BlockSpec::with_key(
+                BlockKey::FusionTree(key.clone()),
+                shape.clone(),
+                strides,
+                offset,
+            )?);
+        }
+
+        sector_offset = sector_offset
+            .checked_add(
+                matrix_rows
+                    .checked_mul(matrix_cols)
+                    .ok_or(CoreError::ElementCountOverflow)?,
+            )
+            .ok_or(CoreError::ElementCountOverflow)?;
+        run_start = run_end;
+    }
+    Ok(specs)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
     dense_space: TensorMapSpace<NOUT, NIN>,
@@ -787,6 +951,41 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         let rank = NOUT + NIN;
         let subblock_structure =
             BlockStructure::packed_column_major_with_keys(rank, keys.into_iter().zip(shapes))?;
+        Self::new(dense_space, homspace, subblock_structure)
+    }
+
+    /// TensorKit-style coupled-sector matrix layout.
+    ///
+    /// Each coupled sector stores one contiguous column-major matrix whose
+    /// rows enumerate (codomain fusion tree × codomain degeneracies) and whose
+    /// columns enumerate (domain fusion tree × domain degeneracies). Fusion
+    /// tree subblocks are strided views into that matrix, so the canonical
+    /// (codomain | domain) matricization needs no packing. Block keys and
+    /// their order are identical to [`Self::from_degeneracy_shapes`]; only
+    /// strides and offsets differ.
+    pub fn from_degeneracy_shapes_coupled<R, Shapes>(
+        dense_space: TensorMapSpace<NOUT, NIN>,
+        homspace: FusionTreeHomSpace,
+        rule: &R,
+        shapes: Shapes,
+    ) -> Result<Self, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        Self::validate_homspace_rank(&homspace)?;
+        let keys = homspace.fusion_tree_keys(rule);
+        let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
+        if keys.len() != shapes.len() {
+            return Err(CoreError::BlockCountMismatch {
+                expected: keys.len(),
+                actual: shapes.len(),
+            });
+        }
+        let rank = NOUT + NIN;
+        let specs = coupled_sector_matrix_block_specs(rule, NOUT, rank, &keys, &shapes)?;
+        let subblock_structure = BlockStructure::from_blocks_with_rank(rank, specs)?;
         Self::new(dense_space, homspace, subblock_structure)
     }
 
@@ -5921,6 +6120,87 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coupled_layout_embeds_subblocks_into_sector_matrices() {
+        let rule = Z2FusionRule;
+        let leg = |dual| SectorLeg::new([z2_even(), z2_odd()], dual);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(false), leg(false)]),
+            FusionProductSpace::new([leg(false), leg(false)]),
+        );
+        let keys = homspace.fusion_tree_keys(&rule);
+        let shapes = keys
+            .iter()
+            .map(|_| vec![2usize, 3, 2, 3])
+            .collect::<Vec<_>>();
+        let packed = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes(
+            TensorMapSpace::<2, 2>::from_dims([10, 10], [10, 10]).unwrap(),
+            homspace.clone(),
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap();
+        let coupled = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 2>::from_dims([10, 10], [10, 10]).unwrap(),
+            homspace,
+            &rule,
+            shapes,
+        )
+        .unwrap();
+
+        let packed_structure = packed.subblock_structure();
+        let coupled_structure = coupled.subblock_structure();
+        assert_eq!(
+            packed_structure.block_count(),
+            coupled_structure.block_count()
+        );
+        assert_eq!(
+            packed_structure.required_len().unwrap(),
+            coupled_structure.required_len().unwrap()
+        );
+
+        // Two coupled sectors (even/odd), each with two codomain and two
+        // domain trees of subblock row dim 6 and column dim 6: sector matrices
+        // are 12 x 12.
+        let matrix_rows = 12usize;
+        let mut covered = vec![false; coupled_structure.required_len().unwrap()];
+        for index in 0..coupled_structure.block_count() {
+            let packed_block = packed_structure.block(index).unwrap();
+            let coupled_block = coupled_structure.block(index).unwrap();
+            assert_eq!(packed_block.key(), coupled_block.key());
+            assert_eq!(packed_block.shape(), coupled_block.shape());
+            // Codomain legs stay column-major inside the row block; domain
+            // legs step whole matrix columns.
+            assert_eq!(coupled_block.strides()[0], 1);
+            assert_eq!(coupled_block.strides()[1], 2);
+            assert_eq!(coupled_block.strides()[2], matrix_rows);
+            assert_eq!(coupled_block.strides()[3], matrix_rows * 2);
+            for i3 in 0..3 {
+                for i2 in 0..2 {
+                    for i1 in 0..3 {
+                        for i0 in 0..2 {
+                            let strides = coupled_block.strides();
+                            let position = coupled_block.offset()
+                                + i0 * strides[0]
+                                + i1 * strides[1]
+                                + i2 * strides[2]
+                                + i3 * strides[3];
+                            assert!(
+                                !covered[position],
+                                "coupled layout must not overlap between subblocks"
+                            );
+                            covered[position] = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            covered.iter().all(|&flag| flag),
+            "coupled layout must cover the sector matrices without holes"
+        );
+    }
 
     fn u1(charge: i32) -> SectorId {
         U1Irrep::new(charge).sector_id()

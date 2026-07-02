@@ -3456,3 +3456,219 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
         );
     }
 }
+
+fn copy_blocks_between_layouts(dst: &mut TensorMap<f64, 2, 2>, src: &TensorMap<f64, 2, 2>) {
+    let dst_structure = std::sync::Arc::clone(dst.structure());
+    let src_structure = std::sync::Arc::clone(src.structure());
+    assert_eq!(dst_structure.block_count(), src_structure.block_count());
+    for index in 0..src_structure.block_count() {
+        let src_block = src_structure.block(index).unwrap();
+        let dst_block = dst_structure.block(index).unwrap();
+        assert_eq!(src_block.key(), dst_block.key());
+        assert_eq!(src_block.shape(), dst_block.shape());
+        let shape = src_block.shape().to_vec();
+        let count = shape.iter().product::<usize>();
+        let mut multi_index = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let src_position = src_block.offset()
+                + multi_index
+                    .iter()
+                    .zip(src_block.strides())
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let dst_position = dst_block.offset()
+                + multi_index
+                    .iter()
+                    .zip(dst_block.strides())
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            dst.data_mut()[dst_position] = src.data()[src_position];
+            for axis in 0..shape.len() {
+                multi_index[axis] += 1;
+                if multi_index[axis] < shape[axis] {
+                    break;
+                }
+                multi_index[axis] = 0;
+            }
+        }
+    }
+}
+
+fn assert_blocks_match(lhs: &TensorMap<f64, 2, 2>, rhs: &TensorMap<f64, 2, 2>) {
+    let lhs_structure = std::sync::Arc::clone(lhs.structure());
+    let rhs_structure = std::sync::Arc::clone(rhs.structure());
+    assert_eq!(lhs_structure.block_count(), rhs_structure.block_count());
+    for index in 0..lhs_structure.block_count() {
+        let lhs_block = lhs_structure.block(index).unwrap();
+        let rhs_block = rhs_structure.block(index).unwrap();
+        assert_eq!(lhs_block.key(), rhs_block.key());
+        assert_eq!(lhs_block.shape(), rhs_block.shape());
+        let shape = lhs_block.shape().to_vec();
+        let count = shape.iter().product::<usize>();
+        let mut multi_index = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let lhs_position = lhs_block.offset()
+                + multi_index
+                    .iter()
+                    .zip(lhs_block.strides())
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let rhs_position = rhs_block.offset()
+                + multi_index
+                    .iter()
+                    .zip(rhs_block.strides())
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let lhs_value = lhs.data()[lhs_position];
+            let rhs_value = rhs.data()[rhs_position];
+            assert!(
+                (lhs_value - rhs_value).abs() < 1e-12,
+                "block {index} element {multi_index:?}: {lhs_value} != {rhs_value}"
+            );
+            for axis in 0..shape.len() {
+                multi_index[axis] += 1;
+                if multi_index[axis] < shape[axis] {
+                    break;
+                }
+                multi_index[axis] = 0;
+            }
+        }
+    }
+}
+
+#[test]
+fn coupled_layout_contraction_matches_packed_layout() {
+    run_coupled_vs_packed_contractions(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+}
+
+#[test]
+fn coupled_layout_contraction_matches_packed_layout_su2() {
+    run_coupled_vs_packed_contractions(
+        &SU2FusionRule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+}
+
+fn run_coupled_vs_packed_contractions<R>(rule: &R, sectors: &[SectorId])
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+{
+    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let homspace = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        )
+    };
+    let degeneracy = 2usize;
+    let leg_dim = 2 * degeneracy;
+    let dense =
+        || TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
+    let shapes =
+        |hom: &FusionTreeHomSpace| vec![vec![degeneracy; 4]; hom.fusion_tree_keys(rule).len()];
+    let packed_space = |hom: FusionTreeHomSpace| {
+        let shape_list = shapes(&hom);
+        FusionTensorMapSpace::from_degeneracy_shapes(dense(), hom, rule, shape_list).unwrap()
+    };
+    let coupled_space = |hom: FusionTreeHomSpace| {
+        let shape_list = shapes(&hom);
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense(), hom, rule, shape_list)
+            .unwrap()
+    };
+
+    let lhs_packed_space = packed_space(homspace());
+    let lhs_len = lhs_packed_space.required_len().unwrap();
+    let lhs_packed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..lhs_len).map(|i| (i % 11) as f64 * 0.5 - 2.0).collect(),
+        lhs_packed_space,
+    )
+    .unwrap();
+    let rhs_packed_space = packed_space(homspace());
+    let rhs_len = rhs_packed_space.required_len().unwrap();
+    let rhs_packed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..rhs_len).map(|i| (i % 7) as f64 * 0.25 - 1.0).collect(),
+        rhs_packed_space,
+    )
+    .unwrap();
+
+    let mut lhs_coupled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![0.0; lhs_len],
+        coupled_space(homspace()),
+    )
+    .unwrap();
+    let mut rhs_coupled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![0.0; rhs_len],
+        coupled_space(homspace()),
+    )
+    .unwrap();
+    copy_blocks_between_layouts(&mut lhs_coupled, &lhs_packed);
+    copy_blocks_between_layouts(&mut rhs_coupled, &rhs_packed);
+
+    let workloads: [(&[usize; 2], &[usize; 2], &[usize; 4]); 3] = [
+        (&[2, 3], &[0, 1], &[0, 1, 2, 3]),
+        (&[3, 2], &[0, 1], &[0, 1, 2, 3]),
+        (&[3, 2], &[0, 1], &[1, 0, 2, 3]),
+    ];
+    for (lhs_axes, rhs_axes, output_axes) in workloads {
+        let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs_packed.fusion_space().unwrap().homspace(),
+            rhs_packed.fusion_space().unwrap().homspace(),
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            2,
+        )
+        .unwrap();
+        let dst_packed_space = packed_space(dst_hom.clone());
+        let dst_len = dst_packed_space.required_len().unwrap();
+        let mut dst_packed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+            vec![0.0; dst_len],
+            dst_packed_space,
+        )
+        .unwrap();
+        let mut dst_coupled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+            vec![0.0; dst_len],
+            coupled_space(dst_hom),
+        )
+        .unwrap();
+
+        let axes = || {
+            TensorContractAxisSpec::new(lhs_axes, rhs_axes, AxisPermutation::from_axes(output_axes))
+        };
+        let mut packed_context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        packed_context
+            .tensorcontract_fusion_into(
+                rule,
+                &mut dst_packed,
+                &lhs_packed,
+                &rhs_packed,
+                axes(),
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        let mut coupled_context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        coupled_context
+            .tensorcontract_fusion_into(
+                rule,
+                &mut dst_coupled,
+                &lhs_coupled,
+                &rhs_coupled,
+                axes(),
+                1.0,
+                0.0,
+            )
+            .unwrap();
+
+        assert_blocks_match(&dst_packed, &dst_coupled);
+    }
+}
