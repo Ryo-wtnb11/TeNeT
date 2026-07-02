@@ -82,6 +82,10 @@ Storage-aware workspace target:
   This avoids freezing a workspace trait before tree-transform, contraction,
   canonical fusion-block, and dynamic fusion scratch agree on one storage-aware
   shape.
+- Tree-transform scratch now has an internal source/destination slot shape,
+  `TreeTransformScratchBuffers<Source, Destination>`. The current host replay
+  instantiates both slots with `HostScratchBuffer<T>`; this is only a naming
+  and boundary step, not device dispatch.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic

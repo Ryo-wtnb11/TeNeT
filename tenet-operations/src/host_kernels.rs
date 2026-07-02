@@ -9,6 +9,7 @@ use tenet_core::{
 use tenet_dense::DenseExecutor;
 
 use crate::host_scratch::HostScratchBuffer;
+use crate::storage_scratch::TreeTransformScratchBuffers;
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
@@ -28,8 +29,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
-    source: HostScratchBuffer<T>,
-    destination: HostScratchBuffer<T>,
+    packed: TreeTransformScratchBuffers<HostScratchBuffer<T>, HostScratchBuffer<T>>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -38,8 +38,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
     fn default() -> Self {
         Self {
             zero_strides: Vec::new(),
-            source: HostScratchBuffer::default(),
-            destination: HostScratchBuffer::default(),
+            packed: TreeTransformScratchBuffers::default(),
         }
     }
 }
@@ -56,19 +55,23 @@ impl<T> HostTreeTransformWorkspace<T> {
     }
 
     pub fn source_len(&self) -> usize {
-        self.source.len()
+        self.packed.source().len()
     }
 
     pub fn destination_len(&self) -> usize {
-        self.destination.len()
+        self.packed.destination().len()
     }
 
     fn prepare_packed_buffers(&mut self, source_len: usize, destination_len: usize, zero: T)
     where
         T: Clone,
     {
-        self.source.resize_filled(source_len, zero.clone());
-        self.destination.resize_filled(destination_len, zero);
+        self.packed
+            .source_mut()
+            .resize_filled(source_len, zero.clone());
+        self.packed
+            .destination_mut()
+            .resize_filled(destination_len, zero);
     }
 }
 
@@ -678,21 +681,24 @@ where
             layouts,
             layout,
             src_data,
-            workspace.source.as_mut_slice(),
+            workspace.packed.source_mut().as_mut_slice(),
             src_index * element_count,
             source_conjugate,
         )?;
     }
 
-    apply_recoupling_matrix_src_times_u_transpose(
-        workspace.destination.as_mut_slice(),
-        workspace.source.as_slice(),
-        coefficients_src_by_dst,
-        coefficient_start,
-        element_count,
-        src_count,
-        dst_count,
-    )?;
+    {
+        let (source, destination) = workspace.packed.source_and_destination_mut();
+        apply_recoupling_matrix_src_times_u_transpose(
+            destination.as_mut_slice(),
+            source.as_slice(),
+            coefficients_src_by_dst,
+            coefficient_start,
+            element_count,
+            src_count,
+            dst_count,
+        )?;
+    }
 
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
@@ -700,7 +706,7 @@ where
             &mut workspace.zero_strides,
             layouts,
             layout,
-            workspace.destination.as_slice(),
+            workspace.packed.destination().as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,
@@ -747,21 +753,24 @@ where
             layouts,
             layout,
             src_data,
-            workspace.source.as_mut_slice(),
+            workspace.packed.source_mut().as_mut_slice(),
             src_index * element_count,
             source_conjugate,
         )?;
     }
 
-    apply_recoupling_matrix_src_times_u_transpose(
-        workspace.destination.as_mut_slice(),
-        workspace.source.as_slice(),
-        coefficients_src_by_dst,
-        coefficient_start,
-        element_count,
-        src_count,
-        dst_count,
-    )?;
+    {
+        let (source, destination) = workspace.packed.source_and_destination_mut();
+        apply_recoupling_matrix_src_times_u_transpose(
+            destination.as_mut_slice(),
+            source.as_slice(),
+            coefficients_src_by_dst,
+            coefficient_start,
+            element_count,
+            src_count,
+            dst_count,
+        )?;
+    }
 
     for dst_index in 0..dst_count {
         let layout = layouts.entry(dst_layout_start + dst_index);
@@ -769,7 +778,7 @@ where
             &mut workspace.zero_strides,
             layouts,
             layout,
-            workspace.destination.as_slice(),
+            workspace.packed.destination().as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,
@@ -821,7 +830,7 @@ where
             layouts,
             layout,
             src_data,
-            workspace.source.as_mut_slice(),
+            workspace.packed.source_mut().as_mut_slice(),
             src_index * element_count,
             source_conjugate,
             profile,
@@ -831,15 +840,18 @@ where
     profile.multi_pack += start.elapsed();
 
     let start = std::time::Instant::now();
-    apply_recoupling_matrix_src_times_u_transpose(
-        workspace.destination.as_mut_slice(),
-        workspace.source.as_slice(),
-        coefficients_src_by_dst,
-        coefficient_start,
-        element_count,
-        src_count,
-        dst_count,
-    )?;
+    {
+        let (source, destination) = workspace.packed.source_and_destination_mut();
+        apply_recoupling_matrix_src_times_u_transpose(
+            destination.as_mut_slice(),
+            source.as_slice(),
+            coefficients_src_by_dst,
+            coefficient_start,
+            element_count,
+            src_count,
+            dst_count,
+        )?;
+    }
     let elapsed = start.elapsed();
     profile.multi_scalar_recoupling += elapsed;
     profile.multi_matmul_total += elapsed;
@@ -851,7 +863,7 @@ where
             &mut workspace.zero_strides,
             layouts,
             layout,
-            workspace.destination.as_slice(),
+            workspace.packed.destination().as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,

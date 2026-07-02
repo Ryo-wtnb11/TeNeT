@@ -19,6 +19,58 @@ impl SamePlacementScratchAllocator {
     }
 }
 
+/// Source/destination scratch shape for tree-transform replay.
+///
+/// The cached tree-transform structure remains placement-neutral; these slots
+/// name the storage-local scratch buffers needed to replay source packs into
+/// destination packs. Current host replay instantiates both slots with
+/// `HostScratchBuffer<T>`.
+#[derive(Clone, Debug)]
+pub(crate) struct TreeTransformScratchBuffers<Source, Destination> {
+    source: Source,
+    destination: Destination,
+}
+
+impl<Source, Destination> Default for TreeTransformScratchBuffers<Source, Destination>
+where
+    Source: Default,
+    Destination: Default,
+{
+    fn default() -> Self {
+        Self {
+            source: Source::default(),
+            destination: Destination::default(),
+        }
+    }
+}
+
+impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
+    #[inline]
+    pub(crate) fn source(&self) -> &Source {
+        &self.source
+    }
+
+    #[inline]
+    pub(crate) fn source_mut(&mut self) -> &mut Source {
+        &mut self.source
+    }
+
+    #[inline]
+    pub(crate) fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    #[inline]
+    pub(crate) fn destination_mut(&mut self) -> &mut Destination {
+        &mut self.destination
+    }
+
+    #[inline]
+    pub(crate) fn source_and_destination_mut(&mut self) -> (&Source, &mut Destination) {
+        (&self.source, &mut self.destination)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +139,20 @@ mod tests {
         assert_eq!(scratch.data, vec![7, 7, 7]);
         assert_eq!(scratch.len(), 3);
         assert_eq!(scratch.placement(), storage.placement());
+    }
+
+    #[test]
+    fn tree_transform_scratch_buffers_keep_source_and_destination_slots() {
+        let buffers = TreeTransformScratchBuffers {
+            source: PlacementOnlyScratch { data: vec![1, 2] },
+            destination: PlacementOnlyScratch {
+                data: vec![3, 4, 5],
+            },
+        };
+
+        assert_eq!(buffers.source().data, vec![1, 2]);
+        assert_eq!(buffers.destination().data, vec![3, 4, 5]);
+        assert_eq!(buffers.source().len(), 2);
+        assert_eq!(buffers.destination().len(), 3);
     }
 }
