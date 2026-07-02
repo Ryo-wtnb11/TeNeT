@@ -262,6 +262,9 @@ pub struct DenseTensor {
 enum DenseTensorInner {
     #[cfg(feature = "tenferro")]
     Tenferro(tenferro_tensor::Tensor),
+    #[cfg(not(feature = "tenferro"))]
+    #[allow(dead_code)]
+    Empty(std::convert::Infallible),
 }
 
 impl DenseTensor {
@@ -274,6 +277,8 @@ impl DenseTensor {
         match &self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => dense_dtype_from_tenferro(tensor.dtype()),
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match *inner {},
         }
     }
 
@@ -281,6 +286,8 @@ impl DenseTensor {
         match &self.inner {
             #[cfg(feature = "tenferro")]
             DenseTensorInner::Tenferro(tensor) => tensor.shape(),
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match *inner {},
         }
     }
 
@@ -290,6 +297,8 @@ impl DenseTensor {
             DenseTensorInner::Tenferro(tensor) => tensor
                 .as_slice::<f32>()
                 .map_err(|err| tenferro_error("DenseTensor::as_f32_slice", err)),
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match *inner {},
         }
     }
 
@@ -299,6 +308,8 @@ impl DenseTensor {
             DenseTensorInner::Tenferro(tensor) => tensor
                 .as_slice::<f64>()
                 .map_err(|err| tenferro_error("DenseTensor::as_f64_slice", err)),
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match *inner {},
         }
     }
 
@@ -308,6 +319,8 @@ impl DenseTensor {
             DenseTensorInner::Tenferro(tensor) => tensor
                 .as_slice::<Complex32>()
                 .map_err(|err| tenferro_error("DenseTensor::as_c32_slice", err)),
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match *inner {},
         }
     }
 
@@ -317,6 +330,8 @@ impl DenseTensor {
             DenseTensorInner::Tenferro(tensor) => tensor
                 .as_slice::<Complex64>()
                 .map_err(|err| tenferro_error("DenseTensor::as_c64_slice", err)),
+            #[cfg(not(feature = "tenferro"))]
+            DenseTensorInner::Empty(inner) => match *inner {},
         }
     }
 
@@ -350,6 +365,26 @@ pub trait DenseExecutor {
     ) -> Result<(), DenseError> {
         self.dot_general_into(output, lhs, rhs, &DenseDotConfig::matmul())
     }
+}
+
+/// Low-level dense kernel boundary.
+///
+/// `DenseExecutor` owns high-level dense operations such as decomposition and
+/// dot-general lowering. This trait is the narrower backend boundary for hot
+/// kernels that symmetric tensor replay wants to call directly. Concrete
+/// implementations may be backed by strided-rs, C++ BLAS, CUDA/cuBLAS, or
+/// another runtime, but callers only see TeNeT-owned dense views.
+pub trait DenseKernelBackend {
+    fn backend(&self) -> DenseBackend;
+
+    fn supports_matmul(&self, dtype: DenseDType) -> bool;
+
+    fn matmul_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+    ) -> Result<(), DenseError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -454,10 +489,14 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseEr
 pub use tenferro_adapter::DefaultDenseExecutor;
 
 #[cfg(feature = "tenferro")]
+mod strided_adapter;
+#[cfg(feature = "tenferro")]
+pub use strided_adapter::StridedKernelBackend;
+
+#[cfg(feature = "tenferro")]
 mod tenferro_adapter {
     use super::*;
 
-    use num_traits::{One, Zero};
     use tenferro_cpu::CpuBackend;
     use tenferro_linalg::LinalgBackend;
     use tenferro_tensor::{
@@ -466,15 +505,23 @@ mod tenferro_adapter {
     };
 
     #[derive(Debug)]
-    pub struct DefaultDenseExecutor {
+    pub struct DefaultDenseExecutor<K = StridedKernelBackend> {
         backend: CpuBackend,
+        kernel: K,
         matmul_config: DotGeneralConfig,
     }
 
-    impl DefaultDenseExecutor {
+    impl DefaultDenseExecutor<StridedKernelBackend> {
         pub fn new() -> Self {
+            Self::with_kernel_backend(StridedKernelBackend::new())
+        }
+    }
+
+    impl<K> DefaultDenseExecutor<K> {
+        pub fn with_kernel_backend(kernel: K) -> Self {
             Self {
                 backend: CpuBackend::new(),
+                kernel,
                 matmul_config: DotGeneralConfig {
                     lhs_contracting_dims: vec![1],
                     rhs_contracting_dims: vec![0],
@@ -483,15 +530,26 @@ mod tenferro_adapter {
                 },
             }
         }
+
+        pub fn kernel_backend(&self) -> &K {
+            &self.kernel
+        }
+
+        pub fn kernel_backend_mut(&mut self) -> &mut K {
+            &mut self.kernel
+        }
     }
 
-    impl Default for DefaultDenseExecutor {
+    impl Default for DefaultDenseExecutor<StridedKernelBackend> {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl DenseExecutor for DefaultDenseExecutor {
+    impl<K> DenseExecutor for DefaultDenseExecutor<K>
+    where
+        K: DenseKernelBackend,
+    {
         fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
             let input = tenferro_view(input)?;
             self.backend
@@ -537,93 +595,32 @@ mod tenferro_adapter {
             lhs: DenseRead<'_>,
             rhs: DenseRead<'_>,
         ) -> Result<(), DenseError> {
-            match (output, lhs, rhs) {
-                (DenseWrite::F32(output), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
-                    direct_strided_matmul_into(output, lhs, rhs)
-                }
-                (DenseWrite::F64(output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
-                    direct_strided_matmul_into(output, lhs, rhs)
-                }
-                (DenseWrite::C32(output), DenseRead::C32(lhs), DenseRead::C32(rhs)) => {
-                    direct_strided_matmul_into(output, lhs, rhs)
-                }
-                (DenseWrite::C64(output), DenseRead::C64(lhs), DenseRead::C64(rhs)) => {
-                    direct_strided_matmul_into(output, lhs, rhs)
-                }
-                (output, lhs, rhs) => {
-                    let lhs = TensorRead::from_view(tenferro_view(lhs)?);
-                    let rhs = TensorRead::from_view(tenferro_view(rhs)?);
-                    let output = TensorWrite::from_view(tenferro_view_mut(output)?);
-                    self.backend
-                        .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
-                        .map_err(|err| tenferro_error("dot_general_read_into", err))
-                }
+            let dtype = output.dtype();
+            if dtype == lhs.dtype() && dtype == rhs.dtype() && self.kernel.supports_matmul(dtype) {
+                self.kernel.matmul_into(output, lhs, rhs)
+            } else {
+                self.tenferro_matmul_into(output, lhs, rhs)
             }
         }
     }
 
-    fn direct_strided_matmul_into<T>(
-        mut output: DenseViewMut<'_, T>,
-        lhs: DenseView<'_, T>,
-        rhs: DenseView<'_, T>,
-    ) -> Result<(), DenseError>
+    impl<K> DefaultDenseExecutor<K>
     where
-        T: strided_einsum2::Scalar + One + Zero,
+        K: DenseKernelBackend,
     {
-        let lhs_shape = rank2_shape(lhs.shape(), "lhs")?;
-        let rhs_shape = rank2_shape(rhs.shape(), "rhs")?;
-        let output_shape = rank2_shape(output.shape(), "output")?;
-        if lhs_shape[1] != rhs_shape[0] {
-            return Err(shape_error(format!(
-                "lhs columns {} do not match rhs rows {}",
-                lhs_shape[1], rhs_shape[0]
-            )));
+        fn tenferro_matmul_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+        ) -> Result<(), DenseError> {
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            self.backend
+                .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
+                .map_err(|err| tenferro_error("dot_general_read_into", err))
         }
-        let expected_output = [lhs_shape[0], rhs_shape[1]];
-        if output_shape != expected_output {
-            return Err(shape_error(format!(
-                "output shape {:?} does not match matmul shape {:?}",
-                output_shape, expected_output
-            )));
-        }
-
-        let lhs_strides = rank2_strides_to_isize(lhs.strides(), "lhs")?;
-        let rhs_strides = rank2_strides_to_isize(rhs.strides(), "rhs")?;
-        let output_strides = rank2_strides_to_isize(output.strides(), "output")?;
-        let lhs_offset = offset_to_isize(lhs.offset())?;
-        let rhs_offset = offset_to_isize(rhs.offset())?;
-        let output_offset = offset_to_isize(output.offset())?;
-
-        let lhs_view =
-            strided_einsum2::RawStridedRef::new(lhs.data(), &lhs_shape, &lhs_strides, lhs_offset)
-                .map_err(strided_error)?;
-        let rhs_view =
-            strided_einsum2::RawStridedRef::new(rhs.data(), &rhs_shape, &rhs_strides, rhs_offset)
-                .map_err(strided_error)?;
-        let output_view = strided_einsum2::RawStridedMut::new(
-            output.data_mut(),
-            &output_shape,
-            &output_strides,
-            output_offset,
-        )
-        .map_err(strided_error)?;
-        // This is the dense backend's rank-2 `mul!` equivalent.  The public
-        // dot-general path rebuilds an einsum plan every call; canonical
-        // fusion-block contraction has already compiled the rank-2 layout.
-        strided_einsum2::bgemm_raw_strided_into(
-            output_view,
-            lhs_view,
-            rhs_view,
-            0,
-            1,
-            1,
-            1,
-            T::one(),
-            T::zero(),
-            false,
-            false,
-        )
-        .map_err(strided_error)
     }
 
     fn wrap_outputs(outputs: Vec<Tensor>) -> Vec<DenseTensor> {
@@ -692,54 +689,9 @@ mod tenferro_adapter {
             rhs_batch_dims: config.rhs_batch_dims().to_vec(),
         }
     }
-
-    fn offset_to_isize(offset: usize) -> Result<isize, DenseError> {
-        isize::try_from(offset).map_err(|_| DenseError::OffsetOverflow { value: offset })
-    }
-
-    fn rank2_shape(shape: &[usize], label: &'static str) -> Result<[usize; 2], DenseError> {
-        match shape {
-            [rows, cols] => Ok([*rows, *cols]),
-            _ => Err(shape_error(format!(
-                "{label} rank {} is not rank-2",
-                shape.len()
-            ))),
-        }
-    }
-
-    fn rank2_strides_to_isize(
-        strides: &[usize],
-        label: &'static str,
-    ) -> Result<[isize; 2], DenseError> {
-        match strides {
-            [row, col] => Ok([
-                isize::try_from(*row).map_err(|_| DenseError::StrideOverflow { value: *row })?,
-                isize::try_from(*col).map_err(|_| DenseError::StrideOverflow { value: *col })?,
-            ]),
-            _ => Err(shape_error(format!(
-                "{label} stride rank {} is not rank-2",
-                strides.len()
-            ))),
-        }
-    }
-
-    fn shape_error(message: String) -> DenseError {
-        DenseError::Backend {
-            backend: DenseBackend::Strided,
-            op: "matmul_into",
-            message,
-        }
-    }
-
-    fn strided_error(err: impl std::fmt::Display) -> DenseError {
-        DenseError::Backend {
-            backend: DenseBackend::Strided,
-            op: "matmul_into",
-            message: err.to_string(),
-        }
-    }
 }
 
+#[cfg(feature = "tenferro")]
 fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, DenseError> {
     strides
         .iter()
@@ -773,6 +725,8 @@ fn tenferro_error(op: &'static str, err: tenferro_tensor::Error) -> DenseError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use super::*;
 
     fn assert_f64_close(actual: f64, expected: f64, tol: f64) {
@@ -966,6 +920,64 @@ mod tests {
         let strides = [1, 4];
         let err = DenseView::new(&data, &shape, &strides, 0).unwrap_err();
         assert_eq!(err, DenseError::OutOfBounds);
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[derive(Default)]
+    struct CountingKernelBackend {
+        matmul_calls: usize,
+    }
+
+    #[cfg(feature = "tenferro")]
+    impl DenseKernelBackend for CountingKernelBackend {
+        fn backend(&self) -> DenseBackend {
+            DenseBackend::Strided
+        }
+
+        fn supports_matmul(&self, dtype: DenseDType) -> bool {
+            dtype == DenseDType::F64
+        }
+
+        fn matmul_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+        ) -> Result<(), DenseError> {
+            self.matmul_calls += 1;
+            match (output, lhs, rhs) {
+                (DenseWrite::F64(mut output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                    assert_eq!(lhs.shape(), &[2, 2]);
+                    assert_eq!(rhs.shape(), &[2, 2]);
+                    output.data_mut().fill(7.0);
+                    Ok(())
+                }
+                _ => panic!("CountingKernelBackend should receive only supported F64 matmul"),
+            }
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_routes_supported_matmul_to_kernel_backend() {
+        let lhs = [1.0, 2.0, 3.0, 4.0];
+        let rhs = [5.0, 6.0, 7.0, 8.0];
+        let mut output = [0.0; 4];
+        let shape = [2, 2];
+        let strides = [1, 2];
+
+        let mut executor =
+            DefaultDenseExecutor::with_kernel_backend(CountingKernelBackend::default());
+        executor
+            .matmul_into(
+                DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
+                DenseRead::F64(DenseView::new(&lhs, &shape, &strides, 0).unwrap()),
+                DenseRead::F64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
+            )
+            .unwrap();
+
+        assert_eq!(executor.kernel_backend().matmul_calls, 1);
+        assert_eq!(output, [7.0; 4]);
     }
 
     #[cfg(feature = "tenferro")]
