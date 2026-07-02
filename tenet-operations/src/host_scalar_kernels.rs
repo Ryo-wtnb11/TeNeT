@@ -468,6 +468,94 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn tensortrace_raw_strided_kernel<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+{
+    let output_len = crate::strided::element_count(output_shape)?;
+    let trace_len = crate::strided::element_count(trace_shape)?;
+    for output_linear in 0..output_len {
+        let dst_index =
+            strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
+        let src_base =
+            strided_linear_offset(output_linear, output_shape, src_output_strides, src_offset)?;
+        let src_base = isize::try_from(src_base)
+            .map_err(|_| OperationError::OffsetOverflow { value: src_base })?;
+        let mut sum = T::zero();
+        for trace_linear in 0..trace_len {
+            let src_index =
+                strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
+            sum = sum + src_data[src_index].maybe_conj(source_conjugate);
+        }
+        let value = alpha * sum;
+        dst_data[dst_index] = if beta.is_zero() {
+            value
+        } else {
+            beta * dst_data[dst_index] + value
+        };
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    output_shape: &[usize],
+    trace_shape: &[usize],
+    dst_strides: &[isize],
+    src_output_strides: &[isize],
+    src_trace_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    coefficient: C,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + Zero
+        + ConjugateValue
+        + crate::RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let output_len = crate::strided::element_count(output_shape)?;
+    let trace_len = crate::strided::element_count(trace_shape)?;
+    for output_linear in 0..output_len {
+        let dst_index =
+            strided_linear_offset(output_linear, output_shape, dst_strides, dst_offset)?;
+        let src_base =
+            strided_linear_offset(output_linear, output_shape, src_output_strides, src_offset)?;
+        let src_base = isize::try_from(src_base)
+            .map_err(|_| OperationError::OffsetOverflow { value: src_base })?;
+        let mut sum = T::zero();
+        for trace_linear in 0..trace_len {
+            let src_index =
+                strided_linear_offset(trace_linear, trace_shape, src_trace_strides, src_base)?;
+            sum = sum + src_data[src_index].maybe_conj(source_conjugate);
+        }
+        let value = (alpha * sum).scale_by_coefficient(coefficient);
+        dst_data[dst_index] = dst_data[dst_index] + value;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_raw_strided_views<T>(
     dst_data: &mut [T],
     src_data: &[T],
@@ -759,4 +847,28 @@ fn is_column_major_contiguous(shape: &[usize], strides: &[isize]) -> Result<bool
             .ok_or(OperationError::ElementCountOverflow)?;
     }
     Ok(true)
+}
+
+fn strided_linear_offset(
+    mut linear: usize,
+    shape: &[usize],
+    strides: &[isize],
+    base: isize,
+) -> Result<usize, OperationError> {
+    let mut offset = base;
+    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
+        let coord = if dim == 0 { 0 } else { linear % dim };
+        if dim != 0 {
+            linear /= dim;
+        }
+        let coord = isize::try_from(coord).map_err(|_| OperationError::ElementCountOverflow)?;
+        offset = offset
+            .checked_add(
+                coord
+                    .checked_mul(stride)
+                    .ok_or(OperationError::ElementCountOverflow)?,
+            )
+            .ok_or(OperationError::ElementCountOverflow)?;
+    }
+    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
 }

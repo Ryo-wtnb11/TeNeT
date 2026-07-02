@@ -86,6 +86,7 @@ pub(crate) use host_scalar_kernels::{
     copy_scale_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
     scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
     tensoradd_raw_strided_kernel_profiled, tensoradd_raw_strided_kernel_trusted,
+    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
 };
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
