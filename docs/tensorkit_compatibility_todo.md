@@ -311,6 +311,10 @@ Remaining implementation boundary:
   `HostAllocator` name remains a type alias. This keeps source compatibility
   while avoiding the implication that the current host scratch object is a
   general device/backend allocator.
+- Host operation backend/workspace placement uses the core `Placement`
+  vocabulary and reports `Placement::Host`. Do not introduce a second
+  operations-local placement enum unless device/MPI execution needs additional
+  distinctions that cannot live in `tenet_core::Placement`.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.

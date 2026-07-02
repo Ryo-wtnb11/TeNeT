@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, TensorMap,
+    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
+    TensorMap,
 };
 use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
 
@@ -223,10 +224,29 @@ pub struct HostTensorOperationsWorkspace {
     pub(crate) zero_strides: Vec<isize>,
 }
 
+impl HostTensorOperationsWorkspace {
+    #[inline]
+    pub fn placement(&self) -> Placement {
+        Placement::Host
+    }
+
+    #[inline]
+    pub fn is_host_workspace(&self) -> bool {
+        self.placement() == Placement::Host
+    }
+}
+
 pub type HostAllocator = HostTensorOperationsWorkspace;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HostTensorOperations;
+
+impl HostTensorOperations {
+    #[inline]
+    pub fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
 
 #[derive(Debug)]
 pub struct DenseTreeTransformOperations<E = DefaultDenseExecutor> {
@@ -244,6 +264,11 @@ impl DenseTreeTransformOperations<DefaultDenseExecutor> {
 impl<E> DenseTreeTransformOperations<E> {
     pub fn new(dense: E) -> Self {
         Self { dense }
+    }
+
+    #[inline]
+    pub fn placement(&self) -> Placement {
+        Placement::Host
     }
 
     pub fn dense(&self) -> &E {
@@ -555,6 +580,11 @@ mod tests {
 
     #[test]
     fn host_tensor_operations_keeps_compatibility_backend_names() {
+        let backend = HostTensorOperations;
+        let tree_backend = DenseTreeTransformOperations::default();
+
+        assert_eq!(backend.placement(), Placement::Host);
+        assert_eq!(tree_backend.placement(), Placement::Host);
         assert_tensor_operations_backend::<HostTensorOperations>();
         assert_host_tensor_operations_backend::<HostTensorOperations>();
         assert_host_tree_transform_backend::<HostTensorOperations, f64, f64>();
@@ -566,6 +596,9 @@ mod tests {
         let workspace = HostTensorOperationsWorkspace::default();
         let alias = HostAllocator::default();
 
+        assert_eq!(workspace.placement(), Placement::Host);
+        assert!(workspace.is_host_workspace());
+        assert_eq!(alias.placement(), Placement::Host);
         assert_eq!(workspace.zero_strides.len(), 0);
         assert_eq!(alias.zero_strides.len(), workspace.zero_strides.len());
     }
