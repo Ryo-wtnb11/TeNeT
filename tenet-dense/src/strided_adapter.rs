@@ -6,7 +6,7 @@ use crate::{
 use num_traits::{One, Zero};
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct StridedKernelBackend;
+pub struct StridedKernelBackend;
 
 impl StridedKernelBackend {
     pub fn new() -> Self {

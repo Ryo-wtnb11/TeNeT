@@ -407,7 +407,12 @@ pub trait DenseExecutor {
     }
 }
 
-trait DenseKernelBackend {
+/// Low-level dense matmul kernel boundary used by dense executors.
+///
+/// Implementations own the placement-specific rank-2 matmul path. The default
+/// host implementation wraps `strided-einsum2`; future BLAS/C++/CUDA kernels
+/// should implement this trait without changing TensorMap/fusion code.
+pub trait DenseKernelBackend {
     fn supports_matmul(&self, dtype: DenseDType) -> bool;
 
     fn matmul_into(
@@ -517,7 +522,10 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseEr
 }
 
 #[cfg(feature = "tenferro")]
-pub use tenferro_adapter::DefaultDenseExecutor;
+pub use strided_adapter::StridedKernelBackend;
+
+#[cfg(feature = "tenferro")]
+pub use tenferro_adapter::{DefaultDenseExecutor, DenseExecutorWithKernel};
 
 #[cfg(feature = "tenferro")]
 mod strided_adapter;
@@ -535,7 +543,7 @@ mod tenferro_adapter {
     };
 
     #[derive(Debug)]
-    pub(super) struct DenseExecutorImpl<K> {
+    pub struct DenseExecutorWithKernel<K> {
         backend: CpuBackend,
         kernel: K,
         matmul_config: DotGeneralConfig,
@@ -543,19 +551,19 @@ mod tenferro_adapter {
 
     #[derive(Debug)]
     pub struct DefaultDenseExecutor {
-        inner: DenseExecutorImpl<StridedKernelBackend>,
+        inner: DenseExecutorWithKernel<StridedKernelBackend>,
     }
 
     impl DefaultDenseExecutor {
         pub fn new() -> Self {
             Self {
-                inner: DenseExecutorImpl::with_kernel_backend(StridedKernelBackend::new()),
+                inner: DenseExecutorWithKernel::with_kernel_backend(StridedKernelBackend::new()),
             }
         }
     }
 
-    impl<K> DenseExecutorImpl<K> {
-        pub(super) fn with_kernel_backend(kernel: K) -> Self {
+    impl<K> DenseExecutorWithKernel<K> {
+        pub fn with_kernel_backend(kernel: K) -> Self {
             Self {
                 backend: CpuBackend::new(),
                 kernel,
@@ -613,7 +621,7 @@ mod tenferro_adapter {
         }
     }
 
-    impl<K> DenseExecutor for DenseExecutorImpl<K>
+    impl<K> DenseExecutor for DenseExecutorWithKernel<K>
     where
         K: DenseKernelBackend,
     {
@@ -671,7 +679,7 @@ mod tenferro_adapter {
         }
     }
 
-    impl<K> DenseExecutorImpl<K>
+    impl<K> DenseExecutorWithKernel<K>
     where
         K: DenseKernelBackend,
     {
@@ -1029,9 +1037,8 @@ mod tests {
         let shape = [2, 2];
         let strides = [1, 2];
 
-        let mut executor = tenferro_adapter::DenseExecutorImpl::with_kernel_backend(
-            CountingKernelBackend::default(),
-        );
+        let mut executor =
+            DenseExecutorWithKernel::with_kernel_backend(CountingKernelBackend::default());
         executor
             .matmul_into(
                 DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),

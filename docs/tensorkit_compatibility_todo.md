@@ -291,6 +291,10 @@ Remaining implementation boundary:
   axpby, and scale rather than embedding raw strided loops in categorical
   planning code. This mirrors the TensorKit/Strided.jl split and is the
   replacement point for a future C++/CUDA low-level backend.
+- Dense matmul has an explicit kernel boundary:
+  `DenseKernelBackend` plus `DenseExecutorWithKernel<K>`. The default host
+  executor still uses `StridedKernelBackend`, while future BLAS/C++/CUDA
+  kernels can replace that layer without touching TensorMap/fusion algorithms.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.
