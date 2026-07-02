@@ -27,8 +27,8 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
-    source: Vec<T>,
-    destination: Vec<T>,
+    source: HostScratchBuffer<T>,
+    destination: HostScratchBuffer<T>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -37,8 +37,8 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
     fn default() -> Self {
         Self {
             zero_strides: Vec::new(),
-            source: Vec::new(),
-            destination: Vec::new(),
+            source: HostScratchBuffer::default(),
+            destination: HostScratchBuffer::default(),
         }
     }
 }
@@ -61,12 +61,56 @@ impl<T> HostTreeTransformWorkspace<T> {
     pub fn destination_len(&self) -> usize {
         self.destination.len()
     }
+
+    fn prepare_packed_buffers(&mut self, source_len: usize, destination_len: usize, zero: T)
+    where
+        T: Clone,
+    {
+        self.source.resize_filled(source_len, zero.clone());
+        self.destination.resize_filled(destination_len, zero);
+    }
 }
 
 impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HostScratchBuffer<T> {
+    data: Vec<T>,
+}
+
+impl<T> Default for HostScratchBuffer<T> {
+    fn default() -> Self {
+        Self { data: Vec::new() }
+    }
+}
+
+impl<T> HostScratchBuffer<T> {
+    #[inline]
+    fn resize_filled(&mut self, len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.data.resize(len, value);
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
     }
 }
 
@@ -661,8 +705,7 @@ where
     let destination_len = element_count
         .checked_mul(dst_count)
         .ok_or(OperationError::ElementCountOverflow)?;
-    workspace.source.resize(source_len, D::zero());
-    workspace.destination.resize(destination_len, D::zero());
+    workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
 
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
@@ -670,15 +713,15 @@ where
             layouts,
             layout,
             src_data,
-            &mut workspace.source,
+            workspace.source.as_mut_slice(),
             src_index * element_count,
             source_conjugate,
         )?;
     }
 
     apply_recoupling_matrix_src_times_u_transpose(
-        &mut workspace.destination,
-        &workspace.source,
+        workspace.destination.as_mut_slice(),
+        workspace.source.as_slice(),
         coefficients_src_by_dst,
         coefficient_start,
         element_count,
@@ -692,7 +735,7 @@ where
             &mut workspace.zero_strides,
             layouts,
             layout,
-            &workspace.destination,
+            workspace.destination.as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,
@@ -731,8 +774,7 @@ where
     let destination_len = element_count
         .checked_mul(dst_count)
         .ok_or(OperationError::ElementCountOverflow)?;
-    workspace.source.resize(source_len, D::zero());
-    workspace.destination.resize(destination_len, D::zero());
+    workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
 
     for src_index in 0..src_count {
         let layout = layouts.entry(src_layout_start + src_index);
@@ -740,15 +782,15 @@ where
             layouts,
             layout,
             src_data,
-            &mut workspace.source,
+            workspace.source.as_mut_slice(),
             src_index * element_count,
             source_conjugate,
         )?;
     }
 
     apply_recoupling_matrix_src_times_u_transpose(
-        &mut workspace.destination,
-        &workspace.source,
+        workspace.destination.as_mut_slice(),
+        workspace.source.as_slice(),
         coefficients_src_by_dst,
         coefficient_start,
         element_count,
@@ -762,7 +804,7 @@ where
             &mut workspace.zero_strides,
             layouts,
             layout,
-            &workspace.destination,
+            workspace.destination.as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,
@@ -804,8 +846,7 @@ where
         .ok_or(OperationError::ElementCountOverflow)?;
 
     let start = std::time::Instant::now();
-    workspace.source.resize(source_len, D::zero());
-    workspace.destination.resize(destination_len, D::zero());
+    workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
     profile.multi_workspace_prepare += start.elapsed();
 
     let start = std::time::Instant::now();
@@ -815,7 +856,7 @@ where
             layouts,
             layout,
             src_data,
-            &mut workspace.source,
+            workspace.source.as_mut_slice(),
             src_index * element_count,
             source_conjugate,
             profile,
@@ -826,8 +867,8 @@ where
 
     let start = std::time::Instant::now();
     apply_recoupling_matrix_src_times_u_transpose(
-        &mut workspace.destination,
-        &workspace.source,
+        workspace.destination.as_mut_slice(),
+        workspace.source.as_slice(),
         coefficients_src_by_dst,
         coefficient_start,
         element_count,
@@ -845,7 +886,7 @@ where
             &mut workspace.zero_strides,
             layouts,
             layout,
-            &workspace.destination,
+            workspace.destination.as_slice(),
             dst_index * element_count,
             dst_data,
             alpha,
