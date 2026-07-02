@@ -43,6 +43,8 @@ pub struct TensorContractFusionProfile {
     pub rhs_transform_calls: usize,
     pub output_transform_calls: usize,
     pub canonical_contract_groups: usize,
+    pub canonical_direct_pack_skips: usize,
+    pub canonical_direct_gemm_groups: usize,
     pub tree_replay: TreeTransformReplayProfile,
 }
 
@@ -77,6 +79,8 @@ impl TensorContractFusionProfile {
         self.rhs_transform_calls += other.rhs_transform_calls;
         self.output_transform_calls += other.output_transform_calls;
         self.canonical_contract_groups += other.canonical_contract_groups;
+        self.canonical_direct_pack_skips += other.canonical_direct_pack_skips;
+        self.canonical_direct_gemm_groups += other.canonical_direct_gemm_groups;
         self.tree_replay.accumulate(&other.tree_replay);
         if self.route == TensorContractFusionRoute::Unset {
             self.route = other.route;

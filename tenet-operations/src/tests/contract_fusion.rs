@@ -3672,3 +3672,85 @@ where
         assert_blocks_match(&dst_packed, &dst_coupled);
     }
 }
+
+#[test]
+fn coupled_layout_compose_uses_direct_gemm_groups() {
+    let rule = Z2FusionRule;
+    let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+    let homspace = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        )
+    };
+    let degeneracy = 2usize;
+    let leg_dim = 2 * degeneracy;
+    let space = |hom: FusionTreeHomSpace| {
+        let key_count = hom.fusion_tree_keys(&rule).len();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
+            hom,
+            &rule,
+            vec![vec![degeneracy; 4]; key_count],
+        )
+        .unwrap()
+    };
+    let lhs_space = space(homspace());
+    let lhs_len = lhs_space.required_len().unwrap();
+    let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..lhs_len).map(|i| i as f64 * 0.5).collect(),
+        lhs_space,
+    )
+    .unwrap();
+    let rhs_space = space(homspace());
+    let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..lhs_len).map(|i| 1.0 - i as f64 * 0.25).collect(),
+        rhs_space,
+    )
+    .unwrap();
+    let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+        &rule,
+        lhs.fusion_space().unwrap().homspace(),
+        rhs.fusion_space().unwrap().homspace(),
+        &[2, 3],
+        &[0, 1],
+        &[0, 1, 2, 3],
+        2,
+    )
+    .unwrap();
+    let dst_space = space(dst_hom);
+    let dst_len = dst_space.required_len().unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space).unwrap();
+
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let axes =
+        || TensorContractAxisSpec::new(&[2, 3], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2, 3]));
+    let mut profile = TensorContractFusionProfile::default();
+    context
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            axes(),
+            1.0,
+            0.0,
+            &mut profile,
+        )
+        .unwrap();
+
+    assert!(profile.canonical_contract_groups > 0);
+    assert_eq!(
+        profile.canonical_direct_gemm_groups, profile.canonical_contract_groups,
+        "coupled layout compose must GEMM directly into destination blocks"
+    );
+    assert_eq!(
+        profile.canonical_direct_pack_skips,
+        2 * profile.canonical_contract_groups,
+        "coupled layout compose must skip both operand packs"
+    );
+    assert_eq!(profile.canonical_pack_lhs, std::time::Duration::ZERO);
+    assert_eq!(profile.canonical_scatter, std::time::Duration::ZERO);
+}

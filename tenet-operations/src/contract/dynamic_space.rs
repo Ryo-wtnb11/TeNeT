@@ -9,6 +9,35 @@ use tenet_core::{
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{OperationError, TreeTransformOperationKey};
 
+/// Builds scratch structures in the coupled-sector matrix layout so canonical
+/// temporaries feed fusion-block GEMM without packing; falls back to the
+/// packed layout when the coupled grid is incomplete (structural zeros).
+fn scratch_subblock_structure<R>(
+    rule: &R,
+    nout: usize,
+    rank: usize,
+    blocks: Vec<(BlockKey, Vec<usize>)>,
+) -> Result<BlockStructure, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let mut tree_blocks = Vec::with_capacity(blocks.len());
+    for (key, shape) in &blocks {
+        match key {
+            BlockKey::FusionTree(tree) => tree_blocks.push((tree.clone(), shape.clone())),
+            _ => {
+                return BlockStructure::packed_column_major_with_keys(rank, blocks)
+                    .map_err(OperationError::from_core_preserving_context)
+            }
+        }
+    }
+    match BlockStructure::coupled_sector_matrix_with_keys(rule, nout, rank, tree_blocks) {
+        Ok(structure) => Ok(structure),
+        Err(_) => BlockStructure::packed_column_major_with_keys(rank, blocks)
+            .map_err(OperationError::from_core_preserving_context),
+    }
+}
+
 use super::fusion::{contracted_fusion_tree_basis_matches, TensorContractFusionExplicitPlan};
 use super::structure::TensorContractAxisPlan;
 
@@ -86,10 +115,8 @@ impl DynamicFusionMapSpace {
                 blocks.push((dst_key.clone(), dst_shape));
             }
         }
-        let subblock_structure = Arc::new(BlockStructure::packed_column_major_with_keys(
-            nout + nin,
-            blocks,
-        )?);
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
         Ok(Self {
             nout,
             nin,
@@ -140,10 +167,9 @@ impl DynamicFusionMapSpace {
                 blocks.push((BlockKey::from(key), shape));
             }
         }
-        let subblock_structure = Arc::new(BlockStructure::packed_column_major_with_keys(
-            nout + nin,
-            blocks,
-        )?);
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
+
         Ok(Self {
             nout,
             nin,

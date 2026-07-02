@@ -5269,6 +5269,30 @@ impl BlockStructure {
         Self::from_parts(sector, degeneracy)
     }
 
+    /// Coupled-sector matrix layout over fusion-tree block keys.
+    ///
+    /// Blocks are stable-sorted by coupled sector, then each coupled sector is
+    /// laid out as one contiguous column-major matrix with the fusion-tree
+    /// subblocks as strided views (see
+    /// [`FusionTensorMapSpace::from_degeneracy_shapes_coupled`]). Fails when a
+    /// coupled sector does not cover its full codomain-tree x domain-tree
+    /// grid, because the sector matrix would contain uninitialized holes.
+    pub fn coupled_sector_matrix_with_keys<R>(
+        rule: &R,
+        nout: usize,
+        rank: usize,
+        blocks: Vec<(FusionTreeBlockKey, Vec<usize>)>,
+    ) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+    {
+        let mut blocks = blocks;
+        blocks.sort_by_key(|(key, _)| coupled_or_vacuum(rule, key.codomain_tree()).id());
+        let (keys, shapes): (Vec<_>, Vec<_>) = blocks.into_iter().unzip();
+        let specs = coupled_sector_matrix_block_specs(rule, nout, rank, &keys, &shapes)?;
+        Self::from_blocks_with_rank(rank, specs)
+    }
+
     pub fn packed_column_major_with_keys<I, K>(rank: usize, blocks: I) -> Result<Self, CoreError>
     where
         I: IntoIterator<Item = (K, Vec<usize>)>,

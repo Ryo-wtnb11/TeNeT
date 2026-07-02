@@ -511,13 +511,16 @@ impl CanonicalFusionBlockContractPlan {
         )?;
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
+        let trivial_scale = alpha.is_one() && beta.is_zero();
         for group in &self.groups {
-            fusion_workspace
-                .buffers
-                .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-            fusion_workspace
-                .buffers
-                .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
+            if !group.is_fully_direct(trivial_scale) {
+                fusion_workspace
+                    .buffers
+                    .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+                fusion_workspace
+                    .buffers
+                    .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
+            }
             execute_group_with_scratch_buffers(
                 kernels,
                 backend,
@@ -573,60 +576,104 @@ impl CanonicalFusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
         profile.canonical_scale += start.elapsed();
 
+        let trivial_scale = alpha.is_one() && beta.is_zero();
         for group in &self.groups {
             profile.canonical_contract_groups += 1;
 
-            let start = std::time::Instant::now();
-            fusion_workspace
-                .buffers
-                .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-            fusion_workspace
-                .buffers
-                .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
-            profile.canonical_workspace_prepare += start.elapsed();
+            if !group.is_fully_direct(trivial_scale) {
+                let start = std::time::Instant::now();
+                fusion_workspace
+                    .buffers
+                    .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+                fusion_workspace
+                    .buffers
+                    .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
+                profile.canonical_workspace_prepare += start.elapsed();
+            }
 
-            let start = std::time::Instant::now();
-            pack_group(
-                kernels,
-                &group.lhs,
-                lhs_data,
-                fusion_workspace.buffers.packed.lhs_mut().as_mut_slice(),
-            )?;
-            profile.canonical_pack_lhs += start.elapsed();
+            if group.lhs.direct_offset.is_none() {
+                let start = std::time::Instant::now();
+                pack_group(
+                    kernels,
+                    &group.lhs,
+                    lhs_data,
+                    fusion_workspace.buffers.packed.lhs_mut().as_mut_slice(),
+                )?;
+                profile.canonical_pack_lhs += start.elapsed();
+            } else {
+                profile.canonical_direct_pack_skips += 1;
+            }
 
-            let start = std::time::Instant::now();
-            pack_group(
-                kernels,
-                &group.rhs,
-                rhs_data,
-                fusion_workspace.buffers.packed.rhs_mut().as_mut_slice(),
-            )?;
-            profile.canonical_pack_rhs += start.elapsed();
+            if group.rhs.direct_offset.is_none() {
+                let start = std::time::Instant::now();
+                pack_group(
+                    kernels,
+                    &group.rhs,
+                    rhs_data,
+                    fusion_workspace.buffers.packed.rhs_mut().as_mut_slice(),
+                )?;
+                profile.canonical_pack_rhs += start.elapsed();
+            } else {
+                profile.canonical_direct_pack_skips += 1;
+            }
 
+            let dst_direct = if trivial_scale {
+                group.dst.direct_offset
+            } else {
+                None
+            };
             let start = std::time::Instant::now();
             {
                 let (lhs, rhs, dst) = fusion_workspace.buffers.packed.inputs_and_destination_mut();
-                matmul_group_plan(
-                    backend,
-                    workspace,
-                    group,
+                let lhs_slice = direct_or_scratch_slice(
+                    lhs_data,
+                    group.lhs.direct_offset,
+                    group.lhs.rows,
+                    group.lhs.cols,
                     lhs.as_slice(),
-                    rhs.as_slice(),
-                    dst.as_mut_slice(),
                 )?;
+                let rhs_slice = direct_or_scratch_slice(
+                    rhs_data,
+                    group.rhs.direct_offset,
+                    group.rhs.rows,
+                    group.rhs.cols,
+                    rhs.as_slice(),
+                )?;
+                match dst_direct {
+                    Some(base) => {
+                        let dst_slice =
+                            direct_slice_mut(dst_data, base, group.dst.rows, group.dst.cols)?;
+                        matmul_group_plan(
+                            backend, workspace, group, lhs_slice, rhs_slice, dst_slice,
+                        )?;
+                        profile.canonical_direct_gemm_groups += 1;
+                    }
+                    None => {
+                        matmul_group_plan(
+                            backend,
+                            workspace,
+                            group,
+                            lhs_slice,
+                            rhs_slice,
+                            dst.as_mut_slice(),
+                        )?;
+                    }
+                }
             }
             profile.canonical_matmul += start.elapsed();
 
-            let start = std::time::Instant::now();
-            scatter_group(
-                kernels,
-                &group.dst,
-                dst_data,
-                fusion_workspace.buffers.packed.destination().as_slice(),
-                alpha,
-                beta,
-            )?;
-            profile.canonical_scatter += start.elapsed();
+            if dst_direct.is_none() {
+                let start = std::time::Instant::now();
+                scatter_group(
+                    kernels,
+                    &group.dst,
+                    dst_data,
+                    fusion_workspace.buffers.packed.destination().as_slice(),
+                    alpha,
+                    beta,
+                )?;
+                profile.canonical_scatter += start.elapsed();
+            }
         }
 
         profile.canonical_contract_total += total_start.elapsed();
@@ -950,6 +997,15 @@ struct CanonicalFusionBlockContractGroupPlan {
 }
 
 impl CanonicalFusionBlockContractGroupPlan {
+    /// True when GEMM can read both operands from storage and write the
+    /// destination group matrix in place (no pack, no scatter).
+    fn is_fully_direct(&self, trivial_scale: bool) -> bool {
+        trivial_scale
+            && self.lhs.direct_offset.is_some()
+            && self.rhs.direct_offset.is_some()
+            && self.dst.direct_offset.is_some()
+    }
+
     fn compile(
         lhs: FusionBlockMatrixGroup,
         rhs: FusionBlockMatrixGroup,
@@ -1684,11 +1740,14 @@ impl FusionBlockMatrixGroupBuilder {
             .rows
             .checked_mul(self.cols)
             .ok_or(OperationError::ElementCountOverflow)?;
+        let covers_matrix = self.occupied_elements == matrix_elements;
+        let direct_offset = direct_group_matrix_offset(&subblocks, covers_matrix);
         Ok(FusionBlockMatrixGroup {
             coupled: self.coupled,
             rows: self.rows,
             cols: self.cols,
-            needs_clear: self.occupied_elements != matrix_elements,
+            needs_clear: !covers_matrix,
+            direct_offset,
             block_indices,
             subblocks,
         })
@@ -1709,8 +1768,47 @@ struct FusionBlockMatrixGroup {
     // False only when the group's subblocks cover the packed matrix exactly.
     // Sparse fusion layouts keep this true so stale workspace cannot leak into GEMM.
     needs_clear: bool,
+    // Storage offset of the group matrix when the operand's subblocks already
+    // form it in place (coupled-sector matrix layout, unit coefficients):
+    // packing is the identity copy and replay can hand storage to GEMM
+    // directly.
+    direct_offset: Option<usize>,
     block_indices: Vec<usize>,
     subblocks: Vec<FusionSubblockMatrixLayout>,
+}
+
+fn direct_group_matrix_offset(
+    subblocks: &[FusionSubblockMatrixLayout],
+    covers_matrix: bool,
+) -> Option<usize> {
+    if !covers_matrix {
+        return None;
+    }
+    let mut base: Option<isize> = None;
+    for subblock in subblocks {
+        if subblock.coefficient != 1.0 {
+            return None;
+        }
+        let strides_match = subblock
+            .block
+            .shape
+            .iter()
+            .zip(subblock.block.strides.iter().zip(&subblock.matrix_strides))
+            .all(|(&dim, (&stride, &matrix_stride))| dim <= 1 || stride == matrix_stride);
+        if !strides_match {
+            return None;
+        }
+        let offset = subblock.block.offset - subblock.matrix_offset;
+        if offset < 0 {
+            return None;
+        }
+        match base {
+            None => base = Some(offset),
+            Some(existing) if existing != offset => return None,
+            Some(_) => {}
+        }
+    }
+    base.and_then(|offset| usize::try_from(offset).ok())
 }
 
 #[derive(Clone, Debug)]
@@ -1808,37 +1906,112 @@ where
     RhsScratch: HostWritableStorage<D>,
     DestinationScratch: HostWritableStorage<D>,
 {
-    pack_group(
-        kernels,
-        &group.lhs,
-        lhs_data,
-        scratch.lhs_mut().as_mut_slice(),
-    )?;
-    pack_group(
-        kernels,
-        &group.rhs,
-        rhs_data,
-        scratch.rhs_mut().as_mut_slice(),
-    )?;
-    {
-        let (lhs, rhs, dst) = scratch.inputs_and_destination_mut();
-        matmul_group_plan(
-            backend,
-            workspace,
-            group,
-            lhs.as_slice(),
-            rhs.as_slice(),
-            dst.as_mut_slice(),
+    if group.lhs.direct_offset.is_none() {
+        pack_group(
+            kernels,
+            &group.lhs,
+            lhs_data,
+            scratch.lhs_mut().as_mut_slice(),
         )?;
     }
-    scatter_group(
-        kernels,
-        &group.dst,
-        dst_data,
-        scratch.destination().as_slice(),
-        alpha,
-        beta,
-    )
+    if group.rhs.direct_offset.is_none() {
+        pack_group(
+            kernels,
+            &group.rhs,
+            rhs_data,
+            scratch.rhs_mut().as_mut_slice(),
+        )?;
+    }
+    let dst_direct = if alpha.is_one() && beta.is_zero() {
+        group.dst.direct_offset
+    } else {
+        None
+    };
+    let (lhs_scratch, rhs_scratch, dst_scratch) = scratch.inputs_and_destination_mut();
+    let lhs_slice = direct_or_scratch_slice(
+        lhs_data,
+        group.lhs.direct_offset,
+        group.lhs.rows,
+        group.lhs.cols,
+        lhs_scratch.as_slice(),
+    )?;
+    let rhs_slice = direct_or_scratch_slice(
+        rhs_data,
+        group.rhs.direct_offset,
+        group.rhs.rows,
+        group.rhs.cols,
+        rhs_scratch.as_slice(),
+    )?;
+    match dst_direct {
+        Some(base) => {
+            let dst_slice = direct_slice_mut(dst_data, base, group.dst.rows, group.dst.cols)?;
+            matmul_group_plan(backend, workspace, group, lhs_slice, rhs_slice, dst_slice)
+        }
+        None => {
+            matmul_group_plan(
+                backend,
+                workspace,
+                group,
+                lhs_slice,
+                rhs_slice,
+                dst_scratch.as_mut_slice(),
+            )?;
+            scatter_group(
+                kernels,
+                &group.dst,
+                dst_data,
+                dst_scratch.as_slice(),
+                alpha,
+                beta,
+            )
+        }
+    }
+}
+
+fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> {
+    rows.checked_mul(cols)
+        .ok_or(OperationError::ElementCountOverflow)
+}
+
+fn direct_or_scratch_slice<'a, T>(
+    data: &'a [T],
+    direct_offset: Option<usize>,
+    rows: usize,
+    cols: usize,
+    scratch: &'a [T],
+) -> Result<&'a [T], OperationError> {
+    match direct_offset {
+        Some(base) => {
+            let len = direct_matrix_len(rows, cols)?;
+            let end = base
+                .checked_add(len)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            data.get(base..end)
+                .ok_or(OperationError::ElementCountMismatch {
+                    expected: end,
+                    actual: data.len(),
+                })
+        }
+        None => Ok(scratch),
+    }
+}
+
+fn direct_slice_mut<T>(
+    data: &mut [T],
+    base: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<&mut [T], OperationError> {
+    let len = direct_matrix_len(rows, cols)?;
+    let end = base
+        .checked_add(len)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let actual = data.len();
+    data.get_mut(base..end)
+        .ok_or(OperationError::ElementCountMismatch {
+            expected: end,
+            actual,
+        })
 }
 
 fn scatter_group<A, T>(
