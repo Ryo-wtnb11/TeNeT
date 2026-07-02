@@ -79,7 +79,9 @@ pub use facade::{
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with,
 };
-pub use factorize::{tsvd_fusion, FusionSvd, SectorSingularValues};
+pub use factorize::{
+    tsvd_fusion, tsvd_fusion_truncated, FusionSvd, SectorSingularValues, SvdTruncation,
+};
 pub(crate) use host_kernels::{
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
     tree_transform_structure_with_strided_kernel_raw,

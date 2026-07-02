@@ -40,6 +40,122 @@ struct SectorMatricization {
     data: Vec<f64>,
 }
 
+struct SectorFactors {
+    sector: SectorId,
+    /// Full rank of the dense factorization (leading dimension of `vt`).
+    rank: usize,
+    /// Kept singular values after truncation.
+    kept: usize,
+    rows: usize,
+    u: Vec<f64>,
+    vt: Vec<f64>,
+}
+
+/// Applies a TensorKit-style global truncation across sectors, updating the
+/// kept counts and singular-value lists in place, and returns the truncation
+/// error `sqrt(sum_discarded d_c * sigma^2)`.
+fn apply_truncation<R>(
+    rule: &R,
+    factors: &mut [SectorFactors],
+    singular_values: &mut [SectorSingularValues],
+    truncation: SvdTruncation,
+) -> Result<f64, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    if matches!(truncation, SvdTruncation::None) {
+        return Ok(0.0);
+    }
+
+    // (sector position, value); globally sorted descending by value.
+    let mut entries: Vec<(usize, f64, f64)> = Vec::new();
+    for (position, values) in singular_values.iter().enumerate() {
+        let weight = rule.dim_scalar(values.sector);
+        for &value in &values.values {
+            entries.push((position, value, weight));
+        }
+    }
+    entries.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).expect("finite singular values"));
+
+    let keep_count = match truncation {
+        SvdTruncation::None => entries.len(),
+        SvdTruncation::Dim(max_dim) => {
+            let mut total = 0.0;
+            let mut keep = 0;
+            for &(_, _, weight) in &entries {
+                if total + weight > max_dim as f64 + 1e-12 {
+                    break;
+                }
+                total += weight;
+                keep += 1;
+            }
+            keep
+        }
+        SvdTruncation::Error(tolerance) => {
+            let total: f64 = entries
+                .iter()
+                .map(|&(_, value, weight)| weight * value * value)
+                .sum();
+            let budget = tolerance * tolerance * total;
+            let mut discarded = 0.0;
+            let mut keep = entries.len();
+            while keep > 0 {
+                let (_, value, weight) = entries[keep - 1];
+                if discarded + weight * value * value > budget + 1e-15 {
+                    break;
+                }
+                discarded += weight * value * value;
+                keep -= 1;
+            }
+            keep
+        }
+        SvdTruncation::Below(threshold) => entries
+            .iter()
+            .take_while(|&&(_, value, _)| value >= threshold)
+            .count(),
+    };
+
+    let mut kept_per_sector = vec![0usize; singular_values.len()];
+    for &(position, _, _) in &entries[..keep_count] {
+        kept_per_sector[position] += 1;
+    }
+    let discarded_square: f64 = entries[keep_count..]
+        .iter()
+        .map(|&(_, value, weight)| weight * value * value)
+        .sum();
+
+    for (position, values) in singular_values.iter_mut().enumerate() {
+        values.values.truncate(kept_per_sector[position]);
+        let factor = factors
+            .iter_mut()
+            .find(|factor| factor.sector == values.sector)
+            .expect("factor exists for every singular-value sector");
+        factor.kept = kept_per_sector[position];
+    }
+    Ok(discarded_square.sqrt())
+}
+
+/// Truncation policy for [`tsvd_fusion_truncated`], TensorKit-style.
+///
+/// Selection is global across coupled sectors and weights every singular
+/// value by its sector's quantum dimension: total dimension counts
+/// `sum_c d_c * kept_c` and the truncation error is
+/// `sqrt(sum_discarded d_c * sigma^2)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SvdTruncation {
+    /// Keep everything.
+    None,
+    /// Keep the largest singular values while the quantum-dimension-weighted
+    /// total stays at or below this bound (TensorKit `truncdim`).
+    Dim(usize),
+    /// Discard the smallest singular values while the relative truncation
+    /// error stays at or below this tolerance (TensorKit `truncerr`).
+    Error(f64),
+    /// Discard singular values strictly below this threshold (TensorKit
+    /// `truncbelow`).
+    Below(f64),
+}
+
 /// Blockwise SVD of a fusion tensor over its coupled-sector matricization.
 pub fn tsvd_fusion<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
@@ -50,22 +166,29 @@ where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    tsvd_fusion_truncated(dense, rule, tensor, SvdTruncation::None).map(|(svd, _)| svd)
+}
+
+/// Truncated blockwise SVD; also returns the truncation error
+/// `sqrt(sum_discarded d_c * sigma^2)`.
+pub fn tsvd_fusion_truncated<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+    truncation: SvdTruncation,
+) -> Result<(FusionSvd<NOUT, NIN>, f64), OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     let fusion_space = tensor
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
         .clone();
     let matricizations = sector_matricizations(rule, tensor, NOUT)?;
 
-    struct SectorFactors {
-        sector: SectorId,
-        rank: usize,
-        rows: usize,
-        u: Vec<f64>,
-        vt: Vec<f64>,
-    }
     let mut factors = Vec::with_capacity(matricizations.len());
     let mut singular_values = Vec::with_capacity(matricizations.len());
-    let mut new_leg_dim = 0usize;
 
     for matrix in &matricizations {
         let shape = [matrix.rows, matrix.cols];
@@ -95,6 +218,7 @@ where
         factors.push(SectorFactors {
             sector: matrix.sector,
             rank,
+            kept: rank,
             rows: matrix.rows,
             u: outputs[0]
                 .as_f64_slice()
@@ -105,14 +229,21 @@ where
                 .map_err(OperationError::Dense)?
                 .to_vec(),
         });
-        new_leg_dim += rank;
+    }
+
+    let truncation_error = apply_truncation(rule, &mut factors, &mut singular_values, truncation)?;
+    factors.retain(|factor| factor.kept > 0);
+    singular_values.retain(|entry| !entry.values.is_empty());
+    let mut new_leg_dim = 0usize;
+    for factor in &factors {
+        new_leg_dim += factor.kept;
     }
 
     let sector_rank = |sector: SectorId| -> usize {
         factors
             .iter()
             .find(|factor| factor.sector == sector)
-            .map(|factor| factor.rank)
+            .map(|factor| factor.kept)
             .unwrap_or(0)
     };
 
@@ -244,11 +375,14 @@ where
         );
     }
 
-    Ok(FusionSvd {
-        u: u_tensor,
-        singular_values,
-        vt: vt_tensor,
-    })
+    Ok((
+        FusionSvd {
+            u: u_tensor,
+            singular_values,
+            vt: vt_tensor,
+        },
+        truncation_error,
+    ))
 }
 
 /// Copies a dense column-major matrix region into one fusion-tree subblock.
