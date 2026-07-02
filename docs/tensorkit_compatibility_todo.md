@@ -258,8 +258,11 @@ TeNeT fixed coverage:
   inspect structure metadata and do not read tensor data.
 - Public `*_execute_with` facades for tensoradd, tensortrace,
   tree-transform, and tensorcontract accept non-`Vec` host storage.
-- Tests include a custom `TestHostStorage<T>` wrapper to assert that typed
-  structure compile and replay do not accidentally rely on `Vec<T>`.
+- Plain default host facades for tensoradd, tensortrace, and tensorcontract
+  also accept non-`Vec` host storage.
+- Tests include custom writable/read-only host storage wrappers to assert that
+  typed structure compile and replay do not accidentally rely on `Vec<T>` and
+  do not require source tensors to be writable.
 
 Remaining implementation boundary:
 

@@ -38,16 +38,22 @@ pub fn tensorcontract_into<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractAxisSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let mut backend = DenseTreeTransformOperations::default_executor();
     let mut workspace = TensorContractWorkspace::default();
@@ -74,16 +80,22 @@ pub fn tensorproduct_into<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     output_permutation: AxisPermutation<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     tensorcontract_into(
         dst,
@@ -106,10 +118,13 @@ pub fn tensorproduct_into_with_conjugation<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     output_permutation: AxisPermutation<'_>,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
@@ -118,6 +133,9 @@ pub fn tensorproduct_into_with_conjugation<
 ) -> Result<(), OperationError>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     tensorcontract_into(
         dst,
@@ -147,12 +165,15 @@ pub fn tensorcontract_into_with<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractAxisSpec<'_>,
     alpha: D,
     beta: D,
@@ -160,6 +181,9 @@ pub fn tensorcontract_into_with<
 where
     B: TensorContractBackend<D, f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let structure = tensorcontract_structure(dst, lhs, rhs, axes)?;
     tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)

@@ -61,9 +61,9 @@ where
     backend.copy_block_into(allocator, dst.subblock_mut()?, src.subblock()?)
 }
 
-pub fn tensoradd_into<T, const NOUT: usize, const NIN: usize, S>(
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+pub fn tensoradd_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     permutation: AxisPermutation<'_>,
     alpha: T,
     beta: T,
@@ -77,6 +77,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
@@ -91,9 +93,9 @@ where
     )
 }
 
-pub fn tensoradd_into_with_conjugation<T, const NOUT: usize, const NIN: usize, S>(
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+pub fn tensoradd_into_with_conjugation<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     permutation: AxisPermutation<'_>,
     source_conjugate: bool,
     alpha: T,
@@ -108,6 +110,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
@@ -410,9 +414,11 @@ pub fn tensortrace_into<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     axes: TensorTraceAxisSpec<'_>,
     alpha: T,
     beta: T,
@@ -426,6 +432,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
@@ -441,11 +449,13 @@ pub fn tensortrace_into_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     allocator: &mut B::Allocator,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     axes: TensorTraceAxisSpec<'_>,
     alpha: T,
     beta: T,
@@ -460,6 +470,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let structure = tensortrace_structure(dst, src, axes)?;
     tensortrace_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
@@ -841,9 +853,9 @@ where
     context.all_codomain_tree_transform_into(rule, operation, dst, src, alpha, beta)
 }
 
-pub fn tensoradd_assign_into<T, const NOUT: usize, const NIN: usize, S>(
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+pub fn tensoradd_assign_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     alpha: T,
 ) -> Result<(), OperationError>
 where
@@ -855,13 +867,15 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::zero())
 }
 
-pub fn tensoradd_add_into<T, const NOUT: usize, const NIN: usize, S>(
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+pub fn tensoradd_add_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     alpha: T,
 ) -> Result<(), OperationError>
 where
@@ -873,6 +887,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::one())
 }

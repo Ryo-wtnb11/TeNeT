@@ -2,6 +2,25 @@ use super::*;
 use tenet_core::Trivial;
 
 #[test]
+fn tensortrace_default_host_api_accepts_custom_host_storage() {
+    let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
+    let src = test_host_read_tensor_map(vec![1.0_f64, 2.0, 3.0, 4.0], src_space);
+    let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
+    let mut dst = test_host_tensor_map(vec![10.0_f64], dst_space);
+
+    tensortrace_into(
+        &mut dst,
+        &src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[40.0]);
+}
+
+#[test]
 fn tensortrace_repeated_dense_axis_matches_tensoroperations_trace_lowering() {
     let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
     let src: TensorMap<f64, 1, 1, Trivial> =

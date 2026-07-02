@@ -17,6 +17,17 @@ fn tensoradd_structure_replays_custom_host_storage_without_vec_fixing() {
 }
 
 #[test]
+fn tensoradd_default_host_api_accepts_custom_host_storage() {
+    let space = TensorMapSpace::<1, 0>::from_dims([4], []).unwrap();
+    let src = test_host_read_tensor_map(vec![1.0_f64, 2.0, 3.0, 4.0], space.clone());
+    let mut dst = test_host_tensor_map(vec![10.0_f64; 4], space);
+
+    tensoradd_into(&mut dst, &src, AxisPermutation::identity(), 2.0, 3.0).unwrap();
+
+    assert_eq!(dst.data(), &[32.0, 34.0, 36.0, 38.0]);
+}
+
+#[test]
 fn tensoradd_assign_and_add_support_all_numeric_dtypes() {
     assert_tensoradd_dtype(
         vec![1.0_f32, 2.0, 3.0, 4.0],

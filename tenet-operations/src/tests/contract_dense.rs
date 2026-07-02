@@ -34,6 +34,28 @@ fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
 }
 
 #[test]
+fn tensorcontract_default_host_api_accepts_custom_host_storage() {
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs = test_host_read_tensor_map(vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0], lhs_space);
+    let rhs = test_host_read_tensor_map(vec![7.0_f64, 8.0, 9.0, 10.0, 11.0, 12.0], rhs_space);
+    let mut dst = test_host_tensor_map(vec![1.0_f64; 4], dst_space);
+
+    tensorcontract_into(
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[155.0, 203.0, 209.0, 275.0]);
+}
+
+#[test]
 fn tensorcontract_structure_precomputes_canonical_dense_descriptor() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
