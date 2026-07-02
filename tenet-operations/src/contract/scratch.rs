@@ -1,7 +1,8 @@
 use num_traits::Zero;
 use std::sync::Arc;
+use tenet_core::Placement;
 
-use crate::OperationError;
+use crate::{OperationError, ReportsPlacement};
 
 use super::dynamic_space::DynamicFusionMapSpace;
 
@@ -47,6 +48,13 @@ impl<T> HostDynamicFusionScratch<T> {
     #[inline]
     pub(crate) fn data_mut(&mut self) -> &mut [T] {
         &mut self.data
+    }
+}
+
+impl<T> ReportsPlacement for HostDynamicFusionScratch<T> {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
     }
 }
 
@@ -138,6 +146,13 @@ where
     }
 }
 
+impl<T> ReportsPlacement for HostDynamicFusionScratchWorkspace<T> {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
 fn prepare_scratch_slot<T>(
     slot: &mut Option<DynamicFusionScratch<T>>,
     space: Arc<DynamicFusionMapSpace>,
@@ -158,4 +173,19 @@ where
     Ok(slot
         .as_mut()
         .expect("dynamic scratch slot prepared before return"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_fusion_scratch_workspace_is_explicit_host_workspace() {
+        let workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
+        let alias = DynamicFusionScratchWorkspace::<f64>::default();
+
+        assert_eq!(workspace.placement(), Placement::Host);
+        assert!(workspace.is_host_placement());
+        assert_eq!(alias.placement(), Placement::Host);
+    }
 }

@@ -8,6 +8,8 @@ use tenet_core::{
 };
 use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
 
+use crate::ReportsPlacement;
+
 use crate::{
     copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
     tensortrace_fusion_structure_with_strided_kernel, tensortrace_structure_with_strided_kernel,
@@ -236,6 +238,13 @@ impl HostTensorOperationsWorkspace {
     }
 }
 
+impl ReportsPlacement for HostTensorOperationsWorkspace {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
 pub type HostAllocator = HostTensorOperationsWorkspace;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -244,6 +253,13 @@ pub struct HostTensorOperations;
 impl HostTensorOperations {
     #[inline]
     pub fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl ReportsPlacement for HostTensorOperations {
+    #[inline]
+    fn placement(&self) -> Placement {
         Placement::Host
     }
 }
@@ -277,6 +293,13 @@ impl<E> DenseTreeTransformOperations<E> {
 
     pub fn dense_mut(&mut self) -> &mut E {
         &mut self.dense
+    }
+}
+
+impl<E> ReportsPlacement for DenseTreeTransformOperations<E> {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
     }
 }
 

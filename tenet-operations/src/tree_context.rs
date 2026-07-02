@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_traits::Zero;
 use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, TensorMap,
+    MultiplicityFreeRigidSymbols, Placement, TensorMap,
 };
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
@@ -15,7 +15,7 @@ use crate::scalar::TreeTransformScalar;
 use crate::tree_transform::{
     TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
 };
-use crate::{TreeTransformReplayProfile, TreeTransformStructure};
+use crate::{ReportsPlacement, TreeTransformReplayProfile, TreeTransformStructure};
 
 #[derive(Debug)]
 pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
@@ -86,6 +86,29 @@ where
 
     pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<C, RuleKey>) {
         (self.backend, self.workspace, self.cache)
+    }
+}
+
+impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+    B: TreeTransformBackend<D, C> + ReportsPlacement,
+    B::Workspace: ReportsPlacement,
+{
+    #[inline]
+    pub fn backend_placement(&self) -> Placement {
+        self.backend.placement()
+    }
+
+    #[inline]
+    pub fn workspace_placement(&self) -> Placement {
+        self.workspace.placement()
+    }
+
+    #[inline]
+    pub fn is_host_context(&self) -> bool {
+        self.backend.is_host_placement() && self.workspace.is_host_placement()
     }
 }
 

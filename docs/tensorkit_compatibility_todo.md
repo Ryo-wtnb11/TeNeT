@@ -286,6 +286,10 @@ Remaining implementation boundary:
   type aliases for source compatibility. Public host workspace types report
   `Placement::Host`; future device/CUDA replay should add separate device
   workspace types rather than hiding device storage behind these host buffers.
+- Internal fusion scratch buffers (`HostCanonicalFusionBlockContractWorkspace`,
+  `HostDynamicFusionScratch`, and `HostDynamicFusionScratchWorkspace`) also
+  report `Placement::Host`. This is an explicit host-scratch boundary, not a
+  device execution abstraction.
 - Host scalar strided primitives are isolated in `host_scalar_kernels.rs`.
   Tree/fusion replay should call this boundary for tensoradd, copy-scale,
   axpby, and scale rather than embedding raw strided loops in categorical
@@ -315,6 +319,11 @@ Remaining implementation boundary:
   vocabulary and reports `Placement::Host`. Do not introduce a second
   operations-local placement enum unless device/MPI execution needs additional
   distinctions that cannot live in `tenet_core::Placement`.
+- Cached execution contexts (`TreeTransformExecutionContext`,
+  `TensorContractExecutionContext`, and `TensorContractFusionExecutionContext`)
+  expose placement reporting for their current backend/workspace/scratch
+  components. This makes the host-only default route inspectable without adding
+  placement methods to the legacy method-bearing backend traits.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.

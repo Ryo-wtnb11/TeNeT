@@ -14,8 +14,8 @@ use crate::{
     axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_profiled,
     tensoradd_raw_strided_kernel_trusted, ConjugateValue, DenseRecouplingScalar, HostAllocator,
-    OperationError, RecouplingCoefficientAction, TensorAddStructure, TreeTransformBlock,
-    TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
+    OperationError, RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure,
+    TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
 
@@ -60,6 +60,13 @@ impl<T> HostTreeTransformWorkspace<T> {
 
     pub fn destination_len(&self) -> usize {
         self.destination.len()
+    }
+}
+
+impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
     }
 }
 

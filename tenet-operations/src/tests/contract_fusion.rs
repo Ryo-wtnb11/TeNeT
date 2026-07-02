@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn tensor_contract_fusion_execution_context_reports_host_placement() {
+    let context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    assert_eq!(context.tree_backend_placement(), Placement::Host);
+    assert_eq!(context.tree_workspace_placement(), Placement::Host);
+    assert_eq!(context.contract_backend_placement(), Placement::Host);
+    assert_eq!(context.contract_workspace_placement(), Placement::Host);
+    assert_eq!(context.fusion_block_workspace_placement(), Placement::Host);
+    assert_eq!(
+        context.fusion_scratch_workspace_placement(),
+        Placement::Host
+    );
+    assert!(context.is_host_context());
+}
+
+#[test]
 fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);

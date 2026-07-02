@@ -15,6 +15,15 @@ fn host_tree_transform_workspace_is_explicit_host_workspace() {
 }
 
 #[test]
+fn tree_transform_execution_context_reports_host_placement() {
+    let context = TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    assert_eq!(context.backend_placement(), Placement::Host);
+    assert_eq!(context.workspace_placement(), Placement::Host);
+    assert!(context.is_host_context());
+}
+
+#[test]
 fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
     let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();

@@ -5,7 +5,7 @@ use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::{
     tensoradd_raw_strided_kernel, ConjugateValue, DenseBlockScalar, DenseTreeTransformOperations,
-    OperationError, RecouplingCoefficientAction,
+    OperationError, RecouplingCoefficientAction, ReportsPlacement,
 };
 
 use super::structure::{TensorContractDenseRouteOrder, TensorContractStructure};
@@ -140,6 +140,13 @@ impl<T> HostTensorContractWorkspace<T> {
     #[inline]
     pub fn output_len(&self) -> usize {
         self.output.len()
+    }
+}
+
+impl<T> ReportsPlacement for HostTensorContractWorkspace<T> {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
     }
 }
 

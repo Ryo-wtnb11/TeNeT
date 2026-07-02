@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, TensorMap,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -17,7 +17,7 @@ use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{
     DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
-    OperationError, RecouplingCoefficientAction, TreeTransformBackend,
+    OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
 };
 
 use super::backend::TensorContractBackend;
@@ -764,6 +764,28 @@ where
 impl<D, B> TensorContractExecutionContext<D, B>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    B: TensorContractBackend<D, f64> + ReportsPlacement,
+    B::Workspace: ReportsPlacement,
+{
+    #[inline]
+    pub fn backend_placement(&self) -> Placement {
+        self.backend.placement()
+    }
+
+    #[inline]
+    pub fn workspace_placement(&self) -> Placement {
+        self.workspace.placement()
+    }
+
+    #[inline]
+    pub fn is_host_context(&self) -> bool {
+        self.backend.is_host_placement() && self.workspace.is_host_placement()
+    }
+}
+
+impl<D, B> TensorContractExecutionContext<D, B>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     B: TensorContractBackend<D, f64>,
     B::Workspace: Default,
 {
@@ -1018,6 +1040,55 @@ where
             self.contract_workspace,
             self.contract_cache,
         )
+    }
+}
+
+impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
+where
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    RuleKey: Clone + Eq + Hash,
+    BT: TreeTransformBackend<D, f64> + ReportsPlacement,
+    BT::Workspace: ReportsPlacement,
+    BC: TensorContractBackend<D, f64> + ReportsPlacement,
+    BC::Workspace: ReportsPlacement,
+{
+    #[inline]
+    pub fn tree_backend_placement(&self) -> Placement {
+        self.tree_context.backend_placement()
+    }
+
+    #[inline]
+    pub fn tree_workspace_placement(&self) -> Placement {
+        self.tree_context.workspace_placement()
+    }
+
+    #[inline]
+    pub fn contract_backend_placement(&self) -> Placement {
+        self.contract_backend.placement()
+    }
+
+    #[inline]
+    pub fn contract_workspace_placement(&self) -> Placement {
+        self.contract_workspace.placement()
+    }
+
+    #[inline]
+    pub fn fusion_block_workspace_placement(&self) -> Placement {
+        self.fusion_block_workspace.placement()
+    }
+
+    #[inline]
+    pub fn fusion_scratch_workspace_placement(&self) -> Placement {
+        self.fusion_scratch.placement()
+    }
+
+    #[inline]
+    pub fn is_host_context(&self) -> bool {
+        self.tree_context.is_host_context()
+            && self.contract_backend.is_host_placement()
+            && self.contract_workspace.is_host_placement()
+            && self.fusion_block_workspace.is_host_placement()
+            && self.fusion_scratch.is_host_placement()
     }
 }
 

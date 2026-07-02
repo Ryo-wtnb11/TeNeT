@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeRigidSymbols,
-    SectorId,
+    Placement, SectorId,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -20,7 +20,7 @@ use crate::structure_identity::validate_structure_identity;
 use crate::{
     axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_trusted,
     scale_raw_strided_kernel_trusted, ConjugateValue, DenseBlockScalar, OperationError,
-    RecouplingCoefficientAction, TreeTransformRuleCacheKey,
+    RecouplingCoefficientAction, ReportsPlacement, TreeTransformRuleCacheKey,
 };
 
 use super::backend::TensorContractBackend;
@@ -166,6 +166,13 @@ impl<T> Default for HostCanonicalFusionBlockContractWorkspace<T> {
     }
 }
 
+impl<T> ReportsPlacement for HostCanonicalFusionBlockContractWorkspace<T> {
+    #[inline]
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
 #[derive(Clone, Debug)]
 struct HostFusionBlockContractBuffers<T> {
     lhs: Vec<T>,
@@ -180,6 +187,21 @@ impl<T> Default for HostFusionBlockContractBuffers<T> {
             rhs: Vec::new(),
             dst: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_fusion_block_workspace_is_explicit_host_workspace() {
+        let workspace = HostCanonicalFusionBlockContractWorkspace::<f64>::default();
+        let alias = CanonicalFusionBlockContractWorkspace::<f64>::default();
+
+        assert_eq!(workspace.placement(), Placement::Host);
+        assert!(workspace.is_host_placement());
+        assert_eq!(alias.placement(), Placement::Host);
     }
 }
 

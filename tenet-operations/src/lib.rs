@@ -15,6 +15,7 @@ mod facade;
 mod host_kernels;
 mod host_scalar_kernels;
 mod lowering;
+mod placement;
 mod scalar;
 mod strided;
 mod structure_identity;
@@ -89,6 +90,7 @@ pub(crate) use host_scalar_kernels::{
     tensoradd_raw_strided_kernel_profiled, tensoradd_raw_strided_kernel_trusted,
     tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
 };
+pub use placement::ReportsPlacement;
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,

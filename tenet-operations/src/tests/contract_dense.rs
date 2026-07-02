@@ -13,6 +13,15 @@ fn host_tensor_contract_workspace_is_explicit_host_workspace() {
 }
 
 #[test]
+fn tensor_contract_execution_context_reports_host_placement() {
+    let context = TensorContractExecutionContext::<f64>::default();
+
+    assert_eq!(context.backend_placement(), Placement::Host);
+    assert_eq!(context.workspace_placement(), Placement::Host);
+    assert!(context.is_host_context());
+}
+
+#[test]
 fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
