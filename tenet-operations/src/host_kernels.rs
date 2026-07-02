@@ -2,6 +2,8 @@ use core::ops::{Add, Mul};
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
+#[cfg(test)]
+use tenet_core::SimilarStorage;
 use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
     TensorMap,
@@ -186,6 +188,130 @@ where
         alpha,
         beta,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn tree_transform_structure_with_storage_scratch_strided_kernel<
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D>,
+    DSrc::Similar: HostWritableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    structure.validate_replay_structures(&dst_structure, &src_structure)?;
+    validate_replay_storage_len(&dst_structure, dst.storage().len())?;
+    validate_replay_storage_len(&src_structure, src.storage().len())?;
+
+    let mut zero_strides = Vec::new();
+    let src_data = src.data();
+    for block in &structure.blocks {
+        match *block {
+            TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } => tree_transform_single_with_strided_kernel(
+                &mut zero_strides,
+                &structure.layouts,
+                structure.layouts.entry(dst_layout),
+                structure.layouts.entry(src_layout),
+                structure.coefficient(coefficient),
+                structure.storage_conjugate(),
+                dst.data_mut(),
+                src_data,
+                alpha,
+                beta,
+            )?,
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                src_layout_start,
+                src_count,
+                coefficient_start,
+                element_count,
+            } => {
+                let source_len = element_count
+                    .checked_mul(src_count)
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                let destination_len = element_count
+                    .checked_mul(dst_count)
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                let mut scratch = TreeTransformScratchBuffers::from_parts(
+                    src.similar_storage_filled(source_len, D::zero()),
+                    dst.similar_storage_filled(destination_len, D::zero()),
+                );
+
+                for src_index in 0..src_count {
+                    let layout = structure.layouts.entry(src_layout_start + src_index);
+                    pack_layout_into_column(
+                        &structure.layouts,
+                        layout,
+                        src_data,
+                        scratch.source_mut().as_mut_slice(),
+                        src_index * element_count,
+                        structure.storage_conjugate(),
+                    )?;
+                }
+
+                {
+                    let (source, destination) = scratch.source_and_destination_mut();
+                    apply_recoupling_matrix_src_times_u_transpose(
+                        destination.as_mut_slice(),
+                        source.as_slice(),
+                        &structure.coefficients_src_by_dst,
+                        coefficient_start,
+                        element_count,
+                        src_count,
+                        dst_count,
+                    )?;
+                }
+
+                for dst_index in 0..dst_count {
+                    let layout = structure.layouts.entry(dst_layout_start + dst_index);
+                    scatter_column_into_layout(
+                        &mut zero_strides,
+                        &structure.layouts,
+                        layout,
+                        scratch.destination().as_slice(),
+                        dst_index * element_count,
+                        dst.data_mut(),
+                        alpha,
+                        beta,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Replays a prepared tree-transform structure on host slices.

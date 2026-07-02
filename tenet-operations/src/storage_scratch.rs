@@ -45,6 +45,15 @@ where
 }
 
 impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn from_parts(source: Source, destination: Destination) -> Self {
+        Self {
+            source,
+            destination,
+        }
+    }
+
     #[inline]
     pub(crate) fn source(&self) -> &Source {
         &self.source
@@ -143,12 +152,12 @@ mod tests {
 
     #[test]
     fn tree_transform_scratch_buffers_keep_source_and_destination_slots() {
-        let buffers = TreeTransformScratchBuffers {
-            source: PlacementOnlyScratch { data: vec![1, 2] },
-            destination: PlacementOnlyScratch {
+        let buffers = TreeTransformScratchBuffers::from_parts(
+            PlacementOnlyScratch { data: vec![1, 2] },
+            PlacementOnlyScratch {
                 data: vec![3, 4, 5],
             },
-        };
+        );
 
         assert_eq!(buffers.source().data, vec![1, 2]);
         assert_eq!(buffers.destination().data, vec![3, 4, 5]);

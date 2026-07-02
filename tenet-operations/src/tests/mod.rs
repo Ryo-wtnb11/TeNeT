@@ -10,8 +10,8 @@ use tenet_core::{
     FusionTreeHomSpace, FusionTreeKey, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols,
     MultiplicityFreeRigidSymbols, Placement, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep,
-    Z2FusionRule,
+    SectorLeg, SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule,
+    U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 

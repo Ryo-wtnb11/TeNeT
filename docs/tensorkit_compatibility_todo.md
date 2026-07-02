@@ -86,6 +86,10 @@ Storage-aware workspace target:
   `TreeTransformScratchBuffers<Source, Destination>`. The current host replay
   instantiates both slots with `HostScratchBuffer<T>`; this is only a naming
   and boundary step, not device dispatch.
+- A private test-only storage-scratch replay helper now verifies the intended
+  TensorKit allocation semantics: source pack scratch is allocated from source
+  storage and destination pack scratch is allocated from destination storage,
+  while raw replay remains host-slice based.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic

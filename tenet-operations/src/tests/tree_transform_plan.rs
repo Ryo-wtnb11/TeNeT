@@ -2182,6 +2182,174 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     assert_eq!(workspace.destination_len(), 4);
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScratchAllocation {
+    label: &'static str,
+    len: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TrackingStorage<T> {
+    data: Vec<T>,
+    label: &'static str,
+    allocations: std::rc::Rc<std::cell::RefCell<Vec<ScratchAllocation>>>,
+}
+
+#[derive(Clone, Debug)]
+struct TrackingScratch<T> {
+    data: Vec<T>,
+}
+
+impl<T> TrackingStorage<T> {
+    fn new(
+        data: Vec<T>,
+        label: &'static str,
+        allocations: std::rc::Rc<std::cell::RefCell<Vec<ScratchAllocation>>>,
+    ) -> Self {
+        Self {
+            data,
+            label,
+            allocations,
+        }
+    }
+}
+
+impl<T> TensorStorage<T> for TrackingStorage<T> {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for TrackingStorage<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<T> HostWritableStorage<T> for TrackingStorage<T> {
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+impl<T: Clone> SimilarStorage<T> for TrackingStorage<T> {
+    type Similar = TrackingScratch<T>;
+
+    fn similar_filled(&self, len: usize, value: T) -> Self::Similar
+    where
+        T: Clone,
+    {
+        self.allocations.borrow_mut().push(ScratchAllocation {
+            label: self.label,
+            len,
+        });
+        TrackingScratch {
+            data: vec![value; len],
+        }
+    }
+}
+
+impl<T> TensorStorage<T> for TrackingScratch<T> {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for TrackingScratch<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<T> HostWritableStorage<T> for TrackingScratch<T> {
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+}
+
+#[test]
+fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage() {
+    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
+    let key10 = BlockKey::sector_ids([10]);
+    let key20 = BlockKey::sector_ids([20]);
+    let key100 = BlockKey::sector_ids([100]);
+    let key200 = BlockKey::sector_ids([200]);
+    let key300 = BlockKey::sector_ids([300]);
+    let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
+    let src_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [
+            (key100.clone(), vec![2, 1]),
+            (key300.clone(), vec![2, 1]),
+            (key200.clone(), vec![2, 1]),
+        ],
+    )
+    .unwrap();
+    let dst_structure = BlockStructure::packed_column_major_with_keys(
+        2,
+        [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
+    )
+    .unwrap();
+    let allocations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let src = TensorMap::<f64, 2, 0, Trivial, TrackingStorage<f64>>::from_storage_with_structure(
+        TrackingStorage::new(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "source",
+            allocations.clone(),
+        ),
+        src_space,
+        src_structure,
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0, Trivial, TrackingStorage<f64>>::from_storage_with_structure(
+            TrackingStorage::new(vec![0.0; 4], "destination", allocations.clone()),
+            dst_space,
+            dst_structure,
+        )
+        .unwrap();
+    let structure = TreeTransformStructure::compile_grouped(
+        &dst,
+        &src,
+        &[TreeTransformGroupBlockSpec::multi(
+            group_key,
+            [key10, key20],
+            [key100, key200, key300],
+            vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
+        )],
+    )
+    .unwrap();
+
+    crate::host_kernels::tree_transform_structure_with_storage_scratch_strided_kernel(
+        &structure, &mut dst, &src, 1.0, 0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[7020.0, 9240.0, 3510.0, 4620.0]);
+    assert_eq!(
+        allocations.borrow().as_slice(),
+        &[
+            ScratchAllocation {
+                label: "source",
+                len: 6,
+            },
+            ScratchAllocation {
+                label: "destination",
+                len: 4,
+            },
+        ],
+    );
+}
+
 #[test]
 fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
