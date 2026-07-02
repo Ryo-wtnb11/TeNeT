@@ -17,6 +17,12 @@ use crate::{
     TreeTransformWorkspace,
 };
 
+/// Legacy/current tree-transform execution contract over host-accessible data.
+///
+/// The raw replay methods take host slices. New code that specifically depends
+/// on this host-slice contract may use `HostTreeTransformBackend`; future
+/// placement-aware/device/MPI transform traits should not inherit from this
+/// raw-slice API.
 pub trait TreeTransformBackend<D, C>
 where
     D: TreeTransformScalar,
@@ -85,6 +91,27 @@ where
         profile.total += start.elapsed();
         result
     }
+}
+
+/// Explicit marker for the legacy host-slice tree-transform backend family.
+///
+/// `TreeTransformBackend` keeps the existing method-bearing public trait for
+/// source compatibility. This marker means “implements the host-slice replay
+/// contract,” not necessarily “physically CPU-native.” Future device/MPI
+/// transform backends should use separate placement-aware execution traits.
+pub trait HostTreeTransformBackend<D, C>: TreeTransformBackend<D, C>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+{
+}
+
+impl<B, D, C> HostTreeTransformBackend<D, C> for B
+where
+    B: TreeTransformBackend<D, C> + ?Sized,
+    D: TreeTransformScalar,
+    C: Copy,
+{
 }
 
 pub trait TensorOperationsBackend {
@@ -518,11 +545,20 @@ mod tests {
 
     fn assert_tensor_operations_backend<B: TensorOperationsBackend>() {}
     fn assert_host_tensor_operations_backend<B: HostTensorOperationsBackend>() {}
+    fn assert_host_tree_transform_backend<B, D, C>()
+    where
+        B: HostTreeTransformBackend<D, C>,
+        D: TreeTransformScalar,
+        C: Copy,
+    {
+    }
 
     #[test]
     fn host_tensor_operations_keeps_compatibility_backend_names() {
         assert_tensor_operations_backend::<HostTensorOperations>();
         assert_host_tensor_operations_backend::<HostTensorOperations>();
+        assert_host_tree_transform_backend::<HostTensorOperations, f64, f64>();
+        assert_host_tree_transform_backend::<DenseTreeTransformOperations, f64, f64>();
     }
 
     #[test]

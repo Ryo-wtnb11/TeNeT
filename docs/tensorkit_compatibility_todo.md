@@ -301,6 +301,12 @@ Remaining implementation boundary:
   trait is host-slice/strided-kernel specific. Future device/MPI backends
   should use separate placement-aware execution traits instead of implementing
   the host-slice boundary.
+- Tree-transform and tensor-contract replay traits remain
+  `TreeTransformBackend` and `TensorContractBackend` for source compatibility.
+  `HostTreeTransformBackend` and `HostTensorContractBackend` mark the same
+  legacy host-slice replay contracts. These markers mean “implements the
+  host-slice contract,” not “physically CPU-native”; future device/MPI traits
+  should not inherit from the raw-slice APIs.
 - The host replay scratch type is `HostTensorOperationsWorkspace`; the older
   `HostAllocator` name remains a type alias. This keeps source compatibility
   while avoiding the implication that the current host scratch object is a

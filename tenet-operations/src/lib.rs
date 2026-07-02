@@ -30,7 +30,8 @@ pub use axis::{
 };
 pub use backend::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,
-    HostTensorOperationsWorkspace, TensorOperationsBackend, TreeTransformBackend,
+    HostTensorOperationsWorkspace, HostTreeTransformBackend, TensorOperationsBackend,
+    TreeTransformBackend,
 };
 pub use cache::{
     BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
@@ -53,7 +54,7 @@ pub use contract::{
     tensorcontract_into, tensorcontract_into_with, tensorcontract_into_with_context,
     tensorcontract_structure, tensorproduct_fusion_into,
     tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
-    tensorproduct_into_with_conjugation, HostTensorContractWorkspace,
+    tensorproduct_into_with_conjugation, HostTensorContractBackend, HostTensorContractWorkspace,
     HostTreeFusionExecutionContext, TensorContractBackend, TensorContractBlockPlanKey,
     TensorContractBlockPlanTerm, TensorContractBlockSpec, TensorContractCache,
     TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,

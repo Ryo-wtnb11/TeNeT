@@ -10,6 +10,12 @@ use crate::{
 
 use super::structure::{TensorContractDenseRouteOrder, TensorContractStructure};
 
+/// Legacy/current tensor-contraction execution contract over host-accessible data.
+///
+/// The raw replay methods take host slices. New code that specifically depends
+/// on this host-slice contract may use `HostTensorContractBackend`; future
+/// placement-aware/device/MPI contraction traits should not inherit from this
+/// raw-slice API.
 pub trait TensorContractBackend<D, C = f64>
 where
     D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
@@ -75,6 +81,27 @@ where
         contracted: usize,
         cols: usize,
     ) -> Result<(), OperationError>;
+}
+
+/// Explicit marker for the legacy host-slice tensor-contract backend family.
+///
+/// `TensorContractBackend` keeps the existing method-bearing public trait for
+/// source compatibility. This marker means “implements the host-slice replay
+/// contract,” not necessarily “physically CPU-native.” Future device/MPI
+/// contraction backends should use separate placement-aware execution traits.
+pub trait HostTensorContractBackend<D, C = f64>: TensorContractBackend<D, C>
+where
+    D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
+    C: Copy + One,
+{
+}
+
+impl<B, D, C> HostTensorContractBackend<D, C> for B
+where
+    B: TensorContractBackend<D, C> + ?Sized,
+    D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
+    C: Copy + One,
+{
 }
 
 /// Host scratch/replay workspace backed by `Vec<T>`.
@@ -545,4 +572,31 @@ fn linear_strided_offset(
             .ok_or(OperationError::ElementCountOverflow)?;
     }
     Ok(offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_tensor_contract_backend<B, D, C>()
+    where
+        B: TensorContractBackend<D, C>,
+        D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
+        C: Copy + One,
+    {
+    }
+
+    fn assert_host_tensor_contract_backend<B, D, C>()
+    where
+        B: HostTensorContractBackend<D, C>,
+        D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
+        C: Copy + One,
+    {
+    }
+
+    #[test]
+    fn dense_tree_transform_operations_keeps_contract_backend_names() {
+        assert_tensor_contract_backend::<DenseTreeTransformOperations, f64, f64>();
+        assert_host_tensor_contract_backend::<DenseTreeTransformOperations, f64, f64>();
+    }
 }

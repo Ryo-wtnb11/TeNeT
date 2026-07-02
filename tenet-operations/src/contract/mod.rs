@@ -21,7 +21,10 @@ pub use api::{
     tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
     tensorproduct_into_with_conjugation,
 };
-pub use backend::{HostTensorContractWorkspace, TensorContractBackend, TensorContractWorkspace};
+pub use backend::{
+    HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
+    TensorContractWorkspace,
+};
 pub use context::{
     tensorcontract_into_with_context, HostTreeFusionExecutionContext, TensorContractBlockPlanKey,
     TensorContractBlockPlanTerm, TensorContractCache, TensorContractCacheStats,
