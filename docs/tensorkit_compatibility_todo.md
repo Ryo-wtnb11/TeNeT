@@ -286,6 +286,11 @@ Remaining implementation boundary:
   type aliases for source compatibility. Public host workspace types report
   `Placement::Host`; future device/CUDA replay should add separate device
   workspace types rather than hiding device storage behind these host buffers.
+- Host scalar strided primitives are isolated in `host_scalar_kernels.rs`.
+  Tree/fusion replay should call this boundary for tensoradd, copy-scale,
+  axpby, and scale rather than embedding raw strided loops in categorical
+  planning code. This mirrors the TensorKit/Strided.jl split and is the
+  replacement point for a future C++/CUDA low-level backend.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.
