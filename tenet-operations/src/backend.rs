@@ -186,10 +186,17 @@ pub trait TensorOperationsBackend {
         DSrc: HostReadableStorage<T>;
 }
 
+/// Host scratch workspace for tensoradd/tensortrace/copy replay.
+///
+/// This is not a general allocator: it currently owns host-side scratch used
+/// by strided replay. The legacy `HostAllocator` name remains as a type alias
+/// for source compatibility.
 #[derive(Clone, Debug, Default)]
-pub struct HostAllocator {
+pub struct HostTensorOperationsWorkspace {
     pub(crate) zero_strides: Vec<isize>,
 }
+
+pub type HostAllocator = HostTensorOperationsWorkspace;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HostTensorOperations;
@@ -237,7 +244,7 @@ pub trait HostTensorOperationsBackend: TensorOperationsBackend {}
 impl<B> HostTensorOperationsBackend for B where B: TensorOperationsBackend + ?Sized {}
 
 impl TensorOperationsBackend for HostTensorOperations {
-    type Allocator = HostAllocator;
+    type Allocator = HostTensorOperationsWorkspace;
 
     fn copy_block_into<T>(
         &mut self,
@@ -516,5 +523,14 @@ mod tests {
     fn host_tensor_operations_keeps_compatibility_backend_names() {
         assert_tensor_operations_backend::<HostTensorOperations>();
         assert_host_tensor_operations_backend::<HostTensorOperations>();
+    }
+
+    #[test]
+    fn host_allocator_alias_keeps_workspace_shape() {
+        let workspace = HostTensorOperationsWorkspace::default();
+        let alias = HostAllocator::default();
+
+        assert_eq!(workspace.zero_strides.len(), 0);
+        assert_eq!(alias.zero_strides.len(), workspace.zero_strides.len());
     }
 }

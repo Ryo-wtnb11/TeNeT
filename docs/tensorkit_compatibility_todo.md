@@ -301,6 +301,10 @@ Remaining implementation boundary:
   trait is host-slice/strided-kernel specific. Future device/MPI backends
   should use separate placement-aware execution traits instead of implementing
   the host-slice boundary.
+- The host replay scratch type is `HostTensorOperationsWorkspace`; the older
+  `HostAllocator` name remains a type alias. This keeps source compatibility
+  while avoiding the implication that the current host scratch object is a
+  general device/backend allocator.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.

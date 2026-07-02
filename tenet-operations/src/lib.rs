@@ -30,7 +30,7 @@ pub use axis::{
 };
 pub use backend::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,
-    TensorOperationsBackend, TreeTransformBackend,
+    HostTensorOperationsWorkspace, TensorOperationsBackend, TreeTransformBackend,
 };
 pub use cache::{
     BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
