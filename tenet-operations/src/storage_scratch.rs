@@ -186,6 +186,122 @@ impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
     }
 }
 
+/// LHS/RHS/destination scratch shape for canonical fusion-block contraction.
+///
+/// This mirrors the TensorKit pack-GEMM-scatter slots: `lhs` and `rhs` hold
+/// packed source blocks, while `destination` holds the dense matmul result
+/// before scatter.
+#[derive(Clone, Debug)]
+pub(crate) struct FusionBlockContractScratchBuffers<Lhs, Rhs, Destination> {
+    lhs: Lhs,
+    rhs: Rhs,
+    destination: Destination,
+}
+
+impl<Lhs, Rhs, Destination> Default for FusionBlockContractScratchBuffers<Lhs, Rhs, Destination>
+where
+    Lhs: Default,
+    Rhs: Default,
+    Destination: Default,
+{
+    fn default() -> Self {
+        Self {
+            lhs: Lhs::default(),
+            rhs: Rhs::default(),
+            destination: Destination::default(),
+        }
+    }
+}
+
+impl<Lhs, Rhs, Destination> FusionBlockContractScratchBuffers<Lhs, Rhs, Destination> {
+    #[inline]
+    pub(crate) fn from_parts(lhs: Lhs, rhs: Rhs, destination: Destination) -> Self {
+        Self {
+            lhs,
+            rhs,
+            destination,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn lhs_mut(&mut self) -> &mut Lhs {
+        &mut self.lhs
+    }
+
+    #[inline]
+    pub(crate) fn rhs_mut(&mut self) -> &mut Rhs {
+        &mut self.rhs
+    }
+
+    #[inline]
+    pub(crate) fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    #[inline]
+    pub(crate) fn destination_mut(&mut self) -> &mut Destination {
+        &mut self.destination
+    }
+
+    #[inline]
+    pub(crate) fn inputs_and_destination_mut(&mut self) -> (&Lhs, &Rhs, &mut Destination) {
+        (&self.lhs, &self.rhs, &mut self.destination)
+    }
+}
+
+/// Storage-aware canonical fusion-block contraction workspace.
+///
+/// Allocation origins are explicit: LHS pack scratch from LHS storage, RHS pack
+/// scratch from RHS storage, and matmul output scratch from destination storage.
+#[derive(Clone, Debug)]
+pub(crate) struct StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch> {
+    buffers: Option<FusionBlockContractScratchBuffers<LhsScratch, RhsScratch, DestinationScratch>>,
+}
+
+impl<LhsScratch, RhsScratch, DestinationScratch> Default
+    for StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch>
+{
+    fn default() -> Self {
+        Self { buffers: None }
+    }
+}
+
+impl<LhsScratch, RhsScratch, DestinationScratch>
+    StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch>
+{
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_from_storages<T, DLhs, DRhs, DDst>(
+        &mut self,
+        lhs_storage: &DLhs,
+        rhs_storage: &DRhs,
+        dst_storage: &DDst,
+        lhs_len: usize,
+        rhs_len: usize,
+        destination_len: usize,
+        zero: T,
+    ) where
+        T: Clone,
+        DLhs: SimilarStorage<T, Similar = LhsScratch>,
+        DRhs: SimilarStorage<T, Similar = RhsScratch>,
+        DDst: SimilarStorage<T, Similar = DestinationScratch>,
+    {
+        self.buffers = Some(FusionBlockContractScratchBuffers::from_parts(
+            lhs_storage.similar_filled(lhs_len, zero.clone()),
+            rhs_storage.similar_filled(rhs_len, zero.clone()),
+            dst_storage.similar_filled(destination_len, zero),
+        ));
+    }
+
+    #[inline]
+    pub(crate) fn buffers_mut(
+        &mut self,
+    ) -> &mut FusionBlockContractScratchBuffers<LhsScratch, RhsScratch, DestinationScratch> {
+        self.buffers
+            .as_mut()
+            .expect("storage fusion-block scratch prepared before replay")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

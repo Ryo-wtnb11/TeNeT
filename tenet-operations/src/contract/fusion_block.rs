@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockKey, BlockStructure, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeRigidSymbols,
-    Placement, SectorId,
+    BlockKey, BlockStructure, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, SectorId, SimilarStorage,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -13,6 +13,9 @@ use crate::cache::{
     rebuild_lru_order_from_keys, touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
 };
 use crate::host_scratch::HostScratchBuffer;
+use crate::storage_scratch::{
+    FusionBlockContractScratchBuffers, StorageFusionBlockContractWorkspace,
+};
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
     strides_to_isize,
@@ -176,17 +179,17 @@ impl<T> ReportsPlacement for HostCanonicalFusionBlockContractWorkspace<T> {
 
 #[derive(Clone, Debug)]
 struct HostFusionBlockContractBuffers<T> {
-    lhs: HostScratchBuffer<T>,
-    rhs: HostScratchBuffer<T>,
-    dst: HostScratchBuffer<T>,
+    packed: FusionBlockContractScratchBuffers<
+        HostScratchBuffer<T>,
+        HostScratchBuffer<T>,
+        HostScratchBuffer<T>,
+    >,
 }
 
 impl<T> Default for HostFusionBlockContractBuffers<T> {
     fn default() -> Self {
         Self {
-            lhs: HostScratchBuffer::default(),
-            rhs: HostScratchBuffer::default(),
-            dst: HostScratchBuffer::default(),
+            packed: FusionBlockContractScratchBuffers::default(),
         }
     }
 }
@@ -194,6 +197,107 @@ impl<T> Default for HostFusionBlockContractBuffers<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use tenet_core::{
+        FusionProductSpace, FusionTensorMapSpace, HostReadableStorage, HostWritableStorage,
+        SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, Z2FusionRule,
+    };
+
+    use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ScratchAllocation {
+        label: &'static str,
+        len: usize,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TrackingStorage<T> {
+        data: Vec<T>,
+        label: &'static str,
+        allocations: Rc<RefCell<Vec<ScratchAllocation>>>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TrackingScratch<T> {
+        data: Vec<T>,
+    }
+
+    impl<T> TrackingStorage<T> {
+        fn new(
+            data: Vec<T>,
+            label: &'static str,
+            allocations: Rc<RefCell<Vec<ScratchAllocation>>>,
+        ) -> Self {
+            Self {
+                data,
+                label,
+                allocations,
+            }
+        }
+    }
+
+    impl<T> TensorStorage<T> for TrackingStorage<T> {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl<T> HostReadableStorage<T> for TrackingStorage<T> {
+        fn as_slice(&self) -> &[T] {
+            &self.data
+        }
+    }
+
+    impl<T> HostWritableStorage<T> for TrackingStorage<T> {
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            &mut self.data
+        }
+    }
+
+    impl<T: Clone> SimilarStorage<T> for TrackingStorage<T> {
+        type Similar = TrackingScratch<T>;
+
+        fn similar_filled(&self, len: usize, value: T) -> Self::Similar
+        where
+            T: Clone,
+        {
+            self.allocations.borrow_mut().push(ScratchAllocation {
+                label: self.label,
+                len,
+            });
+            TrackingScratch {
+                data: vec![value; len],
+            }
+        }
+    }
+
+    impl<T> TensorStorage<T> for TrackingScratch<T> {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl<T> HostReadableStorage<T> for TrackingScratch<T> {
+        fn as_slice(&self) -> &[T] {
+            &self.data
+        }
+    }
+
+    impl<T> HostWritableStorage<T> for TrackingScratch<T> {
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            &mut self.data
+        }
+    }
 
     #[test]
     fn canonical_fusion_block_workspace_is_explicit_host_workspace() {
@@ -203,6 +307,102 @@ mod tests {
         assert_eq!(workspace.placement(), Placement::Host);
         assert!(workspace.is_host_placement());
         assert_eq!(alias.placement(), Placement::Host);
+    }
+
+    #[test]
+    fn canonical_fusion_block_storage_workspace_allocates_pack_scratch_from_operands_and_output_from_destination(
+    ) {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let fusion_space = || {
+            FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([leg()]),
+                    FusionProductSpace::new([leg()]),
+                ),
+                &rule,
+                [vec![1, 1], vec![1, 1]],
+            )
+            .unwrap()
+        };
+        let allocations = Rc::new(RefCell::new(Vec::new()));
+        let lhs =
+            TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![2.0, 3.0], "lhs", allocations.clone()),
+                fusion_space(),
+            )
+            .unwrap();
+        let rhs =
+            TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![5.0, 7.0], "rhs", allocations.clone()),
+                fusion_space(),
+            )
+            .unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
+                TrackingStorage::new(vec![10.0, 20.0], "destination", allocations.clone()),
+                fusion_space(),
+            )
+            .unwrap();
+        let plan = CanonicalFusionBlockContractPlan::compile(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
+            &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
+            &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TensorContractWorkspace::default();
+        let mut fusion_workspace = StorageFusionBlockContractWorkspace::<
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+            TrackingScratch<f64>,
+        >::default();
+
+        plan.execute_storage_workspace(
+            &mut backend,
+            &mut workspace,
+            &mut fusion_workspace,
+            &mut dst,
+            &lhs,
+            &rhs,
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data(), &[50.0, 102.0]);
+        assert_eq!(
+            allocations.borrow().as_slice(),
+            &[
+                ScratchAllocation {
+                    label: "lhs",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "rhs",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "destination",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "lhs",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "rhs",
+                    len: 1,
+                },
+                ScratchAllocation {
+                    label: "destination",
+                    len: 1,
+                },
+            ],
+        );
     }
 }
 
@@ -313,28 +513,14 @@ impl CanonicalFusionBlockContractPlan {
             fusion_workspace
                 .buffers
                 .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
-            pack_group(
-                &group.lhs,
-                lhs_data,
-                fusion_workspace.buffers.lhs.as_mut_slice(),
-            )?;
-            pack_group(
-                &group.rhs,
-                rhs_data,
-                fusion_workspace.buffers.rhs.as_mut_slice(),
-            )?;
-            matmul_group_plan(
+            execute_group_with_scratch_buffers(
                 backend,
                 workspace,
                 group,
-                fusion_workspace.buffers.lhs.as_slice(),
-                fusion_workspace.buffers.rhs.as_slice(),
-                fusion_workspace.buffers.dst.as_mut_slice(),
-            )?;
-            scatter_group(
-                &group.dst,
+                &mut fusion_workspace.buffers.packed,
                 dst_data,
-                fusion_workspace.buffers.dst.as_slice(),
+                lhs_data,
+                rhs_data,
                 alpha,
                 beta,
             )?;
@@ -395,7 +581,7 @@ impl CanonicalFusionBlockContractPlan {
             pack_group(
                 &group.lhs,
                 lhs_data,
-                fusion_workspace.buffers.lhs.as_mut_slice(),
+                fusion_workspace.buffers.packed.lhs_mut().as_mut_slice(),
             )?;
             profile.canonical_pack_lhs += start.elapsed();
 
@@ -403,26 +589,29 @@ impl CanonicalFusionBlockContractPlan {
             pack_group(
                 &group.rhs,
                 rhs_data,
-                fusion_workspace.buffers.rhs.as_mut_slice(),
+                fusion_workspace.buffers.packed.rhs_mut().as_mut_slice(),
             )?;
             profile.canonical_pack_rhs += start.elapsed();
 
             let start = std::time::Instant::now();
-            matmul_group_plan(
-                backend,
-                workspace,
-                group,
-                fusion_workspace.buffers.lhs.as_slice(),
-                fusion_workspace.buffers.rhs.as_slice(),
-                fusion_workspace.buffers.dst.as_mut_slice(),
-            )?;
+            {
+                let (lhs, rhs, dst) = fusion_workspace.buffers.packed.inputs_and_destination_mut();
+                matmul_group_plan(
+                    backend,
+                    workspace,
+                    group,
+                    lhs.as_slice(),
+                    rhs.as_slice(),
+                    dst.as_mut_slice(),
+                )?;
+            }
             profile.canonical_matmul += start.elapsed();
 
             let start = std::time::Instant::now();
             scatter_group(
                 &group.dst,
                 dst_data,
-                fusion_workspace.buffers.dst.as_slice(),
+                fusion_workspace.buffers.packed.destination().as_slice(),
                 alpha,
                 beta,
             )?;
@@ -430,6 +619,90 @@ impl CanonicalFusionBlockContractPlan {
         }
 
         profile.canonical_contract_total += total_start.elapsed();
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_storage_workspace<
+        B,
+        D,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+        DLhs,
+        DRhs,
+    >(
+        &self,
+        backend: &mut B,
+        workspace: &mut B::Workspace,
+        fusion_workspace: &mut StorageFusionBlockContractWorkspace<
+            DLhs::Similar,
+            DRhs::Similar,
+            DDst::Similar,
+        >,
+        dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &tenet_core::TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &tenet_core::TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        B: TensorContractBackend<D, f64>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+        DDst: HostWritableStorage<D> + SimilarStorage<D>,
+        DDst::Similar: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D> + SimilarStorage<D>,
+        DLhs::Similar: HostWritableStorage<D>,
+        DRhs: HostReadableStorage<D> + SimilarStorage<D>,
+        DRhs::Similar: HostWritableStorage<D>,
+    {
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        self.validate_replay_inputs(
+            &dst_structure,
+            dst.storage().len(),
+            &lhs_structure,
+            lhs.storage().len(),
+            &rhs_structure,
+            rhs.storage().len(),
+        )?;
+        scale_all_blocks(&self.inactive_dst_scale_blocks, dst.data_mut(), beta)?;
+
+        let lhs_data = lhs.data();
+        let rhs_data = rhs.data();
+        for group in &self.groups {
+            let lens =
+                fusion_block_group_scratch_lens(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
+            fusion_workspace.prepare_from_storages(
+                lhs.storage(),
+                rhs.storage(),
+                dst.storage(),
+                lens.lhs,
+                lens.rhs,
+                lens.destination,
+                D::zero(),
+            );
+            execute_group_with_scratch_buffers(
+                backend,
+                workspace,
+                group,
+                fusion_workspace.buffers_mut(),
+                dst.data_mut(),
+                lhs_data,
+                rhs_data,
+                alpha,
+                beta,
+            )?;
+        }
         Ok(())
     }
 
@@ -945,29 +1218,51 @@ where
         contracted: usize,
         rhs_cols: usize,
     ) -> Result<(), OperationError> {
-        let lhs_len = lhs_rows
-            .checked_mul(contracted)
-            .ok_or(OperationError::ElementCountOverflow)?;
-        let rhs_len = contracted
-            .checked_mul(rhs_cols)
-            .ok_or(OperationError::ElementCountOverflow)?;
-        let dst_len = lhs_rows
-            .checked_mul(rhs_cols)
-            .ok_or(OperationError::ElementCountOverflow)?;
-        self.lhs.resize_filled(lhs_len, T::zero());
-        self.rhs.resize_filled(rhs_len, T::zero());
-        self.dst.resize_filled(dst_len, T::zero());
+        let lens = fusion_block_group_scratch_lens(lhs_rows, contracted, rhs_cols)?;
+        self.packed.lhs_mut().resize_filled(lens.lhs, T::zero());
+        self.packed.rhs_mut().resize_filled(lens.rhs, T::zero());
+        self.packed
+            .destination_mut()
+            .resize_filled(lens.destination, T::zero());
         Ok(())
     }
 
     fn clear_inputs(&mut self, clear_lhs: bool, clear_rhs: bool) {
         if clear_lhs {
-            self.lhs.fill(T::zero());
+            self.packed.lhs_mut().fill(T::zero());
         }
         if clear_rhs {
-            self.rhs.fill(T::zero());
+            self.packed.rhs_mut().fill(T::zero());
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FusionBlockContractScratchLens {
+    lhs: usize,
+    rhs: usize,
+    destination: usize,
+}
+
+fn fusion_block_group_scratch_lens(
+    lhs_rows: usize,
+    contracted: usize,
+    rhs_cols: usize,
+) -> Result<FusionBlockContractScratchLens, OperationError> {
+    let lhs = lhs_rows
+        .checked_mul(contracted)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let rhs = contracted
+        .checked_mul(rhs_cols)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination = lhs_rows
+        .checked_mul(rhs_cols)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    Ok(FusionBlockContractScratchLens {
+        lhs,
+        rhs,
+        destination,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1299,6 +1594,47 @@ where
         )?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_group_with_scratch_buffers<B, D, LhsScratch, RhsScratch, DestinationScratch>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    group: &CanonicalFusionBlockContractGroupPlan,
+    scratch: &mut FusionBlockContractScratchBuffers<LhsScratch, RhsScratch, DestinationScratch>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TensorContractBackend<D, f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    LhsScratch: HostWritableStorage<D>,
+    RhsScratch: HostWritableStorage<D>,
+    DestinationScratch: HostWritableStorage<D>,
+{
+    pack_group(&group.lhs, lhs_data, scratch.lhs_mut().as_mut_slice())?;
+    pack_group(&group.rhs, rhs_data, scratch.rhs_mut().as_mut_slice())?;
+    {
+        let (lhs, rhs, dst) = scratch.inputs_and_destination_mut();
+        matmul_group_plan(
+            backend,
+            workspace,
+            group,
+            lhs.as_slice(),
+            rhs.as_slice(),
+            dst.as_mut_slice(),
+        )?;
+    }
+    scatter_group(
+        &group.dst,
+        dst_data,
+        scratch.destination().as_slice(),
+        alpha,
+        beta,
+    )
 }
 
 fn scatter_group<T>(

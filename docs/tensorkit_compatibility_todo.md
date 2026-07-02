@@ -98,9 +98,14 @@ Storage-aware workspace target:
   remain the legacy host-slice route.
 - Plain dense tensor contraction now has the same staged boundary:
   `StorageTensorContractWorkspace<OutputScratch>` allocates dense output
-  scratch from destination storage before host-slice replay. Canonical fusion
-  `lhs`/`rhs`/`dst` pack scratch and dynamic fusion scratch are still separate
-  host boundaries and should be generalized in their own patches.
+  scratch from destination storage before host-slice replay.
+- Canonical fusion-block contraction now has the analogous crate-private
+  staged boundary:
+  `StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch>`
+  allocates LHS pack scratch from LHS storage, RHS pack scratch from RHS
+  storage, and dense matmul output scratch from destination storage before the
+  existing host-slice pack-GEMM-scatter replay. Dynamic fusion scratch is still
+  a separate host boundary and should be generalized in its own patch.
 - The first non-host design should introduce a workspace allocation boundary
   that can produce same-placement temporary buffers for tree-transform source
   packs, destination packs, canonical fusion contraction buffers, and dynamic
@@ -312,9 +317,10 @@ TeNeT fixed coverage:
   APIs accept non-`Vec` host storage while still compiling transformer
   structures only from categorical/block metadata.
 - Fusion contraction convenience, explicit-plan, and dynamic fallback APIs
-  accept non-`Vec` host storage. Dynamic scratch and canonical replay remain
-  host-backed internally, so the API uses host readable/writable bounds rather
-  than pretending to support device storage.
+  accept non-`Vec` host storage. Dynamic scratch remains host-backed
+  internally, and canonical fusion-block has only a crate-private
+  storage-aware workspace boundary so far. Public APIs therefore still use host
+  readable/writable bounds rather than pretending to support device storage.
 - Fusion tensortrace convenience APIs and `TensorContractFusionExecutionContext`
   methods accept non-`Vec` host storage under the same host-read/write boundary.
 - Tests include custom writable/read-only host storage wrappers to assert that
@@ -324,9 +330,12 @@ TeNeT fixed coverage:
 Remaining implementation boundary:
 
 - Raw replay methods still accept `&[T]` / `&mut [T]` and are host-only.
-- Workspaces (`TreeTransformWorkspace`, `TensorContractWorkspace`) still own
-  `Vec<T>`. Device/CUDA support requires storage-aware workspaces before any
-  CUDA feature should be exposed.
+- Public workspaces (`TreeTransformWorkspace`, `TensorContractWorkspace`) still
+  own `Vec<T>`. Crate-private storage-aware workspaces now exist for
+  tree-transform, plain dense contraction, and canonical fusion-block
+  contraction, but they still replay through host slices. Device/CUDA support
+  requires storage-aware replay kernels before any CUDA feature should be
+  exposed.
 - Host workspace implementations are named explicitly:
   `HostTreeTransformWorkspace`, `HostTensorContractWorkspace`,
   `HostCanonicalFusionBlockContractWorkspace`, and
