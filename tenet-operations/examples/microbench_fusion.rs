@@ -187,8 +187,13 @@ where
             )
         };
 
-        // Warm structure caches.
-        for _ in 0..3 {
+        // First call compiles every structure cache; report it as cold time.
+        let cold_start = Instant::now();
+        context
+            .tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes(), 1.0, 0.0)
+            .unwrap();
+        let cold_us = cold_start.elapsed().as_secs_f64() * 1e6;
+        for _ in 0..2 {
             context
                 .tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes(), 1.0, 0.0)
                 .unwrap();
@@ -207,7 +212,7 @@ where
         let us_per_iter = elapsed.as_secs_f64() * 1e6 / iters as f64;
         let checksum: f64 = dst.data().iter().copied().sum();
         println!(
-            "{name}\t{workload}\t{us_per_iter:.2}\t{iters}\t{checksum:.6}",
+            "{name}\t{workload}\t{us_per_iter:.2}\t{iters}\t{checksum:.6}\tcold={cold_us:.0}",
             workload = workload.name,
         );
 
@@ -256,6 +261,23 @@ where
                 scale = us(profile.canonical_scale + profile.canonical_validate),
                 out = us(profile.output_transform),
                 groups = profile.canonical_contract_groups / profile_iters as usize,
+            );
+            let tree = &profile.tree_replay;
+            println!(
+                "  tree_replay: total={total:.1} single={single:.1}({sb}) \
+                 pack={pack:.1}({pc}) recoupling={rec:.1} matmul={mm:.1} \
+                 scatter={scatter:.1}({sc}) prepare={prep:.1} multi_blocks={mb}",
+                total = us(tree.total),
+                single = us(tree.single_total),
+                sb = tree.single_blocks / profile_iters as usize,
+                pack = us(tree.multi_pack),
+                pc = tree.packed_columns / profile_iters as usize,
+                rec = us(tree.multi_scalar_recoupling),
+                mm = us(tree.multi_matmul_total),
+                scatter = us(tree.multi_scatter),
+                sc = tree.scattered_columns / profile_iters as usize,
+                prep = us(tree.multi_workspace_prepare),
+                mb = tree.multi_blocks / profile_iters as usize,
             );
         }
     }

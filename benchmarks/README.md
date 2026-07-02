@@ -152,6 +152,17 @@ Every workload at both sizes is now at or faster than TensorKit except
 `compose` at d=4 (6.2 vs 4.0 µs), which is five Accelerate GEMM calls plus
 ~1.4 µs of validation/lookup — no longer dominated by any replay stage.
 
+## Cold (structure compile) baseline
+
+The example now reports the first call (all structure caches cold) per
+workload as `cold=`. At d=16, coupled layout: U1 compose 6.1 ms / swap 4.8 ms;
+SU2 compose 9.7 ms / swap 17.2 ms / swap+out 24.0 ms — i.e. compile adds
+roughly one warm iteration at this scale. The pathological cold costs seen in
+finite-torus (seconds to minutes) belong to the legacy stack's per-permute
+caches, not to this pipeline; re-evaluate compile cost on a realistic
+apply-gate workload (rank-5/6, larger sector sets) when the network
+contraction bench lands.
+
 ## Conclusions
 
 - **With identical BLAS, TeNeT is 3.6–42x slower**; the gap is the per-call
