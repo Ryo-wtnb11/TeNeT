@@ -25,7 +25,7 @@ tenferro = [
 [dependencies]
 num-complex = "0.4"
 num-traits = "0.2"
-strided-einsum2 = { git = "https://github.com/Ryo-wtnb11/strided-rs", rev = "1af3f531ba5145123d087f8a39de6d17abe7fe76", version = "0.1.0", default-features = false, optional = true }
+strided-einsum2 = { git = "https://github.com/Ryo-wtnb11/strided-rs", rev = "bd6d0775b17b83eff19b0f1b3825059bb6ee66c7", version = "0.1.0", default-features = false, optional = true }
 tenferro-cpu = { path = "../../tenferro-rs/crates/tenferro-cpu", default-features = false, optional = true }
 tenferro-linalg = { path = "../../tenferro-rs/crates/tenferro-linalg", default-features = false, optional = true }
 tenferro-tensor = { path = "../../tenferro-rs/crates/tenferro-tensor", default-features = false, optional = true }
