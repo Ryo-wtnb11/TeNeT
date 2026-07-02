@@ -74,18 +74,18 @@ pub use facade::{
     tree_pair_transform_structure, tree_transform_execute_with,
 };
 pub(crate) use host_kernels::{
-    copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
-    tree_transform_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel_raw,
+    tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
+    tree_transform_structure_with_strided_kernel_raw,
     tree_transform_structure_with_structural_recoupling,
     tree_transform_structure_with_structural_recoupling_raw,
     tree_transform_structure_with_structural_recoupling_raw_profiled,
 };
 pub use host_kernels::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub(crate) use host_scalar_kernels::{
-    axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_trusted,
-    copy_scale_raw_strided_kernel_with_conjugate_trusted, scale_raw_strided_kernel_trusted,
-    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_profiled,
-    tensoradd_raw_strided_kernel_trusted,
+    axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
+    copy_scale_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
+    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
+    tensoradd_raw_strided_kernel_profiled, tensoradd_raw_strided_kernel_trusted,
 };
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,

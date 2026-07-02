@@ -8,9 +8,7 @@ use tenet_core::{
 };
 use tenet_dense::DenseExecutor;
 
-use crate::strided::{
-    error as strided_error, offset_to_isize, read as strided_read, write as strided_write,
-};
+use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::{
     axpby_raw_strided_kernel_trusted, copy_scale_raw_strided_kernel_with_conjugate_trusted,
@@ -63,18 +61,6 @@ impl<T> HostTreeTransformWorkspace<T> {
     pub fn destination_len(&self) -> usize {
         self.destination.len()
     }
-}
-
-pub(crate) fn copy_block_with_strided_kernel<T>(
-    dst: BlockViewMut<'_, T>,
-    src: BlockView<'_, T>,
-) -> Result<(), OperationError>
-where
-    T: Copy + strided_kernel::MaybeSendSync,
-{
-    let mut dst = strided_write(dst)?;
-    let src = strided_read(src)?;
-    strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
 }
 
 pub(crate) fn tensoradd_structure_with_strided_kernel<
