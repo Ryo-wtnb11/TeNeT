@@ -279,6 +279,13 @@ Remaining implementation boundary:
 - Workspaces (`TreeTransformWorkspace`, `TensorContractWorkspace`) still own
   `Vec<T>`. Device/CUDA support requires storage-aware workspaces before any
   CUDA feature should be exposed.
+- Host workspace implementations are named explicitly:
+  `HostTreeTransformWorkspace`, `HostTensorContractWorkspace`,
+  `HostCanonicalFusionBlockContractWorkspace`, and
+  `HostDynamicFusionScratchWorkspace`. The old public workspace names remain
+  type aliases for source compatibility. Public host workspace types report
+  `Placement::Host`; future device/CUDA replay should add separate device
+  workspace types rather than hiding device storage behind these host buffers.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.

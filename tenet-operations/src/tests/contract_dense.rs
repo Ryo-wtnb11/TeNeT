@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn host_tensor_contract_workspace_is_explicit_host_workspace() {
+    let workspace = HostTensorContractWorkspace::<f64>::default();
+    let alias = TensorContractWorkspace::<f64>::default();
+
+    assert_eq!(workspace.placement(), Placement::Host);
+    assert!(workspace.is_host_workspace());
+    assert_eq!(workspace.output_len(), 0);
+    assert_eq!(alias.placement(), Placement::Host);
+    assert_eq!(alias.output_len(), workspace.output_len());
+}
+
+#[test]
 fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();

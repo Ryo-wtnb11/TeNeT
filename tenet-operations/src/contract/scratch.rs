@@ -5,13 +5,18 @@ use crate::OperationError;
 
 use super::dynamic_space::DynamicFusionMapSpace;
 
+/// Host scratch tensor for dynamic fusion-space lowering.
+///
+/// The buffer is host-owned `Vec<T>` storage and exposes host slices.
 #[derive(Clone, Debug)]
-pub(crate) struct DynamicFusionScratch<T> {
+pub(crate) struct HostDynamicFusionScratch<T> {
     space: Arc<DynamicFusionMapSpace>,
     data: Vec<T>,
 }
 
-impl<T> DynamicFusionScratch<T>
+pub(crate) type DynamicFusionScratch<T> = HostDynamicFusionScratch<T>;
+
+impl<T> HostDynamicFusionScratch<T>
 where
     T: Clone + Zero,
 {
@@ -28,7 +33,7 @@ where
     }
 }
 
-impl<T> DynamicFusionScratch<T> {
+impl<T> HostDynamicFusionScratch<T> {
     #[inline]
     pub(crate) fn space(&self) -> &DynamicFusionMapSpace {
         self.space.as_ref()
@@ -45,14 +50,19 @@ impl<T> DynamicFusionScratch<T> {
     }
 }
 
+/// Host scratch workspace for dynamic fusion-space lowering.
+///
+/// Device lowering should use a separate device scratch workspace.
 #[derive(Clone, Debug)]
-pub(crate) struct DynamicFusionScratchWorkspace<T> {
+pub(crate) struct HostDynamicFusionScratchWorkspace<T> {
     lhs: Option<DynamicFusionScratch<T>>,
     rhs: Option<DynamicFusionScratch<T>>,
     dst: Option<DynamicFusionScratch<T>>,
 }
 
-impl<T> Default for DynamicFusionScratchWorkspace<T> {
+pub(crate) type DynamicFusionScratchWorkspace<T> = HostDynamicFusionScratchWorkspace<T>;
+
+impl<T> Default for HostDynamicFusionScratchWorkspace<T> {
     fn default() -> Self {
         Self {
             lhs: None,
@@ -62,7 +72,7 @@ impl<T> Default for DynamicFusionScratchWorkspace<T> {
     }
 }
 
-impl<T> DynamicFusionScratchWorkspace<T>
+impl<T> HostDynamicFusionScratchWorkspace<T>
 where
     T: Clone + Zero,
 {

@@ -1,6 +1,6 @@
 use num_traits::One;
 use std::sync::Arc;
-use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, TensorMap};
+use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, Placement, TensorMap};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::{
@@ -77,13 +77,20 @@ where
     ) -> Result<(), OperationError>;
 }
 
+/// Host scratch/replay workspace backed by `Vec<T>`.
+///
+/// Raw contraction replay using this workspace operates on host slices. Device
+/// execution should use a separate device workspace instead of hiding device
+/// storage behind this type.
 #[derive(Clone, Debug)]
-pub struct TensorContractWorkspace<T> {
+pub struct HostTensorContractWorkspace<T> {
     output: Vec<T>,
     zero_strides: Vec<isize>,
 }
 
-impl<T> Default for TensorContractWorkspace<T> {
+pub type TensorContractWorkspace<T> = HostTensorContractWorkspace<T>;
+
+impl<T> Default for HostTensorContractWorkspace<T> {
     fn default() -> Self {
         Self {
             output: Vec::new(),
@@ -92,7 +99,17 @@ impl<T> Default for TensorContractWorkspace<T> {
     }
 }
 
-impl<T> TensorContractWorkspace<T> {
+impl<T> HostTensorContractWorkspace<T> {
+    #[inline]
+    pub fn placement(&self) -> Placement {
+        Placement::Host
+    }
+
+    #[inline]
+    pub fn is_host_workspace(&self) -> bool {
+        self.placement() == Placement::Host
+    }
+
     #[inline]
     pub fn output_len(&self) -> usize {
         self.output.len()
@@ -259,6 +276,7 @@ where
     )
 }
 
+/// Replays a prepared tensor contraction structure on host slices.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_structure_with_dense_executor_raw<E, D, C>(
     dense: &mut E,

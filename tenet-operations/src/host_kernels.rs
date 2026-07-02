@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, TensorMap,
+    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
+    TensorMap,
 };
 use tenet_dense::DenseExecutor;
 
@@ -17,14 +18,21 @@ use crate::{
     TreeTransformLayoutTable, TreeTransformReplayProfile, TreeTransformStructure,
 };
 
+/// Host scratch/replay workspace backed by `Vec<T>`.
+///
+/// Raw replay methods using this workspace operate on host slices. Device
+/// execution should use a separate device workspace instead of hiding device
+/// storage behind this type.
 #[derive(Clone, Debug)]
-pub struct TreeTransformWorkspace<T> {
+pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     source: Vec<T>,
     destination: Vec<T>,
 }
 
-impl<T> Default for TreeTransformWorkspace<T> {
+pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
+
+impl<T> Default for HostTreeTransformWorkspace<T> {
     fn default() -> Self {
         Self {
             zero_strides: Vec::new(),
@@ -34,7 +42,17 @@ impl<T> Default for TreeTransformWorkspace<T> {
     }
 }
 
-impl<T> TreeTransformWorkspace<T> {
+impl<T> HostTreeTransformWorkspace<T> {
+    #[inline]
+    pub fn placement(&self) -> Placement {
+        Placement::Host
+    }
+
+    #[inline]
+    pub fn is_host_workspace(&self) -> bool {
+        self.placement() == Placement::Host
+    }
+
     pub fn source_len(&self) -> usize {
         self.source.len()
     }
@@ -162,6 +180,7 @@ where
     )
 }
 
+/// Replays a prepared tree-transform structure on host slices.
 pub(crate) fn tree_transform_structure_with_strided_kernel_raw<D, C>(
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -276,6 +295,7 @@ where
     )
 }
 
+/// Replays a prepared structural-recoupling tree transform on host slices.
 pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<E, D, C>(
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,

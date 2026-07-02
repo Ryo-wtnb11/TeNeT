@@ -146,12 +146,19 @@ fn is_canonical_output(
     dst_space.nout() == lhs_space.nout() && axis_plan.output_axes == canonical_output_axes
 }
 
+/// Host scratch workspace for canonical fusion-block contraction.
+///
+/// This workspace packs blocks into host `Vec<T>` buffers before dense replay.
+/// Device execution needs a separate device workspace.
 #[derive(Clone, Debug)]
-pub(crate) struct CanonicalFusionBlockContractWorkspace<T> {
+pub(crate) struct HostCanonicalFusionBlockContractWorkspace<T> {
     buffers: FusionBlockContractBuffers<T>,
 }
 
-impl<T> Default for CanonicalFusionBlockContractWorkspace<T> {
+pub(crate) type CanonicalFusionBlockContractWorkspace<T> =
+    HostCanonicalFusionBlockContractWorkspace<T>;
+
+impl<T> Default for HostCanonicalFusionBlockContractWorkspace<T> {
     fn default() -> Self {
         Self {
             buffers: FusionBlockContractBuffers::default(),

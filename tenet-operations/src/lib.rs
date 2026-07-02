@@ -52,12 +52,13 @@ pub use contract::{
     tensorcontract_into, tensorcontract_into_with, tensorcontract_into_with_context,
     tensorcontract_structure, tensorproduct_fusion_into,
     tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
-    tensorproduct_into_with_conjugation, HostTreeFusionExecutionContext, TensorContractBackend,
-    TensorContractBlockPlanKey, TensorContractBlockPlanTerm, TensorContractBlockSpec,
-    TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
-    TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
-    TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
-    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
+    tensorproduct_into_with_conjugation, HostTensorContractWorkspace,
+    HostTreeFusionExecutionContext, TensorContractBackend, TensorContractBlockPlanKey,
+    TensorContractBlockPlanTerm, TensorContractBlockSpec, TensorContractCache,
+    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
+    TensorContractFusionExplicitPlan, TensorContractFusionProfile, TensorContractFusionRoute,
+    TensorContractPlanKey, TensorContractStructure, TensorContractStructureTerm,
+    TensorContractWorkspace,
 };
 pub use error::OperationError;
 pub use facade::{
@@ -71,7 +72,6 @@ pub use facade::{
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with,
 };
-pub use host_kernels::TreeTransformWorkspace;
 pub(crate) use host_kernels::{
     axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
     copy_scale_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
@@ -81,6 +81,7 @@ pub(crate) use host_kernels::{
     tree_transform_structure_with_structural_recoupling_raw,
     tree_transform_structure_with_structural_recoupling_raw_profiled,
 };
+pub use host_kernels::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
