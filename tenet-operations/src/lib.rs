@@ -29,8 +29,8 @@ pub use axis::{
     AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
 };
 pub use backend::{
-    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
-    TreeTransformBackend,
+    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,
+    TensorOperationsBackend, TreeTransformBackend,
 };
 pub use cache::{
     BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,

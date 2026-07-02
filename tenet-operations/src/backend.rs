@@ -227,6 +227,15 @@ impl Default for DenseTreeTransformOperations<DefaultDenseExecutor> {
     }
 }
 
+/// Explicit marker for the current host-slice tensor operation backend family.
+///
+/// `TensorOperationsBackend` keeps the existing method-bearing public trait for
+/// source compatibility. This marker makes host-only bounds explicit without
+/// forcing downstream custom backends to rewrite their existing impls.
+pub trait HostTensorOperationsBackend: TensorOperationsBackend {}
+
+impl<B> HostTensorOperationsBackend for B where B: TensorOperationsBackend + ?Sized {}
+
 impl TensorOperationsBackend for HostTensorOperations {
     type Allocator = HostAllocator;
 
@@ -493,5 +502,19 @@ where
             beta,
             profile,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_tensor_operations_backend<B: TensorOperationsBackend>() {}
+    fn assert_host_tensor_operations_backend<B: HostTensorOperationsBackend>() {}
+
+    #[test]
+    fn host_tensor_operations_keeps_compatibility_backend_names() {
+        assert_tensor_operations_backend::<HostTensorOperations>();
+        assert_host_tensor_operations_backend::<HostTensorOperations>();
     }
 }

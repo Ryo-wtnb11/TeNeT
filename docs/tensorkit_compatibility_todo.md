@@ -295,6 +295,12 @@ Remaining implementation boundary:
   `DenseKernelBackend` plus `DenseExecutorWithKernel<K>`. The default host
   executor still uses `StridedKernelBackend`, while future BLAS/C++/CUDA
   kernels can replace that layer without touching TensorMap/fusion algorithms.
+- The current tensoradd/tensortrace/copy replay trait remains
+  `TensorOperationsBackend` for source compatibility. A
+  `HostTensorOperationsBackend` marker now documents that this method-bearing
+  trait is host-slice/strided-kernel specific. Future device/MPI backends
+  should use separate placement-aware execution traits instead of implementing
+  the host-slice boundary.
 - Higher-level default convenience functions currently instantiate host
   backends. Once device storage exists, these should dispatch from placement
   instead of exposing backend selection in user-facing APIs.
