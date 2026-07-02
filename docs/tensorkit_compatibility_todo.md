@@ -63,6 +63,25 @@ Next required refactor:
   feature must not be exposed until tree replay and contraction actually use
   device-resident workspaces and kernels.
 
+Storage-aware workspace target:
+
+- Do not add runtime placement dispatch to default facades while their
+  signatures still require `HostReadableStorage` / `HostWritableStorage`; that
+  would only re-label a host-slice execution path as storage-centric dispatch.
+- The TensorKit-equivalent step is to separate structure/transformer caches
+  from scratch allocation. Cached structures remain placement-neutral; scratch
+  buffers must be allocated from the destination/source storage placement,
+  analogous to TensorKit's `similar(tdst.data, sz)` behavior.
+- The first non-host design should introduce a workspace allocation boundary
+  that can produce same-placement temporary buffers for tree-transform source
+  packs, destination packs, canonical fusion contraction buffers, and dynamic
+  fusion scratch. Only after that boundary exists should ordinary facades select
+  host/device execution from `TensorMap::placement()`.
+- `*_with` APIs remain explicit override/test hooks and may keep accepting
+  caller-owned backends/workspaces. Ordinary APIs should eventually be the
+  storage-centric path users call, matching TensorKit's TensorOperations
+  lowering.
+
 Known temporary mismatch:
 
 - Until the raw strided-rs API is merged upstream and tenferro-rs is updated to
