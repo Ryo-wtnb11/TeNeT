@@ -21,6 +21,6 @@ provider-inject = ["tenet-dense/provider-inject"]
 [dependencies]
 tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense", default-features = false }
-strided-kernel = { git = "https://github.com/Ryo-wtnb11/strided-rs", rev = "bd6d0775b17b83eff19b0f1b3825059bb6ee66c7", version = "0.1.0", features = ["parallel"] }
+strided-kernel = { git = "https://github.com/tensor4all/strided-rs", rev = "4ea9acbaa1422efa2662ff4b25b17cdae28f093d", version = "0.1.0", features = ["parallel"] }
 num-traits = "0.2"
 num-complex = "0.4"
