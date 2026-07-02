@@ -7,11 +7,103 @@ use tenet_core::{
     unique_permute_tree_pair, BlockKey, BlockSpec, BlockStructure, BlockView, BlockViewMut,
     BraidingStyleKind, CoreError, FermionParityFusionRule, FusionProductSpace, FusionRule,
     FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeGroupKey,
-    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, ProductFusionRule, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    FusionTreeHomSpace, FusionTreeKey, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols,
+    MultiplicityFreeRigidSymbols, Placement, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep,
+    Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
+
+#[derive(Clone, Debug, PartialEq)]
+struct TestHostStorage<T>(Vec<T>);
+
+#[derive(Clone, Debug, PartialEq)]
+struct TestHostReadStorage<T>(Vec<T>);
+
+impl<T> TestHostStorage<T> {
+    fn new(data: Vec<T>) -> Self {
+        Self(data)
+    }
+}
+
+impl<T> TestHostReadStorage<T> {
+    fn new(data: Vec<T>) -> Self {
+        Self(data)
+    }
+}
+
+impl<T> TensorStorage<T> for TestHostStorage<T> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for TestHostStorage<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> HostWritableStorage<T> for TestHostStorage<T> {
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.0
+    }
+}
+
+impl<T> TensorStorage<T> for TestHostReadStorage<T> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
+}
+
+impl<T> HostReadableStorage<T> for TestHostReadStorage<T> {
+    fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+}
+
+fn test_host_tensor_map<T, const NOUT: usize, const NIN: usize>(
+    data: Vec<T>,
+    space: TensorMapSpace<NOUT, NIN>,
+) -> TensorMap<T, NOUT, NIN, Trivial, TestHostStorage<T>> {
+    let structure = BlockStructure::trivial(space.dims()).unwrap();
+    TensorMap::from_storage_with_structure(TestHostStorage::new(data), space, structure).unwrap()
+}
+
+fn test_host_tensor_map_with_structure<T, const NOUT: usize, const NIN: usize>(
+    data: Vec<T>,
+    space: TensorMapSpace<NOUT, NIN>,
+    structure: BlockStructure,
+) -> TensorMap<T, NOUT, NIN, Trivial, TestHostStorage<T>> {
+    TensorMap::from_storage_with_structure(TestHostStorage::new(data), space, structure).unwrap()
+}
+
+fn test_host_read_tensor_map<T, const NOUT: usize, const NIN: usize>(
+    data: Vec<T>,
+    space: TensorMapSpace<NOUT, NIN>,
+) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
+    let structure = BlockStructure::trivial(space.dims()).unwrap();
+    TensorMap::from_storage_with_structure(TestHostReadStorage::new(data), space, structure)
+        .unwrap()
+}
+
+fn test_host_read_tensor_map_with_structure<T, const NOUT: usize, const NIN: usize>(
+    data: Vec<T>,
+    space: TensorMapSpace<NOUT, NIN>,
+    structure: BlockStructure,
+) -> TensorMap<T, NOUT, NIN, Trivial, TestHostReadStorage<T>> {
+    TensorMap::from_storage_with_structure(TestHostReadStorage::new(data), space, structure)
+        .unwrap()
+}
 
 fn fusion_tree_test_key<
     const COD: usize,

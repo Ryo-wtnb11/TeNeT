@@ -229,3 +229,44 @@ Remaining semantic boundary:
 - Do not silently lower explicit non-symmetric `Braid + source_conjugate` as an
   ordinary `permute`; that is categorically wrong for non-symmetric braiding.
   Keep the TeNeT extension gated by explicit rule capability.
+
+## Storage-centric typed execution boundary
+
+TensorKit source:
+
+- TensorKit tensor objects keep categorical/block structure separate from the
+  underlying storage object.
+- Transformer/structure construction uses block structures and fusion-tree
+  metadata; replay dispatch follows the storage/array backend.
+- Low-level raw replay is still an array/slice/device-kernel concern, not a
+  categorical API concern.
+
+TeNeT fixed coverage:
+
+- `TensorMap<T, NOUT, NIN, S, D>` already had a storage slot, but several
+  `tenet-operations` typed APIs omitted `D` and therefore defaulted to
+  `Vec<T>`.
+- `TreeTransformBackend`, `TensorOperationsBackend`, and
+  `TensorContractBackend` typed entry points now expose the storage slot.
+- Current host implementations require `HostReadableStorage` /
+  `HostWritableStorage` explicitly. This is intentional: raw replay still uses
+  host slices, and TeNeT should not pretend CUDA/device storage is supported
+  until device replay/workspace paths exist.
+- Structure builders such as `TensorAddStructure::compile`,
+  `TensorTraceStructure::compile`, `TensorContractStructure::compile`, and
+  `TreeTransformStructure::compile` require only `TensorStorage`, because they
+  inspect structure metadata and do not read tensor data.
+- Public `*_execute_with` facades for tensoradd, tensortrace,
+  tree-transform, and tensorcontract accept non-`Vec` host storage.
+- Tests include a custom `TestHostStorage<T>` wrapper to assert that typed
+  structure compile and replay do not accidentally rely on `Vec<T>`.
+
+Remaining implementation boundary:
+
+- Raw replay methods still accept `&[T]` / `&mut [T]` and are host-only.
+- Workspaces (`TreeTransformWorkspace`, `TensorContractWorkspace`) still own
+  `Vec<T>`. Device/CUDA support requires storage-aware workspaces before any
+  CUDA feature should be exposed.
+- Higher-level default convenience functions currently instantiate host
+  backends. Once device storage exists, these should dispatch from placement
+  instead of exposing backend selection in user-facing APIs.

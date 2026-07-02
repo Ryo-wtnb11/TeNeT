@@ -2,7 +2,9 @@ use core::ops::{Add, Mul};
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockKey, BlockStructure, TensorMap};
+use tenet_core::{
+    BlockKey, BlockStructure, HostReadableStorage, HostWritableStorage, TensorMap, TensorStorage,
+};
 
 use crate::axis::{permutation_axes, AxisPermutation};
 use crate::error::OperationError;
@@ -20,11 +22,24 @@ pub struct TensorAddStructure {
     src_structure: Arc<BlockStructure>,
 }
 
-pub fn tensoradd_structure<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
-    dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-    src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+pub fn tensoradd_structure<
+    TDst,
+    TSrc,
+    const NOUT: usize,
+    const NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
     permutation: AxisPermutation<'_>,
-) -> Result<TensorAddStructure, OperationError> {
+) -> Result<TensorAddStructure, OperationError>
+where
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
     TensorAddStructure::compile(dst, src, permutation)
 }
 
@@ -35,12 +50,18 @@ pub fn tensoradd_structure_with_conjugation<
     const NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
-    dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-    src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
     permutation: AxisPermutation<'_>,
     source_conjugate: bool,
-) -> Result<TensorAddStructure, OperationError> {
+) -> Result<TensorAddStructure, OperationError>
+where
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
     TensorAddStructure::compile_with_conjugation(dst, src, permutation, source_conjugate)
 }
 
@@ -50,20 +71,37 @@ pub(crate) const PLAIN_TENSORADD_FUSION_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT
     "plain tensoradd with fusion-tree conjugation requires categorical adjoint lowering";
 
 impl TensorAddStructure {
-    pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
-        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc, DDst, DSrc>(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
         permutation: AxisPermutation<'_>,
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         Self::compile_with_conjugation(dst, src, permutation, false)
     }
 
-    pub fn compile_with_conjugation<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc>(
-        dst: &TensorMap<TDst, NOUT, NIN, SDst>,
-        src: &TensorMap<TSrc, NOUT, NIN, SSrc>,
+    pub fn compile_with_conjugation<
+        TDst,
+        TSrc,
+        const NOUT: usize,
+        const NIN: usize,
+        SDst,
+        SSrc,
+        DDst,
+        DSrc,
+    >(
+        dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
         permutation: AxisPermutation<'_>,
         source_conjugate: bool,
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         let axes = permutation_axes(permutation, dst.structure().rank())?;
         let has_fusion = dst.fusion_space().is_some() || src.fusion_space().is_some();
         if source_conjugate && has_fusion {
@@ -195,12 +233,12 @@ impl TensorAddStructure {
         validate_structure_identity("src", &self.src_structure, src_structure)
     }
 
-    pub fn execute_with<B, T, const NOUT: usize, const NIN: usize, S>(
+    pub fn execute_with<B, T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
         &self,
         backend: &mut B,
         allocator: &mut B::Allocator,
-        dst: &mut TensorMap<T, NOUT, NIN, S>,
-        src: &TensorMap<T, NOUT, NIN, S>,
+        dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+        src: &TensorMap<T, NOUT, NIN, S, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -214,6 +252,8 @@ impl TensorAddStructure {
             + One
             + ConjugateValue
             + strided_kernel::MaybeSendSync,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>,
     {
         backend.tensoradd_structure_into(allocator, self, dst, src, alpha, beta)
     }

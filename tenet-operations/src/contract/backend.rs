@@ -1,6 +1,6 @@
 use num_traits::One;
 use std::sync::Arc;
-use tenet_core::{BlockStructure, TensorMap};
+use tenet_core::{BlockStructure, HostReadableStorage, HostWritableStorage, TensorMap};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::{
@@ -27,16 +27,23 @@ where
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TensorContractStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         alpha: D,
         beta: D,
-    ) -> Result<(), OperationError>;
+    ) -> Result<(), OperationError>
+    where
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>;
 
     fn tensorcontract_structure_into_raw(
         &mut self,
@@ -110,16 +117,24 @@ where
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TensorContractStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         alpha: D,
         beta: D,
-    ) -> Result<(), OperationError> {
+    ) -> Result<(), OperationError>
+    where
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
+    {
         tensorcontract_structure_with_dense_executor(
             self.dense_mut(),
             workspace,
@@ -205,13 +220,16 @@ fn tensorcontract_structure_with_dense_executor<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     dense: &mut E,
     workspace: &mut TensorContractWorkspace<D>,
     structure: &TensorContractStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -219,6 +237,9 @@ where
     E: DenseExecutor,
     D: DenseBlockScalar + ConjugateValue + RecouplingCoefficientAction<C>,
     C: Copy + One,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     let dst_structure = Arc::clone(dst.structure());
     let lhs_structure = Arc::clone(lhs.structure());

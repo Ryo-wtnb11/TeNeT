@@ -3,8 +3,8 @@ use std::hash::Hash;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockView, BlockViewMut, CoreError, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, TensorMap,
+    BlockView, BlockViewMut, CoreError, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap,
 };
 
 use crate::axis::{AxisPermutation, TensorTraceAxisSpec};
@@ -32,27 +32,31 @@ use crate::tree_transform::{
     build_tree_pair_transform_group_plan, TreeTransformOperationKey, TreeTransformRuleCacheKey,
 };
 
-pub fn tensorcopy_into<T, const NOUT: usize, const NIN: usize, S>(
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+pub fn tensorcopy_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
 ) -> Result<(), OperationError>
 where
     T: Copy + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
     tensorcopy_into_with(&mut backend, &mut allocator, dst, src)
 }
 
-pub fn tensorcopy_into_with<B, T, const NOUT: usize, const NIN: usize, S>(
+pub fn tensorcopy_into_with<B, T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
     backend: &mut B,
     allocator: &mut B::Allocator,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
 ) -> Result<(), OperationError>
 where
     B: TensorOperationsBackend,
     T: Copy + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     backend.copy_block_into(allocator, dst.subblock_mut()?, src.subblock()?)
 }
@@ -119,11 +123,11 @@ where
     )
 }
 
-pub fn tensoradd_into_with<B, T, const NOUT: usize, const NIN: usize, S>(
+pub fn tensoradd_into_with<B, T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
     backend: &mut B,
     allocator: &mut B::Allocator,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     permutation: AxisPermutation<'_>,
     alpha: T,
     beta: T,
@@ -138,17 +142,27 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let structure = tensoradd_structure(dst, src, permutation)?;
     tensoradd_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tensoradd_into_with_backend_and_conjugation<B, T, const NOUT: usize, const NIN: usize, S>(
+pub fn tensoradd_into_with_backend_and_conjugation<
+    B,
+    T,
+    const NOUT: usize,
+    const NIN: usize,
+    S,
+    DDst,
+    DSrc,
+>(
     backend: &mut B,
     allocator: &mut B::Allocator,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     permutation: AxisPermutation<'_>,
     source_conjugate: bool,
     alpha: T,
@@ -164,17 +178,19 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let structure = tensoradd_structure_with_conjugation(dst, src, permutation, source_conjugate)?;
     tensoradd_execute_with(backend, allocator, &structure, dst, src, alpha, beta)
 }
 
-pub fn tensoradd_execute_with<B, T, const NOUT: usize, const NIN: usize, S>(
+pub fn tensoradd_execute_with<B, T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
     backend: &mut B,
     allocator: &mut B::Allocator,
     structure: &TensorAddStructure,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -188,6 +204,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     structure.execute_with(backend, allocator, dst, src, alpha, beta)
 }
@@ -456,12 +474,14 @@ pub fn tensortrace_execute_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     allocator: &mut B::Allocator,
     structure: &TensorTraceStructure,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -475,6 +495,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     structure.execute_with(backend, allocator, dst, src, alpha, beta)
 }
@@ -581,12 +603,14 @@ pub fn tensortrace_fusion_execute_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     allocator: &mut B::Allocator,
     structure: &TensorTraceFusionStructure<C>,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -602,6 +626,8 @@ where
         + ConjugateValue
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     structure.execute_with(backend, allocator, dst, src, alpha, beta)
 }
@@ -616,12 +642,14 @@ pub fn tree_transform_execute_with<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -636,6 +664,8 @@ where
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
     C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
 }

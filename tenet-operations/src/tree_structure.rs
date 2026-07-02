@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tenet_core::{BlockStructure, TensorMap};
+use tenet_core::{BlockStructure, TensorMap, TensorStorage};
 
 use crate::strided::{column_major_strides_isize, element_count, offset_to_isize};
 use crate::structure_identity::validate_structure_identity;
@@ -36,11 +36,17 @@ impl<T: Copy> TreeTransformStructure<T> {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         specs: &[TreeTransformBlockSpec<T>],
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         Self::compile_shared_structures(
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
@@ -85,11 +91,17 @@ impl<T: Copy> TreeTransformStructure<T> {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         specs: &[TreeTransformKeyBlockSpec<T>],
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         Self::compile_keyed_shared_structures(
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),
@@ -134,11 +146,17 @@ impl<T: Copy> TreeTransformStructure<T> {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         specs: &[TreeTransformGroupBlockSpec<T>],
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         Self::compile_grouped_shared_structures(
             Arc::clone(dst.structure()),
             Arc::clone(src.structure()),

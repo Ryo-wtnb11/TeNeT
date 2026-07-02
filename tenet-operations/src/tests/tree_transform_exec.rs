@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn tree_transform_structure_replays_custom_host_storage_without_vec_fixing() {
+    let space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
+    let src = test_host_read_tensor_map_with_structure(
+        vec![1.0_f64, 2.0, 3.0, 4.0],
+        space.clone(),
+        structure.clone(),
+    );
+    let mut dst = test_host_tensor_map_with_structure(vec![10.0_f64; 4], space, structure);
+    let transform =
+        TreeTransformStructure::compile(&dst, &src, &[TreeTransformBlockSpec::single(0, 0, 3.0)])
+            .unwrap();
+    let mut backend = HostTensorOperations;
+    let mut workspace = TreeTransformWorkspace::default();
+
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &transform,
+        &mut dst,
+        &src,
+        2.0,
+        4.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[46.0, 52.0, 58.0, 64.0]);
+}
+
+#[test]
 fn tree_transform_single_replay_supports_all_numeric_dtypes() {
     assert_tree_single_dtype(
         vec![1.0_f32, 2.0, 3.0, 4.0],

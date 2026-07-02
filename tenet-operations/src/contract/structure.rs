@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use num_traits::One;
-use tenet_core::{BlockKey, BlockStructure, TensorMap};
+use tenet_core::{
+    BlockKey, BlockStructure, HostReadableStorage, HostWritableStorage, TensorMap, TensorStorage,
+};
 use tenet_dense::DenseDotConfig;
 
 use crate::axis::{permutation_axes, TensorContractAxisSpec};
@@ -43,12 +45,20 @@ pub fn tensorcontract_structure<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractAxisSpec<'_>,
-) -> Result<TensorContractStructure, OperationError> {
+) -> Result<TensorContractStructure, OperationError>
+where
+    DDst: TensorStorage<TDst>,
+    DLhs: TensorStorage<TLhs>,
+    DRhs: TensorStorage<TRhs>,
+{
     TensorContractStructure::compile(dst, lhs, rhs, axes)
 }
 
@@ -71,12 +81,20 @@ impl TensorContractStructure {
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractAxisSpec<'_>,
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DLhs: TensorStorage<TLhs>,
+        DRhs: TensorStorage<TRhs>,
+    {
         if dst.fusion_space().is_some()
             || lhs.fusion_space().is_some()
             || rhs.fusion_space().is_some()
@@ -120,13 +138,21 @@ impl TensorContractStructure {
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         axes: TensorContractAxisSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DLhs: TensorStorage<TLhs>,
+        DRhs: TensorStorage<TRhs>,
+    {
         Self::compile_shared_structures_with_block_specs(
             Arc::clone(dst.structure()),
             Arc::clone(lhs.structure()),
@@ -370,19 +396,25 @@ where
         SDst,
         SLhs,
         SRhs,
+        DDst,
+        DLhs,
+        DRhs,
     >(
         &self,
         backend: &mut B,
         workspace: &mut B::Workspace,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
     where
         B: TensorContractBackend<D, C>,
         D: DenseBlockScalar + RecouplingCoefficientAction<C>,
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
     {
         backend.tensorcontract_structure_into(workspace, self, dst, lhs, rhs, alpha, beta)
     }

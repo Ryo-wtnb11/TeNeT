@@ -5,7 +5,8 @@ use num_traits::{One, Zero};
 use tenet_core::{
     multiplicity_free_permute_tree_pair, split_fusion_tree, BlockKey, BlockStructure, FusionRule,
     FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
-    MultiplicityFreeRigidSymbols, SectorLeg, TensorMap,
+    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, SectorLeg, TensorMap,
+    TensorStorage,
 };
 
 use crate::axis::TensorTraceAxisSpec;
@@ -38,11 +39,17 @@ pub fn tensortrace_structure<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     axes: TensorTraceAxisSpec<'_>,
-) -> Result<TensorTraceStructure, OperationError> {
+) -> Result<TensorTraceStructure, OperationError>
+where
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
     TensorTraceStructure::compile(dst, src, axes)
 }
 
@@ -56,13 +63,17 @@ pub fn tensortrace_fusion_structure<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     rule: &R,
-    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     axes: TensorTraceAxisSpec<'_>,
 ) -> Result<TensorTraceFusionStructure<R::Scalar>, OperationError>
 where
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone
         + Add<Output = R::Scalar>
@@ -249,12 +260,14 @@ impl<C> TensorTraceFusionStructure<C> {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &self,
         backend: &mut B,
         allocator: &mut B::Allocator,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -270,6 +283,8 @@ impl<C> TensorTraceFusionStructure<C> {
             + RecouplingCoefficientAction<C>
             + strided_kernel::MaybeSendSync,
         C: Copy,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>,
     {
         backend.tensortrace_fusion_structure_into(allocator, self, dst, src, alpha, beta)
     }
@@ -321,11 +336,17 @@ impl TensorTraceStructure {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
         if dst.fusion_space().is_some() || src.fusion_space().is_some() {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: PLAIN_TENSORTRACE_FUSION_REQUIRES_FUSION_API,
@@ -438,12 +459,14 @@ impl TensorTraceStructure {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &self,
         backend: &mut B,
         allocator: &mut B::Allocator,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -457,6 +480,8 @@ impl TensorTraceStructure {
             + One
             + ConjugateValue
             + strided_kernel::MaybeSendSync,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>,
     {
         backend.tensortrace_structure_into(allocator, self, dst, src, alpha, beta)
     }
@@ -878,11 +903,13 @@ pub(crate) fn tensortrace_structure_with_strided_kernel<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     _allocator: &mut crate::HostAllocator,
     structure: &TensorTraceStructure,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -895,6 +922,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
@@ -928,11 +957,13 @@ pub(crate) fn tensortrace_fusion_structure_with_strided_kernel<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     _allocator: &mut crate::HostAllocator,
     structure: &TensorTraceFusionStructure<C>,
-    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -947,6 +978,8 @@ where
         + RecouplingCoefficientAction<C>
         + strided_kernel::MaybeSendSync,
     C: Copy,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());

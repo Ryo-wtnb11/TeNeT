@@ -2,7 +2,9 @@ use core::ops::{Add, Mul};
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockStructure, BlockView, BlockViewMut, TensorMap};
+use tenet_core::{
+    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, TensorMap,
+};
 use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
 
 use crate::{
@@ -29,15 +31,20 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TreeTransformStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
         beta: D,
-    ) -> Result<(), OperationError>;
+    ) -> Result<(), OperationError>
+    where
+        DDst: HostWritableStorage<D>,
+        DSrc: HostReadableStorage<D>;
 
     fn tree_transform_structure_into_raw(
         &mut self,
@@ -92,12 +99,12 @@ pub trait TensorOperationsBackend {
     where
         T: Copy + strided_kernel::MaybeSendSync;
 
-    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S>(
+    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
         &mut self,
         allocator: &mut Self::Allocator,
         structure: &TensorAddStructure,
-        dst: &mut TensorMap<T, NOUT, NIN, S>,
-        src: &TensorMap<T, NOUT, NIN, S>,
+        dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+        src: &TensorMap<T, NOUT, NIN, S, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -109,7 +116,9 @@ pub trait TensorOperationsBackend {
             + Zero
             + One
             + ConjugateValue
-            + strided_kernel::MaybeSendSync;
+            + strided_kernel::MaybeSendSync,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>;
 
     fn tensortrace_structure_into<
         T,
@@ -119,12 +128,14 @@ pub trait TensorOperationsBackend {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         allocator: &mut Self::Allocator,
         structure: &TensorTraceStructure,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -136,7 +147,9 @@ pub trait TensorOperationsBackend {
             + Zero
             + One
             + ConjugateValue
-            + strided_kernel::MaybeSendSync;
+            + strided_kernel::MaybeSendSync,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>;
 
     fn tensortrace_fusion_structure_into<
         T,
@@ -147,12 +160,14 @@ pub trait TensorOperationsBackend {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         allocator: &mut Self::Allocator,
         structure: &TensorTraceFusionStructure<C>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -166,7 +181,9 @@ pub trait TensorOperationsBackend {
             + ConjugateValue
             + RecouplingCoefficientAction<C>
             + strided_kernel::MaybeSendSync,
-        C: Copy;
+        C: Copy,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -225,12 +242,12 @@ impl TensorOperationsBackend for HostTensorOperations {
         copy_block_with_strided_kernel(dst, src)
     }
 
-    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S>(
+    fn tensoradd_structure_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
         &mut self,
         allocator: &mut Self::Allocator,
         structure: &TensorAddStructure,
-        dst: &mut TensorMap<T, NOUT, NIN, S>,
-        src: &TensorMap<T, NOUT, NIN, S>,
+        dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+        src: &TensorMap<T, NOUT, NIN, S, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -243,6 +260,8 @@ impl TensorOperationsBackend for HostTensorOperations {
             + One
             + ConjugateValue
             + strided_kernel::MaybeSendSync,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>,
     {
         tensoradd_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
     }
@@ -255,12 +274,14 @@ impl TensorOperationsBackend for HostTensorOperations {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         allocator: &mut Self::Allocator,
         structure: &TensorTraceStructure,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -273,6 +294,8 @@ impl TensorOperationsBackend for HostTensorOperations {
             + One
             + ConjugateValue
             + strided_kernel::MaybeSendSync,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>,
     {
         tensortrace_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
     }
@@ -286,12 +309,14 @@ impl TensorOperationsBackend for HostTensorOperations {
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         allocator: &mut Self::Allocator,
         structure: &TensorTraceFusionStructure<C>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError>
@@ -306,6 +331,8 @@ impl TensorOperationsBackend for HostTensorOperations {
             + RecouplingCoefficientAction<C>
             + strided_kernel::MaybeSendSync,
         C: Copy,
+        DDst: HostWritableStorage<T>,
+        DSrc: HostReadableStorage<T>,
     {
         tensortrace_fusion_structure_with_strided_kernel(
             allocator, structure, dst, src, alpha, beta,
@@ -335,15 +362,21 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TreeTransformStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
         beta: D,
-    ) -> Result<(), OperationError> {
+    ) -> Result<(), OperationError>
+    where
+        DDst: HostWritableStorage<D>,
+        DSrc: HostReadableStorage<D>,
+    {
         tree_transform_structure_with_strided_kernel(workspace, structure, dst, src, alpha, beta)
     }
 
@@ -386,15 +419,21 @@ where
         const SRC_NIN: usize,
         SDst,
         SSrc,
+        DDst,
+        DSrc,
     >(
         &mut self,
         workspace: &mut Self::Workspace,
         structure: &TreeTransformStructure<C>,
-        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
         beta: D,
-    ) -> Result<(), OperationError> {
+    ) -> Result<(), OperationError>
+    where
+        DDst: HostWritableStorage<D>,
+        DSrc: HostReadableStorage<D>,
+    {
         tree_transform_structure_with_structural_recoupling(
             &mut self.dense,
             workspace,

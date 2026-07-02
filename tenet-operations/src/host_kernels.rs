@@ -2,7 +2,9 @@ use core::ops::{Add, Mul};
 use std::sync::Arc;
 
 use num_traits::{One, Zero};
-use tenet_core::{BlockStructure, BlockView, BlockViewMut, TensorMap};
+use tenet_core::{
+    BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, TensorMap,
+};
 use tenet_dense::DenseExecutor;
 
 use crate::strided::{
@@ -54,11 +56,18 @@ where
     strided_kernel::copy_into(&mut dst, &src).map_err(strided_error)
 }
 
-pub(crate) fn tensoradd_structure_with_strided_kernel<T, const NOUT: usize, const NIN: usize, S>(
+pub(crate) fn tensoradd_structure_with_strided_kernel<
+    T,
+    const NOUT: usize,
+    const NIN: usize,
+    S,
+    DDst,
+    DSrc,
+>(
     allocator: &mut HostAllocator,
     structure: &TensorAddStructure,
-    dst: &mut TensorMap<T, NOUT, NIN, S>,
-    src: &TensorMap<T, NOUT, NIN, S>,
+    dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
+    src: &TensorMap<T, NOUT, NIN, S, DSrc>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -71,6 +80,8 @@ where
         + One
         + ConjugateValue
         + strided_kernel::MaybeSendSync,
+    DDst: HostWritableStorage<T>,
+    DSrc: HostReadableStorage<T>,
 {
     let descriptor = structure.descriptor();
     structure.validate_replay_structures(dst.structure(), src.structure())?;
@@ -113,11 +124,13 @@ pub(crate) fn tree_transform_structure_with_strided_kernel<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -132,6 +145,8 @@ where
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<C>,
     C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
@@ -228,12 +243,14 @@ pub(crate) fn tree_transform_structure_with_structural_recoupling<
     const SRC_NIN: usize,
     SDst,
     SSrc,
+    DDst,
+    DSrc,
 >(
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -241,6 +258,8 @@ where
     E: DenseExecutor,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
 {
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());

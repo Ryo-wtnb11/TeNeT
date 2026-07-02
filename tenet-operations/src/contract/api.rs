@@ -1,5 +1,7 @@
 use num_traits::One;
-use tenet_core::{CoreError, MultiplicityFreeRigidSymbols, TensorMap};
+use tenet_core::{
+    CoreError, HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
+};
 
 use crate::axis::{AxisPermutation, TensorContractAxisSpec};
 use crate::lowering::adjoint_fusion_space_view;
@@ -929,13 +931,16 @@ pub fn tensorcontract_execute_with<
     SDst,
     SLhs,
     SRhs,
+    DDst,
+    DLhs,
+    DRhs,
 >(
     backend: &mut B,
     workspace: &mut B::Workspace,
     structure: &TensorContractStructure<C>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -943,6 +948,9 @@ where
     B: TensorContractBackend<D, C>,
     D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     C: Copy + One,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
 {
     structure.execute_with(backend, workspace, dst, lhs, rhs, alpha, beta)
 }
