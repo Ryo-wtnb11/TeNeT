@@ -16,6 +16,16 @@ impl<T> Default for HostScratchBuffer<T> {
 
 impl<T> HostScratchBuffer<T> {
     #[inline]
+    pub(crate) fn filled(len: usize, value: T) -> Self
+    where
+        T: Clone,
+    {
+        Self {
+            data: vec![value; len],
+        }
+    }
+
+    #[inline]
     pub(crate) fn resize_filled(&mut self, len: usize, value: T)
     where
         T: Clone,

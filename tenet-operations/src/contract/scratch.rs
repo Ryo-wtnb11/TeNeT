@@ -2,17 +2,17 @@ use num_traits::Zero;
 use std::sync::Arc;
 use tenet_core::Placement;
 
-use crate::{OperationError, ReportsPlacement};
+use crate::{host_scratch::HostScratchBuffer, OperationError, ReportsPlacement};
 
 use super::dynamic_space::DynamicFusionMapSpace;
 
 /// Host scratch tensor for dynamic fusion-space lowering.
 ///
-/// The buffer is host-owned `Vec<T>` storage and exposes host slices.
+/// The buffer is host-owned scratch storage and exposes host slices.
 #[derive(Clone, Debug)]
 pub(crate) struct HostDynamicFusionScratch<T> {
     space: Arc<DynamicFusionMapSpace>,
-    data: Vec<T>,
+    data: HostScratchBuffer<T>,
 }
 
 pub(crate) type DynamicFusionScratch<T> = HostDynamicFusionScratch<T>;
@@ -25,7 +25,7 @@ where
         let len = space.required_len()?;
         Ok(Self {
             space,
-            data: vec![T::zero(); len],
+            data: HostScratchBuffer::filled(len, T::zero()),
         })
     }
 
@@ -42,12 +42,12 @@ impl<T> HostDynamicFusionScratch<T> {
 
     #[inline]
     pub(crate) fn data(&self) -> &[T] {
-        &self.data
+        self.data.as_slice()
     }
 
     #[inline]
     pub(crate) fn data_mut(&mut self) -> &mut [T] {
-        &mut self.data
+        self.data.as_mut_slice()
     }
 }
 
@@ -178,6 +178,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenet_core::{
+        BlockStructure, FusionTensorMapSpace, FusionTreeHomSpace, SectorId, TensorMapSpace,
+    };
+
+    fn scratch_space(len: usize) -> Arc<DynamicFusionMapSpace> {
+        let dense_space = TensorMapSpace::<1, 0>::from_dims([len], []).unwrap();
+        let homspace =
+            FusionTreeHomSpace::from_sectors([SectorId::new(0)], std::iter::empty::<SectorId>());
+        let structure = BlockStructure::packed_column_major(1, [vec![len]]).unwrap();
+        let fusion_space = FusionTensorMapSpace::new(dense_space, homspace, structure).unwrap();
+        Arc::new(DynamicFusionMapSpace::from_typed(&fusion_space))
+    }
 
     #[test]
     fn dynamic_fusion_scratch_workspace_is_explicit_host_workspace() {
@@ -187,5 +199,19 @@ mod tests {
         assert_eq!(workspace.placement(), Placement::Host);
         assert!(workspace.is_host_placement());
         assert_eq!(alias.placement(), Placement::Host);
+    }
+
+    #[test]
+    fn dynamic_fusion_scratch_reuse_zeros_existing_buffer() {
+        let space = scratch_space(3);
+        let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
+        {
+            let scratch = workspace.prepare_lhs(space.clone()).unwrap();
+            scratch.data_mut().copy_from_slice(&[1.0, 2.0, 3.0]);
+        }
+
+        let scratch = workspace.prepare_lhs(space).unwrap();
+
+        assert_eq!(scratch.data(), &[0.0, 0.0, 0.0]);
     }
 }
