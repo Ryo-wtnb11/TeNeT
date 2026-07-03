@@ -1422,3 +1422,13 @@ fn tensorcontract_structure_rejects_invalid_explicit_block_term_at_compile_time(
         }
     );
 }
+
+impl<T: Clone> tenet_core::ScratchStorage<T> for ContractTrackingScratch<T> {
+    fn reset_filled(&mut self, len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.data.clear();
+        self.data.resize(len, value);
+    }
+}

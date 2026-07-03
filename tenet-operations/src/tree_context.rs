@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_traits::Zero;
 use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, SimilarStorage, TensorMap,
+    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
 };
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
@@ -210,8 +210,8 @@ where
         D: RecouplingCoefficientAction<C>,
         DDst: HostWritableStorage<D> + SimilarStorage<D>,
         DSrc: HostReadableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D>,
-        DSrc::Similar: HostWritableStorage<D>,
+        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+        DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     {
         let structure = self
             .cache

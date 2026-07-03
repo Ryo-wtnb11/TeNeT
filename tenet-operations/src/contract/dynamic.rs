@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionTreeHomSpace, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, SimilarStorage, TensorMap, TensorStorage,
+    MultiplicityFreeRigidSymbols, ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
 };
 
 use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -614,11 +614,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     DDst: HostWritableStorage<D> + SimilarStorage<D>,
-    DDst::Similar: HostWritableStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     DLhs: HostReadableStorage<D> + SimilarStorage<D>,
-    DLhs::Similar: HostWritableStorage<D>,
+    DLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     DRhs: HostReadableStorage<D> + SimilarStorage<D>,
-    DRhs::Similar: HostWritableStorage<D>,
+    DRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
 {
     let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
         tree_context,
@@ -2009,6 +2009,16 @@ mod tests {
     impl<T> tenet_core::HostWritableStorage<T> for TrackingScratch<T> {
         fn as_mut_slice(&mut self) -> &mut [T] {
             &mut self.data
+        }
+    }
+
+    impl<T: Clone> tenet_core::ScratchStorage<T> for TrackingScratch<T> {
+        fn reset_filled(&mut self, len: usize, value: T)
+        where
+            T: Clone,
+        {
+            self.data.clear();
+            self.data.resize(len, value);
         }
     }
 

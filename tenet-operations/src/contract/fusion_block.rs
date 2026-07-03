@@ -5,7 +5,8 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, SectorId, SimilarStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SectorId,
+    SimilarStorage,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -301,6 +302,16 @@ mod tests {
         }
     }
 
+    impl<T: Clone> tenet_core::ScratchStorage<T> for TrackingScratch<T> {
+        fn reset_filled(&mut self, len: usize, value: T)
+        where
+            T: Clone,
+        {
+            self.data.clear();
+            self.data.resize(len, value);
+        }
+    }
+
     #[test]
     fn canonical_fusion_block_workspace_is_explicit_host_workspace() {
         let workspace = HostCanonicalFusionBlockContractWorkspace::<f64>::default();
@@ -377,21 +388,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(dst.data(), &[50.0, 102.0]);
+        // The second group reuses the first group's buffers (same placement),
+        // so exactly one allocation per slot happens.
         assert_eq!(
             allocations.borrow().as_slice(),
             &[
-                ScratchAllocation {
-                    label: "lhs",
-                    len: 1,
-                },
-                ScratchAllocation {
-                    label: "rhs",
-                    len: 1,
-                },
-                ScratchAllocation {
-                    label: "destination",
-                    len: 1,
-                },
                 ScratchAllocation {
                     label: "lhs",
                     len: 1,
@@ -719,11 +720,11 @@ impl CanonicalFusionBlockContractPlan {
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
         DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D>,
+        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         DLhs: HostReadableStorage<D> + SimilarStorage<D>,
-        DLhs::Similar: HostWritableStorage<D>,
+        DLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         DRhs: HostReadableStorage<D> + SimilarStorage<D>,
-        DRhs::Similar: HostWritableStorage<D>,
+        DRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     {
         let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
@@ -808,11 +809,11 @@ impl CanonicalFusionBlockContractPlan {
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
         SLhs: SimilarStorage<D>,
-        SLhs::Similar: HostWritableStorage<D>,
+        SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         SRhs: SimilarStorage<D>,
-        SRhs::Similar: HostWritableStorage<D>,
+        SRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         SDst: SimilarStorage<D>,
-        SDst::Similar: HostWritableStorage<D>,
+        SDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     {
         self.validate_replay_inputs(
             dst_structure,
@@ -896,11 +897,11 @@ impl CanonicalFusionBlockContractPlan {
         B: TensorContractBackend<D, f64>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
         SLhs: SimilarStorage<D>,
-        SLhs::Similar: HostWritableStorage<D>,
+        SLhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         SRhs: SimilarStorage<D>,
-        SRhs::Similar: HostWritableStorage<D>,
+        SRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D>,
+        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     {
         let dst_structure = Arc::clone(dst.structure());
         self.validate_replay_inputs(

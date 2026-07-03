@@ -4,7 +4,7 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
-    SimilarStorage, TensorMap,
+    ScratchStorage, SimilarStorage, TensorMap,
 };
 use tenet_dense::DenseExecutor;
 
@@ -226,8 +226,8 @@ where
     C: Copy,
     DDst: HostWritableStorage<D> + SimilarStorage<D>,
     DSrc: HostReadableStorage<D> + SimilarStorage<D>,
-    DDst::Similar: HostWritableStorage<D>,
-    DSrc::Similar: HostWritableStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
 {
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());

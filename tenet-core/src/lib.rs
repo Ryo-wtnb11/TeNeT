@@ -44,6 +44,28 @@ pub trait SimilarStorage<T>: TensorStorage<T> {
         T: Clone;
 }
 
+/// Reusable same-placement scratch buffer.
+///
+/// `reset_filled` returns the buffer to exactly `len` elements equal to
+/// `value`, reusing existing capacity where possible so replay paths do not
+/// allocate on every call. Device scratch implementations should back this
+/// with pooled (stream-ordered) reuse instead of fresh device allocations.
+pub trait ScratchStorage<T>: TensorStorage<T> {
+    fn reset_filled(&mut self, len: usize, value: T)
+    where
+        T: Clone;
+}
+
+impl<T> ScratchStorage<T> for Vec<T> {
+    fn reset_filled(&mut self, len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.clear();
+        self.resize(len, value);
+    }
+}
+
 pub trait HostReadableStorage<T>: TensorStorage<T> {
     fn as_slice(&self) -> &[T];
 }

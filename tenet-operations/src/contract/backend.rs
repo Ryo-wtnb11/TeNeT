@@ -1,7 +1,8 @@
 use num_traits::One;
 use std::sync::Arc;
 use tenet_core::{
-    BlockStructure, HostReadableStorage, HostWritableStorage, Placement, SimilarStorage, TensorMap,
+    BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage,
+    SimilarStorage, TensorMap,
 };
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
@@ -396,7 +397,7 @@ where
     D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     C: Copy + One,
     DDst: HostWritableStorage<D> + SimilarStorage<D>,
-    DDst::Similar: HostWritableStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
 {

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, SimilarStorage, TensorMap,
-    TensorStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage,
+    TensorMap, TensorStorage,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -890,7 +890,7 @@ where
     ) -> Result<(), OperationError>
     where
         DDst: HostWritableStorage<D> + SimilarStorage<D>,
-        DDst::Similar: HostWritableStorage<D>,
+        DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
     {

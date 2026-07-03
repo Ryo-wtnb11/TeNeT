@@ -1,4 +1,4 @@
-use tenet_core::SimilarStorage;
+use tenet_core::{ScratchStorage, SimilarStorage, TensorStorage};
 
 /// Crate-internal same-placement scratch allocator.
 ///
@@ -115,11 +115,26 @@ impl<SourceScratch, DestinationScratch>
         T: Clone,
         DSrc: SimilarStorage<T, Similar = SourceScratch>,
         DDst: SimilarStorage<T, Similar = DestinationScratch>,
+        SourceScratch: ScratchStorage<T>,
+        DestinationScratch: ScratchStorage<T>,
     {
-        self.packed = Some(TreeTransformScratchBuffers::from_parts(
-            src_storage.similar_filled(source_len, zero.clone()),
-            dst_storage.similar_filled(destination_len, zero),
-        ));
+        match &mut self.packed {
+            Some(buffers)
+                if buffers.source().placement() == src_storage.placement()
+                    && buffers.destination().placement() == dst_storage.placement() =>
+            {
+                buffers.source_mut().reset_filled(source_len, zero.clone());
+                buffers
+                    .destination_mut()
+                    .reset_filled(destination_len, zero);
+            }
+            _ => {
+                self.packed = Some(TreeTransformScratchBuffers::from_parts(
+                    src_storage.similar_filled(source_len, zero.clone()),
+                    dst_storage.similar_filled(destination_len, zero),
+                ));
+            }
+        }
     }
 
     #[inline]
@@ -171,8 +186,14 @@ impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
     ) where
         T: Clone,
         DDst: SimilarStorage<T, Similar = OutputScratch>,
+        OutputScratch: ScratchStorage<T>,
     {
-        self.output = Some(dst_storage.similar_filled(len, zero));
+        match &mut self.output {
+            Some(output) if output.placement() == dst_storage.placement() => {
+                output.reset_filled(len, zero)
+            }
+            _ => self.output = Some(dst_storage.similar_filled(len, zero)),
+        }
     }
 
     #[inline]
@@ -224,8 +245,18 @@ impl<Lhs, Rhs, Destination> FusionBlockContractScratchBuffers<Lhs, Rhs, Destinat
     }
 
     #[inline]
+    pub(crate) fn lhs(&self) -> &Lhs {
+        &self.lhs
+    }
+
+    #[inline]
     pub(crate) fn lhs_mut(&mut self) -> &mut Lhs {
         &mut self.lhs
+    }
+
+    #[inline]
+    pub(crate) fn rhs(&self) -> &Rhs {
+        &self.rhs
     }
 
     #[inline]
@@ -284,12 +315,30 @@ impl<LhsScratch, RhsScratch, DestinationScratch>
         DLhs: SimilarStorage<T, Similar = LhsScratch>,
         DRhs: SimilarStorage<T, Similar = RhsScratch>,
         DDst: SimilarStorage<T, Similar = DestinationScratch>,
+        LhsScratch: ScratchStorage<T>,
+        RhsScratch: ScratchStorage<T>,
+        DestinationScratch: ScratchStorage<T>,
     {
-        self.buffers = Some(FusionBlockContractScratchBuffers::from_parts(
-            lhs_storage.similar_filled(lhs_len, zero.clone()),
-            rhs_storage.similar_filled(rhs_len, zero.clone()),
-            dst_storage.similar_filled(destination_len, zero),
-        ));
+        match &mut self.buffers {
+            Some(buffers)
+                if buffers.lhs().placement() == lhs_storage.placement()
+                    && buffers.rhs().placement() == rhs_storage.placement()
+                    && buffers.destination().placement() == dst_storage.placement() =>
+            {
+                buffers.lhs_mut().reset_filled(lhs_len, zero.clone());
+                buffers.rhs_mut().reset_filled(rhs_len, zero.clone());
+                buffers
+                    .destination_mut()
+                    .reset_filled(destination_len, zero);
+            }
+            _ => {
+                self.buffers = Some(FusionBlockContractScratchBuffers::from_parts(
+                    lhs_storage.similar_filled(lhs_len, zero.clone()),
+                    rhs_storage.similar_filled(rhs_len, zero.clone()),
+                    dst_storage.similar_filled(destination_len, zero),
+                ));
+            }
+        }
     }
 
     #[inline]

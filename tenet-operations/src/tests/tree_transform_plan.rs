@@ -2332,6 +2332,16 @@ impl<T> HostWritableStorage<T> for TrackingScratch<T> {
     }
 }
 
+impl<T: Clone> tenet_core::ScratchStorage<T> for TrackingScratch<T> {
+    fn reset_filled(&mut self, len: usize, value: T)
+    where
+        T: Clone,
+    {
+        self.data.clear();
+        self.data.resize(len, value);
+    }
+}
+
 #[test]
 fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage() {
     let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
@@ -2457,6 +2467,8 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     .unwrap();
 
     assert_eq!(dst2.data(), &[75.0, 150.0, 225.0]);
+    // The second replay reuses the workspace buffers (same host placement),
+    // so no new scratch is allocated from the second tensor pair.
     assert_eq!(
         allocations.borrow().as_slice(),
         &[
@@ -2467,14 +2479,6 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
             ScratchAllocation {
                 label: "destination",
                 len: 4,
-            },
-            ScratchAllocation {
-                label: "source2",
-                len: 2,
-            },
-            ScratchAllocation {
-                label: "destination2",
-                len: 3,
             },
         ],
     );
