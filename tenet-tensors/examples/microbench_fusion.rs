@@ -200,12 +200,24 @@ where
         }
 
         let min_duration = std::time::Duration::from_millis(min_ms);
+        let prepared = std::env::var("MICROBENCH_PREPARED").is_ok().then(|| {
+            context
+                .prepare_tensorcontract_fusion(rule, &dst, &lhs, &rhs, axes())
+                .unwrap()
+        });
         let mut iters = 0u64;
         let start = Instant::now();
         while start.elapsed() < min_duration {
-            context
-                .tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes(), 1.0, 0.0)
-                .unwrap();
+            match &prepared {
+                Some(plan) => context
+                    .execute_prepared_tensorcontract_fusion(
+                        plan, rule, &mut dst, &lhs, &rhs, 1.0, 0.0,
+                    )
+                    .unwrap(),
+                None => context
+                    .tensorcontract_fusion_into(rule, &mut dst, &lhs, &rhs, axes(), 1.0, 0.0)
+                    .unwrap(),
+            }
             iters += 1;
         }
         let elapsed = start.elapsed();

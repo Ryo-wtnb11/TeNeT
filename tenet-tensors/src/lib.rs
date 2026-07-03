@@ -55,12 +55,12 @@ pub use contract::{
     tensorcontract_structure, tensorproduct_fusion_into,
     tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
     tensorproduct_into_with_conjugation, HostTensorContractBackend, HostTensorContractWorkspace,
-    HostTreeFusionExecutionContext, TensorContractBackend, TensorContractBlockPlanKey,
-    TensorContractBlockPlanTerm, TensorContractBlockSpec, TensorContractCache,
-    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractFusionExplicitPlan, TensorContractFusionProfile, TensorContractFusionRoute,
-    TensorContractPlanKey, TensorContractStructure, TensorContractStructureTerm,
-    TensorContractWorkspace,
+    HostTreeFusionExecutionContext, PreparedTensorContractFusion, TensorContractBackend,
+    TensorContractBlockPlanKey, TensorContractBlockPlanTerm, TensorContractBlockSpec,
+    TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
+    TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
+    TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
+    TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
 pub use facade::{
     all_codomain_tree_transform_into_with_context, copy_into, scaled_add_into, scaled_assign_into,

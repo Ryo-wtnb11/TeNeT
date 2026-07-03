@@ -1451,6 +1451,34 @@ where
         }
     }
 
+    /// Probe the most-recent-entry fast path without LRU bookkeeping. A hit
+    /// implies the canonical fusion-block route was already decided for this
+    /// exact (rule, spaces, axes) key, so callers may skip the route cache.
+    pub(crate) fn probe_last(
+        &mut self,
+        rule_key: &RuleKey,
+        dst_space: &DynamicFusionMapSpace,
+        lhs_space: &DynamicFusionMapSpace,
+        rhs_space: &DynamicFusionMapSpace,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Option<Arc<CanonicalFusionBlockContractPlan>> {
+        if !self.policy.stores_entries() {
+            return None;
+        }
+        let plan = self.last.as_ref().and_then(|last| {
+            if last.matches(rule_key, dst_space, lhs_space, rhs_space, axes) {
+                Some(Arc::clone(&last.plan))
+            } else {
+                None
+            }
+        });
+        if plan.is_some() {
+            self.stats.hits += 1;
+            self.stats.fast_hits += 1;
+        }
+        plan
+    }
+
     pub(crate) fn get_or_compile<R>(
         &mut self,
         rule: &R,

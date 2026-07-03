@@ -271,3 +271,15 @@ TensorKit-equivalent coupled-sector matrix layout by default;
 `from_degeneracy_shapes_packed` keeps the old packed layout for
 storage-layout tests and packed interop. All earlier `MICROBENCH_LAYOUT=coupled`
 runs correspond to today's defaults.
+
+### Prepared-plan handles + unified warm lookup (2026-07-03)
+
+`prepare_tensorcontract_fusion` returns a `PreparedTensorContractFusion`
+handle resolving route + plan once (FFTW-style plan-once/execute-many);
+`execute_prepared_tensorcontract_fusion` validates tensors by
+subblock-structure Arc identity and replays with zero cache lookups.
+The facade warm path now probes the fusion-block last entry first — a
+hit implies the canonical route, so the route cache is skipped (one
+compare instead of two). d=4 compose: U1 4.3, fZ2 1.7 (TensorKit 4.1 /
+1.9), SU2 7.5 (TK 7.1). The handle is also the execution unit for
+sector-level threading.

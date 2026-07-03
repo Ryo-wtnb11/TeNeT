@@ -36,7 +36,8 @@ use super::fusion::{
     SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
-    CanonicalFusionBlockContractCache, CanonicalFusionBlockContractWorkspace,
+    CanonicalFusionBlockContractCache, CanonicalFusionBlockContractPlan,
+    CanonicalFusionBlockContractWorkspace,
 };
 use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 use super::route_cache::{FusionRouteCache, TensorContractFusionRouteDecision};
@@ -1246,13 +1247,27 @@ where
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
         if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
-            let route = self.route_cache.get_or_compile_nonconjugate(
-                rule,
+            // A fusion-block last-entry hit implies the canonical route was
+            // already decided for this key; skip the route cache entirely.
+            let rule_key = rule.tree_transform_rule_cache_key();
+            let probed = self.fusion_block_cache.probe_last(
+                &rule_key,
                 &dst_dynamic,
                 &lhs_dynamic,
                 &rhs_dynamic,
                 axes,
-            )?;
+            );
+            let route = if probed.is_some() {
+                TensorContractFusionRouteDecision::CanonicalFusionBlocks
+            } else {
+                self.route_cache.get_or_compile_nonconjugate(
+                    rule,
+                    &dst_dynamic,
+                    &lhs_dynamic,
+                    &rhs_dynamic,
+                    axes,
+                )?
+            };
             if route == TensorContractFusionRouteDecision::CanonicalFusionBlocks {
                 let Self {
                     contract_backend,
@@ -1266,13 +1281,16 @@ where
                     dynamic_space_cache: _,
                     fusion_scratch: _,
                 } = self;
-                let block_plan = fusion_block_cache.get_or_compile(
-                    rule,
-                    &dst_dynamic,
-                    &lhs_dynamic,
-                    &rhs_dynamic,
-                    axes,
-                )?;
+                let block_plan = match probed {
+                    Some(plan) => plan,
+                    None => fusion_block_cache.get_or_compile(
+                        rule,
+                        &dst_dynamic,
+                        &lhs_dynamic,
+                        &rhs_dynamic,
+                        axes,
+                    )?,
+                };
                 let dst_structure = std::sync::Arc::clone(dst.structure());
                 let lhs_structure = std::sync::Arc::clone(lhs.structure());
                 let rhs_structure = std::sync::Arc::clone(rhs.structure());
@@ -1409,6 +1427,204 @@ where
             alpha,
             beta,
         )
+    }
+
+    /// Resolves the contraction route and plan once, returning a handle that
+    /// [`Self::execute_prepared_tensorcontract_fusion`] replays without any
+    /// cache lookups. Valid for tensors that share the prepared tensors'
+    /// fusion spaces (checked by subblock-structure identity at execute).
+    pub fn prepare_tensorcontract_fusion<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+        DLhs,
+        DRhs,
+    >(
+        &mut self,
+        rule: &R,
+        dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        axes: TensorContractAxisSpec<'_>,
+    ) -> Result<PreparedTensorContractFusion<RuleKey>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
+    {
+        let dst_fusion = dst
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let lhs_fusion = lhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let rhs_fusion = rhs
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+        let resolution = if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
+            let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
+            let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
+            let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+            let route = self.route_cache.get_or_compile_nonconjugate(
+                rule,
+                &dst_dynamic,
+                &lhs_dynamic,
+                &rhs_dynamic,
+                axes,
+            )?;
+            if route == TensorContractFusionRouteDecision::CanonicalFusionBlocks {
+                PreparedFusionResolution::Canonical(self.fusion_block_cache.get_or_compile(
+                    rule,
+                    &dst_dynamic,
+                    &lhs_dynamic,
+                    &rhs_dynamic,
+                    axes,
+                )?)
+            } else {
+                PreparedFusionResolution::DynamicTree(
+                    self.explicit_plan_cache
+                        .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?,
+                )
+            }
+        } else {
+            match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
+                Ok(structure) => PreparedFusionResolution::Structure(Arc::new(structure)),
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => PreparedFusionResolution::DynamicTree(
+                    self.explicit_plan_cache
+                        .get_or_compile(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?,
+                ),
+                Err(err) => return Err(err),
+            }
+        };
+        Ok(PreparedTensorContractFusion {
+            rule: rule.tree_transform_rule_cache_key(),
+            dst_structure: Arc::clone(dst.structure()),
+            lhs_structure: Arc::clone(lhs.structure()),
+            rhs_structure: Arc::clone(rhs.structure()),
+            resolution,
+        })
+    }
+
+    /// Replays a prepared contraction. The tensors must share the prepared
+    /// tensors' fusion spaces; this is enforced by pointer identity of the
+    /// subblock structures, so tensors created from the same
+    /// [`FusionTensorMapSpace`] (or clones of the prepared ones) are valid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_prepared_tensorcontract_fusion<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const LHS_NOUT: usize,
+        const LHS_NIN: usize,
+        const RHS_NOUT: usize,
+        const RHS_NIN: usize,
+        SDst,
+        SLhs,
+        SRhs,
+        DDst,
+        DLhs,
+        DRhs,
+    >(
+        &mut self,
+        prepared: &PreparedTensorContractFusion<RuleKey>,
+        rule: &R,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+        rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+        DDst: HostWritableStorage<D>,
+        DLhs: HostReadableStorage<D>,
+        DRhs: HostReadableStorage<D>,
+    {
+        if prepared.rule != rule.tree_transform_rule_cache_key()
+            || !Arc::ptr_eq(&prepared.dst_structure, dst.structure())
+            || !Arc::ptr_eq(&prepared.lhs_structure, lhs.structure())
+            || !Arc::ptr_eq(&prepared.rhs_structure, rhs.structure())
+        {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prepared contraction",
+            });
+        }
+        match &prepared.resolution {
+            PreparedFusionResolution::Canonical(plan) => {
+                let Self {
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    ..
+                } = self;
+                plan.execute_raw(
+                    &mut crate::StridedHostKernelAdapter,
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    &prepared.dst_structure,
+                    dst.data_mut(),
+                    &prepared.lhs_structure,
+                    lhs.data(),
+                    &prepared.rhs_structure,
+                    rhs.data(),
+                    alpha,
+                    beta,
+                )
+            }
+            PreparedFusionResolution::DynamicTree(plan) => {
+                let Self {
+                    tree_context,
+                    dynamic_space_cache,
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_cache,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                    ..
+                } = self;
+                tensorcontract_fusion_dynamic_plan_into_context(
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    dynamic_space_cache,
+                    fusion_block_cache,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                    rule,
+                    plan.as_ref(),
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                )
+            }
+            PreparedFusionResolution::Structure(structure) => {
+                self.contract_backend.tensorcontract_structure_into(
+                    &mut self.contract_workspace,
+                    structure,
+                    dst,
+                    lhs,
+                    rhs,
+                    alpha,
+                    beta,
+                )
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1936,4 +2152,23 @@ where
             D::zero(),
         )
     }
+}
+
+/// Resolved contraction handle: plan-once/execute-many without per-call
+/// cache lookups. Created by
+/// [`TensorContractFusionExecutionContext::prepare_tensorcontract_fusion`].
+#[derive(Clone, Debug)]
+pub struct PreparedTensorContractFusion<RuleKey> {
+    rule: RuleKey,
+    dst_structure: Arc<BlockStructure>,
+    lhs_structure: Arc<BlockStructure>,
+    rhs_structure: Arc<BlockStructure>,
+    resolution: PreparedFusionResolution,
+}
+
+#[derive(Clone, Debug)]
+enum PreparedFusionResolution {
+    Canonical(Arc<CanonicalFusionBlockContractPlan>),
+    DynamicTree(Arc<TensorContractFusionExplicitPlan>),
+    Structure(Arc<TensorContractStructure<f64>>),
 }
