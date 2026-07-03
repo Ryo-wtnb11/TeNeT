@@ -446,7 +446,7 @@ fn tree_transform_dense_backend_matches_tensorkit_recoupling_orientation_for_gem
 }
 
 #[test]
-fn tree_transform_dense_backend_keeps_multi_tree_recoupling_in_replay_kernel() {
+fn tree_transform_dense_backend_routes_multi_tree_recoupling_through_one_gemm() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure =
@@ -485,6 +485,9 @@ fn tree_transform_dense_backend_keeps_multi_tree_recoupling_in_replay_kernel() {
     )
     .unwrap();
 
-    assert_eq!(backend.dense().dot_general_into_calls, 0);
+    // T20 (TensorKit _add_transform_multi! parity): the multi-tree
+    // recoupling matrix is applied as ONE dense GEMM through the executor,
+    // not as per-element scalar loops in the replay kernel.
+    assert_eq!(backend.dense().dot_general_into_calls, 1);
     assert_eq!(dst.data(), &[10623.0, 12843.0, 21243.0, 25683.0]);
 }

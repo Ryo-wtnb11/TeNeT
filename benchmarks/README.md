@@ -321,3 +321,20 @@ route (where TensorKit's @tensor applies them); non-coupled operand
 layouts also take the dynamic route (materialize to coupled, then pure
 GEMM). Values pinned by the fZ2 twist tests (scalar and deg-2 TensorKit
 @tensor references) across the routing change.
+
+### GEMM-based recoupling replay (2026-07-04) — T20 warm half
+
+Multi-tree recoupling now applies the cached U[dst,src] matrix as ONE
+dense GEMM (destination = source * U^T through the executor seam) —
+TensorKit's _add_transform_multi! mul! step — replacing the per-element
+scalar loops. The coefficients slice is already the column-major U^T,
+so the swap is a buffer dtype conversion plus a matmul_into call.
+
+| SU2 d=16 | before | after | TensorKit | ratio |
+|---|---|---|---|---|
+| swap | ~14 500-15 700 | 12 070 | 15 779 | **0.76** |
+| swap+out | ~18 800-19 200 | 15 079 | 19 914 | **0.76** |
+
+First clear win over TensorKit on the SU(2) transform paths; all other
+symmetries and checksums unchanged. Storage-scratch replay variant
+still uses the adapter loop (executor threading tracked for T17).

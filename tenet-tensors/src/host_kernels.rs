@@ -29,6 +29,9 @@ use crate::{
 pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     packed: TreeTransformScratchBuffers<HostScratchBuffer<T>, HostScratchBuffer<T>>,
+    // Recoupling matrix converted into the data scalar type for the GEMM
+    // application (TensorKit's basistransform buffer).
+    coefficient_scratch: Vec<T>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -38,6 +41,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
         Self {
             zero_strides: Vec::new(),
             packed: TreeTransformScratchBuffers::default(),
+            coefficient_scratch: Vec::new(),
         }
     }
 }
@@ -758,6 +762,90 @@ where
     result
 }
 
+/// Applies the recoupling matrix as one GEMM: `destination = source * U^T`
+/// with `source` packed as (element_count x src_count) and
+/// `coefficients_src_by_dst` (row-major `U[dst, src]`) reinterpreted as the
+/// column-major (src_count x dst_count) matrix `U^T`. This is TensorKit's
+/// `_add_transform_multi!` `mul!` step; the naive per-element loop in the
+/// kernel adapter remains only for adapters without a dense executor.
+#[allow(clippy::too_many_arguments)]
+fn recoupling_gemm<E, D, C>(
+    dense: &mut E,
+    coefficient_scratch: &mut Vec<D>,
+    destination: &mut [D],
+    source: &[D],
+    coefficients_src_by_dst: &[C],
+    coefficient_start: usize,
+    element_count: usize,
+    src_count: usize,
+    dst_count: usize,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let coefficient_len = src_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficient_end = coefficient_start
+        .checked_add(coefficient_len)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let coefficients = coefficients_src_by_dst
+        .get(coefficient_start..coefficient_end)
+        .ok_or(OperationError::CoefficientCountMismatch {
+            expected: coefficient_end,
+            actual: coefficients_src_by_dst.len(),
+        })?;
+    let source_len = element_count
+        .checked_mul(src_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let destination_len = element_count
+        .checked_mul(dst_count)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if source.len() < source_len || destination.len() < destination_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: source_len.max(destination_len),
+            actual: source.len().min(destination.len()),
+        });
+    }
+
+    coefficient_scratch.clear();
+    coefficient_scratch.extend(
+        coefficients
+            .iter()
+            .map(|&coefficient| D::coefficient_as_data(coefficient)),
+    );
+
+    let lhs_shape = [element_count, src_count];
+    let lhs_strides = [1, element_count];
+    let rhs_shape = [src_count, dst_count];
+    let rhs_strides = [1, src_count];
+    let dst_shape = [element_count, dst_count];
+    let dst_strides = [1, element_count];
+    let lhs = D::dense_read(tenet_dense::DenseView::new_trusted(
+        &source[..source_len],
+        &lhs_shape,
+        &lhs_strides,
+        0,
+    ));
+    let rhs = D::dense_read(tenet_dense::DenseView::new_trusted(
+        coefficient_scratch.as_slice(),
+        &rhs_shape,
+        &rhs_strides,
+        0,
+    ));
+    let output = D::dense_write(tenet_dense::DenseViewMut::new_trusted(
+        &mut destination[..destination_len],
+        &dst_shape,
+        &dst_strides,
+        0,
+    ));
+    dense
+        .matmul_into(output, lhs, rhs)
+        .map_err(OperationError::Dense)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
     kernels: &mut A,
@@ -880,7 +968,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn tree_transform_multi_with_structural_recoupling<A, E, D, C>(
     kernels: &mut A,
-    _dense: &mut E,
+    dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
@@ -925,7 +1013,9 @@ where
 
     {
         let (source, destination) = workspace.packed.source_and_destination_mut();
-        kernels.recoupling_src_times_u_transpose(
+        recoupling_gemm(
+            dense,
+            &mut workspace.coefficient_scratch,
             destination.as_mut_slice(),
             source.as_slice(),
             coefficients_src_by_dst,
@@ -956,7 +1046,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn tree_transform_multi_with_structural_recoupling_profiled<A, E, D, C>(
     kernels: &mut A,
-    _dense: &mut E,
+    dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
@@ -1010,7 +1100,9 @@ where
     let start = std::time::Instant::now();
     {
         let (source, destination) = workspace.packed.source_and_destination_mut();
-        kernels.recoupling_src_times_u_transpose(
+        recoupling_gemm(
+            dense,
+            &mut workspace.coefficient_scratch,
             destination.as_mut_slice(),
             source.as_slice(),
             coefficients_src_by_dst,
