@@ -119,7 +119,7 @@ where
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_compact(&mut dense_executor, rule, &tensor, &Truncation::Full).unwrap();
+    let svd = svd_trunc(&mut dense_executor, rule, &tensor, &Truncation::Full).unwrap();
 
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {
@@ -278,7 +278,7 @@ where
 fn reconstruct_from_svd<R>(
     rule: &R,
     template: &TensorMap<f64, 2, 2>,
-    svd: &SvdCompact<2, 2>,
+    svd: &SvdTrunc<2, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -318,7 +318,7 @@ fn tsvd_truncdim_bounds_weighted_dimension_and_reports_error_su2() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
     let max_dim = 10usize;
-    let svd = svd_compact(
+    let svd = svd_trunc(
         &mut dense_executor,
         &rule,
         &tensor,
@@ -353,7 +353,7 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
     let tensor = tsvd_test_tensor(&rule, &sectors);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
-    let full = svd_compact(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
+    let full = svd_trunc(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
     let threshold = {
         let mut all: Vec<f64> = full
             .singular_values
@@ -364,7 +364,7 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
         (all[all.len() / 2] + all[all.len() / 2 - 1]) / 2.0
     };
 
-    let svd = svd_compact(
+    let svd = svd_trunc(
         &mut dense_executor,
         &rule,
         &tensor,
@@ -406,7 +406,7 @@ fn tsvd_truncerr_respects_relative_tolerance() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
     let tolerance = 0.2;
-    let svd = svd_compact(
+    let svd = svd_trunc(
         &mut dense_executor,
         &rule,
         &tensor,
@@ -534,7 +534,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_compact(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
+    let svd = svd_trunc(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
     let s_tensor = svd.s.clone();
 
     let mut context =
@@ -577,7 +577,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
 }
 
 #[test]
-fn svd_compact_is_svd_full_plus_host_truncation() {
+fn svd_trunc_is_svd_compact_plus_host_truncation() {
     let rule = SU2FusionRule;
     let tensor = tsvd_test_tensor(
         &rule,
@@ -590,10 +590,10 @@ fn svd_compact_is_svd_full_plus_host_truncation() {
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let composed = {
-        let full = svd_full(&mut dense_executor, &rule, &tensor).unwrap();
+        let full = svd_compact(&mut dense_executor, &rule, &tensor).unwrap();
         crate::factorize::truncate_svd(&rule, full, &truncation).unwrap()
     };
-    let direct = svd_compact(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
+    let direct = svd_trunc(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
 
     assert_eq!(composed.singular_values, direct.singular_values);
     assert!((composed.error - direct.error).abs() < 1e-15);
@@ -728,7 +728,7 @@ fn eigh_full_satisfies_the_eigen_equation() {
 }
 
 #[test]
-fn eigh_compact_truncates_by_magnitude_and_keeps_eigen_equation() {
+fn eigh_trunc_truncates_by_magnitude_and_keeps_eigen_equation() {
     let rule = Z2FusionRule;
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
@@ -740,7 +740,7 @@ fn eigh_compact_truncates_by_magnitude_and_keeps_eigen_equation() {
         .map(|entry| entry.values.len())
         .sum();
     let max_dim = full_count / 2;
-    let eigh = eigh_compact(
+    let eigh = eigh_trunc(
         &mut dense_executor,
         &rule,
         &tensor,

@@ -15,7 +15,7 @@ pub struct SectorSpectrum {
     pub values: Vec<f64>,
 }
 
-/// Compact fusion-tensor SVD `t = U * S * Vh` (MatrixAlgebraKit `svd_compact`).
+/// Truncated fusion-tensor SVD `t ~ U * S * Vh` (MatrixAlgebraKit `svd_trunc`).
 ///
 /// The factorization acts blockwise on the coupled-sector matricization
 /// through the placement-capable [`DenseExecutor`] boundary; the truncation
@@ -24,7 +24,7 @@ pub struct SectorSpectrum {
 /// `U : codomain <- W`, `S : W <- W` diagonal, `Vh : W <- domain`; `error` is
 /// the quantum-dimension-weighted 2-norm of the discarded values.
 #[derive(Clone, Debug)]
-pub struct SvdCompact<const NOUT: usize, const NIN: usize> {
+pub struct SvdTrunc<const NOUT: usize, const NIN: usize> {
     pub u: TensorMap<f64, NOUT, 1>,
     pub s: TensorMap<f64, 1, 1>,
     pub vh: TensorMap<f64, 1, NIN>,
@@ -32,13 +32,15 @@ pub struct SvdCompact<const NOUT: usize, const NIN: usize> {
     pub error: f64,
 }
 
-/// Full (untruncated) fusion-tensor SVD `t = U * S * Vh`.
+/// Compact (thin, untruncated) fusion-tensor SVD `t = U * S * Vh`
+/// (MatrixAlgebraKit `svd_compact`).
 ///
 /// This is the pure device-boundary factorization: the dense per-sector SVDs
 /// run through the [`DenseExecutor`] and no truncation logic is involved.
-/// Per block it is the economy factorization with bond `min(rows, cols)`.
+/// Per block the bond is `min(rows, cols)`; the square-`U` variant is
+/// MatrixAlgebraKit `svd_full` (later batch).
 #[derive(Clone, Debug)]
-pub struct SvdFull<const NOUT: usize, const NIN: usize> {
+pub struct SvdCompact<const NOUT: usize, const NIN: usize> {
     pub u: TensorMap<f64, NOUT, 1>,
     pub s: TensorMap<f64, 1, 1>,
     pub vh: TensorMap<f64, 1, NIN>,
@@ -136,35 +138,35 @@ where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    svd_full(dense, rule, tensor).map(|svd| svd.singular_values)
+    svd_compact(dense, rule, tensor).map(|svd| svd.singular_values)
 }
 
-/// Compact fusion-tensor SVD with an in-line truncation policy.
+/// Truncated fusion-tensor SVD (MatrixAlgebraKit `svd_trunc`).
 ///
-/// Layering: the untruncated factorization runs on the device boundary
-/// ([`svd_full`]); the truncation decision is host-side scalar work over the
-/// spectra and its application slices the leading bond states per sector
-/// ([`truncate_svd`]).
-pub fn svd_compact<E, R, const NOUT: usize, const NIN: usize>(
+/// Layering: the untruncated compact factorization runs on the device
+/// boundary ([`svd_compact`]); the truncation decision is host-side scalar
+/// work over the spectra and its application slices the leading bond states
+/// per sector.
+pub fn svd_trunc<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
     truncation: &Truncation,
-) -> Result<SvdCompact<NOUT, NIN>, OperationError>
+) -> Result<SvdTrunc<NOUT, NIN>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let full = svd_full(dense, rule, tensor)?;
+    let full = svd_compact(dense, rule, tensor)?;
     truncate_svd(rule, full, truncation)
 }
 
-/// Full (untruncated) fusion-tensor SVD through the device boundary.
-pub fn svd_full<E, R, const NOUT: usize, const NIN: usize>(
+/// Compact (untruncated) fusion-tensor SVD through the device boundary.
+pub fn svd_compact<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
-) -> Result<SvdFull<NOUT, NIN>, OperationError>
+) -> Result<SvdCompact<NOUT, NIN>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -239,7 +241,7 @@ where
     )?;
 
     let s_tensor = diagonal_bond_tensor(rule, &singular_values)?;
-    Ok(SvdFull {
+    Ok(SvdCompact {
         u: u_tensor,
         s: s_tensor,
         vh: vt_tensor,
@@ -275,16 +277,16 @@ where
 }
 
 /// Applies a truncation policy to a full factorization (the host half of
-/// [`svd_compact`]).
+/// [`svd_trunc`]).
 ///
 /// The decision is host-side scalar work over the spectra; the application
 /// keeps the leading bond states per coupled sector, which in the coupled
 /// layout is a per-sector leading-columns/rows copy (device kernel later).
 pub(crate) fn truncate_svd<R, const NOUT: usize, const NIN: usize>(
     rule: &R,
-    full: SvdFull<NOUT, NIN>,
+    full: SvdCompact<NOUT, NIN>,
     truncation: &Truncation,
-) -> Result<SvdCompact<NOUT, NIN>, OperationError>
+) -> Result<SvdTrunc<NOUT, NIN>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -295,7 +297,7 @@ where
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
-        return Ok(SvdCompact {
+        return Ok(SvdTrunc {
             u: full.u,
             s: full.s,
             vh: full.vh,
@@ -321,7 +323,7 @@ where
     let u_tensor = sliced_bond_tensor(rule, &full.u, NOUT, &kept_of)?;
     let vh_tensor = sliced_bond_tensor(rule, &full.vh, 0, &kept_of)?;
     let s_tensor = diagonal_bond_tensor(rule, &singular_values)?;
-    Ok(SvdCompact {
+    Ok(SvdTrunc {
         u: u_tensor,
         s: s_tensor,
         vh: vh_tensor,
@@ -653,7 +655,7 @@ pub struct EighFull<const NOUT: usize, const NIN: usize> {
 /// Truncated Hermitian eigendecomposition; `error` is the
 /// quantum-dimension-weighted 2-norm of the discarded eigenvalues.
 #[derive(Clone, Debug)]
-pub struct EighCompact<const NOUT: usize, const NIN: usize> {
+pub struct EighTrunc<const NOUT: usize, const NIN: usize> {
     pub d: TensorMap<f64, 1, 1>,
     pub v: TensorMap<f64, NOUT, 1>,
     pub eigenvalues: Vec<SectorSpectrum>,
@@ -749,12 +751,12 @@ where
 
 /// Truncated Hermitian eigendecomposition: [`eigh_full`] on the device
 /// boundary plus the shared host-side truncation by `|eigenvalue|`.
-pub fn eigh_compact<E, R, const NOUT: usize, const NIN: usize>(
+pub fn eigh_trunc<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
     truncation: &Truncation,
-) -> Result<EighCompact<NOUT, NIN>, OperationError>
+) -> Result<EighTrunc<NOUT, NIN>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -767,7 +769,7 @@ where
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
-        return Ok(EighCompact {
+        return Ok(EighTrunc {
             d: full.d,
             v: full.v,
             eigenvalues: full.eigenvalues,
@@ -788,7 +790,7 @@ where
     };
     let v_tensor = sliced_bond_tensor(rule, &full.v, NOUT, &kept_of)?;
     let d_tensor = diagonal_bond_tensor(rule, &eigenvalues)?;
-    Ok(EighCompact {
+    Ok(EighTrunc {
         d: d_tensor,
         v: v_tensor,
         eigenvalues,

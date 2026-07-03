@@ -81,8 +81,8 @@ pub use facade::{
     tree_pair_transform_structure, tree_transform_execute_with,
 };
 pub use factorize::{
-    eigh_compact, eigh_full, lq_compact, qr_compact, svd_compact, svd_full, svd_vals, EighCompact,
-    EighFull, SectorSpectrum, SvdCompact, SvdFull,
+    eigh_full, eigh_trunc, lq_compact, qr_compact, svd_compact, svd_trunc, svd_vals, EighFull,
+    EighTrunc, SectorSpectrum, SvdCompact, SvdTrunc,
 };
 pub(crate) use host_kernels::{
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
