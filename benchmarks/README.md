@@ -283,3 +283,17 @@ hit implies the canonical route, so the route cache is skipped (one
 compare instead of two). d=4 compose: U1 4.3, fZ2 1.7 (TensorKit 4.1 /
 1.9), SU2 7.5 (TK 7.1). The handle is also the execution unit for
 sector-level threading.
+
+### Scratch tree-set completion (2026-07-03) — correctness fix
+
+Dynamic-route scratch spaces (transformed sources, canonical
+destination) now enumerate the FULL fusion-tree set of their hom spaces
+with structural zeros, TensorKit-style, instead of only
+coefficient-reachable trees. This fixed a real bug: the swap workload
+dropped contributions (swap and swap+out — the same contraction up to
+output order — used to report different checksums; the new
+swap-vs-permute+compose regression test fails on the old code, 33 vs 43
+at element 0). Complete grids also mean the coupled matrix layout always
+applies to scratch. Corrected-baseline timings (d=16, vs TensorKit):
+U1 swap 2 771/4 033, U1 swap+out 3 526/4 709, SU2 swap+out
+18 838/19 914 — still at-or-faster everywhere except compose (~1.05×).

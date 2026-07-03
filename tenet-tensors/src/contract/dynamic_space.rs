@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeBlockKey,
-    FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
+    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, SectorId,
 };
 
 use crate::tree_transform::build_tree_pair_transform_group_plan;
@@ -79,41 +79,30 @@ impl DynamicFusionMapSpace {
             .homspace()
             .permute(rule, codomain_axes, domain_axes)
             .map_err(OperationError::from_core_preserving_context)?;
-        let plan = build_tree_pair_transform_group_plan(
-            rule,
-            operation.clone(),
-            source.subblock_structure(),
-        )?;
-        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::new();
-        for spec in plan.specs() {
-            let src_count = spec.src_keys().len();
-            for (dst_row, dst_key) in spec.dst_keys().iter().enumerate() {
-                let mut dst_shape = None::<Vec<usize>>;
-                for (src_column, src_key) in spec.src_keys().iter().enumerate() {
-                    let coefficient =
-                        spec.coefficients_src_by_dst()[src_column + dst_row * src_count];
-                    if coefficient == 0.0 {
-                        continue;
-                    }
-                    let src_block = source
-                        .subblock_structure()
-                        .block_by_key(src_key)
-                        .map_err(OperationError::from_core_preserving_context)?;
-                    let candidate = selected_shape(src_block.shape(), codomain_axes, domain_axes)?;
-                    if let Some(existing) = &dst_shape {
-                        if existing != &candidate {
-                            return Err(OperationError::ShapeMismatch {
-                                dst: existing.clone(),
-                                src: candidate,
-                            });
-                        }
-                    } else {
-                        dst_shape = Some(candidate);
-                    }
-                }
-                let dst_shape = dst_shape.ok_or(OperationError::EmptyTransformBlock)?;
-                blocks.push((dst_key.clone(), dst_shape));
+        // Enumerate the FULL tree set of the permuted hom space (TensorKit
+        // semantics): trees the transform coefficients never reach stay as
+        // structural zeros in the scratch buffer, keeping every coupled
+        // sector grid complete so the coupled matrix layout always applies.
+        let src_dims = axis_sector_dims(rule, source.subblock_structure())?;
+        let src_axes = codomain_axes
+            .iter()
+            .chain(domain_axes.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        let keys = homspace.fusion_tree_keys(rule);
+        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
+        for key in keys {
+            let sectors = key.external_sectors(rule);
+            let mut shape = Vec::with_capacity(src_axes.len());
+            for (out_axis, &src_axis) in src_axes.iter().enumerate() {
+                let dim = src_dims[src_axis].get(&sectors[out_axis]).copied().ok_or(
+                    OperationError::StructureMismatch {
+                        tensor: "transformed scratch",
+                    },
+                )?;
+                shape.push(dim);
             }
+            blocks.push((BlockKey::from(key), shape));
         }
         let subblock_structure =
             Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
@@ -161,11 +150,36 @@ impl DynamicFusionMapSpace {
                 &mut inferred_shapes,
             )?;
         }
-        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::new();
-        for key in homspace.fusion_tree_keys(rule) {
-            if let Some(shape) = inferred_shapes.get(&key).cloned() {
-                blocks.push((BlockKey::from(key), shape));
-            }
+        // Complete the tree set: keys the contraction pairing never produces
+        // still get a subblock (structural zero) so the coupled grid is full.
+        let lhs_dims = axis_sector_dims(rule, lhs.structure())?;
+        let rhs_dims = axis_sector_dims(rule, rhs.structure())?;
+        let lhs_open = axis_plan.lhs_open_axes.clone();
+        let rhs_open = axis_plan.rhs_open_axes.clone();
+        let keys = homspace.fusion_tree_keys(rule);
+        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
+        for key in keys {
+            let shape = match inferred_shapes.get(&key) {
+                Some(shape) => shape.clone(),
+                None => {
+                    let sectors = key.external_sectors(rule);
+                    let mut shape = Vec::with_capacity(lhs_open.len() + rhs_open.len());
+                    for (out_axis, &sector) in sectors.iter().enumerate() {
+                        let dim = if out_axis < lhs_open.len() {
+                            lhs_dims[lhs_open[out_axis]].get(&sector).copied()
+                        } else {
+                            rhs_dims[rhs_open[out_axis - lhs_open.len()]]
+                                .get(&sector)
+                                .copied()
+                        };
+                        shape.push(dim.ok_or(OperationError::StructureMismatch {
+                            tensor: "canonical contraction scratch",
+                        })?);
+                    }
+                    shape
+                }
+            };
+            blocks.push((BlockKey::from(key), shape));
         }
         let subblock_structure =
             Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
@@ -384,28 +398,6 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperationKey) -> (&[us
     }
 }
 
-fn selected_shape(
-    shape: &[usize],
-    codomain_axes: &[usize],
-    domain_axes: &[usize],
-) -> Result<Vec<usize>, OperationError> {
-    let mut selected = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
-    for &axis in codomain_axes.iter().chain(domain_axes) {
-        let dim = shape.get(axis).copied().ok_or_else(|| {
-            let mut axes = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
-            axes.extend_from_slice(codomain_axes);
-            axes.extend_from_slice(domain_axes);
-            OperationError::InvalidAxisSet {
-                tensor: "src",
-                axes,
-                rank: shape.len(),
-            }
-        })?;
-        selected.push(dim);
-    }
-    Ok(selected)
-}
-
 fn invert_selected_shape(
     selected_shape: &[usize],
     axes: &[usize],
@@ -439,4 +431,45 @@ fn invert_selected_shape(
         });
     }
     Ok(shape)
+}
+
+/// Per-axis map from placement-invariant external sector label to degeneracy,
+/// collected over all fusion-tree blocks of a structure. Errors if the same
+/// (axis, sector) pair appears with two different dims.
+fn axis_sector_dims<R>(
+    rule: &R,
+    structure: &BlockStructure,
+) -> Result<Vec<HashMap<SectorId, usize>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let rank = structure.rank();
+    let mut dims = vec![HashMap::<SectorId, usize>::new(); rank];
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "scratch source",
+                index,
+            });
+        };
+        let sectors = key.external_sectors(rule);
+        for (axis, (&sector, &dim)) in sectors.iter().zip(block.shape()).enumerate() {
+            match dims[axis].get(&sector) {
+                Some(&existing) if existing != dim => {
+                    return Err(OperationError::ShapeMismatch {
+                        dst: vec![existing],
+                        src: vec![dim],
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    dims[axis].insert(sector, dim);
+                }
+            }
+        }
+    }
+    Ok(dims)
 }

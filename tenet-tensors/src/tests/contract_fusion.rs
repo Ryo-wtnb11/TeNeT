@@ -229,6 +229,99 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
 }
 
 #[test]
+fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
+    // Regression probe for the dynamic-route scratch enumeration: the swap
+    // contraction C[a b; g h] = A[a b; c d] * B[d c; g h] must equal the
+    // canonical compose of A with an explicitly permuted B. Before scratch
+    // spaces enumerated the full tree set of their hom spaces, the dynamic
+    // route dropped contributions for trees missing from the reachable set.
+    let rule = U1FusionRule;
+    let sectors = [
+        U1Irrep::new(-1).sector_id(),
+        U1Irrep::new(0).sector_id(),
+        U1Irrep::new(1).sector_id(),
+    ];
+    let leg = || SectorLeg::new(sectors, false);
+    let degeneracy = 2usize;
+    let leg_dim = sectors.len() * degeneracy;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let dense =
+        || TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
+    let space = |hom: &FusionTreeHomSpace| {
+        let count = hom.fusion_tree_keys(&rule).len();
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            dense(),
+            hom.clone(),
+            &rule,
+            vec![vec![degeneracy; 4]; count],
+        )
+        .unwrap()
+    };
+    let tensor_space = space(&homspace);
+    let fill = |seed: f64| move |index: usize| 0.25 * seed + ((index * 7 + 3) % 11) as f64 - 5.0;
+    let len = tensor_space.subblock_structure().required_len().unwrap();
+    let lhs_data = (0..len).map(fill(1.0)).collect::<Vec<_>>();
+    let rhs_data = (0..len).map(fill(2.0)).collect::<Vec<_>>();
+    let lhs =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(lhs_data, tensor_space.clone()).unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(rhs_data, tensor_space.clone()).unwrap();
+
+    // Route under test: swap axes through the fusion contraction facade.
+    let mut dst_swap =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
+            .unwrap();
+    tensorcontract_fusion_into(
+        &rule,
+        &mut dst_swap,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::new(&[3, 2], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    // Reference: explicitly permute rhs codomain legs, then canonical compose.
+    let permuted_space = space(&homspace);
+    let mut rhs_permuted =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], permuted_space).unwrap();
+    tree_pair_transform_into(
+        &rule,
+        TreeTransformOperationKey::permute([1, 0], [2, 3]),
+        &mut rhs_permuted,
+        &rhs,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    let mut dst_compose =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], tensor_space.clone())
+            .unwrap();
+    tensorcontract_fusion_into(
+        &rule,
+        &mut dst_compose,
+        &lhs,
+        &rhs_permuted,
+        TensorContractAxisSpec::canonical(&[2, 3], &[0, 1]),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    for (index, (&actual, &expected)) in dst_swap.data().iter().zip(dst_compose.data()).enumerate()
+    {
+        assert!(
+            (actual - expected).abs() < 1.0e-10,
+            "swap vs permute+compose mismatch at {index}: {actual} vs {expected}"
+        );
+    }
+}
+
+#[test]
 fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);

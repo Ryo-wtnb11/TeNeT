@@ -2282,12 +2282,15 @@ mod tests {
 
         assert_eq!(dst.data(), expected_dst.data());
         let allocations = allocations.borrow();
+        // Scratch spaces enumerate the full tree set of their hom spaces
+        // (structural zeros materialized), so the transformed lhs and the
+        // canonical destination hold both Z2 trees.
         assert_eq!(
             allocations[..3],
             [
                 ScratchAllocation {
                     label: "lhs",
-                    len: 1,
+                    len: 2,
                 },
                 ScratchAllocation {
                     label: "rhs",
@@ -2295,7 +2298,7 @@ mod tests {
                 },
                 ScratchAllocation {
                     label: "destination",
-                    len: 1,
+                    len: 2,
                 },
             ]
         );
