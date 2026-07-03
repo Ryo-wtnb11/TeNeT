@@ -442,7 +442,7 @@ where
     Ok(factor)
 }
 
-fn external_axis_is_dual(
+pub(crate) fn external_axis_is_dual(
     homspace: &FusionTreeHomSpace,
     axis: usize,
 ) -> Result<bool, OperationError> {

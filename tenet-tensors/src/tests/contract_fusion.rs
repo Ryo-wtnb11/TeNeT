@@ -1406,6 +1406,63 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
 }
 
 #[test]
+fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
+    // TensorKit @tensor reference (Julia crosscheck 2026-07-04):
+    // V = Vect[FermionParity](0 => 1, 1 => 2); A :: V <- V'; B :: V' <- V
+    // A blocks: even [0.5], odd [1.5, 2.5, 3.5, 4.5] (col-major)
+    // B blocks: even [-1.25], odd [-0.75, -0.25, 0.25, 0.75]
+    // C = @tensor A[a; c] * B[c; b]:
+    //   even [-0.625], odd [2.0, 3.0, -3.0, -4.0]  (= -1 * A_odd * B_odd)
+    let rule = FermionParityFusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let space = |codomain_dual: bool, domain_dual: bool| {
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([even, odd], codomain_dual)]),
+                FusionProductSpace::new([SectorLeg::new([even, odd], domain_dual)]),
+            ),
+            &rule,
+            [vec![1, 1], vec![2, 2]],
+        )
+        .unwrap()
+    };
+    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        vec![0.5, 1.5, 2.5, 3.5, 4.5],
+        space(false, true),
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        vec![-1.25, -0.75, -0.25, 0.25, 0.75],
+        space(true, false),
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![0.0; 5], space(false, false))
+            .unwrap();
+
+    tensorcontract_fusion_into(
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        TensorContractAxisSpec::canonical(&[1], &[0]),
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    let expected = [-0.625, 2.0, 3.0, -3.0, -4.0];
+    for (index, (&actual, &want)) in dst.data().iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - want).abs() < 1.0e-12,
+            "element {index}: got {actual}, TensorKit reference {want}"
+        );
+    }
+}
+
+#[test]
 fn tensorcontract_fusion_block_specs_enumerates_su2_innerline_blocks_from_homspace() {
     let rule = SU2FusionRule;
     let half = SectorId::new(1);

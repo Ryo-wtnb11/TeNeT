@@ -314,10 +314,35 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        if is_canonical_fusion_block_contract(rule, dst, lhs, rhs, axes)? {
+        if is_canonical_fusion_block_contract(rule, dst, lhs, rhs, axes)?
+            && !rhs_contract_requires_twist(rule, rhs, axes)?
+        {
             Ok(TensorContractFusionRouteDecision::CanonicalFusionBlocks)
         } else {
             Ok(TensorContractFusionRouteDecision::DynamicTreeCanonical)
         }
     }
+}
+
+/// True when the fermionic supertrace twist can be nontrivial for this
+/// contraction. Such contractions take the dynamic route, where the twist is
+/// applied during rhs materialization; the canonical direct-GEMM route stays
+/// coefficient-free (TensorKit mul! parity).
+pub(super) fn rhs_contract_requires_twist<R>(
+    rule: &R,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractAxisSpec<'_>,
+) -> Result<bool, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
+        return Ok(false);
+    }
+    for &axis in axes.rhs_contracting_axes() {
+        if super::fusion::external_axis_is_dual(rhs.homspace(), axis)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

@@ -25,6 +25,7 @@ use super::fusion::{
 use super::fusion_block::{
     is_canonical_fusion_block_contract, tensorcontract_canonical_fusion_blocks_into_raw,
 };
+use super::route_cache::rhs_contract_requires_twist;
 use super::structure::{tensorcontract_structure, TensorContractStructure};
 
 pub fn tensorcontract_into<
@@ -893,6 +894,7 @@ where
     if !axes.lhs_conjugate()
         && !axes.rhs_conjugate()
         && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
+        && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
     {
         return tensorcontract_canonical_fusion_blocks_into_raw(
             &mut crate::StridedHostKernelAdapter,
@@ -979,6 +981,7 @@ where
     if !axes.lhs_conjugate()
         && !axes.rhs_conjugate()
         && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
+        && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
     {
         return tensorcontract_canonical_fusion_blocks_into_raw(
             &mut crate::StridedHostKernelAdapter,

@@ -173,6 +173,16 @@ where
         D::one(),
         D::zero(),
     )?;
+    {
+        let rhs_scratch_space = rhs_canonical.space().clone();
+        apply_rhs_contract_twist(
+            &mut crate::StridedHostKernelAdapter,
+            rule,
+            &rhs_scratch_space,
+            rhs_canonical.data_mut(),
+            plan.canonical_axes().as_spec().rhs_contracting_axes(),
+        )?;
+    }
 
     if plan.output_transform_is_identity() {
         let dst_space = DynamicFusionMapSpace::from_typed(
@@ -476,6 +486,13 @@ where
             D::one(),
             D::zero(),
         )?;
+        apply_rhs_contract_twist(
+            &mut crate::StridedHostKernelAdapter,
+            rule,
+            &rhs_space,
+            rhs_scratch.data_mut(),
+            plan.canonical_axes().as_spec().rhs_contracting_axes(),
+        )?;
     }
 
     if plan.output_transform_is_identity() {
@@ -668,6 +685,13 @@ where
             D::one(),
             D::zero(),
         )?;
+        apply_rhs_contract_twist(
+            &mut crate::StridedHostKernelAdapter,
+            rule,
+            &rhs_space,
+            rhs_scratch.buffer_mut().as_mut_slice(),
+            plan.canonical_axes().as_spec().rhs_contracting_axes(),
+        )?;
     }
 
     if plan.output_transform_is_identity() {
@@ -859,6 +883,13 @@ where
             D::one(),
             D::zero(),
             &mut profile.tree_replay,
+        )?;
+        apply_rhs_contract_twist(
+            &mut crate::StridedHostKernelAdapter,
+            rule,
+            &rhs_space,
+            rhs_scratch.data_mut(),
+            plan.canonical_axes().as_spec().rhs_contracting_axes(),
         )?;
         profile.rhs_transform += start.elapsed();
         profile.rhs_transform_calls += 1;
@@ -1788,6 +1819,55 @@ where
         let space = DynamicFusionMapSpace::transformed_from_typed(rule, src_fusion, operation)?;
         Ok((space, replay_structure))
     }
+}
+
+/// Final step of canonical rhs materialization: apply the fermionic
+/// supertrace twist per codomain tree. TensorKit folds this twist into the
+/// transform that @tensor inserts before `mul!`; keeping it here means the
+/// canonical GEMM plans stay coefficient-free (mul! parity).
+fn apply_rhs_contract_twist<A, R, D>(
+    kernels: &mut A,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    rhs_contracting_axes: &[usize],
+) -> Result<(), OperationError>
+where
+    A: crate::HostKernelAdapter<D>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
+        return Ok(());
+    }
+    let structure = std::sync::Arc::clone(space.structure());
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let tenet_core::BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let factor = super::fusion::rhs_contract_twist_factor(
+            rule,
+            space.homspace(),
+            rhs_contracting_axes,
+            key.codomain_tree(),
+        )?;
+        if factor != 1.0 {
+            let shape = block.shape().to_vec();
+            let strides = tenet_operations::strided::strides_to_isize(block.strides())?;
+            let offset = tenet_operations::strided::offset_to_isize(block.offset())?;
+            kernels.scale_strided(
+                data,
+                &shape,
+                &strides,
+                offset,
+                D::coefficient_as_data(factor),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn tree_pair_transform_typed_to_dynamic<

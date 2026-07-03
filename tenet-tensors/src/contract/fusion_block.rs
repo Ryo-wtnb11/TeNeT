@@ -31,7 +31,7 @@ pub(crate) use tenet_operations::fusion_replay::{
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
-use super::fusion::{reject_fusion_contract_conjugation, rhs_contract_twist_factor};
+use super::fusion::reject_fusion_contract_conjugation;
 use super::structure::TensorContractAxisPlan;
 
 /// Adapts a [`TensorContractBackend`] + workspace pair onto the replay
@@ -1328,16 +1328,10 @@ impl FusionBlockMatrixGroupBuilder {
                 .and_then(|offset| offset.checked_add(row.offset))
                 .ok_or(OperationError::ElementCountOverflow)?;
             let matrix_offset = offset_to_isize(matrix_offset)?;
-            let coefficient = if let Some(rhs_contracting_axes) = rhs_contracting_axes {
-                rhs_contract_twist_factor(
-                    rule,
-                    space.homspace(),
-                    rhs_contracting_axes,
-                    key.codomain_tree(),
-                )?
-            } else {
-                rule.scalar_one()
-            };
+            // Coefficient-free by contract (TensorKit mul! parity): fermionic
+            // supertrace twists are applied during rhs materialization on the
+            // dynamic route, never inside the GEMM plan.
+            let coefficient = rule.scalar_one();
             subblocks.push(FusionSubblockMatrixLayout {
                 block: FusionStridedBlockLayout {
                     shape: block.shape().to_vec(),
