@@ -9,15 +9,12 @@ use tenet_core::{
     TensorStorage,
 };
 
-use crate::axis::TensorTraceAxisSpec;
 use crate::lowering::{adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes};
 use crate::strided::offset_to_isize;
-use crate::{
-    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
-    TensorOperationsBackend,
-};
+use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::OperationError;
+use tenet_operations::TensorTraceAxisSpec;
 use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoefficientAction};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,7 +272,7 @@ impl<C> TensorTraceFusionStructure<C> {
         beta: T,
     ) -> Result<(), OperationError>
     where
-        B: TensorOperationsBackend,
+        B: crate::TensorTraceOperationsBackend,
         T: Copy
             + Add<T, Output = T>
             + Mul<T, Output = T>
@@ -474,7 +471,7 @@ impl TensorTraceStructure {
         beta: T,
     ) -> Result<(), OperationError>
     where
-        B: TensorOperationsBackend,
+        B: crate::TensorTraceOperationsBackend,
         T: Copy
             + Add<T, Output = T>
             + Mul<T, Output = T>

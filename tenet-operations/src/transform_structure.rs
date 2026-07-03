@@ -3,10 +3,11 @@ use std::sync::Arc;
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
 
 use crate::strided::{column_major_strides_isize, element_count, offset_to_isize};
-use crate::{
-    OperationError, TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformKeyBlockSpec,
+use crate::structure_identity::validate_structure_identity;
+use crate::transform_plan::{
+    TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformKeyBlockSpec,
 };
-use tenet_operations::structure_identity::validate_structure_identity;
+use crate::OperationError;
 
 /// Replay-ready tree-transform descriptor.
 ///
@@ -19,9 +20,9 @@ use tenet_operations::structure_identity::validate_structure_identity;
 pub struct TreeTransformStructure<T> {
     rank: usize,
     storage_conjugate: bool,
-    pub(crate) blocks: Vec<TreeTransformBlock>,
-    pub(crate) layouts: TreeTransformLayoutTable,
-    pub(crate) coefficients_src_by_dst: Vec<T>,
+    pub blocks: Vec<TreeTransformBlock>,
+    pub layouts: TreeTransformLayoutTable,
+    pub coefficients_src_by_dst: Vec<T>,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
 }
@@ -192,7 +193,7 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    pub(crate) fn compile_grouped_shared_structures(
+    pub fn compile_grouped_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
         specs: &[TreeTransformGroupBlockSpec<T>],
@@ -399,8 +400,9 @@ impl<T: Copy> TreeTransformStructure<T> {
             .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
     }
 
-    #[cfg(test)]
-    pub(crate) fn replay_weights(&self) -> Vec<usize> {
+    /// Test/diagnostic helper: per-block replay weights.
+    #[doc(hidden)]
+    pub fn replay_weights(&self) -> Vec<usize> {
         self.blocks
             .iter()
             .map(|block| tree_transform_block_weight(block, &self.layouts))
@@ -408,15 +410,15 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     #[inline]
-    pub(crate) fn storage_conjugate(&self) -> bool {
+    pub fn storage_conjugate(&self) -> bool {
         self.storage_conjugate
     }
 
-    pub(crate) fn coefficient(&self, index: usize) -> T {
+    pub fn coefficient(&self, index: usize) -> T {
         self.coefficients_src_by_dst[index]
     }
 
-    pub(crate) fn validate_replay_structures(
+    pub fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
@@ -444,7 +446,7 @@ fn tree_transform_block_weight(
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum TreeTransformBlock {
+pub enum TreeTransformBlock {
     Single {
         dst_layout: usize,
         src_layout: usize,
@@ -461,7 +463,7 @@ pub(crate) enum TreeTransformBlock {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct TreeTransformLayoutTable {
+pub struct TreeTransformLayoutTable {
     entries: Vec<TreeTransformLayout>,
     shapes: Vec<usize>,
     strides: Vec<isize>,
@@ -473,19 +475,19 @@ impl TreeTransformLayoutTable {
         self.entries.len()
     }
 
-    pub(crate) fn entry(&self, index: usize) -> &TreeTransformLayout {
+    pub fn entry(&self, index: usize) -> &TreeTransformLayout {
         &self.entries[index]
     }
 
-    pub(crate) fn shape(&self, layout: &TreeTransformLayout) -> &[usize] {
+    pub fn shape(&self, layout: &TreeTransformLayout) -> &[usize] {
         &self.shapes[layout.layout_start..layout.layout_start + layout.rank]
     }
 
-    pub(crate) fn strides(&self, layout: &TreeTransformLayout) -> &[isize] {
+    pub fn strides(&self, layout: &TreeTransformLayout) -> &[isize] {
         &self.strides[layout.layout_start..layout.layout_start + layout.rank]
     }
 
-    pub(crate) fn packed_strides(&self, layout: &TreeTransformLayout) -> &[isize] {
+    pub fn packed_strides(&self, layout: &TreeTransformLayout) -> &[isize] {
         &self.packed_strides[layout.layout_start..layout.layout_start + layout.rank]
     }
 
@@ -570,9 +572,9 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Operatio
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TreeTransformLayout {
+pub struct TreeTransformLayout {
     layout_start: usize,
     rank: usize,
-    pub(crate) offset: isize,
-    pub(crate) element_count: usize,
+    pub offset: isize,
+    pub element_count: usize,
 }

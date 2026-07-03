@@ -8,7 +8,6 @@ use tenet_core::{
     TensorMap, TensorStorage,
 };
 
-use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::{
     enforce_lru_limit, rebuild_lru_order_from_keys, touch_lru_key, OperationCachePolicy,
     TensorContractStructureCache, TensorContractStructureCacheKey,
@@ -21,6 +20,7 @@ use crate::{
     DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
     OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
 };
+use tenet_operations::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 
 use super::backend::{
     tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,

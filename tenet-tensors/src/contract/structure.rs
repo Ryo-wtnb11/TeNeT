@@ -6,10 +6,10 @@ use tenet_core::{
 };
 use tenet_dense::DenseDotConfig;
 
-use crate::axis::{permutation_axes, TensorContractAxisSpec};
 use crate::strided::{column_major_strides_usize, element_count, offset_to_isize};
 use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 use tenet_operations::structure_identity::validate_structure_identity;
+use tenet_operations::{permutation_axes, TensorContractAxisSpec};
 
 use super::backend::TensorContractBackend;
 

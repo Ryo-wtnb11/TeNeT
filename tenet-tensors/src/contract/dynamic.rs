@@ -7,7 +7,6 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
 };
 
-use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::{touch_lru_key, BlockStructureCacheKey, OperationCachePolicy};
 use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_context::TreeTransformExecutionContext;
@@ -17,6 +16,7 @@ use crate::{
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperationKey,
     TreeTransformRuleCacheKey, TreeTransformStructure, TreeTransformWorkspace,
 };
+use tenet_operations::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
@@ -2003,10 +2003,10 @@ mod tests {
         SectorLeg, TensorMapSpace, Trivial, Z2FusionRule,
     };
 
-    use crate::axis::AxisPermutation;
     use crate::storage_scratch::StorageFusionBlockContractWorkspace;
     use crate::tree_context::TreeTransformExecutionContext;
     use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
+    use tenet_operations::AxisPermutation;
 
     use super::super::fusion_block::CanonicalFusionBlockContractWorkspace;
     use super::super::scratch::StorageDynamicFusionScratchWorkspace;

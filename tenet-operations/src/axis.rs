@@ -1,4 +1,4 @@
-use tenet_operations::OperationError;
+use crate::OperationError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AxisPermutation<'a> {
@@ -184,7 +184,7 @@ impl OwnedTensorContractAxisSpec {
     }
 }
 
-pub(crate) fn permutation_axes(
+pub fn permutation_axes(
     permutation: AxisPermutation<'_>,
     rank: usize,
 ) -> Result<Vec<usize>, OperationError> {

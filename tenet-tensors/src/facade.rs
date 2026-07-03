@@ -7,29 +7,29 @@ use tenet_core::{
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 
-use crate::axis::{AxisPermutation, TensorTraceAxisSpec};
-use crate::backend::{
-    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
-    TreeTransformBackend,
-};
-use crate::host_kernels::{tensoradd_block_with_strided_kernel, TreeTransformWorkspace};
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
-use crate::tensoradd::{
-    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
-};
 use crate::tensortrace::{
     tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
     TensorTraceStructure,
 };
 use crate::tree_context::TreeTransformExecutionContext;
-use crate::tree_structure::TreeTransformStructure;
 use crate::tree_transform::{
     build_tree_pair_transform_group_plan, TreeTransformOperationKey, TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
+use tenet_operations::TreeTransformStructure;
+use tenet_operations::{tensoradd_block_with_strided_kernel, TreeTransformWorkspace};
+use tenet_operations::{
+    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
+};
+use tenet_operations::{AxisPermutation, TensorTraceAxisSpec};
 use tenet_operations::{
     ConjugateValue, DenseRecouplingScalar, RealStructuralCoefficient, RecouplingCoefficientAction,
     TreeTransformScalar,
+};
+use tenet_operations::{
+    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
+    TreeTransformBackend,
 };
 
 pub fn tensorcopy_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
@@ -473,7 +473,7 @@ pub fn tensortrace_into_with<
     beta: T,
 ) -> Result<(), OperationError>
 where
-    B: TensorOperationsBackend,
+    B: crate::TensorTraceOperationsBackend,
     T: Copy
         + Add<T, Output = T>
         + Mul<T, Output = T>
@@ -510,7 +510,7 @@ pub fn tensortrace_execute_with<
     beta: T,
 ) -> Result<(), OperationError>
 where
-    B: TensorOperationsBackend,
+    B: crate::TensorTraceOperationsBackend,
     T: Copy
         + Add<T, Output = T>
         + Mul<T, Output = T>
@@ -601,7 +601,7 @@ pub fn tensortrace_fusion_into_with<
     beta: T,
 ) -> Result<(), OperationError>
 where
-    B: TensorOperationsBackend,
+    B: crate::TensorTraceOperationsBackend,
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone
         + Add<Output = R::Scalar>
@@ -647,7 +647,7 @@ pub fn tensortrace_fusion_execute_with<
     beta: T,
 ) -> Result<(), OperationError>
 where
-    B: TensorOperationsBackend,
+    B: crate::TensorTraceOperationsBackend,
     C: Copy,
     T: Copy
         + Add<T, Output = T>

@@ -85,7 +85,7 @@ impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
     }
 }
 
-pub(crate) fn tensoradd_structure_with_strided_kernel<
+pub fn tensoradd_structure_with_strided_kernel<
     T,
     const NOUT: usize,
     const NIN: usize,
@@ -144,7 +144,7 @@ where
     Ok(())
 }
 
-pub(crate) fn tree_transform_structure_with_strided_kernel<
+pub fn tree_transform_structure_with_strided_kernel<
     A,
     D,
     C,
@@ -195,7 +195,7 @@ where
     )
 }
 
-pub(crate) fn tree_transform_structure_with_storage_workspace_strided_kernel<
+pub fn tree_transform_structure_with_storage_workspace_strided_kernel<
     A,
     D,
     C,
@@ -306,7 +306,7 @@ where
 }
 
 /// Replays a prepared tree-transform structure on host slices.
-pub(crate) fn tree_transform_structure_with_strided_kernel_raw<A, D, C>(
+pub fn tree_transform_structure_with_strided_kernel_raw<A, D, C>(
     kernels: &mut A,
     workspace: &mut TreeTransformWorkspace<D>,
     structure: &TreeTransformStructure<C>,
@@ -381,7 +381,7 @@ where
     Ok(())
 }
 
-pub(crate) fn tree_transform_structure_with_structural_recoupling<
+pub fn tree_transform_structure_with_structural_recoupling<
     A,
     E,
     D,
@@ -429,7 +429,7 @@ where
 }
 
 /// Replays a prepared structural-recoupling tree transform on host slices.
-pub(crate) fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
+pub fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -500,7 +500,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tree_transform_structure_with_structural_recoupling_raw_profiled<A, E, D, C>(
+pub fn tree_transform_structure_with_structural_recoupling_raw_profiled<A, E, D, C>(
     kernels: &mut A,
     dense: &mut E,
     workspace: &mut TreeTransformWorkspace<D>,
@@ -588,7 +588,7 @@ where
     Ok(())
 }
 
-pub(crate) fn tensoradd_block_with_strided_kernel<T>(
+pub fn tensoradd_block_with_strided_kernel<T>(
     allocator: &mut HostAllocator,
     dst: BlockViewMut<'_, T>,
     src: BlockView<'_, T>,

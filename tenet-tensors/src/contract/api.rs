@@ -3,13 +3,13 @@ use tenet_core::{
     CoreError, HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
 };
 
-use crate::axis::{AxisPermutation, TensorContractAxisSpec};
 use crate::lowering::adjoint_fusion_space_view;
 use crate::{
     build_tree_pair_transform_group_plan, tree_pair_transform_into_with, DenseBlockScalar,
     DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformWorkspace,
 };
+use tenet_operations::{AxisPermutation, TensorContractAxisSpec};
 
 use super::backend::{TensorContractBackend, TensorContractWorkspace};
 use super::dynamic::{

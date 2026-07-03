@@ -7,7 +7,6 @@ use tenet_core::{
     HostWritableStorage, MultiplicityFreeRigidSymbols, SectorId,
 };
 
-use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::{
     rebuild_lru_order_from_keys, touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
 };
@@ -19,6 +18,7 @@ use crate::{
     DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction,
     TreeTransformRuleCacheKey,
 };
+use tenet_operations::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 
 use tenet_operations::fusion_replay::{
     direct_group_matrix_offset, fusion_scale_block_layouts_excluding,

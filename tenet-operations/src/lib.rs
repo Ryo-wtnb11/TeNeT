@@ -7,6 +7,7 @@
 //! compile layer (`tenet-tensors`) hands plans down as offsets, strides,
 //! `SectorId`s, and scalar coefficients.
 
+pub mod axis;
 mod error;
 pub mod fusion_replay;
 mod host_scalar_kernels;
@@ -14,13 +15,20 @@ pub mod host_scratch;
 pub mod kernel_adapter;
 mod placement;
 mod profile;
+pub mod replay_backend;
 mod scalar;
 pub mod storage_scratch;
 pub mod strided;
 pub mod structure_identity;
+pub mod tensoradd;
+pub mod transform_helpers;
 mod transform_key;
+pub mod transform_plan;
+pub mod transform_replay;
+pub mod transform_structure;
 mod tree_profile;
 
+pub use axis::*;
 pub use error::OperationError;
 pub use fusion_replay::{
     direct_group_matrix_offset, fusion_scale_block_layouts_excluding,
@@ -38,9 +46,17 @@ pub use host_scalar_kernels::{
 pub use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
 pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
+pub use replay_backend::*;
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
 };
+pub use tensoradd::*;
 pub use transform_key::TreeTransformOperationKey;
+pub use transform_plan::{
+    TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    TreeTransformKeyBlockSpec,
+};
+pub use transform_replay::*;
+pub use transform_structure::*;
 pub use tree_profile::TreeTransformReplayProfile;

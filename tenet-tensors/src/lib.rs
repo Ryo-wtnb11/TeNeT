@@ -10,28 +10,17 @@
 //! `tenet-core`.
 
 mod adjoint;
-mod axis;
-mod backend;
+mod backend_trace;
 mod cache;
 mod contract;
 mod facade;
-mod host_kernels;
 mod lowering;
-mod tensoradd;
 mod tensortrace;
 mod tree_context;
-mod tree_structure;
 mod tree_transform;
 
 pub use adjoint::adjoint;
-pub use axis::{
-    AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
-};
-pub use backend::{
-    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,
-    HostTensorOperationsWorkspace, HostTreeTransformBackend, TensorOperationsBackend,
-    TreeTransformBackend,
-};
+pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{
     BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
     TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCache,
@@ -72,43 +61,37 @@ pub use facade::{
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with,
 };
-pub(crate) use host_kernels::{
-    tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
-    tree_transform_structure_with_strided_kernel_raw,
-    tree_transform_structure_with_structural_recoupling,
-    tree_transform_structure_with_structural_recoupling_raw,
-    tree_transform_structure_with_structural_recoupling_raw_profiled,
-};
-pub use host_kernels::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
 pub use tenet_operations::TreeTransformReplayProfile;
-pub(crate) use tenet_operations::{
-    copy_block_with_strided_kernel, tensoradd_raw_strided_kernel,
-    tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
-    tensortrace_raw_strided_kernel_add_with_coefficient,
-};
+pub use tenet_operations::TreeTransformStructure;
 pub(crate) use tenet_operations::{host_scratch, storage_scratch, strided};
+pub use tenet_operations::{
+    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
+    TensorAddStructureTerm,
+};
+pub(crate) use tenet_operations::{
+    tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
+};
+pub use tenet_operations::{
+    AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
+};
 pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
 };
-pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
-pub use tensoradd::{
-    tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
-    TensorAddStructureTerm,
+pub use tenet_operations::{
+    DenseTreeTransformOperations, HostAllocator, HostTensorOperations, HostTensorOperationsBackend,
+    HostTensorOperationsWorkspace, HostTreeTransformBackend, TensorOperationsBackend,
+    TreeTransformBackend,
 };
-pub(crate) use tensortrace::tensortrace_fusion_structure_with_strided_kernel;
-pub(crate) use tensortrace::tensortrace_structure_with_strided_kernel;
+pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
+pub use tenet_operations::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use tensortrace::{
     tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
 };
 pub use tree_context::TreeTransformExecutionContext;
-pub use tree_structure::TreeTransformStructure;
-pub(crate) use tree_structure::{
-    TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable,
-};
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
     build_tree_transform_group_plan, TreePairTransformCache, TreeTransformBlockSpec,

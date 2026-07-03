@@ -6,9 +6,9 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
-use crate::axis::TensorContractAxisSpec;
 use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::OperationError;
+use tenet_operations::TensorContractAxisSpec;
 
 use super::super::structure::{
     TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,

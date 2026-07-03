@@ -12,12 +12,11 @@ use crate::ReportsPlacement;
 
 use crate::{
     copy_block_with_strided_kernel, tensoradd_structure_with_strided_kernel,
-    tensortrace_fusion_structure_with_strided_kernel, tensortrace_structure_with_strided_kernel,
     tree_transform_structure_with_strided_kernel,
     tree_transform_structure_with_structural_recoupling, ConjugateValue, DenseRecouplingScalar,
     OperationError, RecouplingCoefficientAction, StridedHostKernelAdapter, TensorAddStructure,
-    TensorTraceFusionStructure, TensorTraceStructure, TreeTransformReplayProfile,
-    TreeTransformScalar, TreeTransformStructure, TreeTransformWorkspace,
+    TreeTransformReplayProfile, TreeTransformScalar, TreeTransformStructure,
+    TreeTransformWorkspace,
 };
 
 /// Legacy/current tree-transform execution contract over host-accessible data.
@@ -147,71 +146,6 @@ pub trait TensorOperationsBackend {
             + One
             + ConjugateValue
             + strided_kernel::MaybeSendSync,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>;
-
-    fn tensortrace_structure_into<
-        T,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        structure: &TensorTraceStructure,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + strided_kernel::MaybeSendSync,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>;
-
-    fn tensortrace_fusion_structure_into<
-        T,
-        C,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        structure: &TensorTraceFusionStructure<C>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + RecouplingCoefficientAction<C>
-            + strided_kernel::MaybeSendSync,
-        C: Copy,
         DDst: HostWritableStorage<T>,
         DSrc: HostReadableStorage<T>;
 }
@@ -355,79 +289,6 @@ impl TensorOperationsBackend for HostTensorOperations {
         DSrc: HostReadableStorage<T>,
     {
         tensoradd_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
-    }
-
-    fn tensortrace_structure_into<
-        T,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        structure: &TensorTraceStructure,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + strided_kernel::MaybeSendSync,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>,
-    {
-        tensortrace_structure_with_strided_kernel(allocator, structure, dst, src, alpha, beta)
-    }
-
-    fn tensortrace_fusion_structure_into<
-        T,
-        C,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const SRC_NOUT: usize,
-        const SRC_NIN: usize,
-        SDst,
-        SSrc,
-        DDst,
-        DSrc,
-    >(
-        &mut self,
-        allocator: &mut Self::Allocator,
-        structure: &TensorTraceFusionStructure<C>,
-        dst: &mut TensorMap<T, DST_NOUT, DST_NIN, SDst, DDst>,
-        src: &TensorMap<T, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        alpha: T,
-        beta: T,
-    ) -> Result<(), OperationError>
-    where
-        T: Copy
-            + Add<T, Output = T>
-            + Mul<T, Output = T>
-            + PartialEq
-            + Zero
-            + One
-            + ConjugateValue
-            + RecouplingCoefficientAction<C>
-            + strided_kernel::MaybeSendSync,
-        C: Copy,
-        DDst: HostWritableStorage<T>,
-        DSrc: HostReadableStorage<T>,
-    {
-        tensortrace_fusion_structure_with_strided_kernel(
-            allocator, structure, dst, src, alpha, beta,
-        )
     }
 }
 

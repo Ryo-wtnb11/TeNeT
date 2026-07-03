@@ -8,9 +8,9 @@ use tenet_core::{
 
 use crate::axis::{permutation_axes, AxisPermutation};
 use crate::strided::offset_to_isize;
+use crate::structure_identity::validate_structure_identity;
+use crate::OperationError;
 use crate::{ConjugateValue, TensorOperationsBackend};
-use tenet_operations::structure_identity::validate_structure_identity;
-use tenet_operations::OperationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorAddStructure {

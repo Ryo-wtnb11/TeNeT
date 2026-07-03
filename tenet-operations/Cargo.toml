@@ -13,4 +13,10 @@ num-traits = "0.2"
 strided-kernel = { git = "https://github.com/tensor4all/strided-rs", rev = "4ea9acbaa1422efa2662ff4b25b17cdae28f093d", version = "0.1.0", features = ["parallel"] }
 
 [features]
-default = []
+default = ["cpu-faer"]
+cpu-faer = ["tenet-dense/cpu-faer"]
+cpu-blas = ["tenet-dense/cpu-blas"]
+blas-accelerate = ["tenet-dense/blas-accelerate"]
+blas-openblas = ["tenet-dense/blas-openblas"]
+blas-mkl = ["tenet-dense/blas-mkl"]
+provider-inject = ["tenet-dense/provider-inject"]

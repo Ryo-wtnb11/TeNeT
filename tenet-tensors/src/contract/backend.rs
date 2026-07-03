@@ -8,9 +8,11 @@ use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::StorageTensorContractWorkspace;
+use tenet_operations::tensoradd_raw_strided_kernel;
+
 use crate::{
-    tensoradd_raw_strided_kernel, ConjugateValue, DenseBlockScalar, DenseTreeTransformOperations,
-    OperationError, RecouplingCoefficientAction, ReportsPlacement,
+    ConjugateValue, DenseBlockScalar, DenseTreeTransformOperations, OperationError,
+    RecouplingCoefficientAction, ReportsPlacement,
 };
 
 use super::structure::{

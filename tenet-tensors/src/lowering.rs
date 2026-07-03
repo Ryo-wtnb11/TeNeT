@@ -6,8 +6,10 @@ use tenet_core::{
     FusionTreeHomSpace, TensorMapSpace,
 };
 
-use crate::axis::{permutation_axes, AxisPermutation, TensorContractAxisSpec, TensorTraceAxisSpec};
 use crate::{OperationError, TreeTransformOperationKey};
+use tenet_operations::{
+    permutation_axes, AxisPermutation, TensorContractAxisSpec, TensorTraceAxisSpec,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoweredTensorAddSourceOperation {

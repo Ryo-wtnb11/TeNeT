@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use tenet_core::{BlockStructure, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
-use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::cache::{
     enforce_lru_limit, rebuild_lru_order_from_keys, touch_lru_key, BlockStructureCacheKey,
     OperationCachePolicy,
 };
 use crate::{OperationError, TreeTransformRuleCacheKey};
+use tenet_operations::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion_block::is_canonical_fusion_block_contract;

@@ -11,16 +11,16 @@ path = "src/lib.rs"
 
 [features]
 default = ["cpu-faer"]
-cpu-faer = ["tenet-dense/cpu-faer"]
-cpu-blas = ["tenet-dense/cpu-blas"]
-blas-accelerate = ["tenet-dense/blas-accelerate"]
-blas-openblas = ["tenet-dense/blas-openblas"]
-blas-mkl = ["tenet-dense/blas-mkl"]
-provider-inject = ["tenet-dense/provider-inject"]
+cpu-faer = ["tenet-dense/cpu-faer", "tenet-operations/cpu-faer"]
+cpu-blas = ["tenet-dense/cpu-blas", "tenet-operations/cpu-blas"]
+blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-operations/blas-accelerate"]
+blas-openblas = ["tenet-dense/blas-openblas", "tenet-operations/blas-openblas"]
+blas-mkl = ["tenet-dense/blas-mkl", "tenet-operations/blas-mkl"]
+provider-inject = ["tenet-dense/provider-inject", "tenet-operations/provider-inject"]
 
 [dependencies]
 tenet-core = { path = "../tenet-core" }
-tenet-operations = { path = "../tenet-operations" }
+tenet-operations = { path = "../tenet-operations", default-features = false }
 tenet-dense = { path = "../tenet-dense", default-features = false }
 strided-kernel = { git = "https://github.com/tensor4all/strided-rs", rev = "4ea9acbaa1422efa2662ff4b25b17cdae28f093d", version = "0.1.0", features = ["parallel"] }
 num-traits = "0.2"

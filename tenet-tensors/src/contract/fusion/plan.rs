@@ -1,8 +1,8 @@
 use tenet_core::{FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
-use crate::axis::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::{OperationError, TreeTransformOperationKey};
+use tenet_operations::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
 
 use super::super::structure::TensorContractAxisPlan;
 

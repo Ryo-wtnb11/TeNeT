@@ -2443,7 +2443,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
         TrackingScratch<f64>,
     >::default();
 
-    crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel(
+    tenet_operations::tree_transform_structure_with_storage_workspace_strided_kernel(
         &mut crate::StridedHostKernelAdapter,
         &mut workspace,
         &structure,
@@ -2498,7 +2498,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     )
     .unwrap();
 
-    crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel(
+    tenet_operations::tree_transform_structure_with_storage_workspace_strided_kernel(
         &mut crate::StridedHostKernelAdapter,
         &mut workspace,
         &structure2,
@@ -3061,7 +3061,7 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
     let mut workspace = crate::TreeTransformWorkspace::<f64>::default();
     let mut adapter = RecordingKernelAdapter::default();
 
-    crate::host_kernels::tree_transform_structure_with_strided_kernel_raw(
+    tenet_operations::tree_transform_structure_with_strided_kernel_raw(
         &mut adapter,
         &mut workspace,
         &structure,
