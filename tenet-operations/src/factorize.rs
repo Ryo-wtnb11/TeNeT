@@ -246,12 +246,13 @@ where
     })
 }
 
-/// Applies a truncation policy to a full factorization.
+/// Applies a truncation policy to a full factorization (the host half of
+/// [`svd_compact`]).
 ///
 /// The decision is host-side scalar work over the spectra; the application
 /// keeps the leading bond states per coupled sector, which in the coupled
 /// layout is a per-sector leading-columns/rows copy (device kernel later).
-pub fn truncate_svd<R, const NOUT: usize, const NIN: usize>(
+pub(crate) fn truncate_svd<R, const NOUT: usize, const NIN: usize>(
     rule: &R,
     full: SvdFull<NOUT, NIN>,
     truncation: &Truncation,

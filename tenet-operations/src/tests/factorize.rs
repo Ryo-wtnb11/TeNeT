@@ -591,7 +591,7 @@ fn svd_compact_is_svd_full_plus_host_truncation() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let composed = {
         let full = svd_full(&mut dense_executor, &rule, &tensor).unwrap();
-        truncate_svd(&rule, full, &truncation).unwrap()
+        crate::factorize::truncate_svd(&rule, full, &truncation).unwrap()
     };
     let direct = svd_compact(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
 
