@@ -163,6 +163,17 @@ caches, not to this pipeline; re-evaluate compile cost on a realistic
 apply-gate workload (rank-5/6, larger sector sets) when the network
 contraction bench lands.
 
+## tsvd cross-check against TensorKit
+
+`tenet-operations/examples/tsvd_crosscheck.rs` and
+`benchmarks/tensorkit_tsvd_crosscheck.jl` fill every fusion-tree pair block of
+a `V x V <- V x V` tensor with the same integer-hash function of the sector
+labels and degeneracy indices, then print per-coupled-sector singular values
+(invariant under tree ordering and per-tree basis conventions). U(1)
+`{-1,0,1}` and SU(2) `{0,1/2}` at degeneracy 2: all 8 sector spectra agree
+with TensorKit 0.16 `svd_compact` to 10 printed digits (max deviation 0.0) —
+validating the fusion-space structure and the blockwise SVD end to end.
+
 ## Conclusions
 
 - **With identical BLAS, TeNeT is 3.6–42x slower**; the gap is the per-call
