@@ -18,8 +18,47 @@ pub trait FactorScalar: DenseRecouplingScalar {
     type Eig: FactorScalar;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError>;
+    /// Real spectrum output (singular values, Hermitian eigenvalues) widened
+    /// to `f64` for the host-side truncation policies.
+    fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError>;
     fn from_real(value: f64) -> Self;
+    /// Widens to `Complex64` (general eigenvalue bookkeeping).
+    fn widen_complex(self) -> Complex64;
+    /// Narrows from `Complex64` (lossy for the single-precision scalars).
+    fn from_complex64(value: Complex64) -> Self;
     fn adjoint(self) -> Self;
+}
+
+impl FactorScalar for f32 {
+    type Eig = num_complex::Complex32;
+
+    fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
+        tensor.as_f32_slice()
+    }
+
+    fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
+        Ok(tensor
+            .as_f32_slice()?
+            .iter()
+            .map(|&value| value as f64)
+            .collect())
+    }
+
+    fn from_real(value: f64) -> Self {
+        value as f32
+    }
+
+    fn widen_complex(self) -> Complex64 {
+        Complex64::new(self as f64, 0.0)
+    }
+
+    fn from_complex64(value: Complex64) -> Self {
+        value.re as f32
+    }
+
+    fn adjoint(self) -> Self {
+        self
+    }
 }
 
 impl FactorScalar for f64 {
@@ -29,12 +68,56 @@ impl FactorScalar for f64 {
         tensor.as_f64_slice()
     }
 
+    fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
+        Ok(tensor.as_f64_slice()?.to_vec())
+    }
+
     fn from_real(value: f64) -> Self {
         value
     }
 
+    fn widen_complex(self) -> Complex64 {
+        Complex64::new(self, 0.0)
+    }
+
+    fn from_complex64(value: Complex64) -> Self {
+        value.re
+    }
+
     fn adjoint(self) -> Self {
         self
+    }
+}
+
+impl FactorScalar for num_complex::Complex32 {
+    type Eig = num_complex::Complex32;
+
+    fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
+        tensor.as_c32_slice()
+    }
+
+    fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
+        Ok(tensor
+            .as_f32_slice()?
+            .iter()
+            .map(|&value| value as f64)
+            .collect())
+    }
+
+    fn from_real(value: f64) -> Self {
+        num_complex::Complex32::new(value as f32, 0.0)
+    }
+
+    fn widen_complex(self) -> Complex64 {
+        Complex64::new(self.re as f64, self.im as f64)
+    }
+
+    fn from_complex64(value: Complex64) -> Self {
+        num_complex::Complex32::new(value.re as f32, value.im as f32)
+    }
+
+    fn adjoint(self) -> Self {
+        self.conj()
     }
 }
 
@@ -45,8 +128,20 @@ impl FactorScalar for Complex64 {
         tensor.as_c64_slice()
     }
 
+    fn real_spectrum(tensor: &DenseTensor) -> Result<Vec<f64>, DenseError> {
+        Ok(tensor.as_f64_slice()?.to_vec())
+    }
+
     fn from_real(value: f64) -> Self {
         Complex64::new(value, 0.0)
+    }
+
+    fn widen_complex(self) -> Complex64 {
+        self
+    }
+
+    fn from_complex64(value: Complex64) -> Self {
+        value
     }
 
     fn adjoint(self) -> Self {
@@ -271,10 +366,7 @@ where
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
-            values: outputs[1]
-                .as_f64_slice()
-                .map_err(OperationError::Dense)?
-                .to_vec(),
+            values: D::real_spectrum(&outputs[1]).map_err(OperationError::Dense)?,
         });
         factors.push(SectorFactors {
             sector: matrix.sector,
@@ -776,7 +868,7 @@ where
         let n = matrix.rows;
         validate_dense_shape(outputs[0].shape(), &[n])?;
         validate_dense_shape(outputs[1].shape(), &[n, n])?;
-        let values = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+        let values = D::real_spectrum(&outputs[0]).map_err(OperationError::Dense)?;
         let vectors = D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
 
         // Reorder bond states descending by |eigenvalue| (stable on ties).
@@ -929,7 +1021,7 @@ where
         validate_dense_shape(outputs[1].shape(), &[rank])?;
         validate_dense_shape(outputs[2].shape(), &[rank, matrix.cols])?;
         let u_thin = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
-        let s_values = outputs[1].as_f64_slice().map_err(OperationError::Dense)?;
+        let s_values = D::real_spectrum(&outputs[1]).map_err(OperationError::Dense)?;
         let vt_thin = D::dense_slice(&outputs[2]).map_err(OperationError::Dense)?;
 
         let u_full = orthonormal_completion(dense, u_thin, matrix.rows, rank)?;
@@ -941,7 +1033,7 @@ where
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
-            values: s_values.to_vec(),
+            values: s_values.clone(),
         });
         col_dims.push((matrix.sector, matrix.cols));
         pairs.push(FactorPair {
@@ -1275,8 +1367,6 @@ where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
-    D::Eig: FactorScalar<Eig = D::Eig> + From<Complex64>,
-    Complex64: From<D::Eig>,
 {
     let fusion_space = tensor
         .fusion_space()
@@ -1313,7 +1403,7 @@ where
             <D::Eig as FactorScalar>::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
 
         let complex_values: Vec<Complex64> =
-            values.iter().map(|&value| Complex64::from(value)).collect();
+            values.iter().map(|&value| value.widen_complex()).collect();
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
             complex_values[b]
@@ -1364,9 +1454,11 @@ where
         &complex_matricizations,
         &pairs,
     )?;
-    let d_tensor = diagonal_bond_tensor(rule, &eigenvalues, &|value: Complex64| {
-        <D::Eig as From<Complex64>>::from(value)
-    })?;
+    let d_tensor = diagonal_bond_tensor(
+        rule,
+        &eigenvalues,
+        &<D::Eig as FactorScalar>::from_complex64,
+    )?;
     Ok(EigFull {
         d: d_tensor,
         v: v_tensor,
@@ -1386,8 +1478,6 @@ where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
-    D::Eig: FactorScalar<Eig = D::Eig> + From<Complex64>,
-    Complex64: From<D::Eig>,
 {
     let full = eig_full(dense, rule, tensor)?;
     let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation);
@@ -1417,9 +1507,11 @@ where
             .unwrap_or(0)
     };
     let v_tensor = sliced_bond_tensor(rule, &full.v, NOUT, &kept_of)?;
-    let d_tensor = diagonal_bond_tensor(rule, &eigenvalues, &|value: Complex64| {
-        <D::Eig as From<Complex64>>::from(value)
-    })?;
+    let d_tensor = diagonal_bond_tensor(
+        rule,
+        &eigenvalues,
+        &<D::Eig as FactorScalar>::from_complex64,
+    )?;
     Ok(EigTrunc {
         d: d_tensor,
         v: v_tensor,
@@ -1454,8 +1546,6 @@ where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
-    D::Eig: FactorScalar<Eig = D::Eig> + From<Complex64>,
-    Complex64: From<D::Eig>,
 {
     eig_full(dense, rule, tensor).map(|eig| eig.eigenvalues)
 }

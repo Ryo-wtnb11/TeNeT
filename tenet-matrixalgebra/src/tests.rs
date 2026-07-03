@@ -1496,3 +1496,132 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
     let reconstructed = crate::compose::compose(&mut context, &rule, &positive, &isometry).unwrap();
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
+
+#[test]
+fn single_precision_svd_and_eig_work_end_to_end() {
+    use num_complex::Complex32;
+    let rule = Z2FusionRule;
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg_dim = sectors.len() * degeneracy;
+    let homspace = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        )
+    };
+    let space = || {
+        let hom = homspace();
+        let key_count = hom.fusion_tree_keys(&rule).len();
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
+            hom,
+            &rule,
+            vec![vec![degeneracy; 4]; key_count],
+        )
+        .unwrap()
+    };
+    let f32_space = space();
+    let len = f32_space.required_len().unwrap();
+    let tensor_f32 = TensorMap::<f32, 2, 2>::from_vec_with_fusion_space(
+        (0..len)
+            .map(|i| ((i * 7 + 3) % 23) as f32 * 0.5 - 5.0)
+            .collect(),
+        f32_space,
+    )
+    .unwrap();
+
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let svd = svd_trunc(
+        &mut dense_executor,
+        &rule,
+        &tensor_f32,
+        &Truncation::rank(8),
+    )
+    .unwrap();
+    assert!(svd.error > 0.0);
+
+    // Reconstruct through an f32 contraction and compare against the
+    // truncation error at single precision.
+    let mut scaled_vh = svd.vh.clone();
+    {
+        let structure = std::sync::Arc::clone(scaled_vh.structure());
+        for index in 0..structure.block_count() {
+            let block = structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            let sector = key
+                .codomain_tree()
+                .coupled()
+                .unwrap_or_else(|| rule.vacuum());
+            let values = &svd
+                .singular_values
+                .iter()
+                .find(|entry| entry.sector == sector)
+                .unwrap()
+                .values;
+            let shape = block.shape().to_vec();
+            let strides = block.strides().to_vec();
+            let offset = block.offset();
+            let count = shape.iter().product::<usize>();
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..count {
+                let position = offset
+                    + indices
+                        .iter()
+                        .zip(&strides)
+                        .map(|(&i, &s)| i * s)
+                        .sum::<usize>();
+                scaled_vh.data_mut()[position] *= values[indices[0]] as f32;
+                for axis in 0..shape.len() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+        }
+    }
+    let mut context =
+        TensorContractFusionExecutionContext::<f32, TreeTransformBuiltinRuleCacheKey>::default();
+    let reconstructed = crate::compose::compose(&mut context, &rule, &svd.u, &scaled_vh).unwrap();
+    let distance = tensor_f32
+        .data()
+        .iter()
+        .zip(reconstructed.data())
+        .map(|(lhs, rhs)| ((lhs - rhs) as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        (distance - svd.error).abs() < 1e-3,
+        "f32 distance {distance} != error {}",
+        svd.error
+    );
+
+    // Complex32 general eigendecomposition returns Complex32 factors.
+    let c32_space = space();
+    let len = c32_space.required_len().unwrap();
+    let tensor_c32 = TensorMap::<Complex32, 2, 2>::from_vec_with_fusion_space(
+        (0..len)
+            .map(|i| {
+                Complex32::new(
+                    ((i * 3 + 1) % 13) as f32 - 6.0,
+                    ((i * 5 + 2) % 11) as f32 - 5.0,
+                )
+            })
+            .collect(),
+        c32_space,
+    )
+    .unwrap();
+    let eig = eig_full(&mut dense_executor, &rule, &tensor_c32).unwrap();
+    assert!(!eig.eigenvalues.is_empty());
+    for entry in &eig.eigenvalues {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0].norm() >= pair[1].norm() - 1e-6);
+        }
+    }
+    let _: &TensorMap<Complex32, 2, 1> = &eig.v;
+}
