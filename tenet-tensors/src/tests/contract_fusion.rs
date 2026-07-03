@@ -1853,14 +1853,14 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
         lhs_keys[0].domain_tree().innerlines()[0],
         lhs_keys[1].domain_tree().innerlines()[0]
     );
-    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes_packed(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         lhs_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes_packed(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
         rhs_hom,
         &rule,

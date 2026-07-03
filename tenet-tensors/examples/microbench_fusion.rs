@@ -127,16 +127,16 @@ where
             FusionProductSpace::new([leg(), leg()]),
         )
     };
-    let coupled_layout = std::env::var("MICROBENCH_LAYOUT")
-        .map(|value| value == "coupled")
+    let packed_layout = std::env::var("MICROBENCH_LAYOUT")
+        .map(|value| value == "packed")
         .unwrap_or(false);
     let space = |hom: FusionTreeHomSpace| {
         let key_count = hom.fusion_tree_keys(rule).len();
         let dense =
             TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
         let shapes = vec![vec![degeneracy; 4]; key_count];
-        if coupled_layout {
-            FusionTensorMapSpace::from_degeneracy_shapes_coupled(dense, hom, rule, shapes).unwrap()
+        if packed_layout {
+            FusionTensorMapSpace::from_degeneracy_shapes_packed(dense, hom, rule, shapes).unwrap()
         } else {
             FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, rule, shapes).unwrap()
         }

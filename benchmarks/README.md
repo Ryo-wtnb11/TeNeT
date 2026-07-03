@@ -81,7 +81,7 @@ overhead worth a look once packing is gone.
 ## Coupled-sector layout results (same date, after `from_degeneracy_shapes_coupled` + direct GEMM)
 
 With tensors and dynamic-route canonical scratch in the coupled-sector matrix
-layout (`MICROBENCH_LAYOUT=coupled`), the fusion-block plan detects that each
+layout (now the default; `MICROBENCH_LAYOUT=packed` opts out), the fusion-block plan detects that each
 group matrix already exists in storage and hands it to GEMM directly — no
 pack, no scatter (locked by `coupled_layout_compose_uses_direct_gemm_groups`).
 
@@ -263,3 +263,11 @@ equality remains the fallback — semantics unchanged, no thresholds).
 The remaining matmul bucket is 0.84 µs per coupled-sector GEMM vs
 TensorKit's 0.82 µs per `mul!` — per-call parity; the residual ~0.1–0.2 µs
 is cache-key touch and facade entry, shared by all routes.
+
+## Layout default flip (2026-07-03)
+
+`FusionTensorMapSpace::from_degeneracy_shapes` now builds the
+TensorKit-equivalent coupled-sector matrix layout by default;
+`from_degeneracy_shapes_packed` keeps the old packed layout for
+storage-layout tests and packed interop. All earlier `MICROBENCH_LAYOUT=coupled`
+runs correspond to today's defaults.

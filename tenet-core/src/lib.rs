@@ -950,7 +950,30 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         })
     }
 
+    /// Default constructor: TensorKit-equivalent coupled-sector matrix
+    /// layout (see [`Self::from_degeneracy_shapes_coupled`]). Use
+    /// [`Self::from_degeneracy_shapes_packed`] to opt into the packed
+    /// column-major layout instead.
     pub fn from_degeneracy_shapes<R, Shapes>(
+        dense_space: TensorMapSpace<NOUT, NIN>,
+        homspace: FusionTreeHomSpace,
+        rule: &R,
+        shapes: Shapes,
+    ) -> Result<Self, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        Self::from_degeneracy_shapes_coupled(dense_space, homspace, rule, shapes)
+    }
+
+    /// Packed column-major layout: each fusion-tree subblock is stored
+    /// contiguously in key order. The canonical (codomain | domain)
+    /// matricization then requires packing, so contractions and
+    /// factorizations are slower than with the coupled layout; kept for
+    /// storage-layout tests and interop with packed external data.
+    pub fn from_degeneracy_shapes_packed<R, Shapes>(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
         rule: &R,
@@ -6292,7 +6315,7 @@ mod tests {
         };
         let dense = || TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap();
         let hom = homspace();
-        let packed_space = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes(
+        let packed_space = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_packed(
             dense(),
             hom.clone(),
             &rule,
