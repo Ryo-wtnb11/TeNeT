@@ -2,7 +2,7 @@ use core::ops::{Add, Mul};
 
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
-use tenet_dense::{DenseRead, DenseView, DenseViewMut, DenseWrite};
+use tenet_dense::{DenseRead, DenseScalar, DenseView, DenseViewMut, DenseWrite};
 
 pub trait ConjugateValue: Copy + strided_kernel::ElementOpApply {
     fn maybe_conj(self, conjugate: bool) -> Self;
@@ -189,6 +189,8 @@ pub trait DenseBlockScalar:
 {
     fn dense_read(view: DenseView<'_, Self>) -> DenseRead<'_>;
     fn dense_write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_>;
+    /// Dtype-erased carrier for accumulate-form GEMM parameters.
+    fn dense_scalar(self) -> DenseScalar;
 }
 
 #[doc(hidden)]
@@ -205,6 +207,10 @@ macro_rules! impl_dense_block_scalar {
 
             fn dense_write(view: DenseViewMut<'_, Self>) -> DenseWrite<'_> {
                 DenseWrite::$write_variant(view)
+            }
+
+            fn dense_scalar(self) -> DenseScalar {
+                DenseScalar::$read_variant(self)
             }
         }
     };

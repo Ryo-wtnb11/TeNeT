@@ -421,6 +421,37 @@ impl DenseTensor {
     }
 }
 
+/// Dtype-erased GEMM scalar for the accumulate-form matmul seam
+/// (`C = alpha * A * B + beta * C`). Mirrors the BLAS/cuTENSOR parameter
+/// shape so backends can consume it without generics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DenseScalar {
+    F32(f32),
+    F64(f64),
+    C32(Complex32),
+    C64(Complex64),
+}
+
+impl DenseScalar {
+    pub fn is_one(&self) -> bool {
+        match self {
+            Self::F32(value) => *value == 1.0,
+            Self::F64(value) => *value == 1.0,
+            Self::C32(value) => *value == Complex32::new(1.0, 0.0),
+            Self::C64(value) => *value == Complex64::new(1.0, 0.0),
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::F32(value) => *value == 0.0,
+            Self::F64(value) => *value == 0.0,
+            Self::C32(value) => *value == Complex32::new(0.0, 0.0),
+            Self::C64(value) => *value == Complex64::new(0.0, 0.0),
+        }
+    }
+}
+
 pub trait DenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
@@ -452,6 +483,27 @@ pub trait DenseExecutor {
         rhs: DenseRead<'_>,
     ) -> Result<(), DenseError> {
         self.dot_general_into(output, lhs, rhs, &DenseDotConfig::matmul())
+    }
+
+    /// Accumulate-form matmul: `output = alpha * lhs * rhs + beta * output`
+    /// (BLAS gemm semantics). The default supports only the overwrite case
+    /// `alpha = 1, beta = 0`; accumulate-capable backends override it.
+    fn matmul_axpby_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+    ) -> Result<(), DenseError> {
+        if alpha.is_one() && beta.is_zero() {
+            return self.matmul_into(output, lhs, rhs);
+        }
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "matmul_axpby_into",
+            message: "executor does not implement the accumulate-form matmul".to_string(),
+        })
     }
 }
 
@@ -671,6 +723,17 @@ mod tenferro_adapter {
         ) -> Result<(), DenseError> {
             self.inner.matmul_into(output, lhs, rhs)
         }
+
+        fn matmul_axpby_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            alpha: DenseScalar,
+            beta: DenseScalar,
+        ) -> Result<(), DenseError> {
+            self.inner.matmul_axpby_into(output, lhs, rhs, alpha, beta)
+        }
     }
 
     impl<K> DenseExecutor for DenseExecutorWithKernel<K>
@@ -736,6 +799,41 @@ mod tenferro_adapter {
             } else {
                 self.tenferro_matmul_into(output, lhs, rhs)
             }
+        }
+
+        fn matmul_axpby_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            alpha: DenseScalar,
+            beta: DenseScalar,
+        ) -> Result<(), DenseError> {
+            // Overwrite case keeps the kernel-backend fast path.
+            if alpha.is_one() && beta.is_zero() {
+                return self.matmul_into(output, lhs, rhs);
+            }
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            let accumulation = tenferro_tensor::DotGeneralAccumulation {
+                lhs_conj: false,
+                rhs_conj: false,
+                alpha: tenferro_scalar(alpha),
+                beta: tenferro_scalar(beta),
+            };
+            self.backend
+                .dot_general_read_into_accum(lhs, rhs, &self.matmul_config, accumulation, output)
+                .map_err(|err| tenferro_error("dot_general_accum", err))
+        }
+    }
+
+    fn tenferro_scalar(value: DenseScalar) -> tenferro_tensor::ContractionScalar {
+        match value {
+            DenseScalar::F32(value) => tenferro_tensor::ContractionScalar::F32(value),
+            DenseScalar::F64(value) => tenferro_tensor::ContractionScalar::F64(value),
+            DenseScalar::C32(value) => tenferro_tensor::ContractionScalar::C32(value),
+            DenseScalar::C64(value) => tenferro_tensor::ContractionScalar::C64(value),
         }
     }
 

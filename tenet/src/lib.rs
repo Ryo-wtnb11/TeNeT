@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 //! Public facade for the active TeNeT rebuild.
+//!
+#![doc = include_str!("tutorial.md")]
 
 pub mod core {
     pub use tenet_core::*;

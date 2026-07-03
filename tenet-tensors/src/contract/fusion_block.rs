@@ -54,9 +54,20 @@ where
         rows: usize,
         contracted: usize,
         cols: usize,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError> {
-        self.backend
-            .matmul_rank2_into_raw(self.workspace, dst, lhs, rhs, rows, contracted, cols)
+        self.backend.matmul_rank2_axpby_into_raw(
+            self.workspace,
+            dst,
+            lhs,
+            rhs,
+            rows,
+            contracted,
+            cols,
+            alpha,
+            beta,
+        )
     }
 }
 

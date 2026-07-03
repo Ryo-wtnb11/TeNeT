@@ -152,6 +152,14 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
     assert_eq!(profile.lhs_transform_calls, 0);
     assert_eq!(profile.rhs_transform_calls, 0);
     assert!(profile.canonical_contract_groups > 0);
+    // alpha = 2, beta = 3 and every group still runs the direct GEMM: the
+    // accumulate factors ride on the GEMM itself (TensorKit mul! semantics),
+    // never on a scatter pass.
+    assert_eq!(
+        profile.canonical_direct_gemm_groups,
+        profile.canonical_contract_groups
+    );
+    assert_eq!(profile.canonical_scatter, std::time::Duration::ZERO);
     assert_eq!(profile.tree_replay.single_blocks, 0);
     assert_eq!(profile.tree_replay.multi_blocks, 0);
 }

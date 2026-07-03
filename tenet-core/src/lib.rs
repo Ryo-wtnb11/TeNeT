@@ -162,6 +162,17 @@ impl<const NOUT: usize, const NIN: usize> TensorMapSpace<NOUT, NIN> {
         })
     }
 
+    /// Builds a dense tensor-map space from codomain and domain dimensions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::TensorMapSpace;
+    ///
+    /// let space = TensorMapSpace::<2, 1>::from_dims([2, 3], [4]).unwrap();
+    /// assert_eq!(space.dims(), &[2, 3, 4]);
+    /// assert_eq!(space.dense_dim(), 24);
+    /// ```
     pub fn from_dims(codomain: [usize; NOUT], domain: [usize; NIN]) -> Result<Self, CoreError> {
         Self::new(ProductSpace::new(codomain)?, ProductSpace::new(domain)?)
     }
@@ -280,6 +291,23 @@ pub struct SectorLeg {
 }
 
 impl SectorLeg {
+    /// Builds one external leg with a set of allowed sectors.
+    ///
+    /// Duplicate sectors are removed and the sector ids are stored in sorted
+    /// order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{SectorLeg, Z2Irrep};
+    ///
+    /// let leg = SectorLeg::new([Z2Irrep::ODD, Z2Irrep::EVEN, Z2Irrep::ODD], false);
+    /// assert_eq!(leg.sectors().len(), 2);
+    /// assert!(!leg.is_dual());
+    ///
+    /// let dual_leg = SectorLeg::new([Z2Irrep::ODD], true);
+    /// assert!(dual_leg.is_dual());
+    /// ```
     pub fn new<Sectors, Sector>(sectors: Sectors, is_dual: bool) -> Self
     where
         Sectors: IntoIterator<Item = Sector>,
@@ -332,6 +360,19 @@ pub struct FusionProductSpace {
 }
 
 impl FusionProductSpace {
+    /// Builds a product of external fusion legs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{FusionProductSpace, SectorLeg, Z2Irrep};
+    ///
+    /// let space = FusionProductSpace::new([
+    ///     SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false),
+    ///     SectorLeg::new([Z2Irrep::EVEN], true),
+    /// ]);
+    /// assert_eq!(space.len(), 2);
+    /// ```
     pub fn new<Legs>(legs: Legs) -> Self
     where
         Legs: IntoIterator<Item = SectorLeg>,
@@ -378,10 +419,35 @@ pub struct FusionTreeHomSpace {
 }
 
 impl FusionTreeHomSpace {
+    /// Builds a fusion-tree hom space from codomain and domain product spaces.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, Z2Irrep};
+    ///
+    /// let hom = FusionTreeHomSpace::new(
+    ///     FusionProductSpace::new([SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false)]),
+    ///     FusionProductSpace::new([SectorLeg::new([Z2Irrep::EVEN], false)]),
+    /// );
+    /// assert_eq!(hom.codomain().len(), 1);
+    /// assert_eq!(hom.domain().len(), 1);
+    /// ```
     pub fn new(codomain: FusionProductSpace, domain: FusionProductSpace) -> Self {
         Self { codomain, domain }
     }
 
+    /// Builds a hom space when each external leg has exactly one sector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{FusionTreeHomSpace, Z2Irrep};
+    ///
+    /// let hom = FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::ODD]);
+    /// assert_eq!(hom.codomain().len(), 1);
+    /// assert_eq!(hom.domain().len(), 1);
+    /// ```
     pub fn from_sectors<Codomain, Domain, CodomainSector, DomainSector>(
         codomain: Codomain,
         domain: Domain,
@@ -406,6 +472,17 @@ impl FusionTreeHomSpace {
         )
     }
 
+    /// Builds a hom space from raw integer sector ids.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::FusionTreeHomSpace;
+    ///
+    /// let hom = FusionTreeHomSpace::from_sector_ids([0, 1], [1]);
+    /// assert_eq!(hom.codomain().len(), 2);
+    /// assert_eq!(hom.domain().len(), 1);
+    /// ```
     pub fn from_sector_ids<Codomain, Domain>(codomain: Codomain, domain: Domain) -> Self
     where
         Codomain: IntoIterator<Item = usize>,
@@ -922,6 +999,25 @@ pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
 }
 
 impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
+    /// Builds a symmetric tensor-map space from an explicit block structure.
+    ///
+    /// Prefer [`Self::from_degeneracy_shapes`] for ordinary construction; use
+    /// this method when the block structure has already been prepared.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{
+    ///     BlockStructure, FusionTensorMapSpace, FusionTreeHomSpace, TensorMapSpace,
+    /// };
+    ///
+    /// let dense = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    /// let hom = FusionTreeHomSpace::from_sector_ids([0], std::iter::empty::<usize>());
+    /// let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+    ///
+    /// let space = FusionTensorMapSpace::new(dense, hom, structure).unwrap();
+    /// assert_eq!(space.required_len().unwrap(), 2);
+    /// ```
     pub fn new(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
@@ -953,6 +1049,24 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// Default constructor: TensorKit-equivalent coupled-sector matrix
     /// layout (see [`Self::from_degeneracy_shapes_coupled`]). This is the
     /// only product layout.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{
+    ///     FusionTensorMapSpace, FusionTreeHomSpace, TensorMapSpace, Z2FusionRule, Z2Irrep,
+    /// };
+    ///
+    /// let rule = Z2FusionRule;
+    /// let space = FusionTensorMapSpace::from_degeneracy_shapes(
+    ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     &rule,
+    ///     [vec![1, 1]],
+    /// )
+    /// .unwrap();
+    /// assert_eq!(space.required_len().unwrap(), 1);
+    /// ```
     pub fn from_degeneracy_shapes<R, Shapes>(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
@@ -976,6 +1090,29 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// (codomain | domain) matricization needs no packing. Block keys and
     /// their order are identical to [`Self::from_degeneracy_shapes`]; only
     /// strides and offsets differ.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{
+    ///     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg,
+    ///     TensorMapSpace, Z2FusionRule, Z2Irrep,
+    /// };
+    ///
+    /// let rule = Z2FusionRule;
+    /// let leg = || SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false);
+    /// let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+    ///     TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+    ///     FusionTreeHomSpace::new(
+    ///         FusionProductSpace::new([leg()]),
+    ///         FusionProductSpace::new([leg()]),
+    ///     ),
+    ///     &rule,
+    ///     [vec![1, 1], vec![1, 1]],
+    /// )
+    /// .unwrap();
+    /// assert_eq!(space.required_len().unwrap(), 2);
+    /// ```
     pub fn from_degeneracy_shapes_coupled<R, Shapes>(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
@@ -5409,10 +5546,44 @@ pub struct TensorMap<T, const NOUT: usize, const NIN: usize, S = Trivial, D = Ve
 pub type Tensor<T, const N: usize, S = Trivial> = TensorMap<T, N, 0, S>;
 
 impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T>> {
+    /// Builds a dense tensor backed by `Vec<T>` and the default trivial block
+    /// structure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{TensorMap, TensorMapSpace};
+    ///
+    /// let space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
+    /// let tensor = TensorMap::<f64, 1, 1>::from_vec(
+    ///     vec![1.0, 3.0, 2.0, 4.0],
+    ///     space,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(tensor.data(), &[1.0, 3.0, 2.0, 4.0]);
+    /// ```
     pub fn from_vec(data: Vec<T>, space: TensorMapSpace<NOUT, NIN>) -> Result<Self, CoreError> {
         Self::from_vec_with_structure(data, space.clone(), BlockStructure::trivial(space.dims())?)
     }
 
+    /// Builds a dense tensor backed by `Vec<T>` and an explicit block
+    /// structure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{BlockStructure, TensorMap, TensorMapSpace, Trivial};
+    ///
+    /// let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    /// let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+    /// let tensor = TensorMap::<i32, 1, 0>::from_vec_with_structure(
+    ///     vec![10, 20],
+    ///     space,
+    ///     structure,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(tensor.data(), &[10, 20]);
+    /// ```
     pub fn from_vec_with_structure(
         data: Vec<T>,
         space: TensorMapSpace<NOUT, NIN>,
@@ -5429,6 +5600,31 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         Self::from_storage_with_shared_structure(data, space, structure)
     }
 
+    /// Builds a symmetric tensor backed by `Vec<T>`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{
+    ///     FusionTensorMapSpace, FusionTreeHomSpace, TensorMap, TensorMapSpace,
+    ///     Z2FusionRule, Z2Irrep,
+    /// };
+    ///
+    /// let rule = Z2FusionRule;
+    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     &rule,
+    ///     [vec![1, 1]],
+    /// )
+    /// .unwrap();
+    /// let tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+    ///     vec![3.5],
+    ///     fusion_space,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(tensor.data(), &[3.5]);
+    /// ```
     pub fn from_vec_with_fusion_space(
         data: Vec<T>,
         fusion_space: FusionTensorMapSpace<NOUT, NIN>,
@@ -5447,6 +5643,31 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
     /// element; positions not covered by any block keep `background`.
     /// Layout-independent: packed and coupled spaces produce identical
     /// tensors from the same `fill`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{
+    ///     FusionTensorMapSpace, FusionTreeHomSpace, TensorMap, TensorMapSpace,
+    ///     Z2FusionRule, Z2Irrep,
+    /// };
+    ///
+    /// let rule = Z2FusionRule;
+    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     &rule,
+    ///     [vec![1, 1]],
+    /// )
+    /// .unwrap();
+    /// let tensor = TensorMap::<i32, 1, 1>::from_block_fn_with_fusion_space(
+    ///     fusion_space,
+    ///     0,
+    ///     |_key, indices| 10 + indices[0] as i32,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(tensor.data(), &[10]);
+    /// ```
     pub fn from_block_fn_with_fusion_space<F>(
         fusion_space: FusionTensorMapSpace<NOUT, NIN>,
         background: T,
@@ -5464,6 +5685,17 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
 }
 
 impl<T: Clone, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T>> {
+    /// Builds a dense tensor filled with a single value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{TensorMap, TensorMapSpace};
+    ///
+    /// let space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    /// let tensor = TensorMap::<f64, 2, 0>::filled(1.25, space).unwrap();
+    /// assert_eq!(tensor.data(), &[1.25; 6]);
+    /// ```
     pub fn filled(value: T, space: TensorMapSpace<NOUT, NIN>) -> Result<Self, CoreError> {
         Self::from_vec(vec![value; space.dense_dim()], space)
     }
@@ -5473,6 +5705,24 @@ impl<T, const NOUT: usize, const NIN: usize, S, D> TensorMap<T, NOUT, NIN, S, D>
 where
     D: TensorStorage<T>,
 {
+    /// Builds a tensor from caller-provided storage and an explicit block
+    /// structure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{BlockStructure, TensorMap, TensorMapSpace, Trivial};
+    ///
+    /// let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    /// let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+    /// let tensor = TensorMap::<i32, 1, 0, Trivial, Vec<i32>>::from_storage_with_structure(
+    ///     vec![1, 2],
+    ///     space,
+    ///     structure,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(tensor.data(), &[1, 2]);
+    /// ```
     pub fn from_storage_with_structure(
         storage: D,
         space: TensorMapSpace<NOUT, NIN>,
@@ -5489,6 +5739,31 @@ where
         Self::from_storage_parts(storage, space, structure, None)
     }
 
+    /// Builds a symmetric tensor from caller-provided storage.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet_core::{
+    ///     FusionTensorMapSpace, FusionTreeHomSpace, TensorMap, TensorMapSpace,
+    ///     Trivial, Z2FusionRule, Z2Irrep,
+    /// };
+    ///
+    /// let rule = Z2FusionRule;
+    /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     &rule,
+    ///     [vec![1, 1]],
+    /// )
+    /// .unwrap();
+    /// let tensor = TensorMap::<f64, 1, 1, Trivial, Vec<f64>>::from_storage_with_fusion_space(
+    ///     vec![2.0],
+    ///     fusion_space,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(tensor.data(), &[2.0]);
+    /// ```
     pub fn from_storage_with_fusion_space(
         storage: D,
         fusion_space: FusionTensorMapSpace<NOUT, NIN>,

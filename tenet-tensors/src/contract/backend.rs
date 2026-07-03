@@ -89,6 +89,32 @@ where
         contracted: usize,
         cols: usize,
     ) -> Result<(), OperationError>;
+
+    /// Accumulate-form rank-2 GEMM: `dst = alpha * lhs * rhs + beta * dst`
+    /// over column-major slices (BLAS semantics). The default only covers the
+    /// overwrite case; accumulate-capable backends override it.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_rank2_axpby_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        if alpha.is_one() && beta.is_zero() {
+            return self.matmul_rank2_into_raw(
+                workspace, dst_data, lhs_data, rhs_data, rows, contracted, cols,
+            );
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "contract backend does not implement the accumulate-form rank-2 GEMM",
+        })
+    }
 }
 
 /// Explicit marker for the legacy host-slice tensor-contract backend family.
@@ -281,6 +307,48 @@ where
         ));
         self.dense_mut()
             .matmul_into(output, lhs, rhs)
+            .map_err(OperationError::Dense)
+    }
+
+    fn matmul_rank2_axpby_into_raw(
+        &mut self,
+        _workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        let lhs_shape = [rows, contracted];
+        let lhs_strides = [1, rows];
+        let rhs_shape = [contracted, cols];
+        let rhs_strides = [1, contracted];
+        let dst_shape = [rows, cols];
+        let dst_strides = [1, rows];
+        // Same plan-compile validation contract as matmul_rank2_into_raw.
+        let lhs = D::dense_read(DenseView::new_trusted(
+            lhs_data,
+            &lhs_shape,
+            &lhs_strides,
+            0,
+        ));
+        let rhs = D::dense_read(DenseView::new_trusted(
+            rhs_data,
+            &rhs_shape,
+            &rhs_strides,
+            0,
+        ));
+        let output = D::dense_write(DenseViewMut::new_trusted(
+            dst_data,
+            &dst_shape,
+            &dst_strides,
+            0,
+        ));
+        self.dense_mut()
+            .matmul_axpby_into(output, lhs, rhs, alpha.dense_scalar(), beta.dense_scalar())
             .map_err(OperationError::Dense)
     }
 }

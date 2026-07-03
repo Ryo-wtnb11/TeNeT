@@ -26,6 +26,9 @@ use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoeff
 /// half needs from a contraction backend. The symmetric layer adapts its
 /// contraction backends onto this.
 pub trait Rank2Gemm<D> {
+    /// `dst = alpha * lhs * rhs + beta * dst` over column-major matrices
+    /// (BLAS gemm semantics).
+    #[allow(clippy::too_many_arguments)]
     fn matmul_rank2(
         &mut self,
         dst: &mut [D],
@@ -34,6 +37,8 @@ pub trait Rank2Gemm<D> {
         rows: usize,
         contracted: usize,
         cols: usize,
+        alpha: D,
+        beta: D,
     ) -> Result<(), OperationError>;
 }
 
@@ -132,9 +137,8 @@ impl CanonicalFusionBlockContractPlan {
         )?;
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
-        let trivial_scale = alpha.is_one() && beta.is_zero();
         for group in &self.groups {
-            if !group.is_fully_direct(trivial_scale) {
+            if !group.is_fully_direct() {
                 fusion_workspace
                     .buffers
                     .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
@@ -195,11 +199,10 @@ impl CanonicalFusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
         profile.canonical_scale += start.elapsed();
 
-        let trivial_scale = alpha.is_one() && beta.is_zero();
         for group in &self.groups {
             profile.canonical_contract_groups += 1;
 
-            if !group.is_fully_direct(trivial_scale) {
+            if !group.is_fully_direct() {
                 let start = std::time::Instant::now();
                 fusion_workspace
                     .buffers
@@ -236,11 +239,7 @@ impl CanonicalFusionBlockContractPlan {
                 profile.canonical_direct_pack_skips += 1;
             }
 
-            let dst_direct = if trivial_scale {
-                group.dst.direct_offset
-            } else {
-                None
-            };
+            let dst_direct = group.dst.direct_offset;
             let start = std::time::Instant::now();
             {
                 let (lhs, rhs, dst) = fusion_workspace.buffers.packed.inputs_and_destination_mut();
@@ -262,11 +261,21 @@ impl CanonicalFusionBlockContractPlan {
                     Some(base) => {
                         let dst_slice =
                             direct_slice_mut(dst_data, base, group.dst.rows, group.dst.cols)?;
-                        matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice)?;
+                        matmul_group_plan(
+                            gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta,
+                        )?;
                         profile.canonical_direct_gemm_groups += 1;
                     }
                     None => {
-                        matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst.as_mut_slice())?;
+                        matmul_group_plan(
+                            gemm,
+                            group,
+                            lhs_slice,
+                            rhs_slice,
+                            dst.as_mut_slice(),
+                            D::one(),
+                            D::zero(),
+                        )?;
                     }
                 }
             }
@@ -702,10 +711,10 @@ pub struct CanonicalFusionBlockContractGroupPlan {
 
 impl CanonicalFusionBlockContractGroupPlan {
     /// True when GEMM can read both operands from storage and write the
-    /// destination group matrix in place (no pack, no scatter).
-    fn is_fully_direct(&self, trivial_scale: bool) -> bool {
-        trivial_scale
-            && self.lhs.direct_offset.is_some()
+    /// destination group matrix in place (no pack, no scatter); alpha/beta
+    /// are handled by the GEMM itself.
+    fn is_fully_direct(&self) -> bool {
+        self.lhs.direct_offset.is_some()
             && self.rhs.direct_offset.is_some()
             && self.dst.direct_offset.is_some()
     }
@@ -944,11 +953,7 @@ where
             scratch.rhs_mut().as_mut_slice(),
         )?;
     }
-    let dst_direct = if alpha.is_one() && beta.is_zero() {
-        group.dst.direct_offset
-    } else {
-        None
-    };
+    let dst_direct = group.dst.direct_offset;
     let (lhs_scratch, rhs_scratch, dst_scratch) = scratch.inputs_and_destination_mut();
     let lhs_slice = direct_or_scratch_slice(
         lhs_data,
@@ -967,7 +972,7 @@ where
     match dst_direct {
         Some(base) => {
             let dst_slice = direct_slice_mut(dst_data, base, group.dst.rows, group.dst.cols)?;
-            matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice)
+            matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta)
         }
         None => {
             matmul_group_plan(
@@ -976,6 +981,8 @@ where
                 lhs_slice,
                 rhs_slice,
                 dst_scratch.as_mut_slice(),
+                D::one(),
+                D::zero(),
             )?;
             scatter_group(
                 kernels,
@@ -1094,6 +1101,8 @@ fn matmul_group_plan<G, D>(
     lhs: &[D],
     rhs: &[D],
     dst: &mut [D],
+    alpha: D,
+    beta: D,
 ) -> Result<(), OperationError>
 where
     G: Rank2Gemm<D>,
@@ -1106,5 +1115,7 @@ where
         group.lhs.rows,
         group.lhs.cols,
         group.rhs.cols,
+        alpha,
+        beta,
     )
 }

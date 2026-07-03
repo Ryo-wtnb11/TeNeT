@@ -297,3 +297,15 @@ at element 0). Complete grids also mean the coupled matrix layout always
 applies to scratch. Corrected-baseline timings (d=16, vs TensorKit):
 U1 swap 2 771/4 033, U1 swap+out 3 526/4 709, SU2 swap+out
 18 838/19 914 — still at-or-faster everywhere except compose (~1.05×).
+
+### alpha/beta absorbed into the GEMM seam (2026-07-04)
+
+`Rank2Gemm` and the dense seam now carry BLAS-native `C = αAB + βC`
+(tenferro#1286: `dot_general_read_into_accum`). The canonical replay
+writes the destination coupled matrix directly for ANY α/β — the
+trivial-scale restriction on the direct path is gone, and a profiled
+regression test pins `canonical_scatter == 0` with α=2, β=3. The
+overwrite case keeps the kernel fast path (compose d=4 unchanged at
+4.4 µs). The microbench itself runs α=1/β=0, so its numbers are
+unchanged by design; the win applies to accumulate-form workloads
+(energy sums, environment updates).
