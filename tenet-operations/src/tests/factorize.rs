@@ -759,39 +759,75 @@ fn eigh_trunc_truncates_by_magnitude_and_keeps_eigen_equation() {
     assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
 }
 
-fn dense_sector_matrices(
+fn dense_sector_matrices<const A: usize, const B: usize>(
     tensor_nout: usize,
-    t: &TensorMap<f64, 2, 1>,
+    t: &TensorMap<f64, A, B>,
 ) -> Vec<(SectorId, usize, usize, Vec<f64>)> {
-    // Matricize a (2,1) factor per coupled sector (rows = codomain trees x
-    // degeneracy, cols = bond states) for dense checks in tests.
+    // Matricize per coupled sector (rows = codomain trees x degeneracy,
+    // cols = domain trees x degeneracy) for dense checks in tests.
+    struct SectorAccumulator {
+        sector: SectorId,
+        rows: usize,
+        cols: usize,
+        row_trees: Vec<(FusionTreeKey, usize)>,
+        col_trees: Vec<(FusionTreeKey, usize)>,
+        entries: Vec<(usize, usize, f64)>,
+    }
     let structure = std::sync::Arc::clone(t.structure());
-    let mut sectors: Vec<(SectorId, usize, usize, Vec<(usize, usize, f64)>)> = Vec::new();
+    let mut sectors: Vec<SectorAccumulator> = Vec::new();
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
         let sector = key
-            .domain_tree()
+            .codomain_tree()
             .coupled()
+            .or_else(|| key.domain_tree().coupled())
             .unwrap_or_else(|| key.domain_tree().uncoupled()[0]);
-        let entry = match sectors
-            .iter_mut()
-            .find(|(candidate, ..)| *candidate == sector)
-        {
+        let entry = match sectors.iter_mut().find(|entry| entry.sector == sector) {
             Some(entry) => entry,
             None => {
-                sectors.push((sector, 0, 0, Vec::new()));
+                sectors.push(SectorAccumulator {
+                    sector,
+                    rows: 0,
+                    cols: 0,
+                    row_trees: Vec::new(),
+                    col_trees: Vec::new(),
+                    entries: Vec::new(),
+                });
                 sectors.last_mut().unwrap()
             }
         };
         let shape = block.shape().to_vec();
         let row_dim: usize = shape[..tensor_nout].iter().product();
-        let col_dim = shape[tensor_nout];
-        let row_offset = entry.1;
-        entry.1 += row_dim;
-        entry.2 = entry.2.max(col_dim);
+        let col_dim: usize = shape[tensor_nout..].iter().product();
+        let row_offset = match entry
+            .row_trees
+            .iter()
+            .find(|(tree, _)| tree == key.codomain_tree())
+        {
+            Some((_, offset)) => *offset,
+            None => {
+                let offset = entry.rows;
+                entry.row_trees.push((key.codomain_tree().clone(), offset));
+                entry.rows += row_dim;
+                offset
+            }
+        };
+        let col_offset = match entry
+            .col_trees
+            .iter()
+            .find(|(tree, _)| tree == key.domain_tree())
+        {
+            Some((_, offset)) => *offset,
+            None => {
+                let offset = entry.cols;
+                entry.col_trees.push((key.domain_tree().clone(), offset));
+                entry.cols += col_dim;
+                offset
+            }
+        };
         let strides = block.strides().to_vec();
         let offset = block.offset();
         let mut indices = vec![0usize; shape.len()];
@@ -808,9 +844,15 @@ fn dense_sector_matrices(
                 row += indices[axis] * stride;
                 stride *= shape[axis];
             }
+            let mut col = 0;
+            let mut col_stride = 1;
+            for axis in tensor_nout..shape.len() {
+                col += indices[axis] * col_stride;
+                col_stride *= shape[axis];
+            }
             entry
-                .3
-                .push((row_offset + row, indices[tensor_nout], t.data()[position]));
+                .entries
+                .push((row_offset + row, col_offset + col, t.data()[position]));
             for axis in 0..shape.len() {
                 indices[axis] += 1;
                 if indices[axis] < shape[axis] {
@@ -822,12 +864,12 @@ fn dense_sector_matrices(
     }
     sectors
         .into_iter()
-        .map(|(sector, rows, cols, entries)| {
-            let mut matrix = vec![0.0; rows * cols];
-            for (row, col, value) in entries {
-                matrix[row + rows * col] = value;
+        .map(|entry| {
+            let mut matrix = vec![0.0; entry.rows * entry.cols];
+            for (row, col, value) in entry.entries {
+                matrix[row + entry.rows * col] = value;
             }
-            (sector, rows, cols, matrix)
+            (entry.sector, entry.rows, entry.cols, matrix)
         })
         .collect()
 }
@@ -1169,5 +1211,136 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
             (lhs - rhs).norm() < 1e-8,
             "eigen equation violated at raw position {index}: {lhs} != {rhs}"
         );
+    }
+}
+
+#[test]
+fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
+    let rule = Z2FusionRule;
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg_dim = sectors.len() * degeneracy;
+
+    // Tall map (2 codomain legs, 1 domain leg): nontrivial left null space.
+    let tall_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let key_count = tall_hom.fusion_tree_keys(&rule).len();
+    let tall_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 1>::from_dims([leg_dim, leg_dim], [leg_dim]).unwrap(),
+        tall_hom,
+        &rule,
+        vec![vec![degeneracy; 3]; key_count],
+    )
+    .unwrap();
+    let len = tall_space.required_len().unwrap();
+    let tall = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        (0..len).map(|i| ((i * 3 + 1) % 13) as f64 - 6.0).collect(),
+        tall_space,
+    )
+    .unwrap();
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let null = left_null(&mut dense_executor, &rule, &tall).unwrap();
+
+    let null_matrices = dense_sector_matrices(2, &null);
+    assert!(!null_matrices.is_empty());
+    assert_orthonormal_columns(&null_matrices);
+    let tensor_matrices = dense_sector_matrices(2, &tall);
+    for (sector, n_rows, n_cols, n) in &null_matrices {
+        let (_, a_rows, a_cols, a) = tensor_matrices
+            .iter()
+            .find(|(candidate, ..)| candidate == sector)
+            .expect("tensor sector present");
+        assert_eq!(n_rows, a_rows);
+        assert_eq!(*n_cols, a_rows - (*a_rows).min(*a_cols));
+        // N^T A = 0.
+        for null_col in 0..*n_cols {
+            for a_col in 0..*a_cols {
+                let mut dot = 0.0;
+                for row in 0..*a_rows {
+                    dot += n[row + n_rows * null_col] * a[row + a_rows * a_col];
+                }
+                assert!(dot.abs() < 1e-9, "left null failed: {dot}");
+            }
+        }
+    }
+
+    // Wide map (1 codomain leg, 2 domain legs): nontrivial right null space.
+    let wide_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = wide_hom.fusion_tree_keys(&rule).len();
+    let wide_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 2>::from_dims([leg_dim], [leg_dim, leg_dim]).unwrap(),
+        wide_hom,
+        &rule,
+        vec![vec![degeneracy; 3]; key_count],
+    )
+    .unwrap();
+    let len = wide_space.required_len().unwrap();
+    let wide = TensorMap::<f64, 1, 2>::from_vec_with_fusion_space(
+        (0..len).map(|i| ((i * 5 + 2) % 11) as f64 - 5.0).collect(),
+        wide_space,
+    )
+    .unwrap();
+    let null = right_null(&mut dense_executor, &rule, &wide).unwrap();
+
+    let null_matrices = dense_sector_matrices(1, &null);
+    assert!(!null_matrices.is_empty());
+    let tensor_matrices = dense_sector_matrices(1, &wide);
+    for (sector, n_rows, n_cols, n) in &null_matrices {
+        let (_, a_rows, a_cols, a) = tensor_matrices
+            .iter()
+            .find(|(candidate, ..)| candidate == sector)
+            .expect("tensor sector present");
+        assert_eq!(n_cols, a_cols);
+        assert_eq!(*n_rows, a_cols - (*a_cols).min(*a_rows));
+        // Rows of N are orthonormal: N N^T = I.
+        for left in 0..*n_rows {
+            for right in 0..*n_rows {
+                let mut dot = 0.0;
+                for col in 0..*n_cols {
+                    dot += n[left + n_rows * col] * n[right + n_rows * col];
+                }
+                let expected = if left == right { 1.0 } else { 0.0 };
+                assert!((dot - expected).abs() < 1e-9);
+            }
+        }
+        // A N^T = 0 (rows of N span the kernel).
+        for a_row in 0..*a_rows {
+            for null_row in 0..*n_rows {
+                let mut dot = 0.0;
+                for col in 0..*a_cols {
+                    dot += a[a_row + a_rows * col] * n[null_row + n_rows * col];
+                }
+                assert!(dot.abs() < 1e-9, "right null failed: {dot}");
+            }
+        }
+    }
+}
+
+#[test]
+fn spectrum_only_entry_points_return_descending_magnitudes() {
+    let rule = Z2FusionRule;
+    let hermitian = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+
+    let eigh = eigh_vals(&mut dense_executor, &rule, &hermitian).unwrap();
+    assert!(!eigh.is_empty());
+    for entry in &eigh {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
+        }
+    }
+    let eig = eig_vals(&mut dense_executor, &rule, &general).unwrap();
+    assert!(!eig.is_empty());
+    for entry in &eig {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
+        }
     }
 }

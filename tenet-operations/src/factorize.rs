@@ -1428,6 +1428,178 @@ where
     })
 }
 
+/// All Hermitian eigenvalues per coupled sector, descending by magnitude
+/// (MatrixAlgebraKit `eigh_vals`).
+pub fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<Vec<SectorSpectrum>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    eigh_full(dense, rule, tensor).map(|eigh| eigh.eigenvalues)
+}
+
+/// All general eigenvalues per coupled sector, descending by magnitude
+/// (MatrixAlgebraKit `eig_vals`).
+pub fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+    D::Eig: FactorScalar<Eig = D::Eig> + From<Complex64>,
+    Complex64: From<D::Eig>,
+{
+    eig_full(dense, rule, tensor).map(|eig| eig.eigenvalues)
+}
+
+/// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`): the
+/// orthonormal complement of the range, i.e. the full-QR `Q` columns past the
+/// compact rank. Sectors with no null directions drop out of `W`.
+pub fn left_null<E, R, D, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<TensorMap<D, NOUT, 1>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::new();
+    for matrix in &matricizations {
+        let rows = matrix.rows;
+        let cols = matrix.cols;
+        let rank = rows.min(cols);
+        if rank == rows {
+            continue;
+        }
+        let mut augmented = vec![D::zero(); rows * (cols + rows)];
+        augmented[..rows * cols].copy_from_slice(&matrix.data);
+        for row in 0..rows {
+            augmented[rows * cols + row * rows + row] = D::one();
+        }
+        let shape = [rows, cols + rows];
+        let strides = [1usize, rows];
+        let view =
+            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .qr(D::dense_read(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense QR must return exactly (Q, R)",
+            });
+        }
+        validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
+        let q = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
+        let null_dim = rows - rank;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: null_dim,
+            // Null columns are the trailing full-Q columns (contiguous in the
+            // column-major layout).
+            left: q[rows * rank..rows * rows].to_vec(),
+            left_rows: rows,
+            // Discarded placeholder for the pair builder.
+            right: vec![D::zero(); null_dim * cols],
+            right_leading: null_dim,
+        });
+    }
+
+    let (null_tensor, _) = build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )?;
+    Ok(null_tensor)
+}
+
+/// Right null space `N : W <- domain` (MatrixAlgebraKit `right_null`): the
+/// orthonormal rows spanning the kernel, i.e. the full-LQ `Q` rows past the
+/// compact rank. Sectors with no null directions drop out of `W`.
+pub fn right_null<E, R, D, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<TensorMap<D, 1, NIN>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::new();
+    for matrix in &matricizations {
+        let rows = matrix.rows;
+        let cols = matrix.cols;
+        let rank = rows.min(cols);
+        if rank == cols {
+            continue;
+        }
+        let adjoint = adjoint_col_major(&matrix.data, rows, cols);
+        let mut augmented = vec![D::zero(); cols * (rows + cols)];
+        augmented[..cols * rows].copy_from_slice(&adjoint);
+        for row in 0..cols {
+            augmented[cols * rows + row * cols + row] = D::one();
+        }
+        let shape = [cols, rows + cols];
+        let strides = [1usize, cols];
+        let view =
+            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .qr(D::dense_read(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense QR must return exactly (Q, R)",
+            });
+        }
+        validate_dense_shape(outputs[0].shape(), &[cols, cols])?;
+        let q_prime = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
+        let null_dim = cols - rank;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: null_dim,
+            // Discarded placeholder for the pair builder.
+            left: vec![D::zero(); rows * null_dim],
+            left_rows: rows,
+            // Null rows are the adjoints of the trailing Q' columns.
+            right: adjoint_col_major(&q_prime[cols * rank..cols * cols], cols, null_dim),
+            right_leading: null_dim,
+        });
+    }
+
+    let (_, null_tensor) = build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )?;
+    Ok(null_tensor)
+}
+
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
 /// `Q : codomain <- W` has orthonormal columns per coupled sector and
 /// `R : W <- domain` with per-sector bond `min(rows, cols)`.
