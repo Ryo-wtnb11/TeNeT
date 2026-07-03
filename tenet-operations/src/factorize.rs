@@ -798,6 +798,370 @@ where
     })
 }
 
+/// Full fusion-tensor SVD `t = U * S * Vh` (MatrixAlgebraKit `svd_full`):
+/// per sector `U` is the square `m x m` unitary, `S` the rectangular
+/// `m x n` diagonal, and `Vh` the square `n x n` unitary.
+#[derive(Clone, Debug)]
+pub struct SvdFull<const NOUT: usize, const NIN: usize> {
+    pub u: TensorMap<f64, NOUT, 1>,
+    pub s: TensorMap<f64, 1, 1>,
+    pub vh: TensorMap<f64, 1, NIN>,
+    pub singular_values: Vec<SectorSpectrum>,
+}
+
+/// Full fusion-tensor SVD through the device boundary.
+///
+/// The unitaries are completed from the compact factors with an extra
+/// economy QR of `[U1 | I]` per sector (any orthonormal completion is exact
+/// because the corresponding rows/columns of `S` are zero), so the whole
+/// computation stays on the existing dense-executor boundary.
+pub fn svd_full<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<SvdFull<NOUT, NIN>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::with_capacity(matricizations.len());
+    let mut singular_values = Vec::with_capacity(matricizations.len());
+    let mut col_dims: Vec<(SectorId, usize)> = Vec::new();
+    for matrix in &matricizations {
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view =
+            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .svd(DenseRead::F64(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 3 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense SVD must return exactly (U, S, Vt)",
+            });
+        }
+        let rank = matrix.rows.min(matrix.cols);
+        validate_dense_shape(outputs[0].shape(), &[matrix.rows, rank])?;
+        validate_dense_shape(outputs[1].shape(), &[rank])?;
+        validate_dense_shape(outputs[2].shape(), &[rank, matrix.cols])?;
+        let u_thin = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+        let s_values = outputs[1].as_f64_slice().map_err(OperationError::Dense)?;
+        let vt_thin = outputs[2].as_f64_slice().map_err(OperationError::Dense)?;
+
+        let u_full = orthonormal_completion(dense, u_thin, matrix.rows, rank)?;
+        // V columns are the rows of Vt; complete V (n x rank) to n x n, then
+        // store Vh = V^T.
+        let v_thin = transpose_col_major(vt_thin, rank, matrix.cols);
+        let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
+        let vh_full = transpose_col_major(&v_full, matrix.cols, matrix.cols);
+
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: s_values.to_vec(),
+        });
+        col_dims.push((matrix.sector, matrix.cols));
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: matrix.rows,
+            left: u_full,
+            left_rows: matrix.rows,
+            right: vh_full,
+            right_leading: matrix.cols,
+        });
+    }
+
+    let cols_of = |sector: SectorId| {
+        col_dims
+            .iter()
+            .find(|(candidate, _)| *candidate == sector)
+            .map(|(_, cols)| *cols)
+            .expect("column dimension recorded per sector")
+    };
+    // The left/right bond legs differ in the full SVD (rows vs columns), so
+    // build the two factors with separate bond dimensions.
+    let (u_tensor, _) = build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs
+            .iter()
+            .map(|pair| FactorPair {
+                sector: pair.sector,
+                kept: pair.left_rows,
+                left: pair.left.clone(),
+                left_rows: pair.left_rows,
+                // Discarded placeholder sized kept x cols for the scatter.
+                right: vec![0.0; pair.left_rows * cols_of(pair.sector)],
+                right_leading: pair.left_rows,
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let (_, vh_tensor) = build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs
+            .iter()
+            .map(|pair| FactorPair {
+                sector: pair.sector,
+                kept: cols_of(pair.sector),
+                // Discarded placeholder sized rows x kept for the scatter.
+                left: vec![0.0; pair.left_rows * cols_of(pair.sector)],
+                left_rows: pair.left_rows,
+                right: pair.right.clone(),
+                right_leading: cols_of(pair.sector),
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let s_tensor = rectangular_diagonal_bond_tensor(
+        rule,
+        &singular_values,
+        &|sector| {
+            pairs
+                .iter()
+                .find(|pair| pair.sector == sector)
+                .map(|pair| pair.left_rows)
+                .unwrap_or(0)
+        },
+        &cols_of,
+    )?;
+    Ok(SvdFull {
+        u: u_tensor,
+        s: s_tensor,
+        vh: vh_tensor,
+        singular_values,
+    })
+}
+
+/// Completes `k` orthonormal columns (`m x k`, column-major) to a full
+/// `m x m` orthonormal basis via an economy QR of `[Q1 | I]`; the first `k`
+/// columns are returned unchanged.
+fn orthonormal_completion<E>(
+    dense: &mut E,
+    thin: &[f64],
+    rows: usize,
+    rank: usize,
+) -> Result<Vec<f64>, OperationError>
+where
+    E: DenseExecutor,
+{
+    if rank == rows {
+        return Ok(thin.to_vec());
+    }
+    let mut augmented = vec![0.0; rows * (rank + rows)];
+    augmented[..rows * rank].copy_from_slice(thin);
+    for row in 0..rows {
+        augmented[rows * rank + row * rows + row] = 1.0;
+    }
+    let shape = [rows, rank + rows];
+    let strides = [1usize, rows];
+    let view = DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
+    let outputs = dense
+        .qr(DenseRead::F64(view))
+        .map_err(OperationError::Dense)?;
+    if outputs.len() != 2 {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "dense QR must return exactly (Q, R)",
+        });
+    }
+    validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
+    let q = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+    let mut full = vec![0.0; rows * rows];
+    full[..rows * rank].copy_from_slice(thin);
+    full[rows * rank..].copy_from_slice(&q[rows * rank..rows * rows]);
+    Ok(full)
+}
+
+/// Rectangular diagonal `W_row <- W_col` bond tensor (the `S` of the full
+/// SVD): per sector shape `[rows, cols]` with the spectrum on the diagonal.
+fn rectangular_diagonal_bond_tensor<R>(
+    rule: &R,
+    spectra: &[SectorSpectrum],
+    rows_of: &dyn Fn(SectorId) -> usize,
+    cols_of: &dyn Fn(SectorId) -> usize,
+) -> Result<TensorMap<f64, 1, 1>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let row_leg = SectorLeg::new(spectra.iter().map(|entry| entry.sector), false);
+    let col_leg = SectorLeg::new(spectra.iter().map(|entry| entry.sector), false);
+    let total_rows: usize = spectra.iter().map(|entry| rows_of(entry.sector)).sum();
+    let total_cols: usize = spectra.iter().map(|entry| cols_of(entry.sector)).sum();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([row_leg]),
+        FusionProductSpace::new([col_leg]),
+    );
+    let keys = homspace.fusion_tree_keys(rule);
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of(rule, key.codomain_tree());
+            vec![rows_of(sector), cols_of(sector)]
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([total_rows], [total_cols])
+            .map_err(OperationError::from_core_preserving_context)?,
+        homspace,
+        rule,
+        shapes,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    TensorMap::<f64, 1, 1>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+        if indices[0] != indices[1] {
+            return 0.0;
+        }
+        let BlockKey::FusionTree(tree) = key else {
+            return 0.0;
+        };
+        let sector = tree
+            .codomain_tree()
+            .coupled()
+            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        spectra
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .and_then(|entry| entry.values.get(indices[0]).copied())
+            .unwrap_or(0.0)
+    })
+    .map_err(OperationError::from_core_preserving_context)
+}
+
+/// Full QR `t = Q * R` (MatrixAlgebraKit `qr_full`): per sector `Q` is the
+/// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
+/// from one economy QR of the augmented `[A | I]` on the dense boundary.
+pub fn qr_full<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<(TensorMap<f64, NOUT, 1>, TensorMap<f64, 1, NIN>), OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let rows = matrix.rows;
+        let cols = matrix.cols;
+        let mut augmented = vec![0.0; rows * (cols + rows)];
+        augmented[..rows * cols].copy_from_slice(&matrix.data);
+        for row in 0..rows {
+            augmented[rows * cols + row * rows + row] = 1.0;
+        }
+        let shape = [rows, cols + rows];
+        let strides = [1usize, rows];
+        let view =
+            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .qr(DenseRead::F64(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense QR must return exactly (Q, R)",
+            });
+        }
+        validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
+        validate_dense_shape(outputs[1].shape(), &[rows, cols + rows])?;
+        let q = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+        let r_augmented = outputs[1].as_f64_slice().map_err(OperationError::Dense)?;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rows,
+            left: q.to_vec(),
+            left_rows: rows,
+            right: r_augmented[..rows * cols].to_vec(),
+            right_leading: rows,
+        });
+    }
+
+    build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )
+}
+
+/// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
+/// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
+/// QR of the transposed sector matrices.
+pub fn lq_full<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<(TensorMap<f64, NOUT, 1>, TensorMap<f64, 1, NIN>), OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let rows = matrix.rows;
+        let cols = matrix.cols;
+        let transposed = transpose_col_major(&matrix.data, rows, cols);
+        let mut augmented = vec![0.0; cols * (rows + cols)];
+        augmented[..cols * rows].copy_from_slice(&transposed);
+        for row in 0..cols {
+            augmented[cols * rows + row * cols + row] = 1.0;
+        }
+        let shape = [cols, rows + cols];
+        let strides = [1usize, cols];
+        let view =
+            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .qr(DenseRead::F64(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense QR must return exactly (Q, R)",
+            });
+        }
+        validate_dense_shape(outputs[0].shape(), &[cols, cols])?;
+        validate_dense_shape(outputs[1].shape(), &[cols, rows + cols])?;
+        let q_prime = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+        let r_prime = outputs[1].as_f64_slice().map_err(OperationError::Dense)?;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: cols,
+            // L = R'^T : rows x cols (lower trapezoidal).
+            left: transpose_col_major(&r_prime[..cols * rows], cols, rows),
+            left_rows: rows,
+            // Q = Q'^T : cols x cols.
+            right: transpose_col_major(q_prime, cols, cols),
+            right_leading: cols,
+        });
+    }
+
+    build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )
+}
+
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
 /// `Q : codomain <- W` has orthonormal columns per coupled sector and
 /// `R : W <- domain` with per-sector bond `min(rows, cols)`.

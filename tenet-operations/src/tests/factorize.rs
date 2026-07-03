@@ -758,3 +758,223 @@ fn eigh_trunc_truncates_by_magnitude_and_keeps_eigen_equation() {
     // Truncated eigenvectors still satisfy t . V = V . D exactly.
     assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
 }
+
+fn dense_sector_matrices(
+    tensor_nout: usize,
+    t: &TensorMap<f64, 2, 1>,
+) -> Vec<(SectorId, usize, usize, Vec<f64>)> {
+    // Matricize a (2,1) factor per coupled sector (rows = codomain trees x
+    // degeneracy, cols = bond states) for dense checks in tests.
+    let structure = std::sync::Arc::clone(t.structure());
+    let mut sectors: Vec<(SectorId, usize, usize, Vec<(usize, usize, f64)>)> = Vec::new();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let sector = key
+            .domain_tree()
+            .coupled()
+            .unwrap_or_else(|| key.domain_tree().uncoupled()[0]);
+        let entry = match sectors
+            .iter_mut()
+            .find(|(candidate, ..)| *candidate == sector)
+        {
+            Some(entry) => entry,
+            None => {
+                sectors.push((sector, 0, 0, Vec::new()));
+                sectors.last_mut().unwrap()
+            }
+        };
+        let shape = block.shape().to_vec();
+        let row_dim: usize = shape[..tensor_nout].iter().product();
+        let col_dim = shape[tensor_nout];
+        let row_offset = entry.1;
+        entry.1 += row_dim;
+        entry.2 = entry.2.max(col_dim);
+        let strides = block.strides().to_vec();
+        let offset = block.offset();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..shape.iter().product::<usize>() {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(&strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let mut row = 0;
+            let mut stride = 1;
+            for axis in 0..tensor_nout {
+                row += indices[axis] * stride;
+                stride *= shape[axis];
+            }
+            entry
+                .3
+                .push((row_offset + row, indices[tensor_nout], t.data()[position]));
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    sectors
+        .into_iter()
+        .map(|(sector, rows, cols, entries)| {
+            let mut matrix = vec![0.0; rows * cols];
+            for (row, col, value) in entries {
+                matrix[row + rows * col] = value;
+            }
+            (sector, rows, cols, matrix)
+        })
+        .collect()
+}
+
+fn assert_orthonormal_columns(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        for left in 0..*cols {
+            for right in 0..*cols {
+                let mut dot = 0.0;
+                for row in 0..*rows {
+                    dot += matrix[row + rows * left] * matrix[row + rows * right];
+                }
+                let expected = if left == right { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-9,
+                    "sector {sector:?}: column dot ({left},{right}) = {dot}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn qr_full_gives_square_unitary_and_reconstructs() {
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let (q, r) = qr_full(&mut dense_executor, &rule, &tensor).unwrap();
+
+    let matrices = dense_sector_matrices(2, &q);
+    for (_, rows, cols, _) in &matrices {
+        assert_eq!(rows, cols, "full Q must be square per sector");
+    }
+    assert_orthonormal_columns(&matrices);
+
+    let reconstructed = contract_pair(&rule, &tensor, &q, &r);
+    assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn lq_full_reconstructs() {
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let (l, q) = lq_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let reconstructed = contract_pair(&rule, &tensor, &l, &q);
+    assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn svd_full_gives_square_unitaries_and_reconstructs() {
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let full = svd_full(&mut dense_executor, &rule, &tensor).unwrap();
+
+    let matrices = dense_sector_matrices(2, &full.u);
+    for (_, rows, cols, _) in &matrices {
+        assert_eq!(rows, cols, "full U must be square per sector");
+    }
+    assert_orthonormal_columns(&matrices);
+
+    // U . S has U's codomain and S's (column) bond as domain; build its space
+    // from the contraction homspace and per-tree shapes.
+    let us_hom = FusionTreeHomSpace::tensorcontract_homspace(
+        &rule,
+        full.u.fusion_space().unwrap().homspace(),
+        full.s.fusion_space().unwrap().homspace(),
+        &[2],
+        &[0],
+        &[0, 1, 2],
+        2,
+    )
+    .unwrap();
+    let u_structure = std::sync::Arc::clone(full.u.structure());
+    let s_structure = std::sync::Arc::clone(full.s.structure());
+    let shapes = us_hom
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| {
+            let sector = key
+                .domain_tree()
+                .coupled()
+                .unwrap_or_else(|| key.domain_tree().uncoupled()[0]);
+            let mut shape = None;
+            for index in 0..u_structure.block_count() {
+                let block = u_structure.block(index).unwrap();
+                let BlockKey::FusionTree(u_key) = block.key() else {
+                    continue;
+                };
+                if u_key.codomain_tree() == key.codomain_tree() {
+                    shape = Some(block.shape()[..2].to_vec());
+                    break;
+                }
+            }
+            let mut shape = shape.expect("U tree present");
+            let mut s_cols = 0;
+            for index in 0..s_structure.block_count() {
+                let block = s_structure.block(index).unwrap();
+                let BlockKey::FusionTree(s_key) = block.key() else {
+                    continue;
+                };
+                let s_sector = s_key
+                    .domain_tree()
+                    .coupled()
+                    .unwrap_or_else(|| s_key.domain_tree().uncoupled()[0]);
+                if s_sector == sector {
+                    s_cols = block.shape()[1];
+                    break;
+                }
+            }
+            shape.push(s_cols);
+            shape
+        })
+        .collect::<Vec<_>>();
+    let dims = full.u.space().dims();
+    let us_space = FusionTensorMapSpace::<2, 1>::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 1>::from_dims([dims[0], dims[1]], [full.s.space().dims()[1]]).unwrap(),
+        us_hom,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let mut us = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; us_space.required_len().unwrap()],
+        us_space,
+    )
+    .unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut us,
+            &full.u,
+            &full.s,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    let reconstructed = contract_pair(&rule, &tensor, &us, &full.vh);
+    assert_svd_blocks_match(&tensor, &reconstructed);
+}
