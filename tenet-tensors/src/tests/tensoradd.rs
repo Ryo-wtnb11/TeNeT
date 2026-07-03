@@ -579,7 +579,7 @@ fn tensoradd_structure_replays_multiple_packed_blocks() {
 fn tensoradd_structure_pairs_blocks_by_key_not_index() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([4, 4], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 4], []).unwrap();
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (BlockKey::sector_ids([10]), vec![2, 3]),
@@ -587,7 +587,7 @@ fn tensoradd_structure_pairs_blocks_by_key_not_index() {
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         2,
         [
             (BlockKey::sector_ids([20]), vec![4, 1]),

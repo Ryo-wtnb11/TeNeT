@@ -1336,7 +1336,7 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let lhs_structure = BlockStructure::packed_column_major_with_keys(
+    let lhs_structure = packed_fixture_structure(
         2,
         [
             (BlockKey::sector_ids([10]), vec![1, 2]),
@@ -1344,7 +1344,7 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
         ],
     )
     .unwrap();
-    let rhs_structure = BlockStructure::packed_column_major_with_keys(
+    let rhs_structure = packed_fixture_structure(
         2,
         [
             (BlockKey::sector_ids([30]), vec![2, 1]),
@@ -1352,11 +1352,8 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
-        2,
-        [(BlockKey::sector_ids([99]), vec![1, 1])],
-    )
-    .unwrap();
+    let dst_structure =
+        packed_fixture_structure(2, [(BlockKey::sector_ids([99]), vec![1, 1])]).unwrap();
     let lhs = TensorMap::<f64, 2, 0>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
         lhs_space,

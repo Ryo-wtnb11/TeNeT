@@ -1127,7 +1127,7 @@ impl ProductComplexFixture {
         let rhs_space = FusionTensorMapSpace::new(
             TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
             rhs_hom,
-            BlockStructure::packed_column_major_with_keys(0, [(scalar_key, vec![])]).unwrap(),
+            packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
         )
         .unwrap();
         let lhs_canonical_hom = src_space
@@ -1713,4 +1713,26 @@ fn assert_close_complex(actual: &[Complex64], expected: &[Complex64]) {
             "actual {actual} expected {expected}"
         );
     }
+}
+
+/// Fixture layout: subblocks packed contiguously in key order (not a product
+/// layout; exercises the arbitrary-strided-view contract).
+fn packed_fixture_structure<I, K>(
+    rank: usize,
+    blocks: I,
+) -> Result<BlockStructure, tenet_core::CoreError>
+where
+    I: IntoIterator<Item = (K, Vec<usize>)>,
+    K: Into<tenet_core::BlockKey>,
+{
+    let mut keys = Vec::new();
+    let mut shapes = Vec::new();
+    for (key, shape) in blocks {
+        keys.push(key.into());
+        shapes.push(shape);
+    }
+    BlockStructure::from_parts(
+        tenet_core::SectorStructure::from_keys(rank, keys)?,
+        tenet_core::DegeneracyStructure::packed_column_major(rank, shapes)?,
+    )
 }

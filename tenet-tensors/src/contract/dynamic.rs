@@ -2166,7 +2166,7 @@ mod tests {
             FusionTensorMapSpace::new(
                 TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
                 lhs_hom.clone(),
-                BlockStructure::packed_column_major_with_keys(
+                crate::tests::packed_fixture_structure(
                     4,
                     [(BlockKey::from(src_tree.clone()), vec![1, 1, 1, 1])],
                 )
@@ -2187,7 +2187,7 @@ mod tests {
             FusionTensorMapSpace::new(
                 TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
                 lhs_hom.clone(),
-                BlockStructure::packed_column_major_with_keys(
+                crate::tests::packed_fixture_structure(
                     4,
                     [
                         (BlockKey::from(src_tree.clone()), vec![1, 1, 1, 1]),

@@ -1,17 +1,41 @@
 use super::*;
+
+/// Fixture layout: subblocks packed contiguously in key order. Not a product
+/// layout (the only one is the coupled sector matrix); fixtures use it to
+/// exercise the arbitrary-strided-view contract of `BlockStructure`.
+pub(crate) fn packed_fixture_structure<I, K>(
+    rank: usize,
+    blocks: I,
+) -> Result<BlockStructure, CoreError>
+where
+    I: IntoIterator<Item = (K, Vec<usize>)>,
+    K: Into<BlockKey>,
+{
+    let mut keys = Vec::new();
+    let mut shapes = Vec::new();
+    for (key, shape) in blocks {
+        keys.push(key.into());
+        shapes.push(shape);
+    }
+    BlockStructure::from_parts(
+        SectorStructure::from_keys(rank, keys)?,
+        DegeneracyStructure::packed_column_major(rank, shapes)?,
+    )
+}
+
 use num_complex::{Complex32, Complex64};
 use num_traits::{One, Zero};
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
 use tenet_core::{
     unique_permute_tree_pair, BlockKey, BlockSpec, BlockStructure, BlockView, BlockViewMut,
-    BraidingStyleKind, CoreError, FermionParityFusionRule, FusionProductSpace, FusionRule,
-    FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeGroupKey,
+    BraidingStyleKind, CoreError, DegeneracyStructure, FermionParityFusionRule, FusionProductSpace,
+    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeGroupKey,
     FusionTreeHomSpace, FusionTreeKey, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols,
     MultiplicityFreeRigidSymbols, Placement, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule,
-    U1Irrep, Z2FusionRule,
+    SectorLeg, SectorStructure, SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial,
+    U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 
@@ -288,7 +312,7 @@ fn expected_single_tree_pair_replay(
 fn column_major_structure_like(structure: &BlockStructure, shape: Vec<usize>) -> BlockStructure {
     let blocks = (0..structure.block_count())
         .map(|index| (structure.block(index).unwrap().key().clone(), shape.clone()));
-    BlockStructure::packed_column_major_with_keys(structure.rank(), blocks).unwrap()
+    packed_fixture_structure(structure.rank(), blocks).unwrap()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1079,7 +1103,7 @@ fn assert_tree_multi_keyed_dtype<T>(
     let key300 = BlockKey::sector_ids([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (key100.clone(), vec![2, 1]),
@@ -1088,7 +1112,7 @@ fn assert_tree_multi_keyed_dtype<T>(
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         2,
         [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
     )

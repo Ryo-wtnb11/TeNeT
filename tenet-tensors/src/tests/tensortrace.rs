@@ -281,7 +281,7 @@ fn categorical_adjoint_axis_map_matches_tensorkit_adjointtensorindex() {
 #[test]
 fn tensortrace_rejects_block_sparse_trace_until_categorical_trace_is_implemented() {
     let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (BlockKey::ordinal(0), vec![1, 1]),
@@ -292,7 +292,7 @@ fn tensortrace_rejects_block_sparse_trace_until_categorical_trace_is_implemented
     let src: TensorMap<f64, 1, 1, Trivial> =
         TensorMap::from_vec_with_structure(vec![2.0, 3.0], src_space, src_structure).unwrap();
     let dst_space = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         0,
         [
             (BlockKey::ordinal(0), vec![]),

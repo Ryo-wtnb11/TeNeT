@@ -5322,34 +5322,6 @@ impl BlockStructure {
         Self::from_blocks_with_rank(rank, specs)
     }
 
-    /// Fixture-only helper: lays subblocks out contiguously in key order.
-    /// This is NOT a product tensor layout (the only one is the coupled
-    /// sector matrix); tests and timing examples use it to exercise the
-    /// arbitrary-strided-view contract of [`BlockStructure`].
-    #[doc(hidden)]
-    pub fn packed_column_major_with_keys<I, K>(rank: usize, blocks: I) -> Result<Self, CoreError>
-    where
-        I: IntoIterator<Item = (K, Vec<usize>)>,
-        K: Into<BlockKey>,
-    {
-        let mut keys = Vec::new();
-        let mut shapes = Vec::new();
-        for (key, shape) in blocks {
-            if shape.len() != rank {
-                return Err(CoreError::StructureRankMismatch {
-                    expected: rank,
-                    actual: shape.len(),
-                });
-            }
-            keys.push(key.into());
-            shapes.push(shape);
-        }
-        Self::from_parts(
-            SectorStructure::from_keys(rank, keys)?,
-            DegeneracyStructure::packed_column_major(rank, shapes)?,
-        )
-    }
-
     #[inline]
     pub fn rank(&self) -> usize {
         self.sector.rank()
@@ -6270,6 +6242,26 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
 mod tests {
     use super::*;
 
+    /// Fixture layout: subblocks packed contiguously in key order. Not a product
+    /// layout (the only one is the coupled sector matrix); fixtures use it to
+    /// exercise the arbitrary-strided-view contract of [`BlockStructure`].
+    fn packed_fixture_structure<I, K>(rank: usize, blocks: I) -> Result<BlockStructure, CoreError>
+    where
+        I: IntoIterator<Item = (K, Vec<usize>)>,
+        K: Into<BlockKey>,
+    {
+        let mut keys = Vec::new();
+        let mut shapes = Vec::new();
+        for (key, shape) in blocks {
+            keys.push(key.into());
+            shapes.push(shape);
+        }
+        BlockStructure::from_parts(
+            SectorStructure::from_keys(rank, keys)?,
+            DegeneracyStructure::packed_column_major(rank, shapes)?,
+        )
+    }
+
     #[test]
     fn block_fn_construction_is_layout_independent() {
         let rule = Z2FusionRule;
@@ -6288,11 +6280,9 @@ mod tests {
         };
         let dense = || TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap();
         let hom = homspace();
-        let packed_structure = BlockStructure::packed_column_major_with_keys(
-            4,
-            hom.fusion_tree_keys(&rule).into_iter().zip(shapes(&hom)),
-        )
-        .unwrap();
+        let packed_structure =
+            packed_fixture_structure(4, hom.fusion_tree_keys(&rule).into_iter().zip(shapes(&hom)))
+                .unwrap();
         let packed_space =
             FusionTensorMapSpace::<2, 2>::new(dense(), hom.clone(), packed_structure).unwrap();
         let coupled_space = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
@@ -7373,7 +7363,7 @@ mod tests {
             [],
             [],
         );
-        let structure = BlockStructure::packed_column_major_with_keys(
+        let structure = packed_fixture_structure(
             2,
             [
                 (BlockKey::from(second.clone()), vec![1, 4]),
@@ -7419,7 +7409,7 @@ mod tests {
             [],
             [],
         );
-        let structure = BlockStructure::packed_column_major_with_keys(
+        let structure = packed_fixture_structure(
             2,
             [
                 (BlockKey::from(second.clone()), vec![1, 2]),
@@ -7461,7 +7451,7 @@ mod tests {
             [],
             [],
         );
-        let structure = BlockStructure::packed_column_major_with_keys(
+        let structure = packed_fixture_structure(
             2,
             [
                 (BlockKey::sector_ids([0]), vec![1, 2]),
@@ -7508,11 +7498,8 @@ mod tests {
             [],
             [],
         );
-        let structure = BlockStructure::packed_column_major_with_keys(
-            2,
-            [(BlockKey::from(existing), vec![1, 1])],
-        )
-        .unwrap();
+        let structure =
+            packed_fixture_structure(2, [(BlockKey::from(existing), vec![1, 1])]).unwrap();
         let space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
         let tensor =
             TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
@@ -8983,11 +8970,8 @@ mod tests {
 
         let keys = vec![first.clone(), second.clone(), same_group_as_first.clone()];
         let sector = SectorStructure::from_keys(2, keys.clone()).unwrap();
-        let block_structure = BlockStructure::packed_column_major_with_keys(
-            2,
-            keys.into_iter().map(|key| (key, vec![1, 1])),
-        )
-        .unwrap();
+        let block_structure =
+            packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
 
         let sector_groups = sector.fusion_tree_groups();
         let block_groups = block_structure.fusion_tree_groups();

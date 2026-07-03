@@ -124,10 +124,8 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let key1 = BlockKey::sector_ids([1]);
     let key2 = BlockKey::sector_ids([2]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(key1.clone(), vec![2, 2])]).unwrap();
-    let dst_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(key1.clone(), vec![2, 2])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
+    let dst_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
     let src =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure)
             .unwrap();
@@ -192,7 +190,7 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
     let src_tree2 = expect_tree_key(&src_key2);
     let dst_tree1 = expect_tree_key(&dst_key1);
     let dst_tree2 = expect_tree_key(&dst_key2);
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (src_key1.clone(), vec![1, 1]),
@@ -231,8 +229,7 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
 #[test]
 fn single_output_unique_tree_transform_helper_rejects_simple_fusion() {
     let src_key = fusion_tree_test_key([1, 1, 1], [1], 1, [false, false, false], [false]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::transpose([2, 1, 0], [0]);
 
     let err = build_unique_tree_transform_group_plan(
@@ -272,7 +269,7 @@ fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
     );
     let src_tree0 = expect_tree_key(&src_key0);
     let src_tree1 = expect_tree_key(&src_key1);
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -325,7 +322,7 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
         [2, 1],
         [1, 1, 1],
     );
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -404,7 +401,7 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
         [2, 1],
         [1, 1, 1],
     );
-    let structure = BlockStructure::packed_column_major_with_keys(
+    let structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -450,7 +447,7 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
         [2, 1],
         [1, 1, 1],
     );
-    let structure = BlockStructure::packed_column_major_with_keys(
+    let structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -542,7 +539,7 @@ fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
         [2, 1],
         [1, 1, 1],
     );
-    let block_structure = BlockStructure::packed_column_major_with_keys(
+    let block_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -623,7 +620,7 @@ fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
         [2, 1],
         [1, 1, 1],
     );
-    let block_structure = BlockStructure::packed_column_major_with_keys(
+    let block_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -699,7 +696,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
         [2, 1],
         [1, 1, 1],
     );
-    let small_structure = BlockStructure::packed_column_major_with_keys(
+    let small_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -707,7 +704,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
         ],
     )
     .unwrap();
-    let large_structure = BlockStructure::packed_column_major_with_keys(
+    let large_structure = packed_fixture_structure(
         4,
         [(src_key0, vec![2, 1, 1, 1]), (src_key1, vec![2, 1, 1, 1])],
     )
@@ -804,7 +801,7 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
         [2, 1],
         [1, 1, 1],
     );
-    let block_structure = BlockStructure::packed_column_major_with_keys(
+    let block_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -882,7 +879,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
         [2, 1],
         [1, 1, 1],
     );
-    let block_structure = BlockStructure::packed_column_major_with_keys(
+    let block_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -943,7 +940,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
         [2, 1],
         [1, 1, 1],
     );
-    let block_structure = BlockStructure::packed_column_major_with_keys(
+    let block_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -1014,7 +1011,7 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
         [2, 1],
         [1, 1, 1],
     );
-    let block_structure = BlockStructure::packed_column_major_with_keys(
+    let block_structure = packed_fixture_structure(
         4,
         [
             (src_key0.clone(), vec![1, 1, 1, 1]),
@@ -1077,11 +1074,9 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         [],
         [],
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
     let dst_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(expected_dst_key.clone(), vec![1, 1])])
-            .unwrap();
+        packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_tree_pair_transform_group_plan(
         &SU2FusionRule,
@@ -1124,11 +1119,9 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
         [],
         [],
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let dst_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(expected_dst_key.clone(), vec![1, 1])])
-            .unwrap();
+        packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let dst_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let src = TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![7.0], src_space, src_structure)
@@ -1168,11 +1161,9 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
         [],
         [],
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let dst_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(expected_dst_key.clone(), vec![1, 1])])
-            .unwrap();
+        packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let dst_space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
     let src = TensorMap::<Complex64, 1, 1>::from_vec_with_structure(
@@ -1206,8 +1197,7 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
 #[test]
 fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
     let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
 
     let local_domain_identity = build_tree_pair_transform_group_plan(
         &Z2FusionRule,
@@ -1249,11 +1239,8 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
     let (dst_tree, coefficient) =
         unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
     let dst_key = BlockKey::from(dst_tree);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
-    let dst_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(dst_key.clone(), vec![1, 1, 1])])
-            .unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let dst_structure = packed_fixture_structure(3, [(dst_key.clone(), vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
     let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
     let src = TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
@@ -1285,11 +1272,8 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
     let operation = TreeTransformOperationKey::permute([0, 2], [1]);
     let (dst_tree, _) = unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
     let expected_missing = BlockKey::from(dst_tree);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key.clone(), vec![1, 1, 1])])
-            .unwrap();
-    let wrong_dst_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
+    let wrong_dst_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
     let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
     let src = TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
@@ -1787,8 +1771,7 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
 #[test]
 fn unique_tree_transform_plan_builder_rejects_generic_fusion() {
     let src_key = fusion_tree_test_key([1, 1], [1], 1, [false, false], [false]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0]);
 
     let err = build_unique_tree_transform_group_plan(
@@ -1822,8 +1805,7 @@ fn tree_transform_operation_key_distinguishes_permute_from_explicit_braid() {
 #[test]
 fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding() {
     let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::permute([1, 0], [0]);
 
     let err = build_unique_tree_transform_group_plan(
@@ -1849,9 +1831,7 @@ fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding
 fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_logic() {
     let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
     let src_tree = expect_tree_key(&src_key);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key.clone(), vec![1, 1, 1])])
-            .unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
 
     let plan = build_unique_tree_transform_group_plan(
         &UniquePlanarRule,
@@ -1874,8 +1854,7 @@ fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
     let expected_dst_key =
         all_codomain_fusion_tree_test_key([1, 1], Some(0), [true, false], [], [1]);
     let src_tree = expect_tree_key(&src_key);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueAnyonicRule,
@@ -1896,8 +1875,7 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
     let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, true], [], [1]);
     let expected_dst_key =
         all_codomain_fusion_tree_test_key([0, 1], Some(1), [true, false], [], [1]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
@@ -1915,8 +1893,7 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 #[test]
 fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
     let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, false], [], [1]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::braid([1, 0], [0], [0, 1], [0]);
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
@@ -1945,8 +1922,7 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
         FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]),
         empty_fusion_tree_with_coupled(Some(0)),
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
@@ -1967,8 +1943,7 @@ fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
         FusionTreeKey::from_sector_ids([1, 0], Some(1), [false, false], [], [1]),
         empty_fusion_tree_with_coupled(Some(1)),
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
@@ -1986,8 +1961,7 @@ fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
 #[test]
 fn unique_all_codomain_plan_builder_rejects_nonempty_domain_tree() {
     let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
@@ -2005,8 +1979,7 @@ fn unique_all_codomain_plan_builder_rejects_nonempty_domain_tree() {
 #[test]
 fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
     let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new());
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
@@ -2050,9 +2023,7 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
         [1],
     ));
     let src_tree = expect_tree_key(&src_key);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(3, [(src_key.clone(), vec![1, 1, 1])])
-            .unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
 
     let plan = build_unique_tree_pair_transform_group_plan(
         &UniqueZ2Rule,
@@ -2092,8 +2063,7 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
         [],
         [],
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_unique_tree_pair_transform_group_plan(
         &UniqueAnyonicRule,
@@ -2122,8 +2092,7 @@ fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
         [],
     ));
     let expected_dst_key = src_key.clone();
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::transpose([1], [0]);
 
     let plan =
@@ -2160,9 +2129,7 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
         [1],
         [1],
     ));
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(4, [(src_key.clone(), vec![1, 1, 1, 1])])
-            .unwrap();
+    let src_structure = packed_fixture_structure(4, [(src_key.clone(), vec![1, 1, 1, 1])]).unwrap();
     let operation = TreeTransformOperationKey::transpose([2, 0], [3, 1]);
 
     let plan =
@@ -2185,7 +2152,7 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     let key300 = BlockKey::sector_ids([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (key100.clone(), vec![2, 1]),
@@ -2194,7 +2161,7 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         2,
         [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
     )
@@ -2352,7 +2319,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     let key300 = BlockKey::sector_ids([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (key100.clone(), vec![2, 1]),
@@ -2361,7 +2328,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         2,
         [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
     )
@@ -2491,12 +2458,8 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [true]);
     let present_key = BlockKey::sector_ids([1]);
     let missing_key = BlockKey::sector_ids([2]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(present_key.clone(), vec![2, 2])])
-            .unwrap();
-    let dst_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(present_key.clone(), vec![2, 2])])
-            .unwrap();
+    let src_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
+    let dst_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let src =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0; 4], src_space, src_structure)
             .unwrap();
@@ -2525,7 +2488,7 @@ fn tree_transform_group_block_spec_from_groups_uses_source_group_and_ordered_key
     let src_key2 = fusion_tree_test_key([10, 20], [30], 6, [false, true], [true]);
     let dst_key1 = fusion_tree_test_key([20, 10], [30], 7, [true, false], [true]);
     let dst_key2 = fusion_tree_test_key([20, 10], [30], 8, [true, false], [true]);
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (src_key1.clone(), vec![1, 1]),
@@ -2533,7 +2496,7 @@ fn tree_transform_group_block_spec_from_groups_uses_source_group_and_ordered_key
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         2,
         [
             (dst_key1.clone(), vec![1, 1]),
@@ -2566,7 +2529,7 @@ fn tree_transform_group_plan_compiles_across_degeneracy_shapes_without_layout_le
     let src_key2 = fusion_tree_test_key([10, 20], [30], 6, [false, true], [true]);
     let dst_key1 = fusion_tree_test_key([20, 10], [30], 7, [true, false], [true]);
     let dst_key2 = fusion_tree_test_key([20, 10], [30], 8, [true, false], [true]);
-    let src_small = BlockStructure::packed_column_major_with_keys(
+    let src_small = packed_fixture_structure(
         2,
         [
             (src_key1.clone(), vec![2, 1]),
@@ -2574,7 +2537,7 @@ fn tree_transform_group_plan_compiles_across_degeneracy_shapes_without_layout_le
         ],
     )
     .unwrap();
-    let dst_small = BlockStructure::packed_column_major_with_keys(
+    let dst_small = packed_fixture_structure(
         2,
         [
             (dst_key1.clone(), vec![2, 1]),
@@ -2582,16 +2545,10 @@ fn tree_transform_group_plan_compiles_across_degeneracy_shapes_without_layout_le
         ],
     )
     .unwrap();
-    let src_large = BlockStructure::packed_column_major_with_keys(
-        2,
-        [(src_key1, vec![3, 1]), (src_key2, vec![3, 1])],
-    )
-    .unwrap();
-    let dst_large = BlockStructure::packed_column_major_with_keys(
-        2,
-        [(dst_key1, vec![3, 1]), (dst_key2, vec![3, 1])],
-    )
-    .unwrap();
+    let src_large =
+        packed_fixture_structure(2, [(src_key1, vec![3, 1]), (src_key2, vec![3, 1])]).unwrap();
+    let dst_large =
+        packed_fixture_structure(2, [(dst_key1, vec![3, 1]), (dst_key2, vec![3, 1])]).unwrap();
     let spec = TreeTransformGroupBlockSpec::from_block_groups(
         &dst_small,
         &dst_small.fusion_tree_groups()[0],
@@ -2676,7 +2633,7 @@ fn tree_transform_group_plan_cache_key_tracks_operation_but_not_coefficients() {
 fn tree_transform_sector_plan_key_is_rule_scope_and_source_sector_only() {
     let src_key1 = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
     let src_key2 = fusion_tree_test_key([10, 20], [30], 6, [false, true], [true]);
-    let src_small = BlockStructure::packed_column_major_with_keys(
+    let src_small = packed_fixture_structure(
         2,
         [
             (src_key1.clone(), vec![2, 1]),
@@ -2684,11 +2641,8 @@ fn tree_transform_sector_plan_key_is_rule_scope_and_source_sector_only() {
         ],
     )
     .unwrap();
-    let src_large = BlockStructure::packed_column_major_with_keys(
-        2,
-        [(src_key1, vec![3, 1]), (src_key2, vec![3, 1])],
-    )
-    .unwrap();
+    let src_large =
+        packed_fixture_structure(2, [(src_key1, vec![3, 1]), (src_key2, vec![3, 1])]).unwrap();
     let operation = TreeTransformOperationKey::transpose([1, 0], [0]);
 
     let z2_small =
@@ -2770,8 +2724,7 @@ fn tree_transform_structure_cache_key_tracks_concrete_layout() {
 #[test]
 fn tree_transform_group_block_spec_rejects_group_structure_mismatch() {
     let src_key = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
-    let src_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(src_key, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let dense_structure = BlockStructure::trivial(&[1, 1]).unwrap();
     let src_groups = src_structure.fusion_tree_groups();
 
@@ -2993,7 +2946,7 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
     let key300 = BlockKey::sector_ids([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
-    let src_structure = BlockStructure::packed_column_major_with_keys(
+    let src_structure = packed_fixture_structure(
         2,
         [
             (key100.clone(), vec![2, 1]),
@@ -3002,7 +2955,7 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::packed_column_major_with_keys(
+    let dst_structure = packed_fixture_structure(
         2,
         [(key20.clone(), vec![2, 1]), (key10.clone(), vec![2, 1])],
     )

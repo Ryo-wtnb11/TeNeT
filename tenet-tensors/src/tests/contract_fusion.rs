@@ -412,23 +412,19 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     let lhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
-        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
     let rhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
-        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
     let dst_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
-        BlockStructure::packed_column_major_with_keys(
-            2,
-            [(even_key, vec![1, 1]), (odd_key, vec![1, 1])],
-        )
-        .unwrap(),
+        packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )
     .unwrap();
 
@@ -508,23 +504,19 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
     let lhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
-        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
     let rhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
-        BlockStructure::packed_column_major_with_keys(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
     let dst_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
-        BlockStructure::packed_column_major_with_keys(
-            2,
-            [(even_key, vec![1, 1]), (odd_key, vec![1, 1])],
-        )
-        .unwrap(),
+        packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )
     .unwrap();
 
@@ -1486,8 +1478,7 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
         FusionProductSpace::new([leg()]),
     );
     let keys = dst_hom.fusion_tree_keys(&rule);
-    let dst_structure =
-        BlockStructure::packed_column_major_with_keys(2, [(keys[0].clone(), vec![1, 1])]).unwrap();
+    let dst_structure = packed_fixture_structure(2, [(keys[0].clone(), vec![1, 1])]).unwrap();
     let dst_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         dst_hom,
@@ -1636,19 +1627,19 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
     let lhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []),
-        BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
+        packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
     )
     .unwrap();
     let rhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
-        BlockStructure::packed_column_major_with_keys(0, [(scalar_key, vec![])]).unwrap(),
+        packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
     .unwrap();
     let dst_space = FusionTensorMapSpace::new(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []),
-        BlockStructure::packed_column_major_with_keys(
+        packed_fixture_structure(
             4,
             [(dst_key0, vec![1, 1, 1, 1]), (dst_key1, vec![1, 1, 1, 1])],
         )
@@ -1711,7 +1702,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     let lhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         lhs_hom.clone(),
-        BlockStructure::packed_column_major_with_keys(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
+        packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
     )
     .unwrap();
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
@@ -1724,7 +1715,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     let dst_space = FusionTensorMapSpace::new(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         lhs_hom,
-        BlockStructure::packed_column_major_with_keys(
+        packed_fixture_structure(
             4,
             [(dst_key0, vec![1, 1, 1, 1]), (dst_key1, vec![1, 1, 1, 1])],
         )
@@ -2015,7 +2006,7 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
         lhs_keys[1].domain_tree().innerlines()[0]
     );
     let packed = |hom: &FusionTreeHomSpace| {
-        BlockStructure::packed_column_major_with_keys(
+        packed_fixture_structure(
             4,
             hom.fusion_tree_keys(&rule)
                 .into_iter()
@@ -2041,8 +2032,7 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
     let dst_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         dst_hom,
-        BlockStructure::packed_column_major_with_keys(2, [(dst_keys[0].clone(), vec![2, 2])])
-            .unwrap(),
+        packed_fixture_structure(2, [(dst_keys[0].clone(), vec![2, 2])]).unwrap(),
     )
     .unwrap();
     let lhs_data = (0..32).map(|index| 0.25 + index as f64).collect::<Vec<_>>();
@@ -2732,7 +2722,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     let make_lhs_space = |case_index: usize| {
         let dense_space = TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap();
         let structure = match case_index {
-            0 => BlockStructure::packed_column_major_with_keys(
+            0 => packed_fixture_structure(
                 4,
                 lhs_keys.iter().cloned().map(|key| (key, vec![2, 2, 2, 2])),
             )
@@ -2744,7 +2734,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
                     .map(|key| (key, vec![2, 2, 2, 2]))
                     .collect::<Vec<_>>();
                 blocks.reverse();
-                BlockStructure::packed_column_major_with_keys(4, blocks).unwrap()
+                packed_fixture_structure(4, blocks).unwrap()
             }
             2 => BlockStructure::from_blocks_with_rank(
                 4,
@@ -3378,7 +3368,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     let rhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         rhs_hom,
-        BlockStructure::packed_column_major_with_keys(0, [(scalar_key, vec![])]).unwrap(),
+        packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
     .unwrap();
     let lhs_canonical_hom = src_space

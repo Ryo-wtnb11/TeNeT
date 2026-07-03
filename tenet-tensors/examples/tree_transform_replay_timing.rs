@@ -507,7 +507,7 @@ fn product_fixture() -> (
 fn su2_recoupling_fixture() -> (BlockStructure, TensorMapSpace<4, 0>, TensorMapSpace<4, 0>) {
     let src_key0 = all_codomain_fusion_tree_key([0, 1]);
     let src_key1 = all_codomain_fusion_tree_key([2, 1]);
-    let structure = BlockStructure::packed_column_major_with_keys(
+    let structure = packed_fixture_structure(
         4,
         [(src_key0, vec![1, 1, 1, 1]), (src_key1, vec![1, 1, 1, 1])],
     )
@@ -536,4 +536,26 @@ fn all_codomain_fusion_tree_key(innerlines: [usize; 2]) -> BlockKey {
             Vec::<SectorId>::new(),
         ),
     ))
+}
+
+/// Fixture layout: subblocks packed contiguously in key order (not a product
+/// layout; exercises the arbitrary-strided-view contract).
+fn packed_fixture_structure<I, K>(
+    rank: usize,
+    blocks: I,
+) -> Result<BlockStructure, tenet_core::CoreError>
+where
+    I: IntoIterator<Item = (K, Vec<usize>)>,
+    K: Into<tenet_core::BlockKey>,
+{
+    let mut keys = Vec::new();
+    let mut shapes = Vec::new();
+    for (key, shape) in blocks {
+        keys.push(key.into());
+        shapes.push(shape);
+    }
+    BlockStructure::from_parts(
+        tenet_core::SectorStructure::from_keys(rank, keys)?,
+        tenet_core::DegeneracyStructure::packed_column_major(rank, shapes)?,
+    )
 }

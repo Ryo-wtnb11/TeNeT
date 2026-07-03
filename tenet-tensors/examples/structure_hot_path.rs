@@ -280,7 +280,7 @@ fn elapsed_per_iter(mut iters: usize, mut f: impl FnMut()) -> Duration {
 
 fn tensor(block_count: usize, key_order: KeyOrder) -> TensorMap<f64, 2, 0> {
     let space = TensorMapSpace::<2, 0>::from_dims([block_count, 1], []).unwrap();
-    let structure = BlockStructure::packed_column_major_with_keys(
+    let structure = packed_fixture_structure(
         2,
         keys(block_count, key_order)
             .into_iter()
@@ -355,4 +355,26 @@ fn single_sector_id(key: &BlockKey) -> usize {
         BlockKey::Dense => 0,
         _ => panic!("benchmark keys must be single-sector keys"),
     }
+}
+
+/// Fixture layout: subblocks packed contiguously in key order (not a product
+/// layout; exercises the arbitrary-strided-view contract).
+fn packed_fixture_structure<I, K>(
+    rank: usize,
+    blocks: I,
+) -> Result<BlockStructure, tenet_core::CoreError>
+where
+    I: IntoIterator<Item = (K, Vec<usize>)>,
+    K: Into<tenet_core::BlockKey>,
+{
+    let mut keys = Vec::new();
+    let mut shapes = Vec::new();
+    for (key, shape) in blocks {
+        keys.push(key.into());
+        shapes.push(shape);
+    }
+    BlockStructure::from_parts(
+        tenet_core::SectorStructure::from_keys(rank, keys)?,
+        tenet_core::DegeneracyStructure::packed_column_major(rank, shapes)?,
+    )
 }
