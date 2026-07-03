@@ -48,7 +48,7 @@ use super::structure::TensorContractAxisPlan;
 pub(crate) struct DynamicFusionMapSpace {
     nout: usize,
     nin: usize,
-    homspace: FusionTreeHomSpace,
+    homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
 }
 
@@ -59,7 +59,7 @@ impl DynamicFusionMapSpace {
         Self {
             nout: NOUT,
             nin: NIN,
-            homspace: space.homspace().clone(),
+            homspace: Arc::clone(space.homspace_arc()),
             subblock_structure: Arc::clone(space.subblock_structure()),
         }
     }
@@ -120,7 +120,7 @@ impl DynamicFusionMapSpace {
         Ok(Self {
             nout,
             nin,
-            homspace,
+            homspace: Arc::new(homspace),
             subblock_structure,
         })
     }
@@ -173,7 +173,7 @@ impl DynamicFusionMapSpace {
         Ok(Self {
             nout,
             nin,
-            homspace,
+            homspace: Arc::new(homspace),
             subblock_structure,
         })
     }
@@ -190,6 +190,12 @@ impl DynamicFusionMapSpace {
 
     #[inline]
     pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    /// Shared hom-space handle for pointer-identity fast paths in replay
+    /// caches.
+    pub(crate) fn homspace_arc(&self) -> &Arc<FusionTreeHomSpace> {
         &self.homspace
     }
 

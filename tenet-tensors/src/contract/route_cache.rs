@@ -45,13 +45,13 @@ struct FusionRouteLastEntry<RuleKey> {
     key: FusionRouteCacheKey<RuleKey>,
     rule: RuleKey,
     dst_nout: usize,
-    dst_homspace: FusionTreeHomSpace,
+    dst_homspace: Arc<FusionTreeHomSpace>,
     dst_structure: Arc<BlockStructure>,
     lhs_nout: usize,
-    lhs_homspace: FusionTreeHomSpace,
+    lhs_homspace: Arc<FusionTreeHomSpace>,
     lhs_structure: Arc<BlockStructure>,
     rhs_nout: usize,
-    rhs_homspace: FusionTreeHomSpace,
+    rhs_homspace: Arc<FusionTreeHomSpace>,
     rhs_structure: Arc<BlockStructure>,
     axes: RouteRawTensorContractAxisSpecKey,
     route: TensorContractFusionRouteDecision,
@@ -72,13 +72,16 @@ where
         &self.rule == rule
             && self.dst_nout == dst.nout()
             && Arc::ptr_eq(&self.dst_structure, dst.structure())
-            && self.dst_homspace == *dst.homspace()
+            && (Arc::ptr_eq(&self.dst_homspace, dst.homspace_arc())
+                || *self.dst_homspace == *dst.homspace())
             && self.lhs_nout == lhs.nout()
             && Arc::ptr_eq(&self.lhs_structure, lhs.structure())
-            && self.lhs_homspace == *lhs.homspace()
+            && (Arc::ptr_eq(&self.lhs_homspace, lhs.homspace_arc())
+                || *self.lhs_homspace == *lhs.homspace())
             && self.rhs_nout == rhs.nout()
             && Arc::ptr_eq(&self.rhs_structure, rhs.structure())
-            && self.rhs_homspace == *rhs.homspace()
+            && (Arc::ptr_eq(&self.rhs_homspace, rhs.homspace_arc())
+                || *self.rhs_homspace == *rhs.homspace())
             && self.axes.matches(axes)
     }
 }
@@ -235,13 +238,13 @@ where
                 key: key.clone(),
                 rule: rule_key,
                 dst_nout: dst.nout(),
-                dst_homspace: dst.homspace().clone(),
+                dst_homspace: Arc::clone(dst.homspace_arc()),
                 dst_structure: Arc::clone(dst.structure()),
                 lhs_nout: lhs.nout(),
-                lhs_homspace: lhs.homspace().clone(),
+                lhs_homspace: Arc::clone(lhs.homspace_arc()),
                 lhs_structure: Arc::clone(lhs.structure()),
                 rhs_nout: rhs.nout(),
-                rhs_homspace: rhs.homspace().clone(),
+                rhs_homspace: Arc::clone(rhs.homspace_arc()),
                 rhs_structure: Arc::clone(rhs.structure()),
                 axes: raw_axes,
                 route,
@@ -256,13 +259,13 @@ where
             key: last_key,
             rule: rule_key,
             dst_nout: dst.nout(),
-            dst_homspace: dst.homspace().clone(),
+            dst_homspace: Arc::clone(dst.homspace_arc()),
             dst_structure: Arc::clone(dst.structure()),
             lhs_nout: lhs.nout(),
-            lhs_homspace: lhs.homspace().clone(),
+            lhs_homspace: Arc::clone(lhs.homspace_arc()),
             lhs_structure: Arc::clone(lhs.structure()),
             rhs_nout: rhs.nout(),
-            rhs_homspace: rhs.homspace().clone(),
+            rhs_homspace: Arc::clone(rhs.homspace_arc()),
             rhs_structure: Arc::clone(rhs.structure()),
             axes: raw_axes,
             route,

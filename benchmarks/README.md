@@ -241,3 +241,25 @@ compose time, so the Accelerate numbers are the fair baseline). µs/iter.
 Only compose d=4 remains 1.2–1.4× (per-sector GEMM launch overhead;
 TensorKit amortizes via `mul!` on the same coupled matrices). All
 tree-transform paths are 1.6–4× faster than TensorKit at d=4.
+
+### Hom-space Arc sharing (2026-07-03)
+
+Warm replay was paying three deep `FusionTreeHomSpace` clones per call
+(`DynamicFusionMapSpace::from_typed`) plus deep hom-space equality in the
+route and fusion-block last-entry fast paths. The hom space is now stored
+behind `Arc` in `FusionTensorMapSpace`, so the conversion is a pointer
+clone and cache fast paths compare `Arc::ptr_eq` first (structural
+equality remains the fallback — semantics unchanged, no thresholds).
+`plan_lookups` dropped 0.6 → 0.2 µs/call; d=4 compose vs TensorKit
+(Accelerate both sides):
+
+| symmetry | before | after | TensorKit | ratio |
+|---|---|---|---|---|
+| U1 | 5.3 | 4.5 | 4.1 | 1.10 |
+| fZ2 | 2.6 | 1.9 | 1.9 | **1.01** |
+| SU2 | 8.5 | 7.8 | 7.1 | 1.10 |
+| U1⊠fZ2 | 5.2 | 4.5 | 4.1 | 1.10 |
+
+The remaining matmul bucket is 0.84 µs per coupled-sector GEMM vs
+TensorKit's 0.82 µs per `mul!` — per-call parity; the residual ~0.1–0.2 µs
+is cache-key touch and facade entry, shared by all routes.

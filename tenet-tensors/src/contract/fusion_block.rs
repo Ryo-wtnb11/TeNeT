@@ -1621,7 +1621,7 @@ where
 #[derive(Clone, Debug)]
 struct CanonicalFusionBlockLastSpaceKey {
     nout: usize,
-    homspace: FusionTreeHomSpace,
+    homspace: Arc<FusionTreeHomSpace>,
     structure: Arc<BlockStructure>,
 }
 
@@ -1629,15 +1629,16 @@ impl CanonicalFusionBlockLastSpaceKey {
     fn from_space(space: &DynamicFusionMapSpace) -> Self {
         Self {
             nout: space.nout(),
-            homspace: space.homspace().clone(),
+            homspace: Arc::clone(space.homspace_arc()),
             structure: Arc::clone(space.structure()),
         }
     }
 
     fn matches(&self, space: &DynamicFusionMapSpace) -> bool {
         self.nout == space.nout()
-            && self.homspace == *space.homspace()
             && Arc::ptr_eq(&self.structure, space.structure())
+            && (Arc::ptr_eq(&self.homspace, space.homspace_arc())
+                || *self.homspace == *space.homspace())
     }
 }
 

@@ -917,7 +917,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
     dense_space: TensorMapSpace<NOUT, NIN>,
-    homspace: FusionTreeHomSpace,
+    homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
 }
 
@@ -945,7 +945,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         }
         Ok(Self {
             dense_space,
-            homspace,
+            homspace: Arc::new(homspace),
             subblock_structure,
         })
     }
@@ -1034,6 +1034,13 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
 
     #[inline]
     pub fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    /// Shared handle to the hom space; lets replay caches compare spaces by
+    /// pointer identity before falling back to structural equality.
+    #[inline]
+    pub fn homspace_arc(&self) -> &Arc<FusionTreeHomSpace> {
         &self.homspace
     }
 
