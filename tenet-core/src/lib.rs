@@ -951,10 +951,8 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     }
 
     /// Default constructor: TensorKit-equivalent coupled-sector matrix
-    /// layout (see [`Self::from_degeneracy_shapes_coupled`]). There is no
-    /// packed public layout; layout-specific fixtures build a
-    /// [`BlockStructure::packed_column_major_with_keys`] structure and use
-    /// [`Self::new`] directly.
+    /// layout (see [`Self::from_degeneracy_shapes_coupled`]). This is the
+    /// only product layout.
     pub fn from_degeneracy_shapes<R, Shapes>(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
@@ -5324,6 +5322,11 @@ impl BlockStructure {
         Self::from_blocks_with_rank(rank, specs)
     }
 
+    /// Fixture-only helper: lays subblocks out contiguously in key order.
+    /// This is NOT a product tensor layout (the only one is the coupled
+    /// sector matrix); tests and timing examples use it to exercise the
+    /// arbitrary-strided-view contract of [`BlockStructure`].
+    #[doc(hidden)]
     pub fn packed_column_major_with_keys<I, K>(rank: usize, blocks: I) -> Result<Self, CoreError>
     where
         I: IntoIterator<Item = (K, Vec<usize>)>,

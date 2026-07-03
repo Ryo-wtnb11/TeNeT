@@ -9,9 +9,9 @@ use tenet_core::{
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{OperationError, TreeTransformOperationKey};
 
-/// Builds scratch structures in the coupled-sector matrix layout so canonical
-/// temporaries feed fusion-block GEMM without packing; falls back to the
-/// packed layout when the coupled grid is incomplete (structural zeros).
+/// Builds scratch structures in the coupled-sector matrix layout. Scratch
+/// spaces enumerate the full tree set of their hom spaces, so the coupled
+/// grid is always complete; there is no other layout.
 fn scratch_subblock_structure<R>(
     rule: &R,
     nout: usize,
@@ -22,20 +22,19 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let mut tree_blocks = Vec::with_capacity(blocks.len());
-    for (key, shape) in &blocks {
+    for (index, (key, shape)) in blocks.iter().enumerate() {
         match key {
             BlockKey::FusionTree(tree) => tree_blocks.push((tree.clone(), shape.clone())),
-            _ => {
-                return BlockStructure::packed_column_major_with_keys(rank, blocks)
-                    .map_err(OperationError::from_core_preserving_context)
+            BlockKey::Dense => {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "scratch",
+                    index,
+                })
             }
         }
     }
-    match BlockStructure::coupled_sector_matrix_with_keys(rule, nout, rank, tree_blocks) {
-        Ok(structure) => Ok(structure),
-        Err(_) => BlockStructure::packed_column_major_with_keys(rank, blocks)
-            .map_err(OperationError::from_core_preserving_context),
-    }
+    BlockStructure::coupled_sector_matrix_with_keys(rule, nout, rank, tree_blocks)
+        .map_err(OperationError::from_core_preserving_context)
 }
 
 use super::fusion::{contracted_fusion_tree_basis_matches, TensorContractFusionExplicitPlan};
@@ -304,9 +303,15 @@ where
     let dummy_blocks = canonical_homspace
         .fusion_tree_keys(rule)
         .into_iter()
-        .map(|key| (BlockKey::from(key), vec![1; canonical_rank]));
-    let dummy_structure =
-        BlockStructure::packed_column_major_with_keys(canonical_rank, dummy_blocks)?;
+        .map(|key| (key, vec![1; canonical_rank]))
+        .collect::<Vec<_>>();
+    let dummy_structure = BlockStructure::coupled_sector_matrix_with_keys(
+        rule,
+        plan.canonical_dst_nout(),
+        canonical_rank,
+        dummy_blocks,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
     let transform_plan = build_tree_pair_transform_group_plan(
         rule,
         plan.output_transform().clone(),
