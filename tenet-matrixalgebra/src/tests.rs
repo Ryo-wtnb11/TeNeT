@@ -1355,3 +1355,144 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
         }
     }
 }
+
+fn assert_identity_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    assert!(!matrices.is_empty());
+    for (sector, rows, cols, matrix) in matrices {
+        assert_eq!(rows, cols, "identity block must be square in {sector:?}");
+        for col in 0..*cols {
+            for row in 0..*rows {
+                let expected = if row == col { 1.0 } else { 0.0 };
+                let value = matrix[row + rows * col];
+                assert!(
+                    (value - expected).abs() < 1e-9,
+                    "sector {sector:?} ({row},{col}): {value}"
+                );
+            }
+        }
+    }
+}
+
+fn default_context() -> TensorContractFusionExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>
+{
+    TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default()
+}
+
+#[test]
+fn adjoint_composition_gives_the_identity_on_the_bond() {
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
+    let qh = tenet_operations::adjoint(&rule, &q).unwrap();
+    let mut context = default_context();
+    let identity = crate::compose::compose(&mut context, &rule, &qh, &q).unwrap();
+    assert_identity_matrices(&dense_sector_matrices(1, &identity));
+}
+
+#[test]
+fn exp_of_a_hermitian_tensor_inverts_under_negation() {
+    let rule = Z2FusionRule;
+    let raw = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    // Keep the spectrum modest so exp(t) exp(-t) stays well conditioned.
+    let tensor = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        raw.data().iter().map(|value| 0.1 * value).collect(),
+        raw.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let negated = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        tensor.data().iter().map(|value| -value).collect(),
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let forward = exp(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let backward = exp(&mut dense_executor, &mut context, &rule, &negated).unwrap();
+    let identity = crate::compose::compose(&mut context, &rule, &forward, &backward).unwrap();
+    assert_identity_matrices(&dense_sector_matrices(2, &identity));
+}
+
+#[test]
+fn pinv_satisfies_the_moore_penrose_identity() {
+    let rule = Z2FusionRule;
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg_dim = sectors.len() * degeneracy;
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let key_count = hom.fusion_tree_keys(&rule).len();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 1>::from_dims([leg_dim, leg_dim], [leg_dim]).unwrap(),
+        hom,
+        &rule,
+        vec![vec![degeneracy; 3]; key_count],
+    )
+    .unwrap();
+    let len = space.required_len().unwrap();
+    let tensor = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        (0..len).map(|i| ((i * 3 + 2) % 11) as f64 - 5.0).collect(),
+        space,
+    )
+    .unwrap();
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let plus = pinv(&mut dense_executor, &mut context, &rule, &tensor, 1e-12).unwrap();
+    let tp = crate::compose::compose(&mut context, &rule, &tensor, &plus).unwrap();
+    let tpt = crate::compose::compose(&mut context, &rule, &tp, &tensor).unwrap();
+    for (index, (lhs, rhs)) in tpt.data().iter().zip(tensor.data()).enumerate() {
+        assert!(
+            (lhs - rhs).abs() < 1e-8,
+            "Moore-Penrose violated at raw position {index}: {lhs} != {rhs}"
+        );
+    }
+}
+
+#[test]
+fn inv_composes_to_the_identity() {
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    let inverse = inv(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let identity = crate::compose::compose(&mut context, &rule, &tensor, &inverse).unwrap();
+    assert_identity_matrices(&dense_sector_matrices(2, &identity));
+}
+
+#[test]
+fn polar_decompositions_reconstruct_with_isometric_factors() {
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let (isometry, positive) =
+        left_polar(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let reconstructed = crate::compose::compose(&mut context, &rule, &isometry, &positive).unwrap();
+    assert_svd_blocks_match(&tensor, &reconstructed);
+    let wh = tenet_operations::adjoint(&rule, &isometry).unwrap();
+    let unit = crate::compose::compose(&mut context, &rule, &wh, &isometry).unwrap();
+    assert_identity_matrices(&dense_sector_matrices(2, &unit));
+
+    let (positive, isometry) =
+        right_polar(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let reconstructed = crate::compose::compose(&mut context, &rule, &positive, &isometry).unwrap();
+    assert_svd_blocks_match(&tensor, &reconstructed);
+}

@@ -114,7 +114,7 @@ pub struct SvdCompact<D, const NOUT: usize, const NIN: usize> {
 
 /// Materializes per-sector spectra as a diagonal tensor `W <- W` in the
 /// coupled layout (`S` for the SVD, `D` for eigendecompositions).
-fn diagonal_bond_tensor<R, D, V>(
+pub(crate) fn diagonal_bond_tensor<R, D, V>(
     rule: &R,
     singular_values: &[SectorSpectrum<V>],
     to_scalar: &dyn Fn(V) -> D,
@@ -1598,6 +1598,57 @@ where
         &pairs,
     )?;
     Ok(null_tensor)
+}
+
+/// Left polar decomposition `t = W * P` (MatrixAlgebraKit `left_polar`):
+/// `W` is the isometry `U * Vh` and `P = V * S * Vh` the positive part on
+/// the domain.
+pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    context: &mut tenet_operations::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<(TensorMap<D, NOUT, NIN>, TensorMap<D, NIN, NIN>), OperationError>
+where
+    E: DenseExecutor,
+    RuleKey: Clone + Eq + std::hash::Hash,
+    BT: tenet_operations::TreeTransformBackend<D, f64>,
+    BC: tenet_operations::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_operations::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+{
+    let svd = svd_compact(dense, rule, tensor)?;
+    let isometry = crate::compose::compose(context, rule, &svd.u, &svd.vh)?;
+    let v = tenet_operations::adjoint(rule, &svd.vh)?;
+    let vs = crate::compose::compose(context, rule, &v, &svd.s)?;
+    let positive = crate::compose::compose(context, rule, &vs, &svd.vh)?;
+    Ok((isometry, positive))
+}
+
+/// Right polar decomposition `t = P * W` (MatrixAlgebraKit `right_polar`):
+/// `P = U * S * U^H` is the positive part on the codomain and `W = U * Vh`.
+pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    context: &mut tenet_operations::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<(TensorMap<D, NOUT, NOUT>, TensorMap<D, NOUT, NIN>), OperationError>
+where
+    E: DenseExecutor,
+    RuleKey: Clone + Eq + std::hash::Hash,
+    BT: tenet_operations::TreeTransformBackend<D, f64>,
+    BC: tenet_operations::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_operations::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+{
+    let svd = svd_compact(dense, rule, tensor)?;
+    let uh = tenet_operations::adjoint(rule, &svd.u)?;
+    let us = crate::compose::compose(context, rule, &svd.u, &svd.s)?;
+    let positive = crate::compose::compose(context, rule, &us, &uh)?;
+    let isometry = crate::compose::compose(context, rule, &svd.u, &svd.vh)?;
+    Ok((positive, isometry))
 }
 
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):

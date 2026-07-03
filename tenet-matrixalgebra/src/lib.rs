@@ -14,15 +14,18 @@
 //! ([`truncation`], spectrum functions), and mechanical block-data movement
 //! (bond slicing, adjoints) that stays behind device-capable seams.
 
+mod compose;
 mod factorize;
+mod matrix_functions;
 pub mod truncation;
 
 pub use factorize::{
-    eig_full, eig_trunc, eig_vals, eigh_full, eigh_trunc, eigh_vals, left_null, lq_compact,
-    lq_full, qr_compact, qr_full, right_null, svd_compact, svd_full, svd_trunc, svd_vals, EigFull,
-    EigTrunc, EighFull, EighTrunc, FactorScalar, SectorSpectrum, SpectrumMagnitude, SvdCompact,
-    SvdFull, SvdTrunc,
+    eig_full, eig_trunc, eig_vals, eigh_full, eigh_trunc, eigh_vals, left_null, left_polar,
+    lq_compact, lq_full, qr_compact, qr_full, right_null, right_polar, svd_compact, svd_full,
+    svd_trunc, svd_vals, EigFull, EigTrunc, EighFull, EighTrunc, FactorScalar, SectorSpectrum,
+    SpectrumMagnitude, SvdCompact, SvdFull, SvdTrunc,
 };
+pub use matrix_functions::{exp, inv, pinv};
 pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
 
 #[cfg(test)]

@@ -6,6 +6,7 @@
 //! lowers those views to strided-rs kernels at the same granularity that
 //! TensorKit uses Strided.jl/StridedViews.jl internally.
 
+mod adjoint;
 mod axis;
 mod backend;
 mod cache;
@@ -29,6 +30,7 @@ mod tree_profile;
 mod tree_structure;
 mod tree_transform;
 
+pub use adjoint::adjoint;
 pub use axis::{
     AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
 };
