@@ -6,7 +6,7 @@ use num_traits::{One, Zero};
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SectorId,
-    SimilarStorage,
+    SimilarStorage, TensorStorage,
 };
 
 use crate::axis::{AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec};
@@ -310,6 +310,159 @@ mod tests {
             self.data.clear();
             self.data.resize(len, value);
         }
+    }
+
+    /// Storage with no host-slice access: compiling the storage-direct path
+    /// against this type proves the seam has no host contract.
+    #[derive(Debug)]
+    struct OpaqueStorage<T> {
+        cells: Vec<T>,
+    }
+
+    impl<T> TensorStorage<T> for OpaqueStorage<T> {
+        fn len(&self) -> usize {
+            self.cells.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    struct NaiveOpaqueGemm;
+
+    impl StorageGemm<f64, OpaqueStorage<f64>, OpaqueStorage<f64>, OpaqueStorage<f64>>
+        for NaiveOpaqueGemm
+    {
+        fn matmul_range_into(
+            &mut self,
+            dst: &mut OpaqueStorage<f64>,
+            dst_offset: usize,
+            lhs: &OpaqueStorage<f64>,
+            lhs_offset: usize,
+            rhs: &OpaqueStorage<f64>,
+            rhs_offset: usize,
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+        ) -> Result<(), OperationError> {
+            for col in 0..cols {
+                for row in 0..rows {
+                    let mut sum = 0.0;
+                    for inner in 0..contracted {
+                        sum += lhs.cells[lhs_offset + row + rows * inner]
+                            * rhs.cells[rhs_offset + inner + contracted * col];
+                    }
+                    dst.cells[dst_offset + row + rows * col] = sum;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn storage_direct_replay_runs_without_host_slice_contract() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let fusion_space = || {
+            FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([leg()]),
+                    FusionProductSpace::new([leg()]),
+                ),
+                &rule,
+                [vec![1, 1], vec![1, 1]],
+            )
+            .unwrap()
+        };
+        let space = fusion_space();
+        let plan = CanonicalFusionBlockContractPlan::compile(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&space),
+            &DynamicFusionMapSpace::from_typed(&space),
+            &DynamicFusionMapSpace::from_typed(&space),
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+
+        let lhs = OpaqueStorage {
+            cells: vec![2.0, 3.0],
+        };
+        let rhs = OpaqueStorage {
+            cells: vec![5.0, 7.0],
+        };
+        let mut dst = OpaqueStorage {
+            cells: vec![0.0, 0.0],
+        };
+        plan.execute_direct_on_storage(&mut NaiveOpaqueGemm, &mut dst, &lhs, &rhs)
+            .unwrap();
+
+        // Two 1x1 sector matrices: dst = lhs * rhs per sector.
+        assert_eq!(dst.cells, vec![10.0, 21.0]);
+    }
+
+    #[test]
+    fn storage_direct_replay_matches_host_execute_raw() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let fusion_space = |dims: usize| {
+            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+                TensorMapSpace::<1, 1>::from_dims([2 * dims], [2 * dims]).unwrap(),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([leg()]),
+                    FusionProductSpace::new([leg()]),
+                ),
+                &rule,
+                [vec![dims, dims], vec![dims, dims]],
+            )
+            .unwrap()
+        };
+        let space = fusion_space(2);
+        let len = space.required_len().unwrap();
+        let lhs_data: Vec<f64> = (0..len).map(|i| 0.5 * i as f64 - 1.0).collect();
+        let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
+        let plan = CanonicalFusionBlockContractPlan::compile(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&space),
+            &DynamicFusionMapSpace::from_typed(&space),
+            &DynamicFusionMapSpace::from_typed(&space),
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TensorContractWorkspace::default();
+        let mut expected = vec![0.0; len];
+        let structure = std::sync::Arc::clone(space.subblock_structure());
+        let mut fusion_workspace = CanonicalFusionBlockContractWorkspace::<f64>::default();
+        plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter,
+            &mut backend,
+            &mut workspace,
+            &mut fusion_workspace,
+            &structure,
+            &mut expected,
+            &structure,
+            &lhs_data,
+            &structure,
+            &rhs_data,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        let mut direct = vec![0.0; len];
+        let mut gemm = HostStorageGemm::new(&mut backend, &mut workspace);
+        plan.execute_direct_on_storage(
+            &mut gemm,
+            &mut direct,
+            &lhs_data.clone(),
+            &rhs_data.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(direct, expected);
     }
 
     #[test]
@@ -947,6 +1100,61 @@ impl CanonicalFusionBlockContractPlan {
         Ok(())
     }
 
+    /// Executes the contraction purely over storage handles.
+    ///
+    /// This is the device-side replay seam: the bounds require only
+    /// [`TensorStorage`], so no host-slice contract leaks into the path. It
+    /// supports exactly the fully-direct coupled-layout case with `alpha = 1`,
+    /// `beta = 0` and no inactive destination blocks; every other case must
+    /// use the host replay paths until the corresponding device kernels
+    /// (pack/scatter, scale, tree transforms) exist behind their own seams.
+    #[allow(dead_code)]
+    pub(crate) fn execute_direct_on_storage<G, D, DDst, DLhs, DRhs>(
+        &self,
+        gemm: &mut G,
+        dst: &mut DDst,
+        lhs: &DLhs,
+        rhs: &DRhs,
+    ) -> Result<(), OperationError>
+    where
+        G: StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        if !self.inactive_dst_scale_blocks.is_empty() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct replay requires full destination coverage",
+            });
+        }
+        for group in &self.groups {
+            let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
+                group.lhs.direct_offset,
+                group.rhs.direct_offset,
+                group.dst.direct_offset,
+            ) else {
+                return Err(OperationError::UnsupportedTensorContractScope {
+                    message: "storage-direct replay requires the coupled-sector matrix layout",
+                });
+            };
+            validate_storage_range(lhs.len(), lhs_base, group.lhs.rows, group.lhs.cols)?;
+            validate_storage_range(rhs.len(), rhs_base, group.rhs.rows, group.rhs.cols)?;
+            validate_storage_range(dst.len(), dst_base, group.dst.rows, group.dst.cols)?;
+            gemm.matmul_range_into(
+                dst,
+                dst_base,
+                lhs,
+                lhs_base,
+                rhs,
+                rhs_base,
+                group.lhs.rows,
+                group.lhs.cols,
+                group.rhs.cols,
+            )?;
+        }
+        Ok(())
+    }
+
     fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
@@ -972,6 +1180,101 @@ impl CanonicalFusionBlockContractPlan {
         validate_storage_len(lhs_structure, lhs_len)?;
         validate_storage_len(rhs_structure, rhs_len)
     }
+}
+
+/// Placement-aware block GEMM over storage ranges.
+///
+/// The device-side replay seam for canonical fusion-block contraction:
+/// `dst[dst_offset..][rows x cols] = lhs[lhs_offset..][rows x contracted] *
+/// rhs[rhs_offset..][contracted x cols]` as column-major matrices, with no
+/// host-slice contract in the trait. The host implementation wraps a
+/// [`TensorContractBackend`]; device implementations submit kernels against
+/// device storage handles.
+pub(crate) trait StorageGemm<D, DDst, DLhs, DRhs> {
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_range_into(
+        &mut self,
+        dst: &mut DDst,
+        dst_offset: usize,
+        lhs: &DLhs,
+        lhs_offset: usize,
+        rhs: &DRhs,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+    ) -> Result<(), OperationError>;
+}
+
+/// Host implementation of [`StorageGemm`] over host-readable storages.
+#[allow(dead_code)]
+pub(crate) struct HostStorageGemm<'a, B, W> {
+    backend: &'a mut B,
+    workspace: &'a mut W,
+}
+
+impl<'a, B, W> HostStorageGemm<'a, B, W> {
+    #[allow(dead_code)]
+    pub(crate) fn new(backend: &'a mut B, workspace: &'a mut W) -> Self {
+        Self { backend, workspace }
+    }
+}
+
+impl<'a, B, D, DDst, DLhs, DRhs> StorageGemm<D, DDst, DLhs, DRhs>
+    for HostStorageGemm<'a, B, B::Workspace>
+where
+    B: TensorContractBackend<D, f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    DDst: HostWritableStorage<D>,
+    DLhs: HostReadableStorage<D>,
+    DRhs: HostReadableStorage<D>,
+{
+    fn matmul_range_into(
+        &mut self,
+        dst: &mut DDst,
+        dst_offset: usize,
+        lhs: &DLhs,
+        lhs_offset: usize,
+        rhs: &DRhs,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+    ) -> Result<(), OperationError> {
+        let dst_len = rows * cols;
+        let lhs_len = rows * contracted;
+        let rhs_len = contracted * cols;
+        self.backend.matmul_rank2_into_raw(
+            self.workspace,
+            &mut dst.as_mut_slice()[dst_offset..dst_offset + dst_len],
+            &lhs.as_slice()[lhs_offset..lhs_offset + lhs_len],
+            &rhs.as_slice()[rhs_offset..rhs_offset + rhs_len],
+            rows,
+            contracted,
+            cols,
+        )
+    }
+}
+
+fn validate_storage_range(
+    storage_len: usize,
+    base: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(), OperationError> {
+    let len = rows
+        .checked_mul(cols)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let end = base
+        .checked_add(len)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if end > storage_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: end,
+            actual: storage_len,
+        });
+    }
+    Ok(())
 }
 
 fn validate_storage_len(
