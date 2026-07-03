@@ -234,146 +234,25 @@ where
     let truncation_error = apply_truncation(rule, &mut factors, &mut singular_values, truncation)?;
     factors.retain(|factor| factor.kept > 0);
     singular_values.retain(|entry| !entry.values.is_empty());
-    let mut new_leg_dim = 0usize;
-    for factor in &factors {
-        new_leg_dim += factor.kept;
-    }
 
-    let sector_rank = |sector: SectorId| -> usize {
-        factors
-            .iter()
-            .find(|factor| factor.sector == sector)
-            .map(|factor| factor.kept)
-            .unwrap_or(0)
-    };
-
-    let new_leg = SectorLeg::new(factors.iter().map(|factor| factor.sector), false);
-    let dims = tensor.space().dims();
-    let mut codomain_dims = [0usize; NOUT];
-    codomain_dims.copy_from_slice(&dims[..NOUT]);
-    let mut domain_dims = [0usize; NIN];
-    domain_dims.copy_from_slice(&dims[NOUT..]);
-
-    let u_hom = FusionTreeHomSpace::new(
-        fusion_space.homspace().codomain().clone(),
-        FusionProductSpace::new([new_leg.clone()]),
-    );
-    let u_keys = u_hom.fusion_tree_keys(rule);
-    let u_shapes = u_keys
-        .iter()
-        .map(|key| {
-            let sector = coupled_of(rule, key.codomain_tree());
-            let mut shape = row_shape_of(&matricizations, sector, key.codomain_tree())?;
-            shape.push(sector_rank(sector));
-            Ok(shape)
+    let pairs = factors
+        .into_iter()
+        .map(|factor| FactorPair {
+            sector: factor.sector,
+            kept: factor.kept,
+            left: factor.u,
+            left_rows: factor.rows,
+            right: factor.vt,
+            right_leading: factor.rank,
         })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let u_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<NOUT, 1>::from_dims(codomain_dims, [new_leg_dim])
-            .map_err(OperationError::from_core_preserving_context)?,
-        u_hom,
+        .collect::<Vec<_>>();
+    let (u_tensor, vt_tensor) = build_left_right_pair(
         rule,
-        u_shapes,
-    )
-    .map_err(OperationError::from_core_preserving_context)?;
-
-    let vt_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg]),
-        fusion_space.homspace().domain().clone(),
-    );
-    let vt_keys = vt_hom.fusion_tree_keys(rule);
-    let vt_shapes = vt_keys
-        .iter()
-        .map(|key| {
-            let sector = coupled_of(rule, key.domain_tree());
-            let mut shape = vec![sector_rank(sector)];
-            shape.extend(col_shape_of(&matricizations, sector, key.domain_tree())?);
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let vt_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<1, NIN>::from_dims([new_leg_dim], domain_dims)
-            .map_err(OperationError::from_core_preserving_context)?,
-        vt_hom,
-        rule,
-        vt_shapes,
-    )
-    .map_err(OperationError::from_core_preserving_context)?;
-
-    let u_len = u_space
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let mut u_tensor =
-        TensorMap::<f64, NOUT, 1>::from_vec_with_fusion_space(vec![0.0; u_len], u_space)
-            .map_err(OperationError::from_core_preserving_context)?;
-    let vt_len = vt_space
-        .required_len()
-        .map_err(OperationError::from_core_preserving_context)?;
-    let mut vt_tensor =
-        TensorMap::<f64, 1, NIN>::from_vec_with_fusion_space(vec![0.0; vt_len], vt_space)
-            .map_err(OperationError::from_core_preserving_context)?;
-
-    // Scatter U blocks: block element (i.., j) = u[(row_offset + rowmaj(i)) + rows * j].
-    let u_structure = std::sync::Arc::clone(u_tensor.structure());
-    for index in 0..u_structure.block_count() {
-        let block = u_structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of(rule, key.codomain_tree());
-        let matrix = matricization_of(&matricizations, sector)?;
-        let factor = factors
-            .iter()
-            .find(|factor| factor.sector == sector)
-            .expect("factor exists for every matricized sector");
-        let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
-        let shape = block.shape().to_vec();
-        let strides = block.strides().to_vec();
-        let offset = block.offset();
-        scatter_matrix_block(
-            u_tensor.data_mut(),
-            &shape,
-            &strides,
-            offset,
-            shape.len() - 1,
-            &factor.u,
-            factor.rows,
-            row_offset,
-        );
-    }
-
-    // Scatter Vt blocks: block element (r, j..) = vt[r + rank * (col_offset + colmaj(j))].
-    let vt_structure = std::sync::Arc::clone(vt_tensor.structure());
-    for index in 0..vt_structure.block_count() {
-        let block = vt_structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of(rule, key.domain_tree());
-        let matrix = matricization_of(&matricizations, sector)?;
-        let factor = factors
-            .iter()
-            .find(|factor| factor.sector == sector)
-            .expect("factor exists for every matricized sector");
-        let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
-        let shape = block.shape().to_vec();
-        let strides = block.strides().to_vec();
-        let offset = block.offset();
-        scatter_matrix_block(
-            vt_tensor.data_mut(),
-            &shape,
-            &strides,
-            offset,
-            0,
-            &factor.vt,
-            factor.rank,
-            col_offset,
-        );
-    }
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )?;
 
     Ok((
         FusionSvd {
@@ -383,6 +262,304 @@ where
         },
         truncation_error,
     ))
+}
+
+/// One coupled sector's factor pair: `left` is `left_rows x kept` (leading
+/// columns of a column-major matrix), `right` is `kept x cols` (leading rows
+/// of a column-major matrix with leading dimension `right_leading`).
+struct FactorPair {
+    sector: SectorId,
+    kept: usize,
+    left: Vec<f64>,
+    left_rows: usize,
+    right: Vec<f64>,
+    right_leading: usize,
+}
+
+/// Builds the `(codomain <- W, W <- domain)` tensor pair shared by SVD and
+/// the orthogonal factorizations, in the coupled-sector matrix layout.
+fn build_left_right_pair<R, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    fusion_space: &FusionTensorMapSpace<NOUT, NIN>,
+    dims: &[usize],
+    matricizations: &[SectorMatricization],
+    pairs: &[FactorPair],
+) -> Result<(TensorMap<f64, NOUT, 1>, TensorMap<f64, 1, NIN>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let mut new_leg_dim = 0usize;
+    for pair in pairs {
+        new_leg_dim += pair.kept;
+    }
+    let sector_rank = |sector: SectorId| -> usize {
+        pairs
+            .iter()
+            .find(|pair| pair.sector == sector)
+            .map(|pair| pair.kept)
+            .unwrap_or(0)
+    };
+
+    let new_leg = SectorLeg::new(pairs.iter().map(|pair| pair.sector), false);
+    let mut codomain_dims = [0usize; NOUT];
+    codomain_dims.copy_from_slice(&dims[..NOUT]);
+    let mut domain_dims = [0usize; NIN];
+    domain_dims.copy_from_slice(&dims[NOUT..]);
+
+    let left_hom = FusionTreeHomSpace::new(
+        fusion_space.homspace().codomain().clone(),
+        FusionProductSpace::new([new_leg.clone()]),
+    );
+    let left_keys = left_hom.fusion_tree_keys(rule);
+    let left_shapes = left_keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of(rule, key.codomain_tree());
+            let mut shape = row_shape_of(matricizations, sector, key.codomain_tree())?;
+            shape.push(sector_rank(sector));
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+    let left_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<NOUT, 1>::from_dims(codomain_dims, [new_leg_dim])
+            .map_err(OperationError::from_core_preserving_context)?,
+        left_hom,
+        rule,
+        left_shapes,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+
+    let right_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg]),
+        fusion_space.homspace().domain().clone(),
+    );
+    let right_keys = right_hom.fusion_tree_keys(rule);
+    let right_shapes = right_keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of(rule, key.domain_tree());
+            let mut shape = vec![sector_rank(sector)];
+            shape.extend(col_shape_of(matricizations, sector, key.domain_tree())?);
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+    let right_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, NIN>::from_dims([new_leg_dim], domain_dims)
+            .map_err(OperationError::from_core_preserving_context)?,
+        right_hom,
+        rule,
+        right_shapes,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+
+    let left_len = left_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut left_tensor =
+        TensorMap::<f64, NOUT, 1>::from_vec_with_fusion_space(vec![0.0; left_len], left_space)
+            .map_err(OperationError::from_core_preserving_context)?;
+    let right_len = right_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut right_tensor =
+        TensorMap::<f64, 1, NIN>::from_vec_with_fusion_space(vec![0.0; right_len], right_space)
+            .map_err(OperationError::from_core_preserving_context)?;
+
+    // Scatter left blocks: element (i.., j) = left[(row_offset + rowmaj(i)) + left_rows * j].
+    let left_structure = std::sync::Arc::clone(left_tensor.structure());
+    for index in 0..left_structure.block_count() {
+        let block = left_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let sector = coupled_of(rule, key.codomain_tree());
+        let matrix = matricization_of(matricizations, sector)?;
+        let pair = pairs
+            .iter()
+            .find(|pair| pair.sector == sector)
+            .expect("factor pair exists for every matricized sector");
+        let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
+        let shape = block.shape().to_vec();
+        let strides = block.strides().to_vec();
+        let offset = block.offset();
+        scatter_matrix_block(
+            left_tensor.data_mut(),
+            &shape,
+            &strides,
+            offset,
+            shape.len() - 1,
+            &pair.left,
+            pair.left_rows,
+            row_offset,
+        );
+    }
+
+    // Scatter right blocks: element (r, j..) = right[r + right_leading * (col_offset + colmaj(j))].
+    let right_structure = std::sync::Arc::clone(right_tensor.structure());
+    for index in 0..right_structure.block_count() {
+        let block = right_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let sector = coupled_of(rule, key.domain_tree());
+        let matrix = matricization_of(matricizations, sector)?;
+        let pair = pairs
+            .iter()
+            .find(|pair| pair.sector == sector)
+            .expect("factor pair exists for every matricized sector");
+        let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
+        let shape = block.shape().to_vec();
+        let strides = block.strides().to_vec();
+        let offset = block.offset();
+        scatter_matrix_block(
+            right_tensor.data_mut(),
+            &shape,
+            &strides,
+            offset,
+            0,
+            &pair.right,
+            pair.right_leading,
+            col_offset,
+        );
+    }
+
+    Ok((left_tensor, right_tensor))
+}
+
+/// Left-orthogonal factorization `t = Q * R` (TensorKit `leftorth` via QR):
+/// `Q : codomain <- W` has orthonormal columns per coupled sector and
+/// `R : W <- domain`.
+pub fn leftorth_fusion<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<(TensorMap<f64, NOUT, 1>, TensorMap<f64, 1, NIN>), OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view =
+            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .qr(DenseRead::F64(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense QR must return exactly (Q, R)",
+            });
+        }
+        let rank = matrix.rows.min(matrix.cols);
+        validate_dense_shape(outputs[0].shape(), &[matrix.rows, rank])?;
+        validate_dense_shape(outputs[1].shape(), &[rank, matrix.cols])?;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rank,
+            left: outputs[0]
+                .as_f64_slice()
+                .map_err(OperationError::Dense)?
+                .to_vec(),
+            left_rows: matrix.rows,
+            right: outputs[1]
+                .as_f64_slice()
+                .map_err(OperationError::Dense)?
+                .to_vec(),
+            right_leading: rank,
+        });
+    }
+
+    build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )
+}
+
+/// Right-orthogonal factorization `t = L * Q` (TensorKit `rightorth` via the
+/// QR of the transposed sector matrices): `Q : W <- domain` has orthonormal
+/// rows per coupled sector and `L : codomain <- W`.
+pub fn rightorth_fusion<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<(TensorMap<f64, NOUT, 1>, TensorMap<f64, 1, NIN>), OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        // QR of the transpose: t^T = Q' R'  =>  t = R'^T Q'^T = L Q.
+        let transposed = transpose_col_major(&matrix.data, matrix.rows, matrix.cols);
+        let shape = [matrix.cols, matrix.rows];
+        let strides = [1usize, matrix.cols];
+        let view =
+            DenseView::new(&transposed, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .qr(DenseRead::F64(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense QR must return exactly (Q, R)",
+            });
+        }
+        let rank = matrix.rows.min(matrix.cols);
+        validate_dense_shape(outputs[0].shape(), &[matrix.cols, rank])?;
+        validate_dense_shape(outputs[1].shape(), &[rank, matrix.rows])?;
+        let q_prime = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+        let r_prime = outputs[1].as_f64_slice().map_err(OperationError::Dense)?;
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rank,
+            // L = R'^T : rows x rank.
+            left: transpose_col_major(r_prime, rank, matrix.rows),
+            left_rows: matrix.rows,
+            // Q = Q'^T : rank x cols.
+            right: transpose_col_major(q_prime, matrix.cols, rank),
+            right_leading: rank,
+        });
+    }
+
+    build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )
+}
+
+/// Transposes a column-major `rows x cols` matrix into column-major
+/// `cols x rows`.
+fn transpose_col_major(data: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut transposed = vec![0.0; data.len()];
+    for col in 0..cols {
+        for row in 0..rows {
+            transposed[col + cols * row] = data[row + rows * col];
+        }
+    }
+    transposed
 }
 
 /// Copies a dense column-major matrix region into one fusion-tree subblock.

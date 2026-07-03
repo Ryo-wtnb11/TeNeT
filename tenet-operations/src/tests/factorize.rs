@@ -432,3 +432,90 @@ fn tsvd_truncerr_respects_relative_tolerance() {
     let distance = weighted_norm_squared_of_difference(&rule, &tensor, &reconstructed).sqrt();
     assert!((distance - error).abs() < 1e-8);
 }
+
+#[test]
+fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
+    for (rule_case, sectors) in [
+        (0usize, vec![SectorId::new(0), SectorId::new(1)]),
+        (
+            1usize,
+            vec![
+                SU2Irrep::from_twice_spin(0).sector_id(),
+                SU2Irrep::from_twice_spin(1).sector_id(),
+            ],
+        ),
+    ] {
+        if rule_case == 0 {
+            let rule = Z2FusionRule;
+            let tensor = tsvd_test_tensor(&rule, &sectors);
+            let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+            let (q, r) = leftorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+            let reconstructed = contract_pair(&rule, &tensor, &q, &r);
+            assert_svd_blocks_match(&tensor, &reconstructed);
+        } else {
+            let rule = SU2FusionRule;
+            let tensor = tsvd_test_tensor(&rule, &sectors);
+            let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+            let (q, r) = leftorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+            let reconstructed = contract_pair(&rule, &tensor, &q, &r);
+            assert_svd_blocks_match(&tensor, &reconstructed);
+        }
+    }
+}
+
+#[test]
+fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
+    {
+        let rule = Z2FusionRule;
+        let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+        let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+        let (l, q) = rightorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+        let reconstructed = contract_pair(&rule, &tensor, &l, &q);
+        assert_svd_blocks_match(&tensor, &reconstructed);
+    }
+    {
+        let rule = SU2FusionRule;
+        let tensor = tsvd_test_tensor(
+            &rule,
+            &[
+                SU2Irrep::from_twice_spin(0).sector_id(),
+                SU2Irrep::from_twice_spin(1).sector_id(),
+            ],
+        );
+        let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+        let (l, q) = rightorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+        let reconstructed = contract_pair(&rule, &tensor, &l, &q);
+        assert_svd_blocks_match(&tensor, &reconstructed);
+    }
+}
+
+fn contract_pair<R>(
+    rule: &R,
+    template: &TensorMap<f64, 2, 2>,
+    left: &TensorMap<f64, 2, 1>,
+    right: &TensorMap<f64, 1, 2>,
+) -> TensorMap<f64, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+{
+    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![0.0; template.data().len()],
+        template.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .tensorcontract_fusion_into(
+            rule,
+            &mut reconstructed,
+            left,
+            right,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    reconstructed
+}
