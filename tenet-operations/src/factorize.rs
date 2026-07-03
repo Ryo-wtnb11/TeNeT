@@ -31,6 +31,19 @@ pub struct SvdCompact<const NOUT: usize, const NIN: usize> {
     pub error: f64,
 }
 
+/// Full (untruncated) fusion-tensor SVD `t = U * S * Vh`.
+///
+/// This is the pure device-boundary factorization: the dense per-sector SVDs
+/// run through the [`DenseExecutor`] and no truncation logic is involved.
+/// Per block it is the economy factorization with bond `min(rows, cols)`.
+#[derive(Clone, Debug)]
+pub struct SvdFull<const NOUT: usize, const NIN: usize> {
+    pub u: TensorMap<f64, NOUT, 1>,
+    pub s: TensorMap<f64, 1, 1>,
+    pub vh: TensorMap<f64, 1, NIN>,
+    pub singular_values: Vec<SectorSingularValues>,
+}
+
 /// Materializes per-sector spectra as the diagonal tensor `S : W <- W` in the
 /// coupled layout.
 fn singular_tensor<R>(
@@ -122,16 +135,35 @@ where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    svd_compact(dense, rule, tensor, &Truncation::Full).map(|svd| svd.singular_values)
+    svd_full(dense, rule, tensor).map(|svd| svd.singular_values)
 }
 
 /// Compact fusion-tensor SVD with an in-line truncation policy.
+///
+/// Layering: the untruncated factorization runs on the device boundary
+/// ([`svd_full`]); the truncation decision is host-side scalar work over the
+/// spectra and its application slices the leading bond states per sector
+/// ([`truncate_svd`]).
 pub fn svd_compact<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
     truncation: &Truncation,
 ) -> Result<SvdCompact<NOUT, NIN>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let full = svd_full(dense, rule, tensor)?;
+    truncate_svd(rule, full, truncation)
+}
+
+/// Full (untruncated) fusion-tensor SVD through the device boundary.
+pub fn svd_full<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<SvdFull<NOUT, NIN>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -186,27 +218,6 @@ where
         });
     }
 
-    let decision = {
-        let spectra = singular_values
-            .iter()
-            .map(|entry| WeightedSpectrum {
-                weight: rule.dim_scalar(entry.sector),
-                values: &entry.values,
-            })
-            .collect::<Vec<_>>();
-        select_truncation(&spectra, truncation)
-    };
-    for ((entry, factor), &count) in singular_values
-        .iter_mut()
-        .zip(factors.iter_mut())
-        .zip(&decision.kept)
-    {
-        entry.values.truncate(count);
-        factor.kept = count;
-    }
-    factors.retain(|factor| factor.kept > 0);
-    singular_values.retain(|entry| !entry.values.is_empty());
-
     let pairs = factors
         .into_iter()
         .map(|factor| FactorPair {
@@ -227,13 +238,217 @@ where
     )?;
 
     let s_tensor = singular_tensor(rule, &singular_values)?;
-    Ok(SvdCompact {
+    Ok(SvdFull {
         u: u_tensor,
         s: s_tensor,
         vh: vt_tensor,
         singular_values,
+    })
+}
+
+/// Applies a truncation policy to a full factorization.
+///
+/// The decision is host-side scalar work over the spectra; the application
+/// keeps the leading bond states per coupled sector, which in the coupled
+/// layout is a per-sector leading-columns/rows copy (device kernel later).
+pub fn truncate_svd<R, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    full: SvdFull<NOUT, NIN>,
+    truncation: &Truncation,
+) -> Result<SvdCompact<NOUT, NIN>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let decision = {
+        let spectra = full
+            .singular_values
+            .iter()
+            .map(|entry| WeightedSpectrum {
+                weight: rule.dim_scalar(entry.sector),
+                values: &entry.values,
+            })
+            .collect::<Vec<_>>();
+        select_truncation(&spectra, truncation)
+    };
+    if full
+        .singular_values
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok(SvdCompact {
+            u: full.u,
+            s: full.s,
+            vh: full.vh,
+            singular_values: full.singular_values,
+            error: 0.0,
+        });
+    }
+
+    let mut singular_values = full.singular_values;
+    for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    singular_values.retain(|entry| !entry.values.is_empty());
+
+    let kept_of = |sector: SectorId| -> usize {
+        singular_values
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .map(|entry| entry.values.len())
+            .unwrap_or(0)
+    };
+
+    let u_tensor = sliced_bond_tensor(rule, &full.u, NOUT, &kept_of)?;
+    let vh_tensor = sliced_bond_tensor(rule, &full.vh, 0, &kept_of)?;
+    let s_tensor = singular_tensor(rule, &singular_values)?;
+    Ok(SvdCompact {
+        u: u_tensor,
+        s: s_tensor,
+        vh: vh_tensor,
+        singular_values,
         error: decision.error,
     })
+}
+
+/// Rebuilds a factor tensor with the bond leg (`axis`) shrunk to the kept
+/// prefix per coupled sector, copying leading bond states blockwise.
+fn sliced_bond_tensor<R, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<f64, NOUT, NIN>,
+    axis: usize,
+    kept_of: &dyn Fn(SectorId) -> usize,
+) -> Result<TensorMap<f64, NOUT, NIN>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let source_space = source
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    let source_structure = std::sync::Arc::clone(source.structure());
+
+    // The bond leg carries exactly the kept sectors.
+    let kept_sectors: Vec<SectorId> = {
+        let homspace = source_space.homspace();
+        let leg = if axis < NOUT {
+            &homspace.codomain().legs()[axis]
+        } else {
+            &homspace.domain().legs()[axis - NOUT]
+        };
+        leg.sectors()
+            .iter()
+            .copied()
+            .filter(|&sector| kept_of(sector) > 0)
+            .collect()
+    };
+    let bond_leg = SectorLeg::new(kept_sectors.iter().copied(), false);
+    let homspace = source_space.homspace();
+    let new_hom = if axis < NOUT {
+        let mut codomain_legs = homspace.codomain().legs().to_vec();
+        codomain_legs[axis] = bond_leg;
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain_legs),
+            homspace.domain().clone(),
+        )
+    } else {
+        let mut domain_legs = homspace.domain().legs().to_vec();
+        domain_legs[axis - NOUT] = bond_leg;
+        FusionTreeHomSpace::new(
+            homspace.codomain().clone(),
+            FusionProductSpace::new(domain_legs),
+        )
+    };
+
+    let keys = new_hom.fusion_tree_keys(rule);
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let old_index = source_structure
+                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+                .ok_or(OperationError::UnsupportedTensorContractScope {
+                    message: "truncated factor tree must exist in the full factor",
+                })?;
+            let old_block = source_structure
+                .block(old_index)
+                .map_err(OperationError::from_core_preserving_context)?;
+            let mut shape = old_block.shape().to_vec();
+            let bond_tree = if axis < NOUT {
+                key.codomain_tree()
+            } else {
+                key.domain_tree()
+            };
+            shape[axis] = kept_of(coupled_of(rule, bond_tree));
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+
+    let mut dims = source.space().dims().to_vec();
+    dims[axis] = kept_sectors.iter().map(|&sector| kept_of(sector)).sum();
+    let mut codomain_dims = [0usize; NOUT];
+    codomain_dims.copy_from_slice(&dims[..NOUT]);
+    let mut domain_dims = [0usize; NIN];
+    domain_dims.copy_from_slice(&dims[NOUT..]);
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<NOUT, NIN>::from_dims(codomain_dims, domain_dims)
+            .map_err(OperationError::from_core_preserving_context)?,
+        new_hom,
+        rule,
+        shapes,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    let len = space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut sliced = TensorMap::<f64, NOUT, NIN>::from_vec_with_fusion_space(vec![0.0; len], space)
+        .map_err(OperationError::from_core_preserving_context)?;
+
+    let sliced_structure = std::sync::Arc::clone(sliced.structure());
+    for index in 0..sliced_structure.block_count() {
+        let new_block = sliced_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let key = new_block.key().clone();
+        let old_index = source_structure.find_block_index_by_key(&key).ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: "truncated factor tree must exist in the full factor",
+            },
+        )?;
+        let old_block = source_structure
+            .block(old_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let shape = new_block.shape().to_vec();
+        let new_strides = new_block.strides().to_vec();
+        let new_offset = new_block.offset();
+        let old_strides = old_block.strides().to_vec();
+        let old_offset = old_block.offset();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        let source_data = source.data();
+        let data = sliced.data_mut();
+        for _ in 0..count {
+            let new_position = new_offset
+                + indices
+                    .iter()
+                    .zip(&new_strides)
+                    .map(|(&i, &stride)| i * stride)
+                    .sum::<usize>();
+            let old_position = old_offset
+                + indices
+                    .iter()
+                    .zip(&old_strides)
+                    .map(|(&i, &stride)| i * stride)
+                    .sum::<usize>();
+            data[new_position] = source_data[old_position];
+            for axis_index in 0..shape.len() {
+                indices[axis_index] += 1;
+                if indices[axis_index] < shape[axis_index] {
+                    break;
+                }
+                indices[axis_index] = 0;
+            }
+        }
+    }
+    Ok(sliced)
 }
 
 /// One coupled sector's factor pair: `left` is `left_rows x kept` (leading

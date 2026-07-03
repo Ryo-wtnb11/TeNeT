@@ -575,3 +575,29 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
 
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
+
+#[test]
+fn svd_compact_is_svd_full_plus_host_truncation() {
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let truncation = Truncation::rank(9).and(Truncation::absolute_cutoff(1e-12));
+
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let composed = {
+        let full = svd_full(&mut dense_executor, &rule, &tensor).unwrap();
+        truncate_svd(&rule, full, &truncation).unwrap()
+    };
+    let direct = svd_compact(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
+
+    assert_eq!(composed.singular_values, direct.singular_values);
+    assert!((composed.error - direct.error).abs() < 1e-15);
+    assert_eq!(composed.u.data(), direct.u.data());
+    assert_eq!(composed.s.data(), direct.s.data());
+    assert_eq!(composed.vh.data(), direct.vh.data());
+}
