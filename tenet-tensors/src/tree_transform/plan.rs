@@ -349,7 +349,7 @@ where
 }
 
 /// Shape-independent recoupling rows for one source tree under one
-/// operation: the TensorKit `fusiontreedict` caching unit. Rows survive
+/// operation: the caching unit of TensorKit's `@cached` `fstranspose`/`fsbraid`. Rows survive
 /// degeneracy (bond-dimension) changes because they depend only on the tree
 /// keys, so chi sweeps recompile plans without recomputing F/R-symbol
 /// contractions.
@@ -421,7 +421,7 @@ where
 }
 
 /// Memoized plan build: recoupling rows come from a shape-independent
-/// tree-granular memo (TensorKit `fusiontreedict` equivalent), so recompiling
+/// tree-granular memo (TensorKit `fstranspose`/`fsbraid` `@cached` analog), so recompiling
 /// for a new degeneracy pattern reuses every F/R-symbol contraction.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized<R, RuleKey>(

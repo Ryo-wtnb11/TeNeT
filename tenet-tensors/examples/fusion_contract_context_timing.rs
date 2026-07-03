@@ -125,10 +125,10 @@ fn bench_su2_noncanonical_source() {
     );
     println!(
         "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
-        context.fusion_block_contract_cache_hits(),
-        context.fusion_block_contract_cache_fast_hits(),
-        context.fusion_block_contract_cache_misses(),
-        context.fusion_block_contract_cache_len()
+        context.contraction_resolution_cache_hits(),
+        context.contraction_resolution_cache_fast_hits(),
+        context.contraction_resolution_cache_misses(),
+        context.contraction_resolution_cache_len()
     );
 }
 
@@ -190,10 +190,10 @@ fn bench_su2_output_scratch() {
     );
     println!(
         "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
-        context.fusion_block_contract_cache_hits(),
-        context.fusion_block_contract_cache_fast_hits(),
-        context.fusion_block_contract_cache_misses(),
-        context.fusion_block_contract_cache_len()
+        context.contraction_resolution_cache_hits(),
+        context.contraction_resolution_cache_fast_hits(),
+        context.contraction_resolution_cache_misses(),
+        context.contraction_resolution_cache_len()
     );
 }
 
@@ -254,10 +254,10 @@ fn bench_product_complex() {
     );
     println!(
         "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
-        context.fusion_block_contract_cache_hits(),
-        context.fusion_block_contract_cache_fast_hits(),
-        context.fusion_block_contract_cache_misses(),
-        context.fusion_block_contract_cache_len()
+        context.contraction_resolution_cache_hits(),
+        context.contraction_resolution_cache_fast_hits(),
+        context.contraction_resolution_cache_misses(),
+        context.contraction_resolution_cache_len()
     );
 }
 

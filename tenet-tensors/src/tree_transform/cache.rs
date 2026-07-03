@@ -241,7 +241,7 @@ pub struct TreeTransformCache<T, RuleKey> {
     stats: TreeTransformCacheStats,
     // Shape-independent recoupling rows per (rule, operation, source tree):
     // survives degeneracy changes, so chi sweeps recompile plans without
-    // recomputing F/R-symbol contractions (TensorKit fusiontreedict).
+    // recomputing F/R-symbol contractions (TensorKit @cached fstranspose/fsbraid).
     tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
 }
 
@@ -264,7 +264,7 @@ impl TreeTransformCacheStats {
     }
 
     /// Shape-independent recoupling-row memo hits (TensorKit
-    /// fusiontreedict equivalent): rows reused across degeneracy changes.
+    /// fstranspose/fsbraid @cached analog): rows reused across degeneracy changes.
     #[inline]
     pub fn tree_row_hits(self) -> usize {
         self.tree_row_hits

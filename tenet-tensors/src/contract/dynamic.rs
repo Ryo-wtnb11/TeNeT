@@ -22,8 +22,7 @@ use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{tensorcontract_fusion_explicit_plan, TensorContractFusionExplicitPlan};
 use super::fusion_block::{
-    tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractCache,
-    CanonicalFusionBlockContractWorkspace,
+    tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractWorkspace,
 };
 use super::scratch::{
     DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratchWorkspace,
@@ -270,7 +269,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -344,7 +343,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -423,7 +422,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -500,7 +499,7 @@ where
             dst.fusion_space()
                 .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         );
-        let block_plan = fusion_block_cache.get_or_compile(
+        let block_plan = fusion_block_cache.get_or_compile_canonical(
             rule,
             &dst_space,
             &lhs_space,
@@ -540,7 +539,7 @@ where
         &output_dst_space,
     )?;
     let canonical_dst_space = canonical_dst.space.clone();
-    let block_plan = fusion_block_cache.get_or_compile(
+    let block_plan = fusion_block_cache.get_or_compile_canonical(
         rule,
         &canonical_dst_space,
         &lhs_space,
@@ -613,7 +612,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut StorageFusionBlockContractWorkspace<
         DLhs::Similar,
         DRhs::Similar,
@@ -699,7 +698,7 @@ where
             dst.fusion_space()
                 .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         );
-        let block_plan = fusion_block_cache.get_or_compile(
+        let block_plan = fusion_block_cache.get_or_compile_canonical(
             rule,
             &dst_space,
             &lhs_space,
@@ -739,7 +738,7 @@ where
         &output_dst_space,
     )?;
     let canonical_dst_space = canonical_dst.space.clone();
-    let block_plan = fusion_block_cache.get_or_compile(
+    let block_plan = fusion_block_cache.get_or_compile_canonical(
         rule,
         &canonical_dst_space,
         &lhs_space,
@@ -806,7 +805,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context_profiled<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut CanonicalFusionBlockContractCache<RuleKey>,
+    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -901,7 +900,7 @@ where
                 .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         );
         let start = std::time::Instant::now();
-        let block_plan = fusion_block_cache.get_or_compile(
+        let block_plan = fusion_block_cache.get_or_compile_canonical(
             rule,
             &dst_space,
             &lhs_space,
@@ -948,7 +947,7 @@ where
     profile.canonical_dst_space_lookup += start.elapsed();
 
     let start = std::time::Instant::now();
-    let block_plan = fusion_block_cache.get_or_compile(
+    let block_plan = fusion_block_cache.get_or_compile_canonical(
         rule,
         &canonical_dst_space,
         &lhs_space,
@@ -2183,7 +2182,8 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache = CanonicalFusionBlockContractCache::default();
+        let mut fusion_block_cache =
+            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
             TrackingScratch<f64>,
             TrackingScratch<f64>,
@@ -2338,7 +2338,8 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache = CanonicalFusionBlockContractCache::default();
+        let mut fusion_block_cache =
+            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
             TrackingScratch<f64>,
             TrackingScratch<f64>,
@@ -2420,7 +2421,8 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache = CanonicalFusionBlockContractCache::default();
+        let mut fusion_block_cache =
+            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = CanonicalFusionBlockContractWorkspace::<f64>::default();
         let mut scratch = DynamicFusionScratchWorkspace::<f64>::default();
         tensorcontract_fusion_dynamic_plan_into_context(

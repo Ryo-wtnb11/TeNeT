@@ -606,7 +606,7 @@ fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
 
 #[test]
 fn tree_row_memo_survives_structure_change() {
-    // TensorKit fusiontreedict parity: a truncation step changes the tree
+    // TensorKit fstranspose/fsbraid cache parity: a truncation step changes the tree
     // subset of a structure, so the sector-keyed plan cache misses — but
     // recoupling rows for trees shared with earlier structures must be
     // reused from the tree-granular memo instead of recomputing F/R-symbol
