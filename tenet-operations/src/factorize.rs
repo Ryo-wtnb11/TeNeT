@@ -7,9 +7,10 @@ use tenet_dense::{DenseExecutor, DenseRead, DenseView};
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
 use crate::OperationError;
 
-/// Singular values of one coupled sector, descending.
+/// One coupled sector's factorization spectrum: singular values (descending)
+/// or eigenvalues (signed, stored descending by magnitude).
 #[derive(Clone, Debug, PartialEq)]
-pub struct SectorSingularValues {
+pub struct SectorSpectrum {
     pub sector: SectorId,
     pub values: Vec<f64>,
 }
@@ -27,7 +28,7 @@ pub struct SvdCompact<const NOUT: usize, const NIN: usize> {
     pub u: TensorMap<f64, NOUT, 1>,
     pub s: TensorMap<f64, 1, 1>,
     pub vh: TensorMap<f64, 1, NIN>,
-    pub singular_values: Vec<SectorSingularValues>,
+    pub singular_values: Vec<SectorSpectrum>,
     pub error: f64,
 }
 
@@ -41,14 +42,14 @@ pub struct SvdFull<const NOUT: usize, const NIN: usize> {
     pub u: TensorMap<f64, NOUT, 1>,
     pub s: TensorMap<f64, 1, 1>,
     pub vh: TensorMap<f64, 1, NIN>,
-    pub singular_values: Vec<SectorSingularValues>,
+    pub singular_values: Vec<SectorSpectrum>,
 }
 
-/// Materializes per-sector spectra as the diagonal tensor `S : W <- W` in the
-/// coupled layout.
-fn singular_tensor<R>(
+/// Materializes per-sector spectra as a diagonal tensor `W <- W` in the
+/// coupled layout (`S` for the SVD, `D` for eigendecompositions).
+fn diagonal_bond_tensor<R>(
     rule: &R,
-    singular_values: &[SectorSingularValues],
+    singular_values: &[SectorSpectrum],
 ) -> Result<TensorMap<f64, 1, 1>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -130,7 +131,7 @@ pub fn svd_vals<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
-) -> Result<Vec<SectorSingularValues>, OperationError>
+) -> Result<Vec<SectorSpectrum>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -195,7 +196,7 @@ where
         validate_dense_shape(outputs[1].shape(), &[rank])?;
         validate_dense_shape(outputs[2].shape(), &[rank, matrix.cols])?;
 
-        singular_values.push(SectorSingularValues {
+        singular_values.push(SectorSpectrum {
             sector: matrix.sector,
             values: outputs[1]
                 .as_f64_slice()
@@ -237,13 +238,40 @@ where
         &pairs,
     )?;
 
-    let s_tensor = singular_tensor(rule, &singular_values)?;
+    let s_tensor = diagonal_bond_tensor(rule, &singular_values)?;
     Ok(SvdFull {
         u: u_tensor,
         s: s_tensor,
         vh: vt_tensor,
         singular_values,
     })
+}
+
+/// Host-side truncation decision shared by every bond factorization: the
+/// selection magnitude is `|value|` and each `spectra` entry is stored
+/// descending by magnitude (the `*_full` output contract), so the kept set is
+/// always a per-sector prefix.
+fn decide_bond_truncation<R>(
+    rule: &R,
+    spectra: &[SectorSpectrum],
+    truncation: &Truncation,
+) -> crate::truncation::TruncationDecision
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let magnitudes: Vec<Vec<f64>> = spectra
+        .iter()
+        .map(|entry| entry.values.iter().map(|value| value.abs()).collect())
+        .collect();
+    let weighted: Vec<WeightedSpectrum<'_>> = spectra
+        .iter()
+        .zip(&magnitudes)
+        .map(|(entry, values)| WeightedSpectrum {
+            weight: rule.dim_scalar(entry.sector),
+            values,
+        })
+        .collect();
+    select_truncation(&weighted, truncation)
 }
 
 /// Applies a truncation policy to a full factorization (the host half of
@@ -260,17 +288,7 @@ pub(crate) fn truncate_svd<R, const NOUT: usize, const NIN: usize>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let decision = {
-        let spectra = full
-            .singular_values
-            .iter()
-            .map(|entry| WeightedSpectrum {
-                weight: rule.dim_scalar(entry.sector),
-                values: &entry.values,
-            })
-            .collect::<Vec<_>>();
-        select_truncation(&spectra, truncation)
-    };
+    let decision = decide_bond_truncation(rule, &full.singular_values, truncation);
     if full
         .singular_values
         .iter()
@@ -302,7 +320,7 @@ where
 
     let u_tensor = sliced_bond_tensor(rule, &full.u, NOUT, &kept_of)?;
     let vh_tensor = sliced_bond_tensor(rule, &full.vh, 0, &kept_of)?;
-    let s_tensor = singular_tensor(rule, &singular_values)?;
+    let s_tensor = diagonal_bond_tensor(rule, &singular_values)?;
     Ok(SvdCompact {
         u: u_tensor,
         s: s_tensor,
@@ -616,6 +634,166 @@ where
     }
 
     Ok((left_tensor, right_tensor))
+}
+
+/// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.
+///
+/// Requires an endomorphism (`codomain == domain`) with Hermitian coupled
+/// blocks. Bond states are stored descending by `|eigenvalue|` per sector
+/// (the shared `*_full` contract that makes truncation a prefix rule);
+/// `eigenvalues` keeps the signed values in that order and `D : W <- W` is
+/// their diagonal tensor.
+#[derive(Clone, Debug)]
+pub struct EighFull<const NOUT: usize, const NIN: usize> {
+    pub d: TensorMap<f64, 1, 1>,
+    pub v: TensorMap<f64, NOUT, 1>,
+    pub eigenvalues: Vec<SectorSpectrum>,
+}
+
+/// Truncated Hermitian eigendecomposition; `error` is the
+/// quantum-dimension-weighted 2-norm of the discarded eigenvalues.
+#[derive(Clone, Debug)]
+pub struct EighCompact<const NOUT: usize, const NIN: usize> {
+    pub d: TensorMap<f64, 1, 1>,
+    pub v: TensorMap<f64, NOUT, 1>,
+    pub eigenvalues: Vec<SectorSpectrum>,
+    pub error: f64,
+}
+
+/// Full Hermitian eigendecomposition through the device boundary.
+pub fn eigh_full<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Result<EighFull<NOUT, NIN>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let fusion_space = tensor
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?
+        .clone();
+    if fusion_space.homspace().codomain() != fusion_space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires an endomorphism (codomain == domain)",
+        });
+    }
+    let matricizations = sector_matricizations(rule, tensor, NOUT)?;
+
+    let mut pairs = Vec::with_capacity(matricizations.len());
+    let mut eigenvalues = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view =
+            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let outputs = dense
+            .eigh(DenseRead::F64(view))
+            .map_err(OperationError::Dense)?;
+        if outputs.len() != 2 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "dense eigh must return exactly (values, vectors)",
+            });
+        }
+        let n = matrix.rows;
+        validate_dense_shape(outputs[0].shape(), &[n])?;
+        validate_dense_shape(outputs[1].shape(), &[n, n])?;
+        let values = outputs[0].as_f64_slice().map_err(OperationError::Dense)?;
+        let vectors = outputs[1].as_f64_slice().map_err(OperationError::Dense)?;
+
+        // Reorder bond states descending by |eigenvalue| (stable on ties).
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            values[b]
+                .abs()
+                .partial_cmp(&values[a].abs())
+                .expect("finite eigenvalues")
+                .then(a.cmp(&b))
+        });
+        let sorted_values: Vec<f64> = order.iter().map(|&index| values[index]).collect();
+        let mut sorted_vectors = vec![0.0; n * n];
+        for (position, &index) in order.iter().enumerate() {
+            sorted_vectors[position * n..(position + 1) * n]
+                .copy_from_slice(&vectors[index * n..(index + 1) * n]);
+        }
+
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: sorted_values,
+        });
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: n,
+            right: transpose_col_major(&sorted_vectors, n, n),
+            left: sorted_vectors,
+            left_rows: n,
+            right_leading: n,
+        });
+    }
+
+    let (v_tensor, _vh_tensor) = build_left_right_pair(
+        rule,
+        &fusion_space,
+        tensor.space().dims(),
+        &matricizations,
+        &pairs,
+    )?;
+    let d_tensor = diagonal_bond_tensor(rule, &eigenvalues)?;
+    Ok(EighFull {
+        d: d_tensor,
+        v: v_tensor,
+        eigenvalues,
+    })
+}
+
+/// Truncated Hermitian eigendecomposition: [`eigh_full`] on the device
+/// boundary plus the shared host-side truncation by `|eigenvalue|`.
+pub fn eigh_compact<E, R, const NOUT: usize, const NIN: usize>(
+    dense: &mut E,
+    rule: &R,
+    tensor: &TensorMap<f64, NOUT, NIN>,
+    truncation: &Truncation,
+) -> Result<EighCompact<NOUT, NIN>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let full = eigh_full(dense, rule, tensor)?;
+    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation);
+    if full
+        .eigenvalues
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok(EighCompact {
+            d: full.d,
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
+    let mut eigenvalues = full.eigenvalues;
+    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    eigenvalues.retain(|entry| !entry.values.is_empty());
+    let kept_of = |sector: SectorId| -> usize {
+        eigenvalues
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .map(|entry| entry.values.len())
+            .unwrap_or(0)
+    };
+    let v_tensor = sliced_bond_tensor(rule, &full.v, NOUT, &kept_of)?;
+    let d_tensor = diagonal_bond_tensor(rule, &eigenvalues)?;
+    Ok(EighCompact {
+        d: d_tensor,
+        v: v_tensor,
+        eigenvalues,
+        error: decision.error,
+    })
 }
 
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):

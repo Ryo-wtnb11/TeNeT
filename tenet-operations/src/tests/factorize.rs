@@ -48,7 +48,7 @@ fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
 fn scale_vt_rows_by_singular_values<R, const NIN: usize>(
     rule: &R,
     vt: &mut TensorMap<f64, 1, NIN>,
-    singular_values: &[SectorSingularValues],
+    singular_values: &[SectorSpectrum],
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -600,4 +600,161 @@ fn svd_compact_is_svd_full_plus_host_truncation() {
     assert_eq!(composed.u.data(), direct.u.data());
     assert_eq!(composed.s.data(), direct.s.data());
     assert_eq!(composed.vh.data(), direct.vh.data());
+}
+
+fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg_dim = sectors.len() * degeneracy;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = homspace.fusion_tree_keys(rule).len();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
+        homspace,
+        rule,
+        vec![vec![degeneracy; 4]; key_count],
+    )
+    .unwrap();
+    // Symmetric under swapping the (codomain tree, row indices) and
+    // (domain tree, column indices) labels, so every coupled sector matrix is
+    // symmetric (real Hermitian).
+    let side_label = |tree: &FusionTreeKey, indices: &[usize]| -> u64 {
+        let mut label = 17u64;
+        for &sector in tree.uncoupled() {
+            label = label.wrapping_mul(31).wrapping_add(sector.id() as u64 + 1);
+        }
+        for &index in indices {
+            label = label.wrapping_mul(37).wrapping_add(index as u64 + 1);
+        }
+        label
+    };
+    TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+        let BlockKey::FusionTree(tree) = key else {
+            return 0.0;
+        };
+        let row = side_label(tree.codomain_tree(), &indices[..2]);
+        let col = side_label(tree.domain_tree(), &indices[2..]);
+        let (low, high) = if row <= col { (row, col) } else { (col, row) };
+        let hash = low
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(high.wrapping_mul(1442695040888963407));
+        ((hash >> 33) % 19) as f64 * 0.5 - 4.0
+    })
+    .unwrap()
+}
+
+fn assert_eigen_equation<R>(
+    rule: &R,
+    tensor: &TensorMap<f64, 2, 2>,
+    v: &TensorMap<f64, 2, 1>,
+    d: &TensorMap<f64, 1, 1>,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+{
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    // t . V
+    let mut tv = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; v.data().len()],
+        v.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            rule,
+            &mut tv,
+            tensor,
+            v,
+            TensorContractAxisSpec::new(&[2, 3], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    // V . D
+    let mut vd = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; v.data().len()],
+        v.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            rule,
+            &mut vd,
+            v,
+            d,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    for (index, (lhs, rhs)) in tv.data().iter().zip(vd.data()).enumerate() {
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "eigen equation violated at raw position {index}: {lhs} != {rhs}"
+        );
+    }
+}
+
+#[test]
+fn eigh_full_satisfies_the_eigen_equation() {
+    let rule = SU2FusionRule;
+    let tensor = hermitian_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let eigh = eigh_full(&mut dense_executor, &rule, &tensor).unwrap();
+
+    for entry in &eigh.eigenvalues {
+        for pair in entry.values.windows(2) {
+            assert!(
+                pair[0].abs() >= pair[1].abs() - 1e-12,
+                "eigenvalues must be stored descending by magnitude"
+            );
+        }
+    }
+    assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
+}
+
+#[test]
+fn eigh_compact_truncates_by_magnitude_and_keeps_eigen_equation() {
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+
+    let full = eigh_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let full_count: usize = full
+        .eigenvalues
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum();
+    let max_dim = full_count / 2;
+    let eigh = eigh_compact(
+        &mut dense_executor,
+        &rule,
+        &tensor,
+        &Truncation::rank(max_dim),
+    )
+    .unwrap();
+
+    let kept: usize = eigh
+        .eigenvalues
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum();
+    assert!(kept <= max_dim);
+    assert!(eigh.error > 0.0);
+    // Truncated eigenvectors still satisfy t . V = V . D exactly.
+    assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
 }
