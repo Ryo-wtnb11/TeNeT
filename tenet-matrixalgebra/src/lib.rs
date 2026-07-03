@@ -2,11 +2,13 @@
 
 //! MatrixAlgebraKit-style factorizations for TeNeT fusion tensors.
 //!
-//! Mirrors the TensorKit ecosystem split: `tenet-operations` owns contraction
-//! and tree transforms (TensorOperations), this crate owns the matrix-algebra
-//! layer (MatrixAlgebraKit) — blockwise factorizations over the
-//! coupled-sector matricization, spectrum truncation, and the derived matrix
-//! functions built on top of them.
+//! Crate mapping onto the TensorKit ecosystem: `tenet-core` +
+//! `tenet-operations` together play TensorKit.jl's role (structures and
+//! symmetric execution, including the fusion-tree transforms); strided-rs and
+//! tenferro play Strided.jl / TensorOperations.jl's symmetry-agnostic dense
+//! role underneath; and this crate is the MatrixAlgebraKit layer applied at
+//! the fusion-tensor level — blockwise factorizations over the coupled-sector
+//! matricization, spectrum truncation, and the derived matrix functions.
 //!
 //! Every operation decomposes into three kinds of work: dense factorizations
 //! and GEMM on the device boundary ([`tenet_dense::DenseExecutor`]),

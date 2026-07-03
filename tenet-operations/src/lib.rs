@@ -1,10 +1,13 @@
 #![forbid(unsafe_code)]
 
-//! TensorOperations-style lowering for TeNeT.
-//!
-//! Public/core tensor code talks in terms of TeNeT-owned block views. This crate
-//! lowers those views to strided-rs kernels at the same granularity that
-//! TensorKit uses Strided.jl/StridedViews.jl internally.
+//! Symmetric-tensor execution for TeNeT (the operational half of what
+//! TensorKit.jl does in Julia): fusion-tree transforms (F/R recoupling,
+//! braids, permutes), symmetric contraction routes, and the basic tensor
+//! operations, lowered onto strided-rs kernels and the dense executor the
+//! same way TensorKit lowers onto Strided.jl and dense backends. The
+//! symmetry-agnostic einsum layer (TensorOperations.jl's role) lives below
+//! this crate in strided-rs / tenferro; the structural data layer lives in
+//! `tenet-core`.
 
 mod adjoint;
 mod axis;
