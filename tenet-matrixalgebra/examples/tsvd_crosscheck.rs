@@ -12,7 +12,7 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
     U1FusionRule, U1Irrep,
 };
-use tenet_operations::svd_vals;
+use tenet_matrixalgebra::svd_vals;
 
 const DEGENERACY: usize = 2;
 

@@ -1,0 +1,29 @@
+#![forbid(unsafe_code)]
+
+//! MatrixAlgebraKit-style factorizations for TeNeT fusion tensors.
+//!
+//! Mirrors the TensorKit ecosystem split: `tenet-operations` owns contraction
+//! and tree transforms (TensorOperations), this crate owns the matrix-algebra
+//! layer (MatrixAlgebraKit) — blockwise factorizations over the
+//! coupled-sector matricization, spectrum truncation, and the derived matrix
+//! functions built on top of them.
+//!
+//! Every operation decomposes into three kinds of work: dense factorizations
+//! and GEMM on the device boundary ([`tenet_dense::DenseExecutor`]),
+//! scalar decisions over per-sector spectra on the host
+//! ([`truncation`], spectrum functions), and mechanical block-data movement
+//! (bond slicing, adjoints) that stays behind device-capable seams.
+
+mod factorize;
+pub mod truncation;
+
+pub use factorize::{
+    eig_full, eig_trunc, eig_vals, eigh_full, eigh_trunc, eigh_vals, left_null, lq_compact,
+    lq_full, qr_compact, qr_full, right_null, svd_compact, svd_full, svd_trunc, svd_vals, EigFull,
+    EigTrunc, EighFull, EighTrunc, FactorScalar, SectorSpectrum, SpectrumMagnitude, SvdCompact,
+    SvdFull, SvdTrunc,
+};
+pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
+
+#[cfg(test)]
+mod tests;

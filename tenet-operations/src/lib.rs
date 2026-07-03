@@ -12,7 +12,6 @@ mod cache;
 mod contract;
 mod error;
 mod facade;
-mod factorize;
 mod host_kernels;
 mod host_scalar_kernels;
 mod host_scratch;
@@ -29,7 +28,6 @@ mod tree_context;
 mod tree_profile;
 mod tree_structure;
 mod tree_transform;
-mod truncation;
 
 pub use axis::{
     AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
@@ -79,12 +77,6 @@ pub use facade::{
     tensortrace_fusion_into_with, tensortrace_into, tensortrace_into_with,
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with,
-};
-pub use factorize::{
-    eig_full, eig_trunc, eig_vals, eigh_full, eigh_trunc, eigh_vals, left_null, lq_compact,
-    lq_full, qr_compact, qr_full, right_null, svd_compact, svd_full, svd_trunc, svd_vals, EigFull,
-    EigTrunc, EighFull, EighTrunc, FactorScalar, SectorSpectrum, SpectrumMagnitude, SvdCompact,
-    SvdFull, SvdTrunc,
 };
 pub(crate) use host_kernels::{
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
@@ -136,7 +128,6 @@ pub(crate) use tree_transform::{
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
     TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
 };
-pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
 
 #[cfg(test)]
 mod tests;

@@ -1,4 +1,15 @@
-use super::*;
+use tenet_core::{
+    BlockKey, FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreeKey, MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+};
+use tenet_operations::{
+    AxisPermutation, TensorContractAxisSpec, TensorContractFusionExecutionContext,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformRuleCacheKey,
+};
+
+use crate::factorize::truncate_svd;
+use crate::*;
 
 fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
     lhs: &TensorMap<f64, NOUT, NIN>,
@@ -591,7 +602,7 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let composed = {
         let full = svd_compact(&mut dense_executor, &rule, &tensor).unwrap();
-        crate::factorize::truncate_svd(&rule, full, &truncation).unwrap()
+        truncate_svd(&rule, full, &truncation).unwrap()
     };
     let direct = svd_trunc(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
 

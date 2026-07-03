@@ -13,3 +13,7 @@ pub mod dense {
 pub mod operations {
     pub use tenet_operations::*;
 }
+
+pub mod matrixalgebra {
+    pub use tenet_matrixalgebra::*;
+}

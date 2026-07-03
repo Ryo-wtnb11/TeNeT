@@ -232,7 +232,9 @@ impl From<CoreError> for OperationError {
 }
 
 impl OperationError {
-    pub(crate) fn from_core_preserving_context(value: CoreError) -> Self {
+    /// Wraps a core error without collapsing its context; shared with the
+    /// matrix-algebra crate.
+    pub fn from_core_preserving_context(value: CoreError) -> Self {
         match value {
             CoreError::MissingBlockKey { key } => Self::MissingBlockKey { key },
             other => Self::Core(other),

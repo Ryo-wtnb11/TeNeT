@@ -11,14 +11,15 @@ path = "src/lib.rs"
 
 [features]
 default = ["cpu-faer"]
-cpu-faer = ["tenet-dense/cpu-faer", "tenet-operations/cpu-faer"]
-cpu-blas = ["tenet-dense/cpu-blas", "tenet-operations/cpu-blas"]
-blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-operations/blas-accelerate"]
-blas-openblas = ["tenet-dense/blas-openblas", "tenet-operations/blas-openblas"]
-blas-mkl = ["tenet-dense/blas-mkl", "tenet-operations/blas-mkl"]
+cpu-faer = ["tenet-dense/cpu-faer", "tenet-operations/cpu-faer", "tenet-matrixalgebra/cpu-faer"]
+cpu-blas = ["tenet-dense/cpu-blas", "tenet-operations/cpu-blas", "tenet-matrixalgebra/cpu-blas"]
+blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-operations/blas-accelerate", "tenet-matrixalgebra/blas-accelerate"]
+blas-openblas = ["tenet-dense/blas-openblas", "tenet-operations/blas-openblas", "tenet-matrixalgebra/blas-openblas"]
+blas-mkl = ["tenet-dense/blas-mkl", "tenet-operations/blas-mkl", "tenet-matrixalgebra/blas-mkl"]
 provider-inject = ["tenet-dense/provider-inject", "tenet-operations/provider-inject"]
 
 [dependencies]
 tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense", default-features = false }
+tenet-matrixalgebra = { path = "../tenet-matrixalgebra", default-features = false }
 tenet-operations = { path = "../tenet-operations", default-features = false }

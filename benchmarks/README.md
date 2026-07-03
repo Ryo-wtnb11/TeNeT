@@ -165,7 +165,7 @@ contraction bench lands.
 
 ## tsvd cross-check against TensorKit
 
-`tenet-operations/examples/tsvd_crosscheck.rs` and
+`tenet-matrixalgebra/examples/tsvd_crosscheck.rs` and
 `benchmarks/tensorkit_tsvd_crosscheck.jl` fill every fusion-tree pair block of
 a `V x V <- V x V` tensor with the same integer-hash function of the sector
 labels and degeneracy indices, then print per-coupled-sector singular values

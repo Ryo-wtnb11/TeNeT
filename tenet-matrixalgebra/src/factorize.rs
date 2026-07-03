@@ -5,10 +5,10 @@ use tenet_core::{
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView};
 
-use crate::DenseRecouplingScalar;
+use tenet_operations::DenseRecouplingScalar;
 
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
-use crate::OperationError;
+use tenet_operations::OperationError;
 
 /// Scalar contract for the factorization layer: dense-executor I/O plus the
 /// adjoint and real-embedding used by the factor builders. Implemented for

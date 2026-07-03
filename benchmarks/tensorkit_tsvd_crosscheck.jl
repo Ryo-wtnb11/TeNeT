@@ -1,5 +1,5 @@
 # Prints per-sector singular values for deterministic fusion tensors so they
-# can be compared against TeNeT (`tenet-operations/examples/tsvd_crosscheck.rs`).
+# can be compared against TeNeT (`tenet-matrixalgebra/examples/tsvd_crosscheck.rs`).
 #
 # Both sides fill every fusion-tree pair block with the same integer-hash
 # function of the sector labels and one-based degeneracy indices.
