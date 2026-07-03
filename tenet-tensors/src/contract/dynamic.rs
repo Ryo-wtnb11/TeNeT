@@ -2228,14 +2228,10 @@ mod tests {
                 },
             ]
         );
-        let pack_allocations = &allocations[2..];
-        assert!(!pack_allocations.is_empty());
-        assert!(pack_allocations
-            .iter()
-            .all(|allocation| ["lhs", "rhs", "destination"].contains(&allocation.label)));
-        assert!(pack_allocations
-            .iter()
-            .any(|allocation| allocation.label == "destination"));
+        // Only the canonicalization scratch above is allocated: the
+        // contraction itself GEMMs directly on the coupled scratch, with no
+        // pack/scatter allocations.
+        assert_eq!(allocations[2..], []);
     }
 
     #[test]
@@ -2394,11 +2390,9 @@ mod tests {
                 },
             ]
         );
-        let pack_allocations = &allocations[3..];
-        assert!(!pack_allocations.is_empty());
-        assert!(pack_allocations
-            .iter()
-            .all(|allocation| ["lhs", "rhs", "destination"].contains(&allocation.label)));
+        // Canonicalization scratch only: the contraction GEMMs directly on
+        // the coupled scratch, with no pack/scatter allocations.
+        assert_eq!(allocations[3..], []);
     }
 
     fn run_host_reference<

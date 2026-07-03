@@ -23,10 +23,9 @@ mod tree_profile;
 
 pub use error::OperationError;
 pub use fusion_replay::{
-    direct_group_matrix_offset, fusion_block_group_scratch_lens,
-    fusion_scale_block_layouts_excluding, CanonicalFusionBlockContractGroupPlan,
-    CanonicalFusionBlockContractPlan, CanonicalFusionBlockContractWorkspace,
-    FusionBlockContractScratchLens, FusionBlockMatrixGroup, FusionScaleBlockLayout,
+    direct_group_matrix_offset, fusion_scale_block_layouts_excluding,
+    CanonicalFusionBlockContractGroupPlan, CanonicalFusionBlockContractPlan,
+    CanonicalFusionBlockContractWorkspace, FusionBlockMatrixGroup, FusionScaleBlockLayout,
     FusionStridedBlockLayout, FusionSubblockMatrixLayout,
     HostCanonicalFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
 };

@@ -3969,11 +3969,9 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
         profile.canonical_direct_gemm_groups, profile.canonical_contract_groups,
         "coupled layout compose must GEMM directly into destination blocks"
     );
-    assert_eq!(
-        profile.canonical_direct_pack_skips,
-        2 * profile.canonical_contract_groups,
-        "coupled layout compose must skip both operand packs"
-    );
+    // Pack/scatter no longer exist on the canonical route: replay is
+    // direct-GEMM only, so the pack counters stay at their zero defaults.
+    assert_eq!(profile.canonical_direct_pack_skips, 0);
     assert_eq!(profile.canonical_pack_lhs, std::time::Duration::ZERO);
     assert_eq!(profile.canonical_scatter, std::time::Duration::ZERO);
 }

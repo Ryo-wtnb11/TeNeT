@@ -309,3 +309,15 @@ overwrite case keeps the kernel fast path (compose d=4 unchanged at
 4.4 µs). The microbench itself runs α=1/β=0, so its numbers are
 unchanged by design; the win applies to accumulate-form workloads
 (energy sums, environment updates).
+
+### Canonical contraction is pure GEMM (2026-07-04) — T16 complete
+
+pack_group / scatter_group and their workspaces are deleted from the
+canonical replay (tenet-operations/fusion_replay.rs). The canonical
+route now matches TensorKit's mul! exactly: per-coupled-sector direct
+GEMM with alpha/beta, plus a beta-scale of untouched sectors. Fermionic
+supertrace twists moved to rhs scratch materialization on the dynamic
+route (where TensorKit's @tensor applies them); non-coupled operand
+layouts also take the dynamic route (materialize to coupled, then pure
+GEMM). Values pinned by the fZ2 twist tests (scalar and deg-2 TensorKit
+@tensor references) across the routing change.

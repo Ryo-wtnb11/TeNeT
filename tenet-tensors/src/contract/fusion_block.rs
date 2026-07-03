@@ -542,25 +542,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(dst.data(), &[50.0, 102.0]);
-        // The second group reuses the first group's buffers (same placement),
-        // so exactly one allocation per slot happens.
-        assert_eq!(
-            allocations.borrow().as_slice(),
-            &[
-                ScratchAllocation {
-                    label: "lhs",
-                    len: 1,
-                },
-                ScratchAllocation {
-                    label: "rhs",
-                    len: 1,
-                },
-                ScratchAllocation {
-                    label: "destination",
-                    len: 1,
-                },
-            ],
-        );
+        // Pack/scatter scratch is gone from the canonical route: replay is
+        // direct GEMM on storage, so no workspace allocations occur.
+        assert_eq!(allocations.borrow().as_slice(), &[]);
     }
 }
 
@@ -583,10 +567,9 @@ where
         axes,
     )?;
 
-    let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space, None)?;
-    let rhs_layout =
-        FusionBlockMatrixLayout::compile(rule, rhs_space, Some(&axis_plan.rhs_contracting_axes))?;
-    let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space, None)?;
+    let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile(rule, rhs_space)?;
+    let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space)?;
 
     let mut groups = Vec::new();
     let mut active_dst_blocks = HashSet::<usize>::new();
@@ -1133,11 +1116,7 @@ struct FusionBlockMatrixLayout {
 }
 
 impl FusionBlockMatrixLayout {
-    fn compile<R>(
-        rule: &R,
-        space: &DynamicFusionMapSpace,
-        rhs_contracting_axes: Option<&[usize]>,
-    ) -> Result<Self, OperationError>
+    fn compile<R>(rule: &R, space: &DynamicFusionMapSpace) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
@@ -1178,7 +1157,7 @@ impl FusionBlockMatrixLayout {
         }
         let mut groups = Vec::with_capacity(builders.len());
         for builder in builders {
-            groups.push(builder.finish(rule, space, rhs_contracting_axes)?);
+            groups.push(builder.finish(rule, space)?);
         }
         Ok(Self { groups })
     }
@@ -1286,7 +1265,6 @@ impl FusionBlockMatrixGroupBuilder {
         self,
         rule: &R,
         space: &DynamicFusionMapSpace,
-        rhs_contracting_axes: Option<&[usize]>,
     ) -> Result<FusionBlockMatrixGroup, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,

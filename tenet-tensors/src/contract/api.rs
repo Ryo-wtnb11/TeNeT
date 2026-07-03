@@ -895,6 +895,14 @@ where
         && !axes.rhs_conjugate()
         && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
         && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
+        && super::fusion_block::compile_canonical_fusion_block_contract_plan(
+            rule,
+            &dst_dynamic,
+            &lhs_dynamic,
+            &rhs_dynamic,
+            axes,
+        )?
+        .is_fully_direct()
     {
         return tensorcontract_canonical_fusion_blocks_into_raw(
             &mut crate::StridedHostKernelAdapter,
@@ -982,6 +990,14 @@ where
         && !axes.rhs_conjugate()
         && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
         && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
+        && super::fusion_block::compile_canonical_fusion_block_contract_plan(
+            rule,
+            &dst_dynamic,
+            &lhs_dynamic,
+            &rhs_dynamic,
+            axes,
+        )?
+        .is_fully_direct()
     {
         return tensorcontract_canonical_fusion_blocks_into_raw(
             &mut crate::StridedHostKernelAdapter,

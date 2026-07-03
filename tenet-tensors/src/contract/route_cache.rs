@@ -316,6 +316,10 @@ where
     {
         if is_canonical_fusion_block_contract(rule, dst, lhs, rhs, axes)?
             && !rhs_contract_requires_twist(rule, rhs, axes)?
+            && super::fusion_block::compile_canonical_fusion_block_contract_plan(
+                rule, dst, lhs, rhs, axes,
+            )?
+            .is_fully_direct()
         {
             Ok(TensorContractFusionRouteDecision::CanonicalFusionBlocks)
         } else {

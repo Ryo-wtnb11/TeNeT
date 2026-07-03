@@ -6,21 +6,24 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use num_traits::{One, Zero};
+use num_traits::One;
 use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
     SimilarStorage, TensorStorage,
 };
 
-use crate::host_scratch::HostScratchBuffer;
 use crate::placement::ReportsPlacement;
 use crate::profile::TensorContractFusionProfile;
-use crate::storage_scratch::{
-    FusionBlockContractScratchBuffers, StorageFusionBlockContractWorkspace,
-};
+use crate::storage_scratch::StorageFusionBlockContractWorkspace;
 use crate::strided::{offset_to_isize, strides_to_isize};
 use crate::structure_identity::validate_structure_identity;
 use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction};
+
+/// Canonical contraction replay accepts only operands whose coupled-sector
+/// matrices sit directly in storage (the one product layout). Anything else
+/// is a plan-construction bug, not a runtime fallback.
+const NON_COUPLED_OPERAND_MESSAGE: &str =
+    "canonical fusion-block replay requires the coupled sector matrix layout";
 
 /// Rank-2 column-major GEMM over host slices: the only capability the replay
 /// half needs from a contraction backend. The symmetric layer adapts its
@@ -43,7 +46,7 @@ pub trait Rank2Gemm<D> {
 }
 
 pub struct HostCanonicalFusionBlockContractWorkspace<T> {
-    buffers: HostFusionBlockContractBuffers<T>,
+    _scalar: std::marker::PhantomData<T>,
 }
 
 pub type CanonicalFusionBlockContractWorkspace<T> = HostCanonicalFusionBlockContractWorkspace<T>;
@@ -51,7 +54,7 @@ pub type CanonicalFusionBlockContractWorkspace<T> = HostCanonicalFusionBlockCont
 impl<T> Default for HostCanonicalFusionBlockContractWorkspace<T> {
     fn default() -> Self {
         Self {
-            buffers: HostFusionBlockContractBuffers::default(),
+            _scalar: std::marker::PhantomData,
         }
     }
 }
@@ -60,23 +63,6 @@ impl<T> ReportsPlacement for HostCanonicalFusionBlockContractWorkspace<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
-    }
-}
-
-#[derive(Clone, Debug)]
-struct HostFusionBlockContractBuffers<T> {
-    packed: FusionBlockContractScratchBuffers<
-        HostScratchBuffer<T>,
-        HostScratchBuffer<T>,
-        HostScratchBuffer<T>,
-    >,
-}
-
-impl<T> Default for HostFusionBlockContractBuffers<T> {
-    fn default() -> Self {
-        Self {
-            packed: FusionBlockContractScratchBuffers::default(),
-        }
     }
 }
 
@@ -90,6 +76,18 @@ pub struct CanonicalFusionBlockContractPlan {
 }
 
 impl CanonicalFusionBlockContractPlan {
+    /// True when every group reads and writes coupled-sector matrices
+    /// directly in storage — the only layouts the replay executes. The
+    /// symmetric route layer sends anything else through dynamic
+    /// materialization.
+    pub fn is_fully_direct(&self) -> bool {
+        self.groups.iter().all(|group| {
+            group.lhs.direct_offset.is_some()
+                && group.rhs.direct_offset.is_some()
+                && group.dst.direct_offset.is_some()
+        })
+    }
+
     /// Assembles a compiled plan; called by the symmetric compile layer.
     pub fn from_parts(
         dst_structure: Arc<BlockStructure>,
@@ -137,26 +135,9 @@ impl CanonicalFusionBlockContractPlan {
         )?;
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
+        let _ = fusion_workspace;
         for group in &self.groups {
-            if !group.is_fully_direct() {
-                fusion_workspace
-                    .buffers
-                    .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-                fusion_workspace
-                    .buffers
-                    .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
-            }
-            execute_group_with_scratch_buffers(
-                kernels,
-                gemm,
-                group,
-                &mut fusion_workspace.buffers.packed,
-                dst_data,
-                lhs_data,
-                rhs_data,
-                alpha,
-                beta,
-            )?;
+            execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
         }
         Ok(())
     }
@@ -199,100 +180,13 @@ impl CanonicalFusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
         profile.canonical_scale += start.elapsed();
 
+        let _ = fusion_workspace;
         for group in &self.groups {
             profile.canonical_contract_groups += 1;
-
-            if !group.is_fully_direct() {
-                let start = std::time::Instant::now();
-                fusion_workspace
-                    .buffers
-                    .prepare(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-                fusion_workspace
-                    .buffers
-                    .clear_inputs(group.lhs.needs_clear, group.rhs.needs_clear);
-                profile.canonical_workspace_prepare += start.elapsed();
-            }
-
-            if group.lhs.direct_offset.is_none() {
-                let start = std::time::Instant::now();
-                pack_group(
-                    kernels,
-                    &group.lhs,
-                    lhs_data,
-                    fusion_workspace.buffers.packed.lhs_mut().as_mut_slice(),
-                )?;
-                profile.canonical_pack_lhs += start.elapsed();
-            } else {
-                profile.canonical_direct_pack_skips += 1;
-            }
-
-            if group.rhs.direct_offset.is_none() {
-                let start = std::time::Instant::now();
-                pack_group(
-                    kernels,
-                    &group.rhs,
-                    rhs_data,
-                    fusion_workspace.buffers.packed.rhs_mut().as_mut_slice(),
-                )?;
-                profile.canonical_pack_rhs += start.elapsed();
-            } else {
-                profile.canonical_direct_pack_skips += 1;
-            }
-
-            let dst_direct = group.dst.direct_offset;
             let start = std::time::Instant::now();
-            {
-                let (lhs, rhs, dst) = fusion_workspace.buffers.packed.inputs_and_destination_mut();
-                let lhs_slice = direct_or_scratch_slice(
-                    lhs_data,
-                    group.lhs.direct_offset,
-                    group.lhs.rows,
-                    group.lhs.cols,
-                    lhs.as_slice(),
-                )?;
-                let rhs_slice = direct_or_scratch_slice(
-                    rhs_data,
-                    group.rhs.direct_offset,
-                    group.rhs.rows,
-                    group.rhs.cols,
-                    rhs.as_slice(),
-                )?;
-                match dst_direct {
-                    Some(base) => {
-                        let dst_slice =
-                            direct_slice_mut(dst_data, base, group.dst.rows, group.dst.cols)?;
-                        matmul_group_plan(
-                            gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta,
-                        )?;
-                        profile.canonical_direct_gemm_groups += 1;
-                    }
-                    None => {
-                        matmul_group_plan(
-                            gemm,
-                            group,
-                            lhs_slice,
-                            rhs_slice,
-                            dst.as_mut_slice(),
-                            D::one(),
-                            D::zero(),
-                        )?;
-                    }
-                }
-            }
+            execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
+            profile.canonical_direct_gemm_groups += 1;
             profile.canonical_matmul += start.elapsed();
-
-            if dst_direct.is_none() {
-                let start = std::time::Instant::now();
-                scatter_group(
-                    kernels,
-                    &group.dst,
-                    dst_data,
-                    fusion_workspace.buffers.packed.destination().as_slice(),
-                    alpha,
-                    beta,
-                )?;
-                profile.canonical_scatter += start.elapsed();
-            }
         }
 
         profile.canonical_contract_total += total_start.elapsed();
@@ -363,29 +257,9 @@ impl CanonicalFusionBlockContractPlan {
 
         let lhs_data = lhs.data();
         let rhs_data = rhs.data();
+        let _ = fusion_workspace;
         for group in &self.groups {
-            let lens =
-                fusion_block_group_scratch_lens(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-            fusion_workspace.prepare_from_storages(
-                lhs.storage(),
-                rhs.storage(),
-                dst.storage(),
-                lens.lhs,
-                lens.rhs,
-                lens.destination,
-                D::zero(),
-            );
-            execute_group_with_scratch_buffers(
-                kernels,
-                gemm,
-                group,
-                fusion_workspace.buffers_mut(),
-                dst.data_mut(),
-                lhs_data,
-                rhs_data,
-                alpha,
-                beta,
-            )?;
+            execute_group_direct(gemm, group, dst.data_mut(), lhs_data, rhs_data, alpha, beta)?;
         }
         Ok(())
     }
@@ -407,9 +281,9 @@ impl CanonicalFusionBlockContractPlan {
             SRhs::Similar,
             SDst::Similar,
         >,
-        lhs_alloc: &SLhs,
-        rhs_alloc: &SRhs,
-        dst_alloc: &SDst,
+        _lhs_alloc: &SLhs,
+        _rhs_alloc: &SRhs,
+        _dst_alloc: &SDst,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
         lhs_structure: &Arc<BlockStructure>,
@@ -440,29 +314,9 @@ impl CanonicalFusionBlockContractPlan {
         )?;
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
+        let _ = fusion_workspace;
         for group in &self.groups {
-            let lens =
-                fusion_block_group_scratch_lens(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-            fusion_workspace.prepare_from_storages(
-                lhs_alloc,
-                rhs_alloc,
-                dst_alloc,
-                lens.lhs,
-                lens.rhs,
-                lens.destination,
-                D::zero(),
-            );
-            execute_group_with_scratch_buffers(
-                kernels,
-                gemm,
-                group,
-                fusion_workspace.buffers_mut(),
-                dst_data,
-                lhs_data,
-                rhs_data,
-                alpha,
-                beta,
-            )?;
+            execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
         }
         Ok(())
     }
@@ -495,8 +349,8 @@ impl CanonicalFusionBlockContractPlan {
             SRhs::Similar,
             DDst::Similar,
         >,
-        lhs_alloc: &SLhs,
-        rhs_alloc: &SRhs,
+        _lhs_alloc: &SLhs,
+        _rhs_alloc: &SRhs,
         dst: &mut tenet_core::TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs_structure: &Arc<BlockStructure>,
         lhs_data: &[D],
@@ -532,29 +386,9 @@ impl CanonicalFusionBlockContractPlan {
             beta,
         )?;
 
+        let _ = fusion_workspace;
         for group in &self.groups {
-            let lens =
-                fusion_block_group_scratch_lens(group.lhs.rows, group.lhs.cols, group.rhs.cols)?;
-            fusion_workspace.prepare_from_storages(
-                lhs_alloc,
-                rhs_alloc,
-                dst.storage(),
-                lens.lhs,
-                lens.rhs,
-                lens.destination,
-                D::zero(),
-            );
-            execute_group_with_scratch_buffers(
-                kernels,
-                gemm,
-                group,
-                fusion_workspace.buffers_mut(),
-                dst.data_mut(),
-                lhs_data,
-                rhs_data,
-                alpha,
-                beta,
-            )?;
+            execute_group_direct(gemm, group, dst.data_mut(), lhs_data, rhs_data, alpha, beta)?;
         }
         Ok(())
     }
@@ -710,15 +544,6 @@ pub struct CanonicalFusionBlockContractGroupPlan {
 }
 
 impl CanonicalFusionBlockContractGroupPlan {
-    /// True when GEMM can read both operands from storage and write the
-    /// destination group matrix in place (no pack, no scatter); alpha/beta
-    /// are handled by the GEMM itself.
-    fn is_fully_direct(&self) -> bool {
-        self.lhs.direct_offset.is_some()
-            && self.rhs.direct_offset.is_some()
-            && self.dst.direct_offset.is_some()
-    }
-
     /// Validates and packages a group triple; called by the compile layer.
     pub fn new(
         lhs: FusionBlockMatrixGroup,
@@ -740,63 +565,6 @@ impl CanonicalFusionBlockContractGroupPlan {
 
         Ok(Self { lhs, rhs, dst })
     }
-}
-
-impl<T> HostFusionBlockContractBuffers<T>
-where
-    T: Clone + Zero,
-{
-    fn prepare(
-        &mut self,
-        lhs_rows: usize,
-        contracted: usize,
-        rhs_cols: usize,
-    ) -> Result<(), OperationError> {
-        let lens = fusion_block_group_scratch_lens(lhs_rows, contracted, rhs_cols)?;
-        self.packed.lhs_mut().resize_filled(lens.lhs, T::zero());
-        self.packed.rhs_mut().resize_filled(lens.rhs, T::zero());
-        self.packed
-            .destination_mut()
-            .resize_filled(lens.destination, T::zero());
-        Ok(())
-    }
-
-    fn clear_inputs(&mut self, clear_lhs: bool, clear_rhs: bool) {
-        if clear_lhs {
-            self.packed.lhs_mut().fill(T::zero());
-        }
-        if clear_rhs {
-            self.packed.rhs_mut().fill(T::zero());
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FusionBlockContractScratchLens {
-    lhs: usize,
-    rhs: usize,
-    destination: usize,
-}
-
-pub fn fusion_block_group_scratch_lens(
-    lhs_rows: usize,
-    contracted: usize,
-    rhs_cols: usize,
-) -> Result<FusionBlockContractScratchLens, OperationError> {
-    let lhs = lhs_rows
-        .checked_mul(contracted)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let rhs = contracted
-        .checked_mul(rhs_cols)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination = lhs_rows
-        .checked_mul(rhs_cols)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    Ok(FusionBlockContractScratchLens {
-        lhs,
-        rhs,
-        destination,
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -891,137 +659,9 @@ pub fn fusion_scale_block_layouts_excluding(
     Ok(layouts)
 }
 
-fn pack_group<A, T>(
-    kernels: &mut A,
-    group: &FusionBlockMatrixGroup,
-    data: &[T],
-    packed: &mut [T],
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<T>,
-    T: Copy + RecouplingCoefficientAction<f64>,
-{
-    for layout in &group.subblocks {
-        kernels.copy_scale_strided(
-            packed,
-            data,
-            &layout.block.shape,
-            &layout.matrix_strides,
-            &layout.block.strides,
-            layout.matrix_offset,
-            layout.block.offset,
-            false,
-            T::coefficient_as_data(layout.coefficient),
-        )?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_group_with_scratch_buffers<A, G, D, LhsScratch, RhsScratch, DestinationScratch>(
-    kernels: &mut A,
-    gemm: &mut G,
-    group: &CanonicalFusionBlockContractGroupPlan,
-    scratch: &mut FusionBlockContractScratchBuffers<LhsScratch, RhsScratch, DestinationScratch>,
-    dst_data: &mut [D],
-    lhs_data: &[D],
-    rhs_data: &[D],
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    G: Rank2Gemm<D>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    LhsScratch: HostWritableStorage<D>,
-    RhsScratch: HostWritableStorage<D>,
-    DestinationScratch: HostWritableStorage<D>,
-{
-    if group.lhs.direct_offset.is_none() {
-        pack_group(
-            kernels,
-            &group.lhs,
-            lhs_data,
-            scratch.lhs_mut().as_mut_slice(),
-        )?;
-    }
-    if group.rhs.direct_offset.is_none() {
-        pack_group(
-            kernels,
-            &group.rhs,
-            rhs_data,
-            scratch.rhs_mut().as_mut_slice(),
-        )?;
-    }
-    let dst_direct = group.dst.direct_offset;
-    let (lhs_scratch, rhs_scratch, dst_scratch) = scratch.inputs_and_destination_mut();
-    let lhs_slice = direct_or_scratch_slice(
-        lhs_data,
-        group.lhs.direct_offset,
-        group.lhs.rows,
-        group.lhs.cols,
-        lhs_scratch.as_slice(),
-    )?;
-    let rhs_slice = direct_or_scratch_slice(
-        rhs_data,
-        group.rhs.direct_offset,
-        group.rhs.rows,
-        group.rhs.cols,
-        rhs_scratch.as_slice(),
-    )?;
-    match dst_direct {
-        Some(base) => {
-            let dst_slice = direct_slice_mut(dst_data, base, group.dst.rows, group.dst.cols)?;
-            matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta)
-        }
-        None => {
-            matmul_group_plan(
-                gemm,
-                group,
-                lhs_slice,
-                rhs_slice,
-                dst_scratch.as_mut_slice(),
-                D::one(),
-                D::zero(),
-            )?;
-            scatter_group(
-                kernels,
-                &group.dst,
-                dst_data,
-                dst_scratch.as_slice(),
-                alpha,
-                beta,
-            )
-        }
-    }
-}
-
 fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> {
     rows.checked_mul(cols)
         .ok_or(OperationError::ElementCountOverflow)
-}
-
-fn direct_or_scratch_slice<'a, T>(
-    data: &'a [T],
-    direct_offset: Option<usize>,
-    rows: usize,
-    cols: usize,
-    scratch: &'a [T],
-) -> Result<&'a [T], OperationError> {
-    match direct_offset {
-        Some(base) => {
-            let len = direct_matrix_len(rows, cols)?;
-            let end = base
-                .checked_add(len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            data.get(base..end)
-                .ok_or(OperationError::ElementCountMismatch {
-                    expected: end,
-                    actual: data.len(),
-                })
-        }
-        None => Ok(scratch),
-    }
 }
 
 fn direct_slice_mut<T>(
@@ -1040,34 +680,6 @@ fn direct_slice_mut<T>(
             expected: end,
             actual,
         })
-}
-
-fn scatter_group<A, T>(
-    kernels: &mut A,
-    group: &FusionBlockMatrixGroup,
-    data: &mut [T],
-    packed: &[T],
-    alpha: T,
-    beta: T,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<T>,
-    T: Copy,
-{
-    for layout in &group.subblocks {
-        kernels.axpby_strided(
-            data,
-            packed,
-            &layout.block.shape,
-            &layout.block.strides,
-            &layout.matrix_strides,
-            layout.block.offset,
-            layout.matrix_offset,
-            alpha,
-            beta,
-        )?;
-    }
-    Ok(())
 }
 
 fn scale_all_blocks<A, T>(
@@ -1093,6 +705,55 @@ where
         )?;
     }
     Ok(())
+}
+
+/// Direct-only group execution: every operand's coupled-sector matrix sits
+/// in storage, so the group is a single GEMM with alpha/beta applied by the
+/// kernel. Non-direct layouts are a plan-construction bug (the compile layer
+/// only produces coupled operands), reported as an explicit error.
+fn execute_group_direct<G, D>(
+    gemm: &mut G,
+    group: &CanonicalFusionBlockContractGroupPlan,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    G: Rank2Gemm<D>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
+    let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
+        group.lhs.direct_offset,
+        group.rhs.direct_offset,
+        group.dst.direct_offset,
+    ) else {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: NON_COUPLED_OPERAND_MESSAGE,
+        });
+    };
+    let lhs_slice = direct_slice(lhs_data, lhs_base, group.lhs.rows, group.lhs.cols)?;
+    let rhs_slice = direct_slice(rhs_data, rhs_base, group.rhs.rows, group.rhs.cols)?;
+    let dst_slice = direct_slice_mut(dst_data, dst_base, group.dst.rows, group.dst.cols)?;
+    matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta)
+}
+
+fn direct_slice<T>(
+    data: &[T],
+    base: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<&[T], OperationError> {
+    let len = direct_matrix_len(rows, cols)?;
+    let end = base
+        .checked_add(len)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    data.get(base..end)
+        .ok_or(OperationError::ElementCountMismatch {
+            expected: end,
+            actual: data.len(),
+        })
 }
 
 fn matmul_group_plan<G, D>(

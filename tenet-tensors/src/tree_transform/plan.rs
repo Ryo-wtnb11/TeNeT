@@ -182,51 +182,6 @@ pub struct TreeTransformGroupBlockSpec<T> {
     source_axes: Option<Vec<usize>>,
 }
 
-impl TreeTransformGroupBlockSpec<f64> {
-    /// Multiply every coefficient row targeting `dst_keys[row]` by
-    /// `scale(dst_key)`. Used to fold contraction-side twist factors into the
-    /// materialization transform (TensorKit applies twists in the transform
-    /// plan, never in the GEMM).
-    pub(crate) fn scale_dst_rows<F>(&self, scale: &mut F) -> Result<Self, OperationError>
-    where
-        F: FnMut(&BlockKey) -> Result<f64, OperationError>,
-    {
-        let src_count = self.src_keys.len();
-        let mut coefficients = self.coefficients_src_by_dst.clone();
-        for (dst_row, dst_key) in self.dst_keys.iter().enumerate() {
-            let factor = scale(dst_key)?;
-            if factor != 1.0 {
-                for value in &mut coefficients[dst_row * src_count..(dst_row + 1) * src_count] {
-                    *value *= factor;
-                }
-            }
-        }
-        Ok(Self {
-            group_key: self.group_key.clone(),
-            dst_keys: self.dst_keys.clone(),
-            src_keys: self.src_keys.clone(),
-            coefficients_src_by_dst: coefficients,
-            source_axes: self.source_axes.clone(),
-        })
-    }
-}
-
-impl TreeTransformGroupPlan<f64> {
-    /// Plan copy with destination-row coefficients scaled by
-    /// `scale(dst_key)`; see [`TreeTransformGroupBlockSpec::scale_dst_rows`].
-    pub(crate) fn scale_dst_rows<F>(&self, mut scale: F) -> Result<Self, OperationError>
-    where
-        F: FnMut(&BlockKey) -> Result<f64, OperationError>,
-    {
-        let specs = self
-            .specs
-            .iter()
-            .map(|spec| spec.scale_dst_rows(&mut scale))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { specs })
-    }
-}
-
 impl<T> TreeTransformGroupBlockSpec<T> {
     pub fn single<KDst, KSrc>(
         group_key: FusionTreeGroupKey,
