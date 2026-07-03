@@ -1,4 +1,4 @@
-use tenet_core::{ScratchStorage, SimilarStorage, TensorStorage};
+use tenet_core::{ScratchStorage, SimilarStorage};
 
 /// Crate-internal same-placement scratch allocator.
 ///

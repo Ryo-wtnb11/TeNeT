@@ -389,6 +389,17 @@ pub trait DenseExecutor {
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
 
+    /// General (non-Hermitian) eigendecomposition `(values, vectors)`; both
+    /// outputs are complex regardless of the input scalar.
+    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        let _ = input;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eig",
+            message: "executor does not implement the general eigendecomposition".to_string(),
+        })
+    }
+
     fn dot_general_into(
         &mut self,
         output: DenseWrite<'_>,
@@ -601,6 +612,10 @@ mod tenferro_adapter {
             self.inner.eigh(input)
         }
 
+        fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.inner.eig(input)
+        }
+
         fn dot_general_into(
             &mut self,
             output: DenseWrite<'_>,
@@ -639,6 +654,14 @@ mod tenferro_adapter {
                 .qr_read(input)
                 .map(wrap_outputs)
                 .map_err(|err| tenferro_error("qr_read", err))
+        }
+
+        fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            let input = tenferro_view(input)?;
+            self.backend
+                .eig_read(input)
+                .map(wrap_outputs)
+                .map_err(|err| tenferro_error("eig_read", err))
         }
 
         fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {

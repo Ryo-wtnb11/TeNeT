@@ -278,7 +278,7 @@ where
 fn reconstruct_from_svd<R>(
     rule: &R,
     template: &TensorMap<f64, 2, 2>,
-    svd: &SvdTrunc<2, 2>,
+    svd: &SvdTrunc<f64, 2, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -977,4 +977,197 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
         .unwrap();
     let reconstructed = contract_pair(&rule, &tensor, &us, &full.vh);
     assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn svd_trunc_c64_reconstruction_distance_matches_error() {
+    use num_complex::Complex64;
+    let rule = Z2FusionRule;
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let degeneracy = 2usize;
+    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg_dim = sectors.len() * degeneracy;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = homspace.fusion_tree_keys(&rule).len();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
+        homspace,
+        &rule,
+        vec![vec![degeneracy; 4]; key_count],
+    )
+    .unwrap();
+    let len = space.required_len().unwrap();
+    let tensor = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        (0..len)
+            .map(|i| {
+                Complex64::new(
+                    ((i * 7 + 3) % 23) as f64 * 0.5 - 5.0,
+                    ((i * 5 + 1) % 17) as f64 * 0.25 - 2.0,
+                )
+            })
+            .collect(),
+        space,
+    )
+    .unwrap();
+
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let svd = svd_trunc(&mut dense_executor, &rule, &tensor, &Truncation::rank(8)).unwrap();
+    assert!(svd.error > 0.0);
+    for entry in &svd.singular_values {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0] >= pair[1] - 1e-12);
+        }
+    }
+
+    // Scale Vh rows by the (real) singular values.
+    let mut scaled_vh = svd.vh.clone();
+    {
+        let structure = std::sync::Arc::clone(scaled_vh.structure());
+        for index in 0..structure.block_count() {
+            let block = structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                continue;
+            };
+            let sector = key
+                .codomain_tree()
+                .coupled()
+                .unwrap_or_else(|| rule.vacuum());
+            let values = &svd
+                .singular_values
+                .iter()
+                .find(|entry| entry.sector == sector)
+                .unwrap()
+                .values;
+            let shape = block.shape().to_vec();
+            let strides = block.strides().to_vec();
+            let offset = block.offset();
+            let count = shape.iter().product::<usize>();
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..count {
+                let position = offset
+                    + indices
+                        .iter()
+                        .zip(&strides)
+                        .map(|(&i, &s)| i * s)
+                        .sum::<usize>();
+                scaled_vh.data_mut()[position] *= values[indices[0]];
+                for axis in 0..shape.len() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+        }
+    }
+
+    let mut reconstructed = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0); len],
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut context = TensorContractFusionExecutionContext::<
+        Complex64,
+        TreeTransformBuiltinRuleCacheKey,
+    >::default();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut reconstructed,
+            &svd.u,
+            &scaled_vh,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+
+    // Weighted 2-norm of the difference equals the reported error (Z2 has
+    // quantum dimension 1 everywhere).
+    let distance = tensor
+        .data()
+        .iter()
+        .zip(reconstructed.data())
+        .map(|(lhs, rhs)| (lhs - rhs).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        (distance - svd.error).abs() < 1e-8,
+        "distance {distance} != error {}",
+        svd.error
+    );
+}
+
+#[test]
+fn eig_full_satisfies_the_eigen_equation_for_real_input() {
+    use num_complex::Complex64;
+    let rule = Z2FusionRule;
+    // Non-symmetric endomorphism.
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let eig = eig_full(&mut dense_executor, &rule, &tensor).unwrap();
+
+    for entry in &eig.eigenvalues {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
+        }
+    }
+
+    // Promote t to complex (same space => same layout => elementwise cast).
+    let tensor_c = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        tensor
+            .data()
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect(),
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+
+    let mut context = TensorContractFusionExecutionContext::<
+        Complex64,
+        TreeTransformBuiltinRuleCacheKey,
+    >::default();
+    let mut tv = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0); eig.v.data().len()],
+        eig.v.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut tv,
+            &tensor_c,
+            &eig.v,
+            TensorContractAxisSpec::new(&[2, 3], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2])),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+    let mut vd = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0); eig.v.data().len()],
+        eig.v.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut vd,
+            &eig.v,
+            &eig.d,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+    for (index, (lhs, rhs)) in tv.data().iter().zip(vd.data()).enumerate() {
+        assert!(
+            (lhs - rhs).norm() < 1e-8,
+            "eigen equation violated at raw position {index}: {lhs} != {rhs}"
+        );
+    }
 }
