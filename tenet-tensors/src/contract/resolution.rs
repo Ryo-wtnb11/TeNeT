@@ -184,9 +184,14 @@ impl RawAxes {
     }
 }
 
+/// Recently used entries kept for pointer-compared lookups. A dynamic
+/// contraction interleaves the facade key with several distinct internal
+/// scratch keys per replay, so a single slot would thrash on every call.
+const LAST_RING_CAPACITY: usize = 16;
+
 #[derive(Clone, Debug)]
 pub(crate) struct ContractionResolutionCache<RuleKey> {
-    last: Option<LastEntry<RuleKey>>,
+    last: Vec<LastEntry<RuleKey>>,
     fast: HashMap<FastKey<RuleKey>, Resolution>,
     resolved: HashMap<FullKey<RuleKey>, Resolution>,
     lru_order: VecDeque<FullKey<RuleKey>>,
@@ -197,7 +202,7 @@ pub(crate) struct ContractionResolutionCache<RuleKey> {
 impl<RuleKey> Default for ContractionResolutionCache<RuleKey> {
     fn default() -> Self {
         Self {
-            last: None,
+            last: Vec::new(),
             fast: HashMap::new(),
             resolved: HashMap::new(),
             lru_order: VecDeque::new(),
@@ -223,7 +228,7 @@ where
 
     pub(crate) fn set_policy(&mut self, policy: OperationCachePolicy) {
         self.policy = policy;
-        self.last = None;
+        self.last.clear();
         self.fast.clear();
         if !policy.stores_entries() {
             self.resolved.clear();
@@ -244,7 +249,7 @@ where
         }
         if evicted {
             self.fast.clear();
-            self.last = None;
+            self.last.clear();
         }
     }
 
@@ -332,29 +337,33 @@ where
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         if self.policy.stores_entries() {
-            if let Some(last) = &self.last {
-                if last.rule == rule_key
+            let position = self.last.iter().position(|last| {
+                last.rule == rule_key
                     && last.dst.matches(dst)
                     && last.lhs.matches(lhs)
                     && last.rhs.matches(rhs)
                     && last.axes.matches(axes)
-                {
-                    self.stats.hits += 1;
-                    self.stats.fast_hits += 1;
-                    let resolution = last.resolution.clone();
-                    // Clone the deep structural key only when an LRU limit
-                    // actually needs the touch; the clone dwarfs the whole
-                    // hit path otherwise.
-                    let touch_key = if self.policy.max_entries().is_some() {
-                        last.full_key.clone()
-                    } else {
-                        None
-                    };
-                    if let Some(key) = touch_key {
-                        self.touch(&key);
-                    }
-                    return Ok(resolution);
+            });
+            if let Some(index) = position {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                if index != 0 {
+                    let entry = self.last.remove(index);
+                    self.last.insert(0, entry);
                 }
+                let resolution = self.last[0].resolution.clone();
+                // Clone the deep structural key only when an LRU limit
+                // actually needs the touch; the clone dwarfs the whole
+                // hit path otherwise.
+                let touch_key = if self.policy.max_entries().is_some() {
+                    self.last[0].full_key.clone()
+                } else {
+                    None
+                };
+                if let Some(key) = touch_key {
+                    self.touch(&key);
+                }
+                return Ok(resolution);
             }
         }
 
@@ -426,15 +435,19 @@ where
         full_key: Option<FullKey<RuleKey>>,
         resolution: &Resolution,
     ) {
-        self.last = Some(LastEntry {
-            rule: rule_key.clone(),
-            dst: LastSpace::from_space(dst),
-            lhs: LastSpace::from_space(lhs),
-            rhs: LastSpace::from_space(rhs),
-            axes: RawAxes::from_axes(axes),
-            full_key,
-            resolution: resolution.clone(),
-        });
+        self.last.insert(
+            0,
+            LastEntry {
+                rule: rule_key.clone(),
+                dst: LastSpace::from_space(dst),
+                lhs: LastSpace::from_space(lhs),
+                rhs: LastSpace::from_space(rhs),
+                axes: RawAxes::from_axes(axes),
+                full_key,
+                resolution: resolution.clone(),
+            },
+        );
+        self.last.truncate(LAST_RING_CAPACITY);
     }
 }
 
