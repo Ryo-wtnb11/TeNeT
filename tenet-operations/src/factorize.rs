@@ -28,6 +28,68 @@ pub struct FusionSvd<const NOUT: usize, const NIN: usize> {
     pub vt: TensorMap<f64, 1, NIN>,
 }
 
+impl<const NOUT: usize, const NIN: usize> FusionSvd<NOUT, NIN> {
+    /// Materializes the singular values as the diagonal tensor
+    /// `S : W <- W` (TensorKit's `DiagonalTensorMap` equivalent), so
+    /// `t = U * S * Vt` composes through ordinary contractions.
+    pub fn singular_tensor<R>(&self, rule: &R) -> Result<TensorMap<f64, 1, 1>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let new_leg = SectorLeg::new(self.singular_values.iter().map(|entry| entry.sector), false);
+        let total_dim: usize = self
+            .singular_values
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([new_leg.clone()]),
+            FusionProductSpace::new([new_leg]),
+        );
+        let keys = homspace.fusion_tree_keys(rule);
+        let shapes = keys
+            .iter()
+            .map(|key| {
+                let sector = coupled_of(rule, key.codomain_tree());
+                let count = self
+                    .singular_values
+                    .iter()
+                    .find(|entry| entry.sector == sector)
+                    .map(|entry| entry.values.len())
+                    .unwrap_or(0);
+                vec![count, count]
+            })
+            .collect::<Vec<_>>();
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([total_dim], [total_dim])
+                .map_err(OperationError::from_core_preserving_context)?,
+            homspace,
+            rule,
+            shapes,
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+        let values = &self.singular_values;
+        TensorMap::<f64, 1, 1>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+            if indices[0] != indices[1] {
+                return 0.0;
+            }
+            let BlockKey::FusionTree(tree) = key else {
+                return 0.0;
+            };
+            let sector = tree
+                .codomain_tree()
+                .coupled()
+                .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+            values
+                .iter()
+                .find(|entry| entry.sector == sector)
+                .map(|entry| entry.values[indices[0]])
+                .unwrap_or(0.0)
+        })
+        .map_err(OperationError::from_core_preserving_context)
+    }
+}
+
 struct SectorMatricization {
     sector: SectorId,
     rows: usize,

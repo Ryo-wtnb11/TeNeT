@@ -519,3 +519,56 @@ where
         .unwrap();
     reconstructed
 }
+
+#[test]
+fn tsvd_singular_tensor_composes_u_s_vt() {
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let svd = tsvd_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+    let s_tensor = svd.singular_tensor(&rule).unwrap();
+
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut u_s = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; svd.u.data().len()],
+        svd.u.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut u_s,
+            &svd.u,
+            &s_tensor,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![0.0; tensor.data().len()],
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut reconstructed,
+            &u_s,
+            &svd.vt,
+            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    assert_svd_blocks_match(&tensor, &reconstructed);
+}
