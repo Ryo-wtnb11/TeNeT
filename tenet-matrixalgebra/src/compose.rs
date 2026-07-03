@@ -6,7 +6,7 @@ use tenet_core::{
     BlockKey, CoreError, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     TensorMap, TensorMapSpace,
 };
-use tenet_operations::{
+use tenet_tensors::{
     AxisPermutation, OperationError, TensorContractAxisSpec, TensorContractFusionExecutionContext,
     TreeTransformRuleCacheKey,
 };
@@ -24,10 +24,10 @@ pub(crate) fn compose<RuleKey, BT, BC, R, D, const A: usize, const B: usize, con
 ) -> Result<TensorMap<D, A, C>, OperationError>
 where
     RuleKey: Clone + Eq + Hash,
-    BT: tenet_operations::TreeTransformBackend<D, f64>,
-    BC: tenet_operations::TensorContractBackend<D, f64>,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let lhs_space = lhs
         .fusion_space()

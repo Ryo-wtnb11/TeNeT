@@ -3,7 +3,7 @@ use tenet_core::{
     FusionTreeKey, MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
     TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
-use tenet_operations::{
+use tenet_tensors::{
     AxisPermutation, TensorContractAxisSpec, TensorContractFusionExecutionContext,
     TreeTransformBuiltinRuleCacheKey, TreeTransformRuleCacheKey,
 };
@@ -1390,7 +1390,7 @@ fn adjoint_composition_gives_the_identity_on_the_bond() {
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
-    let qh = tenet_operations::adjoint(&rule, &q).unwrap();
+    let qh = tenet_tensors::adjoint(&rule, &q).unwrap();
     let mut context = default_context();
     let identity = crate::compose::compose(&mut context, &rule, &qh, &q).unwrap();
     assert_identity_matrices(&dense_sector_matrices(1, &identity));
@@ -1487,7 +1487,7 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
         left_polar(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
     let reconstructed = crate::compose::compose(&mut context, &rule, &isometry, &positive).unwrap();
     assert_svd_blocks_match(&tensor, &reconstructed);
-    let wh = tenet_operations::adjoint(&rule, &isometry).unwrap();
+    let wh = tenet_tensors::adjoint(&rule, &isometry).unwrap();
     let unit = crate::compose::compose(&mut context, &rule, &wh, &isometry).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &unit));
 

@@ -16,7 +16,7 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, ProductFusionRule, ProductSectorCodec, SU2Irrep, SectorId,
     SectorLeg, TensorKitProductCodec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
-use tenet_operations::{
+use tenet_tensors::{
     AxisPermutation, TensorContractAxisSpec, TensorContractFusionExecutionContext,
     TreeTransformRuleCacheKey,
 };
@@ -217,10 +217,10 @@ where
         );
 
         if std::env::var("MICROBENCH_PROFILE").is_ok() {
-            let mut profile = tenet_operations::TensorContractFusionProfile::default();
+            let mut profile = tenet_tensors::TensorContractFusionProfile::default();
             let profile_iters = iters.clamp(1, 200);
             for _ in 0..profile_iters {
-                let mut step = tenet_operations::TensorContractFusionProfile::default();
+                let mut step = tenet_tensors::TensorContractFusionProfile::default();
                 context
                     .tensorcontract_fusion_into_profiled(
                         rule,

@@ -19,7 +19,7 @@ Symmetries: U(1) `{-1,0,1}`, fZ2 `{0,1}`, SU(2) `{0,1/2,1}`, U(1)⊠fZ2
 Run:
 
 ```
-cargo build --release --example microbench_fusion -p tenet-operations \
+cargo build --release --example microbench_fusion -p tenet-tensors \
     --no-default-features --features blas-accelerate
 RAYON_NUM_THREADS=1 [MICROBENCH_PROFILE=1] target/release/examples/microbench_fusion <d> <min_ms>
 julia -e 'push!(ARGS,"<d>","<min_ms>"); using AppleAccelerate; include("benchmarks/tensorkit_microbench.jl")'

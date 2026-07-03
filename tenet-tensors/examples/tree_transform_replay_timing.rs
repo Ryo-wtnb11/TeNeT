@@ -7,7 +7,7 @@ use tenet_core::{
     ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
     U1FusionRule, U1Irrep,
 };
-use tenet_operations::{
+use tenet_tensors::{
     tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
     tree_pair_transform_structure, tree_transform_execute_with, DenseTreeTransformOperations,
     HostTensorOperations, TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext,

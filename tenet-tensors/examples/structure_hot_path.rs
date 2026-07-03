@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use tenet_core::{BlockKey, BlockStructure, TensorMap, TensorMapSpace};
-use tenet_operations::{
+use tenet_tensors::{
     tensoradd_execute_with, tree_transform_execute_with, AxisPermutation, HostAllocator,
     HostTensorOperations, TensorAddStructure, TreeTransformBlockSpec, TreeTransformKeyBlockSpec,
     TreeTransformStructure, TreeTransformWorkspace,

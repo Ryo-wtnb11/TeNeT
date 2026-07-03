@@ -5,10 +5,10 @@ use tenet_core::{
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView};
 
-use tenet_operations::DenseRecouplingScalar;
+use tenet_tensors::DenseRecouplingScalar;
 
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
-use tenet_operations::OperationError;
+use tenet_tensors::OperationError;
 
 /// Scalar contract for the factorization layer: dense-executor I/O plus the
 /// adjoint and real-embedding used by the factor builders. Implemented for
@@ -1695,22 +1695,22 @@ where
 /// the domain.
 pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
-    context: &mut tenet_operations::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     rule: &R,
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, NIN>, TensorMap<D, NIN, NIN>), OperationError>
 where
     E: DenseExecutor,
     RuleKey: Clone + Eq + std::hash::Hash,
-    BT: tenet_operations::TreeTransformBackend<D, f64>,
-    BC: tenet_operations::TensorContractBackend<D, f64>,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_operations::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let svd = svd_compact(dense, rule, tensor)?;
     let isometry = crate::compose::compose(context, rule, &svd.u, &svd.vh)?;
-    let v = tenet_operations::adjoint(rule, &svd.vh)?;
+    let v = tenet_tensors::adjoint(rule, &svd.vh)?;
     let vs = crate::compose::compose(context, rule, &v, &svd.s)?;
     let positive = crate::compose::compose(context, rule, &vs, &svd.vh)?;
     Ok((isometry, positive))
@@ -1720,21 +1720,21 @@ where
 /// `P = U * S * U^H` is the positive part on the codomain and `W = U * Vh`.
 pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
-    context: &mut tenet_operations::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     rule: &R,
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, NOUT>, TensorMap<D, NOUT, NIN>), OperationError>
 where
     E: DenseExecutor,
     RuleKey: Clone + Eq + std::hash::Hash,
-    BT: tenet_operations::TreeTransformBackend<D, f64>,
-    BC: tenet_operations::TensorContractBackend<D, f64>,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + tenet_operations::TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let svd = svd_compact(dense, rule, tensor)?;
-    let uh = tenet_operations::adjoint(rule, &svd.u)?;
+    let uh = tenet_tensors::adjoint(rule, &svd.u)?;
     let us = crate::compose::compose(context, rule, &svd.u, &svd.s)?;
     let positive = crate::compose::compose(context, rule, &us, &uh)?;
     let isometry = crate::compose::compose(context, rule, &svd.u, &svd.vh)?;

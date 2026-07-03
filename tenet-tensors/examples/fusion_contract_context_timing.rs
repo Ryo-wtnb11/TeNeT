@@ -7,7 +7,7 @@ use tenet_core::{
     FusionTreeHomSpace, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMap,
     TensorMapSpace, U1FusionRule, U1Irrep,
 };
-use tenet_operations::{
+use tenet_tensors::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
     tree_pair_transform_into_with_context, AxisPermutation, HostTensorOperations,

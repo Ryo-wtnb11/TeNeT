@@ -11,7 +11,7 @@ pub mod dense {
 }
 
 pub mod operations {
-    pub use tenet_operations::*;
+    pub use tenet_tensors::*;
 }
 
 pub mod matrixalgebra {

@@ -1,7 +1,7 @@
 use tenet_core::{
     BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMap, TensorMapSpace,
 };
-use tenet_operations::{
+use tenet_tensors::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tree_pair_transform_into_with_context,
     AxisPermutation, TensorContractAxisSpec, TreeTransformBuiltinRuleCacheKey,

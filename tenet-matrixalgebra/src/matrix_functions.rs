@@ -6,7 +6,7 @@ use std::hash::Hash;
 
 use tenet_core::{CoreError, MultiplicityFreeRigidSymbols, TensorMap};
 use tenet_dense::DenseExecutor;
-use tenet_operations::{
+use tenet_tensors::{
     adjoint, OperationError, TensorContractBackend, TensorContractFusionExecutionContext,
     TreeTransformBackend, TreeTransformRuleCacheKey,
 };
@@ -27,7 +27,7 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     spectral_function(dense, context, rule, tensor, &f64::exp)
 }
@@ -47,7 +47,7 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let eigh = eigh_full(dense, rule, tensor)?;
     let mapped: Vec<SectorSpectrum> = eigh
@@ -79,7 +79,7 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let svd = svd_compact(dense, rule, tensor)?;
     let sigma_max = svd
@@ -121,7 +121,7 @@ where
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: FactorScalar + tenet_operations::RecouplingCoefficientAction<f64>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let fusion_space = tensor
         .fusion_space()
