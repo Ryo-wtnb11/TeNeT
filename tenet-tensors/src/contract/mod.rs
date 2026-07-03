@@ -5,7 +5,6 @@ mod dynamic;
 mod dynamic_space;
 mod fusion;
 mod fusion_block;
-mod profile;
 mod route_cache;
 mod scratch;
 mod structure;
@@ -39,10 +38,10 @@ pub use fusion::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_explicit_plan,
     tensorcontract_fusion_structure, TensorContractFusionExplicitPlan,
 };
-pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;
 pub use structure::{
     tensorcontract_structure, TensorContractBlockSpec, TensorContractStructure,
     TensorContractStructureTerm,
 };
+pub use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};

@@ -17,7 +17,6 @@ mod contract;
 mod facade;
 mod host_kernels;
 mod lowering;
-mod structure_identity;
 mod tensoradd;
 mod tensortrace;
 mod tree_context;

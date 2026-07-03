@@ -8,17 +8,28 @@
 //! `SectorId`s, and scalar coefficients.
 
 mod error;
+pub mod fusion_replay;
 mod host_scalar_kernels;
 pub mod host_scratch;
 pub mod kernel_adapter;
 mod placement;
+mod profile;
 mod scalar;
 pub mod storage_scratch;
 pub mod strided;
+pub mod structure_identity;
 mod transform_key;
 mod tree_profile;
 
 pub use error::OperationError;
+pub use fusion_replay::{
+    direct_group_matrix_offset, fusion_block_group_scratch_lens,
+    fusion_scale_block_layouts_excluding, CanonicalFusionBlockContractGroupPlan,
+    CanonicalFusionBlockContractPlan, CanonicalFusionBlockContractWorkspace,
+    FusionBlockContractScratchLens, FusionBlockMatrixGroup, FusionScaleBlockLayout,
+    FusionStridedBlockLayout, FusionSubblockMatrixLayout,
+    HostCanonicalFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
+};
 pub use host_scalar_kernels::{
     axpby_raw_strided_kernel, axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
     scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
@@ -27,6 +38,7 @@ pub use host_scalar_kernels::{
 };
 pub use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
+pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 pub use scalar::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,

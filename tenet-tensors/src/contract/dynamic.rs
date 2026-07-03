@@ -25,11 +25,11 @@ use super::fusion_block::{
     tensorcontract_canonical_fusion_blocks_into_raw, CanonicalFusionBlockContractCache,
     CanonicalFusionBlockContractWorkspace,
 };
-use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 use super::scratch::{
     DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratchWorkspace,
 };
 use crate::storage_scratch::StorageFusionBlockContractWorkspace;
+use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
@@ -494,8 +494,10 @@ where
         let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
         return block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter,
-            contract_backend,
-            contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            },
             fusion_block_workspace,
             &dst_structure,
             dst.data_mut(),
@@ -534,8 +536,10 @@ where
         let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter,
-            contract_backend,
-            contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            },
             fusion_block_workspace,
             &canonical_dst_structure,
             canonical_dst.data_mut(),
@@ -681,8 +685,10 @@ where
         let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
         return block_plan.execute_storage_raw_sources(
             &mut crate::StridedHostKernelAdapter,
-            contract_backend,
-            contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            },
             fusion_block_workspace,
             lhs.storage(),
             rhs.storage(),
@@ -722,8 +728,10 @@ where
         let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_storage_raw(
             &mut crate::StridedHostKernelAdapter,
-            contract_backend,
-            contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            },
             fusion_block_workspace,
             lhs.storage(),
             rhs.storage(),
@@ -875,8 +883,10 @@ where
         let (lhs_canonical, rhs_canonical) = scratch.lhs_rhs();
         return block_plan.execute_raw_profiled(
             &mut crate::StridedHostKernelAdapter,
-            contract_backend,
-            contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            },
             fusion_block_workspace,
             &dst_structure,
             dst.data_mut(),
@@ -925,8 +935,10 @@ where
         let (lhs_canonical, rhs_canonical, canonical_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_raw_profiled(
             &mut crate::StridedHostKernelAdapter,
-            contract_backend,
-            contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            },
             fusion_block_workspace,
             &canonical_dst_structure,
             canonical_dst.data_mut(),

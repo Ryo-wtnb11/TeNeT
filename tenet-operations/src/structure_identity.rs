@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use tenet_core::BlockStructure;
 
-use tenet_operations::OperationError;
+use crate::OperationError;
 
-pub(crate) fn validate_structure_identity(
+pub fn validate_structure_identity(
     tensor: &'static str,
     expected: &Arc<BlockStructure>,
     actual: &Arc<BlockStructure>,

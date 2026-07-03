@@ -8,8 +8,8 @@ use tenet_dense::DenseDotConfig;
 
 use crate::axis::{permutation_axes, TensorContractAxisSpec};
 use crate::strided::{column_major_strides_usize, element_count, offset_to_isize};
-use crate::structure_identity::validate_structure_identity;
 use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
+use tenet_operations::structure_identity::validate_structure_identity;
 
 use super::backend::TensorContractBackend;
 

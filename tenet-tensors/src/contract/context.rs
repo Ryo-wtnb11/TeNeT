@@ -39,10 +39,10 @@ use super::fusion_block::{
     CanonicalFusionBlockContractCache, CanonicalFusionBlockContractPlan,
     CanonicalFusionBlockContractWorkspace,
 };
-use super::profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 use super::route_cache::{FusionRouteCache, TensorContractFusionRouteDecision};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
+use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractPlanKey {
@@ -1296,8 +1296,10 @@ where
                 let rhs_structure = std::sync::Arc::clone(rhs.structure());
                 block_plan.execute_raw(
                     &mut crate::StridedHostKernelAdapter,
-                    contract_backend,
-                    contract_workspace,
+                    &mut super::fusion_block::BackendRank2Gemm {
+                        backend: contract_backend,
+                        workspace: contract_workspace,
+                    },
                     fusion_block_workspace,
                     &dst_structure,
                     dst.data_mut(),
@@ -1572,8 +1574,10 @@ where
                 } = self;
                 plan.execute_raw(
                     &mut crate::StridedHostKernelAdapter,
-                    contract_backend,
-                    contract_workspace,
+                    &mut super::fusion_block::BackendRank2Gemm {
+                        backend: contract_backend,
+                        workspace: contract_workspace,
+                    },
                     fusion_block_workspace,
                     &prepared.dst_structure,
                     dst.data_mut(),
@@ -1718,8 +1722,10 @@ where
             let rhs_structure = std::sync::Arc::clone(rhs.structure());
             let result = block_plan.execute_raw_profiled(
                 &mut crate::StridedHostKernelAdapter,
-                contract_backend,
-                contract_workspace,
+                &mut super::fusion_block::BackendRank2Gemm {
+                    backend: contract_backend,
+                    workspace: contract_workspace,
+                },
                 fusion_block_workspace,
                 &dst_structure,
                 dst.data_mut(),
@@ -2089,8 +2095,10 @@ where
         let rhs_structure = std::sync::Arc::clone(rhs_canonical.structure());
         block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter,
-            &mut self.contract_backend,
-            &mut self.contract_workspace,
+            &mut super::fusion_block::BackendRank2Gemm {
+                backend: &mut self.contract_backend,
+                workspace: &mut self.contract_workspace,
+            },
             &mut self.fusion_block_workspace,
             &dst_structure,
             dst.data_mut(),
