@@ -14,22 +14,13 @@ mod axis;
 mod backend;
 mod cache;
 mod contract;
-mod error;
 mod facade;
 mod host_kernels;
-mod host_scalar_kernels;
-mod host_scratch;
-mod kernel_adapter;
 mod lowering;
-mod placement;
-mod scalar;
-mod storage_scratch;
-mod strided;
 mod structure_identity;
 mod tensoradd;
 mod tensortrace;
 mod tree_context;
-mod tree_profile;
 mod tree_structure;
 mod tree_transform;
 
@@ -71,7 +62,6 @@ pub use contract::{
     TensorContractPlanKey, TensorContractStructure, TensorContractStructureTerm,
     TensorContractWorkspace,
 };
-pub use error::OperationError;
 pub use facade::{
     all_codomain_tree_transform_into_with_context, copy_into, scaled_add_into, scaled_assign_into,
     tensoradd_add_into, tensoradd_assign_into, tensoradd_execute_with, tensoradd_fusion_into,
@@ -91,18 +81,20 @@ pub(crate) use host_kernels::{
     tree_transform_structure_with_structural_recoupling_raw_profiled,
 };
 pub use host_kernels::{HostTreeTransformWorkspace, TreeTransformWorkspace};
-pub(crate) use host_scalar_kernels::{
-    axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,
-    scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel,
+pub use tenet_operations::OperationError;
+pub use tenet_operations::ReportsPlacement;
+pub use tenet_operations::TreeTransformReplayProfile;
+pub(crate) use tenet_operations::{
+    copy_block_with_strided_kernel, tensoradd_raw_strided_kernel,
     tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
     tensortrace_raw_strided_kernel_add_with_coefficient,
 };
-pub(crate) use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter};
-pub use placement::ReportsPlacement;
-pub use scalar::{
+pub(crate) use tenet_operations::{host_scratch, storage_scratch, strided};
+pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
 };
+pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use tensoradd::{
     tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
     TensorAddStructureTerm,
@@ -114,7 +106,6 @@ pub use tensortrace::{
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
 };
 pub use tree_context::TreeTransformExecutionContext;
-pub use tree_profile::TreeTransformReplayProfile;
 pub use tree_structure::TreeTransformStructure;
 pub(crate) use tree_structure::{
     TreeTransformBlock, TreeTransformLayout, TreeTransformLayoutTable,

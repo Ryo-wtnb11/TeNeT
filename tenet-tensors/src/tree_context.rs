@@ -10,9 +10,7 @@ use tenet_core::{
 
 use crate::backend::{DenseTreeTransformOperations, TreeTransformBackend};
 use crate::cache::OperationCachePolicy;
-use crate::error::OperationError;
 use crate::host_kernels::tree_transform_structure_with_storage_workspace_strided_kernel;
-use crate::scalar::TreeTransformScalar;
 use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
     TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
@@ -21,6 +19,8 @@ use crate::{
     RecouplingCoefficientAction, ReportsPlacement, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
+use tenet_operations::OperationError;
+use tenet_operations::TreeTransformScalar;
 
 #[derive(Debug)]
 pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>

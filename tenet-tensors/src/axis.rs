@@ -1,4 +1,4 @@
-use crate::error::OperationError;
+use tenet_operations::OperationError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AxisPermutation<'a> {

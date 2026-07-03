@@ -2,7 +2,7 @@ use tenet_core::{BlockView, BlockViewMut};
 
 use crate::OperationError;
 
-pub(crate) fn read<'a, T>(
+pub fn read<'a, T>(
     view: BlockView<'a, T>,
 ) -> Result<strided_kernel::StridedView<'a, T>, OperationError> {
     let layout = view.layout();
@@ -11,7 +11,7 @@ pub(crate) fn read<'a, T>(
     strided_kernel::StridedView::new(view.data(), layout.shape(), &strides, offset).map_err(error)
 }
 
-pub(crate) fn write<'a, T>(
+pub fn write<'a, T>(
     view: BlockViewMut<'a, T>,
 ) -> Result<strided_kernel::StridedViewMut<'a, T>, OperationError> {
     let (data, layout) = view.into_parts();
@@ -20,7 +20,7 @@ pub(crate) fn write<'a, T>(
     strided_kernel::StridedViewMut::new(data, layout.shape(), &strides, offset).map_err(error)
 }
 
-pub(crate) fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, OperationError> {
+pub fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, OperationError> {
     strides
         .iter()
         .map(|&stride| {
@@ -29,18 +29,18 @@ pub(crate) fn strides_to_isize(strides: &[usize]) -> Result<Vec<isize>, Operatio
         .collect()
 }
 
-pub(crate) fn offset_to_isize(offset: usize) -> Result<isize, OperationError> {
+pub fn offset_to_isize(offset: usize) -> Result<isize, OperationError> {
     isize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: offset })
 }
 
-pub(crate) fn element_count(shape: &[usize]) -> Result<usize, OperationError> {
+pub fn element_count(shape: &[usize]) -> Result<usize, OperationError> {
     shape.iter().try_fold(1usize, |acc, &dim| {
         acc.checked_mul(dim)
             .ok_or(OperationError::ElementCountOverflow)
     })
 }
 
-pub(crate) fn column_major_strides_isize(shape: &[usize]) -> Result<Vec<isize>, OperationError> {
+pub fn column_major_strides_isize(shape: &[usize]) -> Result<Vec<isize>, OperationError> {
     let mut stride = 1usize;
     let mut strides = Vec::with_capacity(shape.len());
     for &dim in shape {
@@ -55,7 +55,7 @@ pub(crate) fn column_major_strides_isize(shape: &[usize]) -> Result<Vec<isize>, 
     Ok(strides)
 }
 
-pub(crate) fn column_major_strides_usize(shape: &[usize]) -> Result<Vec<usize>, OperationError> {
+pub fn column_major_strides_usize(shape: &[usize]) -> Result<Vec<usize>, OperationError> {
     let mut stride = 1usize;
     let mut strides = Vec::with_capacity(shape.len());
     for &dim in shape {
@@ -67,7 +67,7 @@ pub(crate) fn column_major_strides_usize(shape: &[usize]) -> Result<Vec<usize>, 
     Ok(strides)
 }
 
-pub(crate) fn error(err: strided_kernel::StridedError) -> OperationError {
+pub fn error(err: strided_kernel::StridedError) -> OperationError {
     OperationError::StridedKernel {
         message: err.to_string(),
     }

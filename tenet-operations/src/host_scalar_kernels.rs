@@ -11,7 +11,7 @@ use crate::{ConjugateValue, OperationError};
 /// This module owns the current host-slice scalar kernels used by tensoradd,
 /// pack, scatter, and scale replay. Higher-level tree/fusion algorithms should
 /// call these primitives instead of embedding raw strided loops directly.
-pub(crate) fn copy_block_with_strided_kernel<T>(
+pub fn copy_block_with_strided_kernel<T>(
     dst: BlockViewMut<'_, T>,
     src: BlockView<'_, T>,
 ) -> Result<(), OperationError>
@@ -24,7 +24,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensoradd_raw_strided_kernel<T>(
+pub fn tensoradd_raw_strided_kernel<T>(
     zero_strides: &mut Vec<isize>,
     dst_data: &mut [T],
     src_data: &[T],
@@ -76,7 +76,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensoradd_raw_strided_kernel_trusted<T>(
+pub fn tensoradd_raw_strided_kernel_trusted<T>(
     zero_strides: &mut Vec<isize>,
     dst_data: &mut [T],
     src_data: &[T],
@@ -229,7 +229,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn axpby_raw_strided_kernel<T>(
+pub fn axpby_raw_strided_kernel<T>(
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
@@ -273,7 +273,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn axpby_raw_strided_kernel_trusted<T>(
+pub fn axpby_raw_strided_kernel_trusted<T>(
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
@@ -317,7 +317,7 @@ where
     )
 }
 
-pub(crate) fn scale_raw_strided_kernel_trusted<T>(
+pub fn scale_raw_strided_kernel_trusted<T>(
     dst_data: &mut [T],
     shape: &[usize],
     dst_strides: &[isize],
@@ -333,7 +333,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensortrace_raw_strided_kernel<T>(
+pub fn tensortrace_raw_strided_kernel<T>(
     dst_data: &mut [T],
     src_data: &[T],
     output_shape: &[usize],
@@ -376,7 +376,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
+pub fn tensortrace_raw_strided_kernel_add_with_coefficient<T, C>(
     dst_data: &mut [T],
     src_data: &[T],
     output_shape: &[usize],

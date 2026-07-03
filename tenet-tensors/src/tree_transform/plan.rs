@@ -19,7 +19,7 @@ use tenet_core::{
 use crate::{OperationError, TreeTransformStructure};
 
 use super::helpers::{block_indices_for_keys, fusion_tree_group_block_keys};
-use super::operation::TreeTransformOperationKey;
+use super::operation::{TreeTransformOperationKey, ValidateBraidingSupport};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformBlockSpec<T> {

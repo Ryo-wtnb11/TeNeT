@@ -12,13 +12,8 @@ use crate::backend::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
     TreeTransformBackend,
 };
-use crate::error::OperationError;
 use crate::host_kernels::{tensoradd_block_with_strided_kernel, TreeTransformWorkspace};
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
-use crate::scalar::{
-    ConjugateValue, DenseRecouplingScalar, RealStructuralCoefficient, RecouplingCoefficientAction,
-    TreeTransformScalar,
-};
 use crate::tensoradd::{
     tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
 };
@@ -30,6 +25,11 @@ use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_structure::TreeTransformStructure;
 use crate::tree_transform::{
     build_tree_pair_transform_group_plan, TreeTransformOperationKey, TreeTransformRuleCacheKey,
+};
+use tenet_operations::OperationError;
+use tenet_operations::{
+    ConjugateValue, DenseRecouplingScalar, RealStructuralCoefficient, RecouplingCoefficientAction,
+    TreeTransformScalar,
 };
 
 pub fn tensorcopy_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(

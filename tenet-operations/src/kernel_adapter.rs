@@ -178,7 +178,7 @@ fn apply_fused_pair<T, Apply, ElementOp>(
 ///
 /// The data contract is host slices. Device replay needs a separate
 /// storage-aware adapter; device storage must not be hidden behind this trait.
-pub(crate) trait HostKernelAdapter<T> {
+pub trait HostKernelAdapter<T> {
     /// `dst = alpha * op(src) + beta * dst` over strided views, where `op` is
     /// conjugation when `source_conjugate` is set (tensoradd / single-block
     /// tree replay primitive).
@@ -269,7 +269,7 @@ pub(crate) trait HostKernelAdapter<T> {
 /// for a BLAS/GEMM call happens by replacing this adapter, not by editing the
 /// replay drivers.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct StridedHostKernelAdapter;
+pub struct StridedHostKernelAdapter;
 
 impl<T> HostKernelAdapter<T> for StridedHostKernelAdapter
 where
@@ -485,7 +485,7 @@ where
 ///
 /// All adapter implementations should validate against the same packed-column
 /// layout before touching data.
-pub(crate) fn validate_recoupling_lens(
+pub fn validate_recoupling_lens(
     destination_len: usize,
     source_len: usize,
     coefficient_len: usize,

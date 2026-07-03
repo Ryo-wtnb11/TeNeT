@@ -7,7 +7,7 @@ use tenet_core::{HostReadableStorage, HostWritableStorage, Placement, TensorStor
 /// Future storage-aware workspaces can replace this boundary with scratch
 /// buffers allocated from `TensorMap::similar_storage_filled`.
 #[derive(Clone, Debug)]
-pub(crate) struct HostScratchBuffer<T> {
+pub struct HostScratchBuffer<T> {
     data: Vec<T>,
 }
 
@@ -19,7 +19,7 @@ impl<T> Default for HostScratchBuffer<T> {
 
 impl<T> HostScratchBuffer<T> {
     #[inline]
-    pub(crate) fn filled(len: usize, value: T) -> Self
+    pub fn filled(len: usize, value: T) -> Self
     where
         T: Clone,
     {
@@ -31,7 +31,7 @@ impl<T> HostScratchBuffer<T> {
     }
 
     #[inline]
-    pub(crate) fn resize_filled(&mut self, len: usize, value: T)
+    pub fn resize_filled(&mut self, len: usize, value: T)
     where
         T: Clone,
     {
@@ -39,7 +39,7 @@ impl<T> HostScratchBuffer<T> {
     }
 
     #[inline]
-    pub(crate) fn fill(&mut self, value: T)
+    pub fn fill(&mut self, value: T)
     where
         T: Clone,
     {
@@ -47,17 +47,17 @@ impl<T> HostScratchBuffer<T> {
     }
 
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.data.len()
     }
 
     #[inline]
-    pub(crate) fn as_slice(&self) -> &[T] {
+    pub fn as_slice(&self) -> &[T] {
         &self.data
     }
 
     #[inline]
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.data
     }
 }

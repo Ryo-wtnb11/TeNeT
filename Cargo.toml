@@ -1,5 +1,5 @@
 [workspace]
-members = ["tenet", "tenet-core", "tenet-dense", "tenet-matrixalgebra", "tenet-tensors"]
+members = ["tenet", "tenet-core", "tenet-dense", "tenet-matrixalgebra", "tenet-operations", "tenet-tensors"]
 resolver = "2"
 
 [workspace.package]

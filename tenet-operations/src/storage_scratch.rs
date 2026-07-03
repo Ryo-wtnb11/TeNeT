@@ -6,11 +6,11 @@ use tenet_core::{ScratchStorage, SimilarStorage};
 /// storage from an existing storage reference but does not expose host slices or
 /// choose an execution backend.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct SamePlacementScratchAllocator;
+pub struct SamePlacementScratchAllocator;
 
 impl SamePlacementScratchAllocator {
     #[inline]
-    pub(crate) fn filled_like<T, S>(&self, storage: &S, len: usize, value: T) -> S::Similar
+    pub fn filled_like<T, S>(&self, storage: &S, len: usize, value: T) -> S::Similar
     where
         T: Clone,
         S: SimilarStorage<T>,
@@ -26,7 +26,7 @@ impl SamePlacementScratchAllocator {
 /// destination packs. Current host replay instantiates both slots with
 /// `HostScratchBuffer<T>`.
 #[derive(Clone, Debug)]
-pub(crate) struct TreeTransformScratchBuffers<Source, Destination> {
+pub struct TreeTransformScratchBuffers<Source, Destination> {
     source: Source,
     destination: Destination,
 }
@@ -46,7 +46,7 @@ where
 
 impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
     #[inline]
-    pub(crate) fn from_parts(source: Source, destination: Destination) -> Self {
+    pub fn from_parts(source: Source, destination: Destination) -> Self {
         Self {
             source,
             destination,
@@ -54,27 +54,27 @@ impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
     }
 
     #[inline]
-    pub(crate) fn source(&self) -> &Source {
+    pub fn source(&self) -> &Source {
         &self.source
     }
 
     #[inline]
-    pub(crate) fn source_mut(&mut self) -> &mut Source {
+    pub fn source_mut(&mut self) -> &mut Source {
         &mut self.source
     }
 
     #[inline]
-    pub(crate) fn destination(&self) -> &Destination {
+    pub fn destination(&self) -> &Destination {
         &self.destination
     }
 
     #[inline]
-    pub(crate) fn destination_mut(&mut self) -> &mut Destination {
+    pub fn destination_mut(&mut self) -> &mut Destination {
         &mut self.destination
     }
 
     #[inline]
-    pub(crate) fn source_and_destination_mut(&mut self) -> (&Source, &mut Destination) {
+    pub fn source_and_destination_mut(&mut self) -> (&Source, &mut Destination) {
         (&self.source, &mut self.destination)
     }
 }
@@ -85,7 +85,7 @@ impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
 /// `similar(src.data, ...)` / `similar(dst.data, ...)` scratch allocation. It
 /// still feeds the host-slice replay kernels; it does not imply device replay.
 #[derive(Clone, Debug)]
-pub(crate) struct StorageTreeTransformWorkspace<SourceScratch, DestinationScratch> {
+pub struct StorageTreeTransformWorkspace<SourceScratch, DestinationScratch> {
     zero_strides: Vec<isize>,
     packed: Option<TreeTransformScratchBuffers<SourceScratch, DestinationScratch>>,
 }
@@ -104,7 +104,7 @@ impl<SourceScratch, DestinationScratch> Default
 impl<SourceScratch, DestinationScratch>
     StorageTreeTransformWorkspace<SourceScratch, DestinationScratch>
 {
-    pub(crate) fn prepare_from_storages<T, DSrc, DDst>(
+    pub fn prepare_from_storages<T, DSrc, DDst>(
         &mut self,
         src_storage: &DSrc,
         dst_storage: &DDst,
@@ -138,12 +138,12 @@ impl<SourceScratch, DestinationScratch>
     }
 
     #[inline]
-    pub(crate) fn zero_strides_mut(&mut self) -> &mut Vec<isize> {
+    pub fn zero_strides_mut(&mut self) -> &mut Vec<isize> {
         &mut self.zero_strides
     }
 
     #[inline]
-    pub(crate) fn replay_parts_mut(
+    pub fn replay_parts_mut(
         &mut self,
     ) -> (
         &mut Vec<isize>,
@@ -163,7 +163,7 @@ impl<SourceScratch, DestinationScratch>
 /// The output scratch is allocated from destination storage, because it is the
 /// dense contraction result scattered into the destination tensor layout.
 #[derive(Clone, Debug)]
-pub(crate) struct StorageTensorContractWorkspace<OutputScratch> {
+pub struct StorageTensorContractWorkspace<OutputScratch> {
     output: Option<OutputScratch>,
     zero_strides: Vec<isize>,
 }
@@ -178,12 +178,8 @@ impl<OutputScratch> Default for StorageTensorContractWorkspace<OutputScratch> {
 }
 
 impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
-    pub(crate) fn prepare_from_dst_storage<T, DDst>(
-        &mut self,
-        dst_storage: &DDst,
-        len: usize,
-        zero: T,
-    ) where
+    pub fn prepare_from_dst_storage<T, DDst>(&mut self, dst_storage: &DDst, len: usize, zero: T)
+    where
         T: Clone,
         DDst: SimilarStorage<T, Similar = OutputScratch>,
         OutputScratch: ScratchStorage<T>,
@@ -197,7 +193,7 @@ impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
     }
 
     #[inline]
-    pub(crate) fn replay_parts_mut(&mut self) -> (&mut Vec<isize>, &mut OutputScratch) {
+    pub fn replay_parts_mut(&mut self) -> (&mut Vec<isize>, &mut OutputScratch) {
         (
             &mut self.zero_strides,
             self.output
@@ -213,7 +209,7 @@ impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
 /// packed source blocks, while `destination` holds the dense matmul result
 /// before scatter.
 #[derive(Clone, Debug)]
-pub(crate) struct FusionBlockContractScratchBuffers<Lhs, Rhs, Destination> {
+pub struct FusionBlockContractScratchBuffers<Lhs, Rhs, Destination> {
     lhs: Lhs,
     rhs: Rhs,
     destination: Destination,
@@ -236,7 +232,7 @@ where
 
 impl<Lhs, Rhs, Destination> FusionBlockContractScratchBuffers<Lhs, Rhs, Destination> {
     #[inline]
-    pub(crate) fn from_parts(lhs: Lhs, rhs: Rhs, destination: Destination) -> Self {
+    pub fn from_parts(lhs: Lhs, rhs: Rhs, destination: Destination) -> Self {
         Self {
             lhs,
             rhs,
@@ -245,37 +241,37 @@ impl<Lhs, Rhs, Destination> FusionBlockContractScratchBuffers<Lhs, Rhs, Destinat
     }
 
     #[inline]
-    pub(crate) fn lhs(&self) -> &Lhs {
+    pub fn lhs(&self) -> &Lhs {
         &self.lhs
     }
 
     #[inline]
-    pub(crate) fn lhs_mut(&mut self) -> &mut Lhs {
+    pub fn lhs_mut(&mut self) -> &mut Lhs {
         &mut self.lhs
     }
 
     #[inline]
-    pub(crate) fn rhs(&self) -> &Rhs {
+    pub fn rhs(&self) -> &Rhs {
         &self.rhs
     }
 
     #[inline]
-    pub(crate) fn rhs_mut(&mut self) -> &mut Rhs {
+    pub fn rhs_mut(&mut self) -> &mut Rhs {
         &mut self.rhs
     }
 
     #[inline]
-    pub(crate) fn destination(&self) -> &Destination {
+    pub fn destination(&self) -> &Destination {
         &self.destination
     }
 
     #[inline]
-    pub(crate) fn destination_mut(&mut self) -> &mut Destination {
+    pub fn destination_mut(&mut self) -> &mut Destination {
         &mut self.destination
     }
 
     #[inline]
-    pub(crate) fn inputs_and_destination_mut(&mut self) -> (&Lhs, &Rhs, &mut Destination) {
+    pub fn inputs_and_destination_mut(&mut self) -> (&Lhs, &Rhs, &mut Destination) {
         (&self.lhs, &self.rhs, &mut self.destination)
     }
 }
@@ -285,7 +281,7 @@ impl<Lhs, Rhs, Destination> FusionBlockContractScratchBuffers<Lhs, Rhs, Destinat
 /// Allocation origins are explicit: LHS pack scratch from LHS storage, RHS pack
 /// scratch from RHS storage, and matmul output scratch from destination storage.
 #[derive(Clone, Debug)]
-pub(crate) struct StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch> {
+pub struct StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch> {
     buffers: Option<FusionBlockContractScratchBuffers<LhsScratch, RhsScratch, DestinationScratch>>,
 }
 
@@ -301,7 +297,7 @@ impl<LhsScratch, RhsScratch, DestinationScratch>
     StorageFusionBlockContractWorkspace<LhsScratch, RhsScratch, DestinationScratch>
 {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_from_storages<T, DLhs, DRhs, DDst>(
+    pub fn prepare_from_storages<T, DLhs, DRhs, DDst>(
         &mut self,
         lhs_storage: &DLhs,
         rhs_storage: &DRhs,
@@ -342,7 +338,7 @@ impl<LhsScratch, RhsScratch, DestinationScratch>
     }
 
     #[inline]
-    pub(crate) fn buffers_mut(
+    pub fn buffers_mut(
         &mut self,
     ) -> &mut FusionBlockContractScratchBuffers<LhsScratch, RhsScratch, DestinationScratch> {
         self.buffers

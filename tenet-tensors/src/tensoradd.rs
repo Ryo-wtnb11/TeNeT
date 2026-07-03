@@ -7,10 +7,10 @@ use tenet_core::{
 };
 
 use crate::axis::{permutation_axes, AxisPermutation};
-use crate::error::OperationError;
 use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
 use crate::{ConjugateValue, TensorOperationsBackend};
+use tenet_operations::OperationError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorAddStructure {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tenet_core::BlockStructure;
 
-use crate::error::OperationError;
+use tenet_operations::OperationError;
 
 pub(crate) fn validate_structure_identity(
     tensor: &'static str,
