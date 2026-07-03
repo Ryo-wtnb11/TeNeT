@@ -198,3 +198,21 @@ validating the fusion-space structure and the blockwise SVD end to end.
      sector-matrix form so transformed sources feed GEMM directly.
   4. Per-GEMM call overhead audit (TeNeT's matmul leg is ~1.8x TensorKit's
      `mul!` for identical block shapes).
+
+## Post-restructure verification (2026-07-03, after tenet-operations extraction)
+
+Same protocol (coupled layout, Accelerate, `RAYON_NUM_THREADS=1`). No
+regression from the crate split; swap paths improved further vs the last
+recorded table (stack-fused replay loops landed after it).
+
+| symmetry | workload | d=4 | d=16 | TensorKit d=16 | ratio |
+|---|---|---|---|---|---|
+| U1 | compose | 5.3 | 1 841 | 1 844 | **1.00** |
+| U1 | swap | 11.8 | 2 722 | 4 033 | **0.68** |
+| U1 | swap+out | 9.0 | 2 016 | 4 709 | **0.43** |
+| fZ2 | compose | 2.6 | 692 | 679 | 1.02 |
+| fZ2 | swap | 4.9 | 1 002 | 1 415 | **0.71** |
+| SU2 | compose | 8.5 | 7 732 | 7 981 | **0.97** |
+| SU2 | swap | 31.0 | 15 378 | 15 779 | **0.97** |
+| SU2 | swap+out | 46.7 | 21 107 | 19 914 | 1.06 |
+| U1⊠fZ2 | compose | 5.2 | 2 187 | 1 857 | 1.18 |
