@@ -4,6 +4,7 @@ use tenet_core::{
 };
 use tenet_dense::{DenseExecutor, DenseRead, DenseView};
 
+use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
 use crate::OperationError;
 
 /// Singular values of one coupled sector, descending.
@@ -13,81 +14,77 @@ pub struct SectorSingularValues {
     pub values: Vec<f64>,
 }
 
-/// Full (untruncated) fusion-tensor SVD `t = U * diag(S) * Vt`.
+/// Compact fusion-tensor SVD `t = U * S * Vh` (MatrixAlgebraKit `svd_compact`).
 ///
-/// TensorKit's `tsvd` semantics: the SVD acts blockwise on the coupled-sector
-/// matricization (rows = codomain trees x degeneracies, columns = domain trees
-/// x degeneracies). `U : codomain <- W` and `Vt : W <- domain`, where `W` is a
-/// new single leg carrying every coupled sector with degeneracy
-/// `min(rows, cols)`. Truncation policies come later; this returns the full
-/// factorization.
+/// The factorization acts blockwise on the coupled-sector matricization
+/// through the placement-capable [`DenseExecutor`] boundary; the truncation
+/// decision is a host-side scalar selection over the per-sector spectra
+/// (see [`crate::truncation`]), applied as a leading-columns/rows gather.
+/// `U : codomain <- W`, `S : W <- W` diagonal, `Vh : W <- domain`; `error` is
+/// the quantum-dimension-weighted 2-norm of the discarded values.
 #[derive(Clone, Debug)]
-pub struct FusionSvd<const NOUT: usize, const NIN: usize> {
+pub struct SvdCompact<const NOUT: usize, const NIN: usize> {
     pub u: TensorMap<f64, NOUT, 1>,
+    pub s: TensorMap<f64, 1, 1>,
+    pub vh: TensorMap<f64, 1, NIN>,
     pub singular_values: Vec<SectorSingularValues>,
-    pub vt: TensorMap<f64, 1, NIN>,
+    pub error: f64,
 }
 
-impl<const NOUT: usize, const NIN: usize> FusionSvd<NOUT, NIN> {
-    /// Materializes the singular values as the diagonal tensor
-    /// `S : W <- W` (TensorKit's `DiagonalTensorMap` equivalent), so
-    /// `t = U * S * Vt` composes through ordinary contractions.
-    pub fn singular_tensor<R>(&self, rule: &R) -> Result<TensorMap<f64, 1, 1>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    {
-        let new_leg = SectorLeg::new(self.singular_values.iter().map(|entry| entry.sector), false);
-        let total_dim: usize = self
-            .singular_values
-            .iter()
-            .map(|entry| entry.values.len())
-            .sum();
-        let homspace = FusionTreeHomSpace::new(
-            FusionProductSpace::new([new_leg.clone()]),
-            FusionProductSpace::new([new_leg]),
-        );
-        let keys = homspace.fusion_tree_keys(rule);
-        let shapes = keys
-            .iter()
-            .map(|key| {
-                let sector = coupled_of(rule, key.codomain_tree());
-                let count = self
-                    .singular_values
-                    .iter()
-                    .find(|entry| entry.sector == sector)
-                    .map(|entry| entry.values.len())
-                    .unwrap_or(0);
-                vec![count, count]
-            })
-            .collect::<Vec<_>>();
-        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-            TensorMapSpace::<1, 1>::from_dims([total_dim], [total_dim])
-                .map_err(OperationError::from_core_preserving_context)?,
-            homspace,
-            rule,
-            shapes,
-        )
-        .map_err(OperationError::from_core_preserving_context)?;
-        let values = &self.singular_values;
-        TensorMap::<f64, 1, 1>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
-            if indices[0] != indices[1] {
-                return 0.0;
-            }
-            let BlockKey::FusionTree(tree) = key else {
-                return 0.0;
-            };
-            let sector = tree
-                .codomain_tree()
-                .coupled()
-                .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
-            values
+/// Materializes per-sector spectra as the diagonal tensor `S : W <- W` in the
+/// coupled layout.
+fn singular_tensor<R>(
+    rule: &R,
+    singular_values: &[SectorSingularValues],
+) -> Result<TensorMap<f64, 1, 1>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let new_leg = SectorLeg::new(singular_values.iter().map(|entry| entry.sector), false);
+    let total_dim: usize = singular_values.iter().map(|entry| entry.values.len()).sum();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg.clone()]),
+        FusionProductSpace::new([new_leg]),
+    );
+    let keys = homspace.fusion_tree_keys(rule);
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of(rule, key.codomain_tree());
+            let count = singular_values
                 .iter()
                 .find(|entry| entry.sector == sector)
-                .map(|entry| entry.values[indices[0]])
-                .unwrap_or(0.0)
+                .map(|entry| entry.values.len())
+                .unwrap_or(0);
+            vec![count, count]
         })
-        .map_err(OperationError::from_core_preserving_context)
-    }
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([total_dim], [total_dim])
+            .map_err(OperationError::from_core_preserving_context)?,
+        homspace,
+        rule,
+        shapes,
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    TensorMap::<f64, 1, 1>::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+        if indices[0] != indices[1] {
+            return 0.0;
+        }
+        let BlockKey::FusionTree(tree) = key else {
+            return 0.0;
+        };
+        let sector = tree
+            .codomain_tree()
+            .coupled()
+            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        singular_values
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .map(|entry| entry.values[indices[0]])
+            .unwrap_or(0.0)
+    })
+    .map_err(OperationError::from_core_preserving_context)
 }
 
 struct SectorMatricization {
@@ -113,132 +110,28 @@ struct SectorFactors {
     vt: Vec<f64>,
 }
 
-/// Applies a TensorKit-style global truncation across sectors, updating the
-/// kept counts and singular-value lists in place, and returns the truncation
-/// error `sqrt(sum_discarded d_c * sigma^2)`.
-fn apply_truncation<R>(
-    rule: &R,
-    factors: &mut [SectorFactors],
-    singular_values: &mut [SectorSingularValues],
-    truncation: SvdTruncation,
-) -> Result<f64, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    if matches!(truncation, SvdTruncation::None) {
-        return Ok(0.0);
-    }
-
-    // (sector position, value); globally sorted descending by value.
-    let mut entries: Vec<(usize, f64, f64)> = Vec::new();
-    for (position, values) in singular_values.iter().enumerate() {
-        let weight = rule.dim_scalar(values.sector);
-        for &value in &values.values {
-            entries.push((position, value, weight));
-        }
-    }
-    entries.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).expect("finite singular values"));
-
-    let keep_count = match truncation {
-        SvdTruncation::None => entries.len(),
-        SvdTruncation::Dim(max_dim) => {
-            let mut total = 0.0;
-            let mut keep = 0;
-            for &(_, _, weight) in &entries {
-                if total + weight > max_dim as f64 + 1e-12 {
-                    break;
-                }
-                total += weight;
-                keep += 1;
-            }
-            keep
-        }
-        SvdTruncation::Error(tolerance) => {
-            let total: f64 = entries
-                .iter()
-                .map(|&(_, value, weight)| weight * value * value)
-                .sum();
-            let budget = tolerance * tolerance * total;
-            let mut discarded = 0.0;
-            let mut keep = entries.len();
-            while keep > 0 {
-                let (_, value, weight) = entries[keep - 1];
-                if discarded + weight * value * value > budget + 1e-15 {
-                    break;
-                }
-                discarded += weight * value * value;
-                keep -= 1;
-            }
-            keep
-        }
-        SvdTruncation::Below(threshold) => entries
-            .iter()
-            .take_while(|&&(_, value, _)| value >= threshold)
-            .count(),
-    };
-
-    let mut kept_per_sector = vec![0usize; singular_values.len()];
-    for &(position, _, _) in &entries[..keep_count] {
-        kept_per_sector[position] += 1;
-    }
-    let discarded_square: f64 = entries[keep_count..]
-        .iter()
-        .map(|&(_, value, weight)| weight * value * value)
-        .sum();
-
-    for (position, values) in singular_values.iter_mut().enumerate() {
-        values.values.truncate(kept_per_sector[position]);
-        let factor = factors
-            .iter_mut()
-            .find(|factor| factor.sector == values.sector)
-            .expect("factor exists for every singular-value sector");
-        factor.kept = kept_per_sector[position];
-    }
-    Ok(discarded_square.sqrt())
-}
-
-/// Truncation policy for [`tsvd_fusion_truncated`], TensorKit-style.
-///
-/// Selection is global across coupled sectors and weights every singular
-/// value by its sector's quantum dimension: total dimension counts
-/// `sum_c d_c * kept_c` and the truncation error is
-/// `sqrt(sum_discarded d_c * sigma^2)`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum SvdTruncation {
-    /// Keep everything.
-    None,
-    /// Keep the largest singular values while the quantum-dimension-weighted
-    /// total stays at or below this bound (TensorKit `truncdim`).
-    Dim(usize),
-    /// Discard the smallest singular values while the relative truncation
-    /// error stays at or below this tolerance (TensorKit `truncerr`).
-    Error(f64),
-    /// Discard singular values strictly below this threshold (TensorKit
-    /// `truncbelow`).
-    Below(f64),
-}
-
-/// Blockwise SVD of a fusion tensor over its coupled-sector matricization.
-pub fn tsvd_fusion<E, R, const NOUT: usize, const NIN: usize>(
+/// All singular values per coupled sector, descending (MatrixAlgebraKit
+/// `svd_vals`). Runs the dense SVD per sector through the executor and keeps
+/// only the spectra.
+pub fn svd_vals<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
-) -> Result<FusionSvd<NOUT, NIN>, OperationError>
+) -> Result<Vec<SectorSingularValues>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    tsvd_fusion_truncated(dense, rule, tensor, SvdTruncation::None).map(|(svd, _)| svd)
+    svd_compact(dense, rule, tensor, &Truncation::Full).map(|svd| svd.singular_values)
 }
 
-/// Truncated blockwise SVD; also returns the truncation error
-/// `sqrt(sum_discarded d_c * sigma^2)`.
-pub fn tsvd_fusion_truncated<E, R, const NOUT: usize, const NIN: usize>(
+/// Compact fusion-tensor SVD with an in-line truncation policy.
+pub fn svd_compact<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
-    truncation: SvdTruncation,
-) -> Result<(FusionSvd<NOUT, NIN>, f64), OperationError>
+    truncation: &Truncation,
+) -> Result<SvdCompact<NOUT, NIN>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -293,7 +186,24 @@ where
         });
     }
 
-    let truncation_error = apply_truncation(rule, &mut factors, &mut singular_values, truncation)?;
+    let decision = {
+        let spectra = singular_values
+            .iter()
+            .map(|entry| WeightedSpectrum {
+                weight: rule.dim_scalar(entry.sector),
+                values: &entry.values,
+            })
+            .collect::<Vec<_>>();
+        select_truncation(&spectra, truncation)
+    };
+    for ((entry, factor), &count) in singular_values
+        .iter_mut()
+        .zip(factors.iter_mut())
+        .zip(&decision.kept)
+    {
+        entry.values.truncate(count);
+        factor.kept = count;
+    }
     factors.retain(|factor| factor.kept > 0);
     singular_values.retain(|entry| !entry.values.is_empty());
 
@@ -316,14 +226,14 @@ where
         &pairs,
     )?;
 
-    Ok((
-        FusionSvd {
-            u: u_tensor,
-            singular_values,
-            vt: vt_tensor,
-        },
-        truncation_error,
-    ))
+    let s_tensor = singular_tensor(rule, &singular_values)?;
+    Ok(SvdCompact {
+        u: u_tensor,
+        s: s_tensor,
+        vh: vt_tensor,
+        singular_values,
+        error: decision.error,
+    })
 }
 
 /// One coupled sector's factor pair: `left` is `left_rows x kept` (leading
@@ -492,10 +402,10 @@ where
     Ok((left_tensor, right_tensor))
 }
 
-/// Left-orthogonal factorization `t = Q * R` (TensorKit `leftorth` via QR):
+/// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
 /// `Q : codomain <- W` has orthonormal columns per coupled sector and
-/// `R : W <- domain`.
-pub fn leftorth_fusion<E, R, const NOUT: usize, const NIN: usize>(
+/// `R : W <- domain` with per-sector bond `min(rows, cols)`.
+pub fn qr_compact<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,
@@ -552,10 +462,10 @@ where
     )
 }
 
-/// Right-orthogonal factorization `t = L * Q` (TensorKit `rightorth` via the
-/// QR of the transposed sector matrices): `Q : W <- domain` has orthonormal
-/// rows per coupled sector and `L : codomain <- W`.
-pub fn rightorth_fusion<E, R, const NOUT: usize, const NIN: usize>(
+/// Compact LQ `t = L * Q` (MatrixAlgebraKit `lq_compact`, via the QR of the
+/// transposed sector matrices): `Q : W <- domain` has orthonormal rows per
+/// coupled sector and `L : codomain <- W`.
+pub fn lq_compact<E, R, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
     tensor: &TensorMap<f64, NOUT, NIN>,

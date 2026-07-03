@@ -119,7 +119,7 @@ where
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = tsvd_fusion(&mut dense_executor, rule, &tensor).unwrap();
+    let svd = svd_compact(&mut dense_executor, rule, &tensor, &Truncation::Full).unwrap();
 
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {
@@ -132,7 +132,7 @@ where
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
     }
 
-    let mut scaled_vt = svd.vt.clone();
+    let mut scaled_vt = svd.vh.clone();
     scale_vt_rows_by_singular_values(rule, &mut scaled_vt, &svd.singular_values);
 
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
@@ -278,13 +278,13 @@ where
 fn reconstruct_from_svd<R>(
     rule: &R,
     template: &TensorMap<f64, 2, 2>,
-    svd: &FusionSvd<2, 2>,
+    svd: &SvdCompact<2, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
 {
-    let mut scaled_vt = svd.vt.clone();
+    let mut scaled_vt = svd.vh.clone();
     scale_vt_rows_by_singular_values(rule, &mut scaled_vt, &svd.singular_values);
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; template.data().len()],
@@ -318,13 +318,14 @@ fn tsvd_truncdim_bounds_weighted_dimension_and_reports_error_su2() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
     let max_dim = 10usize;
-    let (svd, error) = tsvd_fusion_truncated(
+    let svd = svd_compact(
         &mut dense_executor,
         &rule,
         &tensor,
-        SvdTruncation::Dim(max_dim),
+        &Truncation::rank(max_dim),
     )
     .unwrap();
+    let error = svd.error;
 
     let weighted_dim: f64 = svd
         .singular_values
@@ -352,7 +353,7 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
     let tensor = tsvd_test_tensor(&rule, &sectors);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
-    let full = tsvd_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+    let full = svd_compact(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
     let threshold = {
         let mut all: Vec<f64> = full
             .singular_values
@@ -363,13 +364,14 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
         (all[all.len() / 2] + all[all.len() / 2 - 1]) / 2.0
     };
 
-    let (svd, error) = tsvd_fusion_truncated(
+    let svd = svd_compact(
         &mut dense_executor,
         &rule,
         &tensor,
-        SvdTruncation::Below(threshold),
+        &Truncation::absolute_cutoff(threshold),
     )
     .unwrap();
+    let error = svd.error;
 
     for entry in &svd.singular_values {
         assert!(entry.values.iter().all(|&value| value >= threshold));
@@ -404,13 +406,14 @@ fn tsvd_truncerr_respects_relative_tolerance() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
     let tolerance = 0.2;
-    let (svd, error) = tsvd_fusion_truncated(
+    let svd = svd_compact(
         &mut dense_executor,
         &rule,
         &tensor,
-        SvdTruncation::Error(tolerance),
+        &Truncation::relative_error(tolerance),
     )
     .unwrap();
+    let error = svd.error;
 
     let norm = weighted_norm_squared_of_difference(
         &rule,
@@ -449,14 +452,14 @@ fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
             let rule = Z2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &sectors);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, r) = leftorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+            let (q, r) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
             let reconstructed = contract_pair(&rule, &tensor, &q, &r);
             assert_svd_blocks_match(&tensor, &reconstructed);
         } else {
             let rule = SU2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &sectors);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, r) = leftorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+            let (q, r) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
             let reconstructed = contract_pair(&rule, &tensor, &q, &r);
             assert_svd_blocks_match(&tensor, &reconstructed);
         }
@@ -469,7 +472,7 @@ fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
         let rule = Z2FusionRule;
         let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
         let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-        let (l, q) = rightorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+        let (l, q) = lq_compact(&mut dense_executor, &rule, &tensor).unwrap();
         let reconstructed = contract_pair(&rule, &tensor, &l, &q);
         assert_svd_blocks_match(&tensor, &reconstructed);
     }
@@ -483,7 +486,7 @@ fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
             ],
         );
         let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-        let (l, q) = rightorth_fusion(&mut dense_executor, &rule, &tensor).unwrap();
+        let (l, q) = lq_compact(&mut dense_executor, &rule, &tensor).unwrap();
         let reconstructed = contract_pair(&rule, &tensor, &l, &q);
         assert_svd_blocks_match(&tensor, &reconstructed);
     }
@@ -531,8 +534,8 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = tsvd_fusion(&mut dense_executor, &rule, &tensor).unwrap();
-    let s_tensor = svd.singular_tensor(&rule).unwrap();
+    let svd = svd_compact(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
+    let s_tensor = svd.s.clone();
 
     let mut context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
@@ -563,7 +566,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
             &rule,
             &mut reconstructed,
             &u_s,
-            &svd.vt,
+            &svd.vh,
             TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
             1.0,
             0.0,

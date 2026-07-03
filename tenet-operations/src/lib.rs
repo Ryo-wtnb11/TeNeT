@@ -29,6 +29,7 @@ mod tree_context;
 mod tree_profile;
 mod tree_structure;
 mod tree_transform;
+mod truncation;
 
 pub use axis::{
     AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
@@ -80,8 +81,7 @@ pub use facade::{
     tree_pair_transform_structure, tree_transform_execute_with,
 };
 pub use factorize::{
-    leftorth_fusion, rightorth_fusion, tsvd_fusion, tsvd_fusion_truncated, FusionSvd,
-    SectorSingularValues, SvdTruncation,
+    lq_compact, qr_compact, svd_compact, svd_vals, SectorSingularValues, SvdCompact,
 };
 pub(crate) use host_kernels::{
     tensoradd_structure_with_strided_kernel, tree_transform_structure_with_strided_kernel,
@@ -133,6 +133,7 @@ pub(crate) use tree_transform::{
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
     TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
 };
+pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
 
 #[cfg(test)]
 mod tests;

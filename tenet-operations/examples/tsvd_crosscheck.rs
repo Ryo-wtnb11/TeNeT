@@ -12,7 +12,7 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
     U1FusionRule, U1Irrep,
 };
-use tenet_operations::tsvd_fusion;
+use tenet_operations::svd_vals;
 
 const DEGENERACY: usize = 2;
 
@@ -126,9 +126,8 @@ where
     }
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let svd = tsvd_fusion(&mut dense, rule, &tensor).unwrap();
-    let mut entries: Vec<(i64, Vec<f64>)> = svd
-        .singular_values
+    let spectra = svd_vals(&mut dense, rule, &tensor).unwrap();
+    let mut entries: Vec<(i64, Vec<f64>)> = spectra
         .iter()
         .map(|entry| (label_of(entry.sector), entry.values.clone()))
         .collect();
