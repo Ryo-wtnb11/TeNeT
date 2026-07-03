@@ -446,7 +446,7 @@ where
                     rows.push(vec![T::zero(); src_column + 1]);
                     dst_row
                 };
-                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient;
+                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
             }
         }
 
@@ -688,7 +688,7 @@ where
                     rows.push(vec![R::Scalar::zero(); src_column + 1]);
                     dst_row
                 };
-                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient;
+                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
             }
         }
 
@@ -711,6 +711,61 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
+/// Shape-independent recoupling rows for one source tree under one
+/// operation: the TensorKit `fusiontreedict` caching unit. Rows survive
+/// degeneracy (bond-dimension) changes because they depend only on the tree
+/// keys, so chi sweeps recompile plans without recomputing F/R-symbol
+/// contractions.
+pub(crate) type TreePairRowMemo<T, RuleKey> = HashMap<
+    (RuleKey, TreeTransformOperationKey, FusionTreeBlockKey),
+    Arc<Vec<(FusionTreeBlockKey, T)>>,
+>;
+
+pub(crate) fn transformed_tree_pair_rows<R>(
+    rule: &R,
+    operation: &TreeTransformOperationKey,
+    src_key: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    let rows = match operation {
+        TreeTransformOperationKey::Permute {
+            codomain_permutation,
+            domain_permutation,
+        } => multiplicity_free_permute_tree_pair(
+            rule,
+            src_key,
+            codomain_permutation,
+            domain_permutation,
+        ),
+        TreeTransformOperationKey::Braid {
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        } => multiplicity_free_braid_tree_pair(
+            rule,
+            src_key,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        TreeTransformOperationKey::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => multiplicity_free_transpose_tree_pair(
+            rule,
+            src_key,
+            codomain_permutation,
+            domain_permutation,
+        ),
+    };
+    rows.map_err(OperationError::from_core_preserving_context)
+}
+
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperationKey,
@@ -719,6 +774,64 @@ pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    build_multiplicity_free_tree_pair_transform_group_plan_with_rows(
+        rule,
+        operation,
+        src_structure,
+        |operation, src_key| transformed_tree_pair_rows(rule, operation, src_key).map(Arc::new),
+    )
+}
+
+/// Memoized plan build: recoupling rows come from a shape-independent
+/// tree-granular memo (TensorKit `fusiontreedict` equivalent), so recompiling
+/// for a new degeneracy pattern reuses every F/R-symbol contraction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized<R, RuleKey>(
+    rule: &R,
+    rule_key: &RuleKey,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+    memo: &mut TreePairRowMemo<R::Scalar, RuleKey>,
+    memo_hits: &mut usize,
+    memo_misses: &mut usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: Clone + Eq + std::hash::Hash,
+{
+    build_multiplicity_free_tree_pair_transform_group_plan_with_rows(
+        rule,
+        operation,
+        src_structure,
+        |operation, src_key| {
+            let memo_key = (rule_key.clone(), operation.clone(), src_key.clone());
+            if let Some(rows) = memo.get(&memo_key) {
+                *memo_hits += 1;
+                return Ok(Arc::clone(rows));
+            }
+            *memo_misses += 1;
+            let rows = Arc::new(transformed_tree_pair_rows(rule, operation, src_key)?);
+            memo.insert(memo_key, Arc::clone(&rows));
+            Ok(rows)
+        },
+    )
+}
+
+fn build_multiplicity_free_tree_pair_transform_group_plan_with_rows<R, F>(
+    rule: &R,
+    operation: TreeTransformOperationKey,
+    src_structure: &BlockStructure,
+    mut rows_for: F,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    F: FnMut(
+        &TreeTransformOperationKey,
+        &FusionTreeBlockKey,
+    ) -> Result<Arc<Vec<(FusionTreeBlockKey, R::Scalar)>>, OperationError>,
 {
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
@@ -747,45 +860,13 @@ where
             };
             src_keys.push(BlockKey::from(src_key.clone()));
 
-            let transformed = match &operation {
-                TreeTransformOperationKey::Permute {
-                    codomain_permutation,
-                    domain_permutation,
-                } => multiplicity_free_permute_tree_pair(
-                    rule,
-                    src_key,
-                    codomain_permutation,
-                    domain_permutation,
-                )?,
-                TreeTransformOperationKey::Braid {
-                    codomain_permutation,
-                    domain_permutation,
-                    codomain_levels,
-                    domain_levels,
-                } => multiplicity_free_braid_tree_pair(
-                    rule,
-                    src_key,
-                    codomain_permutation,
-                    domain_permutation,
-                    codomain_levels,
-                    domain_levels,
-                )?,
-                TreeTransformOperationKey::Transpose {
-                    codomain_permutation,
-                    domain_permutation,
-                } => multiplicity_free_transpose_tree_pair(
-                    rule,
-                    src_key,
-                    codomain_permutation,
-                    domain_permutation,
-                )?,
-            };
+            let transformed = rows_for(&operation, src_key)?;
 
             for row in &mut rows {
                 row.push(R::Scalar::zero());
             }
-            for (dst_tree_key, coefficient) in transformed {
-                let dst_key = BlockKey::from(dst_tree_key);
+            for (dst_tree_key, coefficient) in transformed.iter() {
+                let dst_key = BlockKey::from(dst_tree_key.clone());
                 let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
                     dst_row
                 } else {
@@ -795,7 +876,7 @@ where
                     rows.push(vec![R::Scalar::zero(); src_column + 1]);
                     dst_row
                 };
-                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient;
+                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
             }
         }
 

@@ -559,13 +559,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     reject_fusion_contract_conjugation(axes)?;
+    // Axis validation happens inside validate_canonical_compose.
     validate_canonical_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_space.rank(),
-        rhs_space.rank(),
-        dst_space.rank(),
-        axes,
-    )?;
 
     let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space)?;
     let rhs_layout = FusionBlockMatrixLayout::compile(rule, rhs_space)?;

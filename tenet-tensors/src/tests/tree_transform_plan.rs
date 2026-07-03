@@ -605,6 +605,82 @@ fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
 }
 
 #[test]
+fn tree_row_memo_survives_structure_change() {
+    // TensorKit fusiontreedict parity: a truncation step changes the tree
+    // subset of a structure, so the sector-keyed plan cache misses — but
+    // recoupling rows for trees shared with earlier structures must be
+    // reused from the tree-granular memo instead of recomputing F/R-symbol
+    // contractions.
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    let make = |keys: &[BlockKey]| {
+        let blocks: Vec<_> = keys
+            .iter()
+            .map(|key| (key.clone(), vec![1usize, 1, 1, 1]))
+            .collect();
+        let block_structure = packed_fixture_structure(4, blocks).unwrap();
+        let elements = keys.len();
+        let src_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let dst_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![1.0; elements],
+            src_space,
+            block_structure.clone(),
+        )
+        .unwrap();
+        let dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![0.0; elements],
+            dst_space,
+            block_structure,
+        )
+        .unwrap();
+        (dst, src)
+    };
+
+    let (dst1, src1) = make(&[src_key0.clone(), src_key1.clone()]);
+    cache
+        .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst1, &src1)
+        .unwrap();
+    let misses_after_first = cache.stats().tree_row_misses();
+    assert!(misses_after_first > 0);
+    assert_eq!(cache.stats().tree_row_hits(), 0);
+
+    // Structure change (a new coupled sector appears, e.g. after a bond
+    // grows in a sweep): the sector-keyed plan cache misses, but rows for
+    // the previously seen trees come from the memo — only the new sector's
+    // trees compute fresh F/R-symbol contractions.
+    let src_key2 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(2),
+        [false, false, false, false],
+        [2, 3],
+        [1, 1, 1],
+    );
+    let (dst2, src2) = make(&[src_key0.clone(), src_key1.clone(), src_key2.clone()]);
+    cache
+        .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst2, &src2)
+        .unwrap();
+    assert_eq!(cache.stats().plan_misses(), 2);
+    assert!(cache.stats().tree_row_hits() >= misses_after_first);
+    assert!(cache.stats().tree_row_misses() > misses_after_first);
+}
+
+#[test]
 fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],

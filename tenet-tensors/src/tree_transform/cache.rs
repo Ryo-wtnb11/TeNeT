@@ -239,6 +239,10 @@ pub struct TreeTransformCache<T, RuleKey> {
     last_structure: Option<TreeTransformLastStructure<T, RuleKey>>,
     policy: OperationCachePolicy,
     stats: TreeTransformCacheStats,
+    // Shape-independent recoupling rows per (rule, operation, source tree):
+    // survives degeneracy changes, so chi sweeps recompile plans without
+    // recomputing F/R-symbol contractions (TensorKit fusiontreedict).
+    tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
 }
 
 pub type TreePairTransformCache<T, RuleKey> = TreeTransformCache<T, RuleKey>;
@@ -249,12 +253,26 @@ pub struct TreeTransformCacheStats {
     plan_misses: usize,
     structure_hits: usize,
     structure_misses: usize,
+    tree_row_hits: usize,
+    tree_row_misses: usize,
 }
 
 impl TreeTransformCacheStats {
     #[inline]
     pub fn plan_hits(self) -> usize {
         self.plan_hits
+    }
+
+    /// Shape-independent recoupling-row memo hits (TensorKit
+    /// fusiontreedict equivalent): rows reused across degeneracy changes.
+    #[inline]
+    pub fn tree_row_hits(self) -> usize {
+        self.tree_row_hits
+    }
+
+    #[inline]
+    pub fn tree_row_misses(self) -> usize {
+        self.tree_row_misses
     }
 
     #[inline]
@@ -295,6 +313,7 @@ impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
             last_structure: None,
             policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
+            tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
         }
     }
 }
@@ -315,6 +334,7 @@ where
             last_structure: None,
             policy,
             stats: TreeTransformCacheStats::default(),
+            tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
         }
     }
 
@@ -507,7 +527,15 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
+                crate::tree_transform::plan::build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+                rule,
+                &rule_key,
+                operation.clone(),
+                src.structure(),
+                &mut self.tree_rows,
+                &mut self.stats.tree_row_hits,
+                &mut self.stats.tree_row_misses,
+            )?;
             self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure(
@@ -567,7 +595,15 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+                crate::tree_transform::plan::build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+                rule,
+                &rule_key,
+                operation.clone(),
+                src_structure,
+                &mut self.tree_rows,
+                &mut self.stats.tree_row_hits,
+                &mut self.stats.tree_row_misses,
+            )?;
             self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure_from_structures(
@@ -628,7 +664,15 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+                crate::tree_transform::plan::build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+                rule,
+                &rule_key,
+                operation.clone(),
+                src_structure,
+                &mut self.tree_rows,
+                &mut self.stats.tree_row_hits,
+                &mut self.stats.tree_row_misses,
+            )?;
             self.insert_plan(plan_key.clone(), plan);
         }
         self.get_or_compile_structure_from_structures_with_storage_conjugation(
