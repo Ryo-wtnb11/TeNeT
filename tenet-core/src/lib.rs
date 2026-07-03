@@ -5467,6 +5467,25 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
     ) -> Result<Self, CoreError> {
         Self::from_storage_with_shared_fusion_space(data, fusion_space)
     }
+
+    /// Builds a tensor by evaluating `fill(key, indices)` for every block
+    /// element; positions not covered by any block keep `background`.
+    /// Layout-independent: packed and coupled spaces produce identical
+    /// tensors from the same `fill`.
+    pub fn from_block_fn_with_fusion_space<F>(
+        fusion_space: FusionTensorMapSpace<NOUT, NIN>,
+        background: T,
+        fill: F,
+    ) -> Result<Self, CoreError>
+    where
+        T: Clone,
+        F: FnMut(&BlockKey, &[usize]) -> T,
+    {
+        let len = fusion_space.required_len()?;
+        let mut tensor = Self::from_vec_with_fusion_space(vec![background; len], fusion_space)?;
+        tensor.fill_block_elements(fill)?;
+        Ok(tensor)
+    }
 }
 
 impl<T: Clone, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T>> {
@@ -5615,6 +5634,41 @@ where
         self.storage.as_slice()
     }
 
+    /// Visits every block element as `(key, indices, value)`, independent of
+    /// the storage layout.
+    pub fn for_each_block_element<F>(&self, mut visit: F) -> Result<(), CoreError>
+    where
+        F: FnMut(&BlockKey, &[usize], &T),
+    {
+        let structure = Arc::clone(&self.structure);
+        let data = self.storage.as_slice();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let shape = block.shape();
+            let strides = block.strides();
+            let offset = block.offset();
+            let count: usize = shape.iter().product();
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..count {
+                let position = offset
+                    + indices
+                        .iter()
+                        .zip(strides)
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>();
+                visit(block.key(), &indices, &data[position]);
+                for axis in 0..shape.len() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn subblock(&self) -> Result<BlockView<'_, T>, CoreError> {
         let block = self.structure.only_block()?;
         BlockView::new(
@@ -5706,6 +5760,43 @@ where
     #[inline]
     pub fn data_mut(&mut self) -> &mut [T] {
         self.storage.as_mut_slice()
+    }
+
+    /// Fills every block element with `fill(key, indices)`, independent of
+    /// the storage layout. The layout-safe way to enter data: constructing
+    /// through this (instead of positioning raw values in a flat vector)
+    /// gives identical tensors for the packed and coupled layouts.
+    pub fn fill_block_elements<F>(&mut self, mut fill: F) -> Result<(), CoreError>
+    where
+        F: FnMut(&BlockKey, &[usize]) -> T,
+    {
+        let structure = Arc::clone(&self.structure);
+        let data = self.storage.as_mut_slice();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let shape = block.shape();
+            let strides = block.strides();
+            let offset = block.offset();
+            let count: usize = shape.iter().product();
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..count {
+                let position = offset
+                    + indices
+                        .iter()
+                        .zip(strides)
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>();
+                data[position] = fill(block.key(), &indices);
+                for axis in 0..shape.len() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn subblock_mut(&mut self) -> Result<BlockViewMut<'_, T>, CoreError> {
@@ -6175,6 +6266,87 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_fn_construction_is_layout_independent() {
+        let rule = Z2FusionRule;
+        let leg = |dual| SectorLeg::new([z2_even(), z2_odd()], dual);
+        let homspace = || {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg(false), leg(false)]),
+                FusionProductSpace::new([leg(false), leg(false)]),
+            )
+        };
+        let shapes = |hom: &FusionTreeHomSpace| {
+            hom.fusion_tree_keys(&rule)
+                .iter()
+                .map(|_| vec![2usize; 4])
+                .collect::<Vec<_>>()
+        };
+        let dense = || TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap();
+        let hom = homspace();
+        let packed_space = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes(
+            dense(),
+            hom.clone(),
+            &rule,
+            shapes(&hom),
+        )
+        .unwrap();
+        let coupled_space = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
+            dense(),
+            hom.clone(),
+            &rule,
+            shapes(&hom),
+        )
+        .unwrap();
+
+        let fill = |key: &BlockKey, indices: &[usize]| -> f64 {
+            let BlockKey::FusionTree(tree) = key else {
+                panic!("fusion tree keys expected");
+            };
+            let mut value = 0.0;
+            for (axis, &sector) in tree
+                .codomain_tree()
+                .uncoupled()
+                .iter()
+                .chain(tree.domain_tree().uncoupled())
+                .enumerate()
+            {
+                value += (axis as f64 + 1.0) * (sector.id() as f64 + 0.5);
+            }
+            for (axis, &index) in indices.iter().enumerate() {
+                value += (axis as f64 + 2.0) * index as f64;
+            }
+            value
+        };
+        let packed =
+            TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(packed_space, 0.0, fill)
+                .unwrap();
+        let coupled =
+            TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(coupled_space, 0.0, fill)
+                .unwrap();
+
+        // Raw storage differs between layouts...
+        assert_ne!(packed.data(), coupled.data());
+        // ...but the logical block content is identical.
+        let mut packed_elements = Vec::new();
+        packed
+            .for_each_block_element(|key, indices, value| {
+                packed_elements.push((key.clone(), indices.to_vec(), *value));
+            })
+            .unwrap();
+        let mut cursor = 0;
+        coupled
+            .for_each_block_element(|key, indices, value| {
+                let (expected_key, expected_indices, expected_value) = &packed_elements[cursor];
+                assert_eq!(key, expected_key);
+                assert_eq!(indices, expected_indices.as_slice());
+                assert_eq!(value, expected_value);
+                cursor += 1;
+            })
+            .unwrap();
+        assert_eq!(cursor, packed_elements.len());
+    }
 
     #[test]
     fn coupled_layout_embeds_subblocks_into_sector_matrices() {
