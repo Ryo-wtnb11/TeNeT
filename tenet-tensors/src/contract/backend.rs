@@ -257,16 +257,28 @@ where
         let rhs_strides = [1, contracted];
         let dst_shape = [rows, cols];
         let dst_strides = [1, rows];
-        let lhs = D::dense_read(
-            DenseView::new(lhs_data, &lhs_shape, &lhs_strides, 0).map_err(OperationError::Dense)?,
-        );
-        let rhs = D::dense_read(
-            DenseView::new(rhs_data, &rhs_shape, &rhs_strides, 0).map_err(OperationError::Dense)?,
-        );
-        let output = D::dense_write(
-            DenseViewMut::new(dst_data, &dst_shape, &dst_strides, 0)
-                .map_err(OperationError::Dense)?,
-        );
+        // Layout validated at plan compile: callers hand slices whose lengths
+        // were bounds-checked against rows/contracted/cols when the fusion
+        // block plan (or its scratch) was built, so replay uses the trusted
+        // constructors (debug builds re-validate).
+        let lhs = D::dense_read(DenseView::new_trusted(
+            lhs_data,
+            &lhs_shape,
+            &lhs_strides,
+            0,
+        ));
+        let rhs = D::dense_read(DenseView::new_trusted(
+            rhs_data,
+            &rhs_shape,
+            &rhs_strides,
+            0,
+        ));
+        let output = D::dense_write(DenseViewMut::new_trusted(
+            dst_data,
+            &dst_shape,
+            &dst_strides,
+            0,
+        ));
         self.dense_mut()
             .matmul_into(output, lhs, rhs)
             .map_err(OperationError::Dense)

@@ -65,6 +65,26 @@ impl<'a, T> DenseView<'a, T> {
         })
     }
 
+    /// Trusted constructor: the caller guarantees the layout was validated
+    /// when the owning plan was compiled (replay-side counterpart of the
+    /// `*_trusted` kernel entry points). Layout errors are still memory-safe
+    /// (worst case an index panic downstream); debug builds re-validate.
+    #[inline]
+    pub fn new_trusted(
+        data: &'a [T],
+        shape: &'a [usize],
+        strides: &'a [usize],
+        offset: usize,
+    ) -> Self {
+        debug_assert!(validate_dense_layout(data.len(), offset, shape, strides).is_ok());
+        Self {
+            data,
+            shape,
+            strides,
+            offset,
+        }
+    }
+
     #[inline]
     pub fn data(&self) -> &'a [T] {
         self.data
@@ -113,6 +133,23 @@ impl<'a, T> DenseViewMut<'a, T> {
             strides,
             offset,
         })
+    }
+
+    /// Trusted constructor; see [`DenseView::new_trusted`].
+    #[inline]
+    pub fn new_trusted(
+        data: &'a mut [T],
+        shape: &'a [usize],
+        strides: &'a [usize],
+        offset: usize,
+    ) -> Self {
+        debug_assert!(validate_dense_layout(data.len(), offset, shape, strides).is_ok());
+        Self {
+            data,
+            shape,
+            strides,
+            offset,
+        }
     }
 
     #[inline]
