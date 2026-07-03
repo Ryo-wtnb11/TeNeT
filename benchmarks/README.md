@@ -216,3 +216,28 @@ recorded table (stack-fused replay loops landed after it).
 | SU2 | swap | 31.0 | 15 378 | 15 779 | **0.97** |
 | SU2 | swap+out | 46.7 | 21 107 | 19 914 | 1.06 |
 | U1⊠fZ2 | compose | 5.2 | 2 187 | 1 857 | 1.18 |
+
+### d=4 full comparison (2026-07-03, both sides Accelerate, 1 thread)
+
+TensorKit rerun via `julia -e 'using AppleAccelerate; include("tensorkit_microbench.jl")' 4 300`
+(the bare script uses OpenBLAS; at d=4 that alone doubles TensorKit's
+compose time, so the Accelerate numbers are the fair baseline). µs/iter.
+
+| symmetry | workload | TeNeT | TensorKit | ratio |
+|---|---|---|---|---|
+| U1 | compose | 5.3 | 4.1 | 1.31 |
+| U1 | swap | 11.8 | 19.8 | **0.60** |
+| U1 | swap+out | 9.0 | 35.6 | **0.25** |
+| fZ2 | compose | 2.6 | 1.9 | 1.41 |
+| fZ2 | swap | 4.9 | 8.7 | **0.56** |
+| fZ2 | swap+out | 7.2 | 15.2 | **0.47** |
+| SU2 | compose | 8.5 | 7.1 | 1.19 |
+| SU2 | swap | 31.0 | 48.6 | **0.64** |
+| SU2 | swap+out | 46.7 | 78.0 | **0.60** |
+| U1⊠fZ2 | compose | 5.2 | 4.1 | 1.27 |
+| U1⊠fZ2 | swap | 11.7 | 19.9 | **0.59** |
+| U1⊠fZ2 | swap+out | 8.9 | 35.0 | **0.25** |
+
+Only compose d=4 remains 1.2–1.4× (per-sector GEMM launch overhead;
+TensorKit amortizes via `mul!` on the same coupled matrices). All
+tree-transform paths are 1.6–4× faster than TensorKit at d=4.
