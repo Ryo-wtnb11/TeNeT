@@ -127,9 +127,23 @@ pub struct Space {
 }
 
 impl Space {
+    /// Normalizes to the TensorKit `GradedSpace.dims` map invariant:
+    /// zero-degeneracy sectors are dropped (TensorKit does the same) and a
+    /// duplicate sector label panics immediately with a clear message —
+    /// mirroring TensorKit's `ArgumentError` at `GradedSpace` construction
+    /// (gradedspace.jl:49-56) — instead of surfacing later as an
+    /// inconsistent `dim()` or a tensor-construction panic.
     fn new(rule: RuleKind, sectors: Vec<(SectorId, usize)>) -> Self {
         let mut sectors = sectors;
+        sectors.retain(|&(_, degeneracy)| degeneracy > 0);
         sectors.sort_by_key(|(sector, _)| *sector);
+        for pair in sectors.windows(2) {
+            assert!(
+                pair[0].0 != pair[1].0,
+                "sector {:?} appears multiple times in the space constructor                  (TensorKit rejects duplicate sectors at construction)",
+                pair[0].0
+            );
+        }
         Self {
             rule,
             sectors,

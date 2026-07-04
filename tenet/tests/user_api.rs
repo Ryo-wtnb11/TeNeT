@@ -1010,3 +1010,279 @@ fn space_fuse_all_matches_pairwise_fold() {
 
     assert!(Space::fuse_all(&[]).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Structural constructors (id / isomorphism / unitary / isometry) and twist,
+// cross-checked against TensorKit 0.17.0 (Julia). The generating script and
+// its output live in this comment block; every hardcoded number below comes
+// from that run.
+//
+// ```julia
+// using TensorKit
+// const FermionParity = TensorKit.FermionParity
+// label(c::U1Irrep) = c.charge
+// label(c::FermionParity) = Int(c.isodd)
+// label(c::SU2Irrep) = Int(2 * c.j)
+// entry(sectors, idx) =
+//     sum(100.0^(k - 1) * label(s) for (k, s) in enumerate(reverse(collect(sectors)))) +
+//     sum(0.1^k * i for (k, i) in enumerate(Tuple(idx)))
+// function filled!(t)
+//     for (f1, f2) in fusiontrees(t)
+//         b = t[f1, f2]
+//         for idx in CartesianIndices(b)
+//             b[idx] = entry((f1.uncoupled..., f2.uncoupled...), idx)
+//         end
+//     end
+//     return t
+// end
+// function run_case(name, l, m; twists = Int[])
+//     P = dual(l) ⊗ l
+//     g = fuse(P)
+//     F = isomorphism(g, P)
+//     t = filled!(zeros(Float64, P ← m))
+//     w = filled!(zeros(Float64, g ← m))
+//     Ft = isempty(twists) ? F : twist(F, twists)
+//     println("$name: dot(w, F*t) = ", dot(w, Ft * t))
+// end
+// run_case("u1", U1Space(0 => 1, 1 => 2), U1Space(-1 => 1, 0 => 1, 1 => 1))
+// l_f = Vect[FermionParity](0 => 1, 1 => 2); m_f = Vect[FermionParity](0 => 1, 1 => 1)
+// run_case("fz2", l_f, m_f)
+// run_case("fz2 tw[2]", l_f, m_f; twists = [2])
+// run_case("fz2 tw[3]", l_f, m_f; twists = [3])
+// run_case("fz2 tw[1]", l_f, m_f; twists = [1])
+// run_case("su2", SU2Space(0 => 1, 1 // 2 => 2), SU2Space(0 => 1, 1 // 2 => 1, 1 => 1))
+// println("norm(id(P_u1)) = ", norm(id(dual(U1Space(0 => 1, 1 => 2)) ⊗ U1Space(0 => 1, 1 => 2))))
+// W = isometry(SU2Space(0 => 2, 1 // 2 => 3, 1 => 1), SU2Space(0 => 1, 1 // 2 => 1))
+// println("norm(W' * W - id(SU2Space(0 => 1, 1 // 2 => 1))) = ", norm(W' * W - id(SU2Space(0 => 1, 1 // 2 => 1))))
+// println("norm(W) = ", norm(W))
+// ```
+//
+// Output (TensorKit v0.17.0, Julia 1.11.6):
+//   u1: dot(w, F*t) = 2.0231712673900002e6
+//   fz2      : dot(w, F*t) = 2.0584773977899998e6
+//   fz2 tw[2]: dot(w, F*t) = -2.01748090133e6
+//   fz2 tw[3]: dot(w, F*t) = 1.98839242367e6
+//   fz2 tw[1]: dot(w, F*t) = -2.02938887129e6
+//   su2: dot(w, F*t) = 2.8621579710249998e7
+//   norm(id(P_u1)) = 3.0
+//   norm(W' * W - id(...)) = 0.0
+//   norm(W) = 1.7320508075688772
+// ---------------------------------------------------------------------------
+
+/// The Julia `entry` function: sector labels (codomain legs first, then
+/// domain legs, least-significant last) in powers of 100 plus 1-based
+/// block-local indices in powers of 0.1.
+fn oracle_entry(labels: &[f64], indices: &[usize]) -> f64 {
+    let mut value = 0.0;
+    for (k, &label) in labels.iter().rev().enumerate() {
+        value += 100f64.powi(k as i32) * label;
+    }
+    for (k, &index) in indices.iter().enumerate() {
+        value += 0.1f64.powi(k as i32 + 1) * (index as f64 + 1.0);
+    }
+    value
+}
+
+/// `dot(w, isomorphism(fuse(dual(l) ⊗ l) ← dual(l) ⊗ l).twist(twists) * t)`
+/// with the deterministic block entries of the Julia script; `label` decodes
+/// a SectorId into the Julia sector label.
+fn fuser_oracle_scalar(
+    rt: &Runtime,
+    l: &Space,
+    m: &Space,
+    twists: &[usize],
+    label: impl Fn(SectorId) -> f64,
+) -> f64 {
+    let fill = |key: &BlockKey, indices: &[usize]| -> f64 {
+        let BlockKey::FusionTree(key) = key else {
+            panic!("expected fusion-tree block keys");
+        };
+        let labels: Vec<f64> = key
+            .codomain_uncoupled()
+            .iter()
+            .chain(key.domain_uncoupled())
+            .map(|&sector| label(sector))
+            .collect();
+        oracle_entry(&labels, indices)
+    };
+    let fused = l.dual().fuse(l).unwrap();
+    let fuser = Tensor::isomorphism(rt, [&fused], [&l.dual(), l])
+        .unwrap()
+        .twist(twists)
+        .unwrap();
+    let t = Tensor::from_block_fn(rt, [&l.dual(), l], [m], fill).unwrap();
+    let w = Tensor::from_block_fn(rt, [&fused], [m], fill).unwrap();
+    let value = w.inner(&fuser.compose(&t).unwrap()).unwrap();
+    assert_eq!(value.im, 0.0);
+    value.re
+}
+
+fn assert_rel(value: f64, expected: f64) {
+    assert!(
+        (value - expected).abs() <= 1e-9 * expected.abs(),
+        "{value} != {expected}"
+    );
+}
+
+#[test]
+fn fuser_contraction_matches_tensorkit_u1() {
+    use tenet::core::U1Irrep;
+    let rt = Runtime::builder().build().unwrap();
+    let l = Space::u1([(0, 1), (1, 2)]);
+    let m = Space::u1([(-1, 1), (0, 1), (1, 1)]);
+    let label = |sector: SectorId| f64::from(U1Irrep::from_sector_id(sector).unwrap().charge());
+    let value = fuser_oracle_scalar(&rt, &l, &m, &[], label);
+    assert_rel(value, 2.0231712673900002e6);
+}
+
+#[test]
+fn fuser_contraction_and_twist_match_tensorkit_fz2() {
+    let rt = Runtime::builder().build().unwrap();
+    let l = Space::fz2([(0, 1), (1, 2)]);
+    let m = Space::fz2([(0, 1), (1, 1)]);
+    let label = |sector: SectorId| sector.id() as f64;
+    // Untwisted fuser, then the twist on each of the three legs (tenet flat
+    // leg i is Julia index i+1).
+    assert_rel(
+        fuser_oracle_scalar(&rt, &l, &m, &[], label),
+        2.0584773977899998e6,
+    );
+    assert_rel(
+        fuser_oracle_scalar(&rt, &l, &m, &[1], label),
+        -2.01748090133e6,
+    );
+    assert_rel(
+        fuser_oracle_scalar(&rt, &l, &m, &[2], label),
+        1.98839242367e6,
+    );
+    assert_rel(
+        fuser_oracle_scalar(&rt, &l, &m, &[0], label),
+        -2.02938887129e6,
+    );
+}
+
+#[test]
+fn fuser_contraction_matches_tensorkit_su2() {
+    use tenet::core::SU2Irrep;
+    let rt = Runtime::builder().build().unwrap();
+    let l = Space::su2([(0, 1), (1, 2)]);
+    let m = Space::su2([(0, 1), (1, 1), (2, 1)]);
+    let label = |sector: SectorId| SU2Irrep::from_sector_id(sector).twice_spin() as f64;
+    let value = fuser_oracle_scalar(&rt, &l, &m, &[], label);
+    assert_rel(value, 2.8621579710249998e7);
+}
+
+#[test]
+fn id_is_the_identity_and_has_tensorkit_norm() {
+    let rt = Runtime::builder().build().unwrap();
+    let l = Space::u1([(0, 1), (1, 2)]);
+    let id = Tensor::id(&rt, [&l.dual(), &l]).unwrap();
+    // Julia: norm(id(dual(l) ⊗ l)) = 3.0.
+    assert!((id.norm().unwrap() - 3.0).abs() < 1e-12);
+    for seed in [3, 4] {
+        let t = Tensor::rand_with_seed(&rt, [&l.dual(), &l], [&l], seed).unwrap();
+        assert_eq!(id.compose(&t).unwrap().data(), t.data());
+    }
+    // Identity is self-adjoint and idempotent.
+    assert_eq!(id.adjoint().unwrap().data(), id.data());
+    assert_eq!(id.compose(&id).unwrap().data(), id.data());
+}
+
+#[test]
+fn fuser_roundtrips_to_identity_on_both_sides() {
+    let rt = Runtime::builder().build().unwrap();
+    for l in [
+        Space::u1([(0, 1), (1, 2)]),
+        Space::su2([(0, 1), (1, 2)]),
+        Space::fz2([(0, 1), (1, 2)]),
+    ] {
+        let fused = l.dual().fuse(&l).unwrap();
+        let f = Tensor::isomorphism(&rt, [&fused], [&l.dual(), &l]).unwrap();
+        let product_id = Tensor::id(&rt, [&l.dual(), &l]).unwrap();
+        let fused_id = Tensor::id(&rt, [&fused]).unwrap();
+        assert_close(
+            f.adjoint().unwrap().compose(&f).unwrap().data(),
+            product_id.data(),
+            1e-12,
+        );
+        assert_close(
+            f.compose(&f.adjoint().unwrap()).unwrap().data(),
+            fused_id.data(),
+            1e-12,
+        );
+    }
+}
+
+#[test]
+fn unitary_matches_isomorphism_and_rejects_non_isomorphic_spaces() {
+    let rt = Runtime::builder().build().unwrap();
+    let l = Space::u1([(0, 1), (1, 2)]);
+    let fused = l.dual().fuse(&l).unwrap();
+    let iso = Tensor::isomorphism(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    let uni = Tensor::unitary(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    assert_eq!(iso.data(), uni.data());
+
+    let other = Space::u1([(0, 2), (1, 2)]);
+    assert!(Tensor::isomorphism(&rt, [&other], [&l]).is_err());
+    assert!(Tensor::unitary(&rt, [&other], [&l]).is_err());
+}
+
+#[test]
+fn isometry_embeds_isometrically_and_rejects_too_small_codomains() {
+    let rt = Runtime::builder().build().unwrap();
+    let small = Space::su2([(0, 1), (1, 1)]);
+    let big = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    let w = Tensor::isometry(&rt, [&big], [&small]).unwrap();
+    // Julia: norm(W' * W - id(small)) = 0.0, norm(W) = sqrt(3).
+    let id = Tensor::id(&rt, [&small]).unwrap();
+    assert_eq!(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
+    assert!((w.norm().unwrap() - 3f64.sqrt()).abs() < 1e-12);
+    assert!(Tensor::isometry(&rt, [&small], [&big]).is_err());
+}
+
+#[test]
+fn twist_is_trivial_on_bosonic_legs_and_involutive_on_fermionic_ones() {
+    let rt = Runtime::builder().build().unwrap();
+    // Bosonic rules: θ = +1 everywhere, twist is the identity.
+    for l in [Space::u1([(0, 1), (1, 2)]), Space::su2([(0, 1), (1, 2)])] {
+        let t = Tensor::rand_with_seed(&rt, [&l, &l], [&l], 5).unwrap();
+        assert_eq!(t.twist(&[0, 1, 2]).unwrap().data(), t.data());
+    }
+    // Fermionic rule: θ(odd) = −1, twist² = id and odd blocks flip sign.
+    let l = Space::fz2([(0, 1), (1, 2)]);
+    let t = Tensor::rand_with_seed(&rt, [&l, &l], [&l], 6).unwrap();
+    let twisted = t.twist(&[2]).unwrap();
+    assert_ne!(twisted.data(), t.data());
+    assert_eq!(twisted.twist(&[2]).unwrap().data(), t.data());
+    assert!(t.twist(&[3]).is_err());
+    assert_eq!(t.twist(&[]).unwrap().data(), t.data());
+}
+
+/// TeNeT issue #8: Space constructors enforce the TensorKit GradedSpace
+/// sector-map invariant — zero-degeneracy sectors are dropped and duplicate
+/// sector labels are rejected at construction, so introspection, dim(), and
+/// the lowered SectorLeg can never disagree.
+#[test]
+fn space_drops_zero_degeneracy_sectors() {
+    let v = Space::u1([(0, 0), (1, 1)]);
+    assert_eq!(v.sectors(), vec![(SectorLabel::U1(1), 1)]);
+    assert_eq!(v.degeneracy(SectorLabel::U1(0)), None);
+    let w = Space::u1([(0, 1), (1, 1)]);
+    let fused = w.fuse(&v).unwrap();
+    assert_eq!(
+        fused.sectors(),
+        vec![(SectorLabel::U1(1), 1), (SectorLabel::U1(2), 1)]
+    );
+}
+
+#[test]
+#[should_panic(expected = "appears multiple times")]
+fn space_rejects_duplicate_sectors_same_degeneracy() {
+    let _ = Space::u1([(0, 2), (0, 2)]);
+}
+
+#[test]
+#[should_panic(expected = "appears multiple times")]
+fn space_rejects_duplicate_sectors_conflicting_degeneracy() {
+    let _ = Space::u1([(0, 2), (0, 3)]);
+}
