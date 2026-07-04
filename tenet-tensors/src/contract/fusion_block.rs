@@ -75,8 +75,15 @@ where
     where
         D: Copy,
     {
-        self.backend
-            .matmul_rank2_batch_axpby_into_raw(self.workspace, dst, lhs, rhs, jobs, alpha, beta)
+        self.backend.matmul_rank2_batch_axpby_into_raw(
+            self.workspace,
+            dst,
+            lhs,
+            rhs,
+            jobs,
+            alpha,
+            beta,
+        )
     }
 }
 

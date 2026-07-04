@@ -6,7 +6,7 @@ use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
     ScratchStorage, SimilarStorage, TensorMap,
 };
-use tenet_dense::DenseExecutor;
+use tenet_dense::{DenseExecutor, DenseGemmBatchJob};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
@@ -29,9 +29,13 @@ use crate::{
 pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     packed: TreeTransformScratchBuffers<HostScratchBuffer<T>, HostScratchBuffer<T>>,
-    // Recoupling matrix converted into the data scalar type for the GEMM
-    // application (TensorKit's basistransform buffer).
+    // Recoupling matrices converted into the data scalar type for the GEMM
+    // application (TensorKit's basistransform buffer); replay packs every
+    // Multi block's matrix into this one buffer so the recoupling GEMMs
+    // submit as a single batch.
     coefficient_scratch: Vec<T>,
+    // Reused job list for the batched recoupling GEMM.
+    batch_jobs: Vec<DenseGemmBatchJob>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -42,6 +46,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             zero_strides: Vec::new(),
             packed: TreeTransformScratchBuffers::default(),
             coefficient_scratch: Vec::new(),
+            batch_jobs: Vec::new(),
         }
     }
 }
@@ -450,53 +455,9 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
-    for block in &structure.blocks {
-        match *block {
-            TreeTransformBlock::Single {
-                dst_layout,
-                src_layout,
-                coefficient,
-            } => tree_transform_single_with_strided_kernel(
-                kernels,
-                &mut workspace.zero_strides,
-                &structure.layouts,
-                structure.layouts.entry(dst_layout),
-                structure.layouts.entry(src_layout),
-                structure.coefficient(coefficient),
-                structure.storage_conjugate(),
-                dst_data,
-                src_data,
-                alpha,
-                beta,
-            )?,
-            TreeTransformBlock::Multi {
-                dst_layout_start,
-                dst_count,
-                src_layout_start,
-                src_count,
-                coefficient_start,
-                element_count,
-            } => tree_transform_multi_with_structural_recoupling(
-                kernels,
-                dense,
-                workspace,
-                &structure.layouts,
-                dst_layout_start,
-                dst_count,
-                src_layout_start,
-                src_count,
-                coefficient_start,
-                element_count,
-                &structure.recoupling_coefficients_dst_src,
-                structure.storage_conjugate(),
-                dst_data,
-                src_data,
-                alpha,
-                beta,
-            )?,
-        }
-    }
-    Ok(())
+    tree_transform_blocks_with_batched_recoupling(
+        kernels, dense, workspace, structure, dst_data, src_data, alpha, beta, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -527,6 +488,130 @@ where
     validate_replay_storage_len(src_structure, src_data.len())?;
     profile.validate += start.elapsed();
 
+    tree_transform_blocks_with_batched_recoupling(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_data,
+        src_data,
+        alpha,
+        beta,
+        Some(profile),
+    )?;
+
+    profile.total += total_start.elapsed();
+    Ok(())
+}
+
+/// Executes a validated tree-transform block list against a dense executor:
+/// Single blocks apply directly through the strided kernel, and every Multi
+/// block packs into one shared source/destination scratch pair so all the
+/// recoupling GEMMs (`destination = source * U^T` per block) submit as a
+/// single batched call — small transform groups then pay the dense executor's
+/// per-call dispatch cost once per replay instead of once per block.
+///
+/// Inlined into both the plain and profiled entry points so the
+/// `Option<&mut profile>` checks constant-fold away in the unprofiled copy.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    mut profile: Option<&mut TreeTransformReplayProfile>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy,
+{
+    let layouts = &structure.layouts;
+
+    // All-Single structures (abelian recoupling is diagonal) skip the batch
+    // machinery entirely: no pack scratch, no job list, no scatter pass.
+    if !structure
+        .blocks
+        .iter()
+        .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
+    {
+        for block in &structure.blocks {
+            let TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } = *block
+            else {
+                unreachable!("checked above: no Multi blocks");
+            };
+            let start = profile.as_ref().map(|_| std::time::Instant::now());
+            tree_transform_single_with_strided_kernel(
+                kernels,
+                &mut workspace.zero_strides,
+                layouts,
+                layouts.entry(dst_layout),
+                layouts.entry(src_layout),
+                structure.coefficient(coefficient),
+                structure.storage_conjugate(),
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )?;
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+                let elapsed = start.elapsed();
+                profile.single_blocks += 1;
+                profile.single_total += elapsed;
+                profile.strided_kernel += elapsed;
+            }
+        }
+        return Ok(());
+    }
+
+    // Size the shared pack scratch over every Multi block.
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    let mut total_source_len = 0usize;
+    let mut total_destination_len = 0usize;
+    for block in &structure.blocks {
+        if let TreeTransformBlock::Multi {
+            dst_count,
+            src_count,
+            element_count,
+            ..
+        } = *block
+        {
+            let source_len = element_count
+                .checked_mul(src_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            let destination_len = element_count
+                .checked_mul(dst_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            total_source_len = total_source_len
+                .checked_add(source_len)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            total_destination_len = total_destination_len
+                .checked_add(destination_len)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+    }
+    workspace.prepare_packed_buffers(total_source_len, total_destination_len, D::zero());
+    workspace.coefficient_scratch.clear();
+    let mut jobs = std::mem::take(&mut workspace.batch_jobs);
+    jobs.clear();
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+        profile.multi_workspace_prepare += start.elapsed();
+    }
+
+    // Singles apply directly; Multi blocks pack their source columns and
+    // convert their recoupling matrix into the shared coefficient buffer.
+    let mut source_base = 0usize;
+    let mut destination_base = 0usize;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -534,57 +619,147 @@ where
                 src_layout,
                 coefficient,
             } => {
-                profile.single_blocks += 1;
-                let start = std::time::Instant::now();
-                tree_transform_single_with_strided_kernel_profiled(
+                // Timestamps only under profiling: the per-block clock reads
+                // are measurable against microsecond replays.
+                let start = profile.as_ref().map(|_| std::time::Instant::now());
+                tree_transform_single_with_strided_kernel(
                     kernels,
                     &mut workspace.zero_strides,
-                    &structure.layouts,
-                    structure.layouts.entry(dst_layout),
-                    structure.layouts.entry(src_layout),
+                    layouts,
+                    layouts.entry(dst_layout),
+                    layouts.entry(src_layout),
                     structure.coefficient(coefficient),
                     structure.storage_conjugate(),
                     dst_data,
                     src_data,
                     alpha,
                     beta,
-                    profile,
                 )?;
-                profile.single_total += start.elapsed();
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+                    let elapsed = start.elapsed();
+                    profile.single_blocks += 1;
+                    profile.single_total += elapsed;
+                    profile.strided_kernel += elapsed;
+                }
             }
             TreeTransformBlock::Multi {
-                dst_layout_start,
+                dst_layout_start: _,
                 dst_count,
                 src_layout_start,
                 src_count,
                 coefficient_start,
                 element_count,
             } => {
-                profile.multi_blocks += 1;
-                tree_transform_multi_with_structural_recoupling_profiled(
-                    kernels,
-                    dense,
-                    workspace,
-                    &structure.layouts,
-                    dst_layout_start,
-                    dst_count,
-                    src_layout_start,
-                    src_count,
-                    coefficient_start,
-                    element_count,
-                    &structure.recoupling_coefficients_dst_src,
-                    structure.storage_conjugate(),
-                    dst_data,
-                    src_data,
-                    alpha,
-                    beta,
-                    profile,
-                )?;
+                let start = profile.as_ref().map(|_| std::time::Instant::now());
+                for src_index in 0..src_count {
+                    let layout = layouts.entry(src_layout_start + src_index);
+                    pack_layout_into_column(
+                        kernels,
+                        layouts,
+                        layout,
+                        src_data,
+                        workspace.packed.source_mut().as_mut_slice(),
+                        source_base + src_index * element_count,
+                        structure.storage_conjugate(),
+                    )?;
+                }
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+                    profile.multi_blocks += 1;
+                    profile.packed_columns += src_count;
+                    profile.multi_pack += start.elapsed();
+                }
+
+                let start = profile.as_ref().map(|_| std::time::Instant::now());
+                let coefficient_len = src_count
+                    .checked_mul(dst_count)
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                let coefficient_end = coefficient_start
+                    .checked_add(coefficient_len)
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                let coefficients = structure
+                    .recoupling_coefficients_dst_src
+                    .get(coefficient_start..coefficient_end)
+                    .ok_or(OperationError::CoefficientCountMismatch {
+                        expected: coefficient_end,
+                        actual: structure.recoupling_coefficients_dst_src.len(),
+                    })?;
+                let rhs_offset = workspace.coefficient_scratch.len();
+                workspace.coefficient_scratch.extend(
+                    coefficients
+                        .iter()
+                        .map(|&coefficient| D::coefficient_as_data(coefficient)),
+                );
+                jobs.push(DenseGemmBatchJob {
+                    dst_offset: destination_base,
+                    lhs_offset: source_base,
+                    rhs_offset,
+                    rows: element_count,
+                    contracted: src_count,
+                    cols: dst_count,
+                });
+                source_base += element_count * src_count;
+                destination_base += element_count * dst_count;
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+                    profile.multi_coefficient_prepare += start.elapsed();
+                }
             }
         }
     }
 
-    profile.total += total_start.elapsed();
+    // One batched recoupling GEMM across all Multi blocks (TensorKit's
+    // `_add_transform_multi!` `mul!` step, grouped).
+    if !jobs.is_empty() {
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        let (source, destination) = workspace.packed.source_and_destination_mut();
+        recoupling_gemm_batch(
+            dense,
+            destination.as_mut_slice(),
+            source.as_slice(),
+            &workspace.coefficient_scratch,
+            &jobs,
+        )?;
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            let elapsed = start.elapsed();
+            profile.multi_scalar_recoupling += elapsed;
+            profile.multi_matmul_total += elapsed;
+        }
+    }
+    workspace.batch_jobs = jobs;
+
+    // Scatter each Multi block's destination columns back out.
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    let mut destination_base = 0usize;
+    let mut scattered_columns = 0usize;
+    for block in &structure.blocks {
+        if let TreeTransformBlock::Multi {
+            dst_layout_start,
+            dst_count,
+            element_count,
+            ..
+        } = *block
+        {
+            for dst_index in 0..dst_count {
+                let layout = layouts.entry(dst_layout_start + dst_index);
+                scatter_column_into_layout(
+                    kernels,
+                    &mut workspace.zero_strides,
+                    layouts,
+                    layout,
+                    workspace.packed.destination().as_slice(),
+                    destination_base + dst_index * element_count,
+                    dst_data,
+                    alpha,
+                    beta,
+                )?;
+            }
+            scattered_columns += dst_count;
+            destination_base += element_count * dst_count;
+        }
+    }
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+        profile.scattered_columns += scattered_columns;
+        profile.multi_scatter += start.elapsed();
+    }
     Ok(())
 }
 
@@ -722,127 +897,58 @@ where
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn tree_transform_single_with_strided_kernel_profiled<A, D, C>(
-    kernels: &mut A,
-    zero_strides: &mut Vec<isize>,
-    layouts: &TreeTransformLayoutTable,
-    dst_layout: &TreeTransformLayout,
-    src_layout: &TreeTransformLayout,
-    coefficient: C,
-    source_conjugate: bool,
-    dst_data: &mut [D],
-    src_data: &[D],
-    alpha: D,
-    beta: D,
-    profile: &mut TreeTransformReplayProfile,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    D: Copy + RecouplingCoefficientAction<C>,
-    C: Copy,
-{
-    let shape = layouts.shape(dst_layout);
-    let scale = alpha.scale_by_coefficient(coefficient);
-    let start = std::time::Instant::now();
-    let result = kernels.add_strided(
-        zero_strides,
-        dst_data,
-        src_data,
-        shape,
-        layouts.strides(dst_layout),
-        layouts.strides(src_layout),
-        dst_layout.offset,
-        src_layout.offset,
-        source_conjugate,
-        scale,
-        beta,
-    );
-    profile.strided_kernel += start.elapsed();
-    result
-}
-
-/// Applies the recoupling matrix as one GEMM: `destination = source * U^T`
-/// with `source` packed as (element_count x src_count) and
-/// `recoupling_coefficients_dst_src` (row-major `U[dst, src]`) reinterpreted as the
-/// column-major (src_count x dst_count) matrix `U^T`. This is TensorKit's
-/// `_add_transform_multi!` `mul!` step; the naive per-element loop in the
-/// kernel adapter remains only for adapters without a dense executor.
-#[allow(clippy::too_many_arguments)]
-fn recoupling_gemm<E, D, C>(
+/// Applies every Multi block's recoupling matrix in one batched GEMM over
+/// shared flat scratch buffers: per job, the column-major
+/// (element_count x dst_count) destination block receives `source_block *
+/// U^T`, with `recoupling_coefficients_dst_src` (row-major `U[dst, src]`)
+/// reinterpreted as the column-major (src_count x dst_count) matrix `U^T`.
+/// This is TensorKit's `_add_transform_multi!` `mul!` step submitted as one
+/// grouped call; the naive per-element loop in the kernel adapter remains
+/// only for adapters without a dense executor. Job offsets are constructed by
+/// the replay against scratch sized to their exact totals, matching the
+/// plan-compile validation contract of the trusted views.
+fn recoupling_gemm_batch<E, D>(
     dense: &mut E,
-    coefficient_scratch: &mut Vec<D>,
     destination: &mut [D],
     source: &[D],
-    recoupling_coefficients_dst_src: &[C],
-    coefficient_start: usize,
-    element_count: usize,
-    src_count: usize,
-    dst_count: usize,
+    coefficients: &[D],
+    jobs: &[DenseGemmBatchJob],
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C>,
-    C: Copy,
+    D: DenseRecouplingScalar,
 {
-    let coefficient_len = src_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficient_end = coefficient_start
-        .checked_add(coefficient_len)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficients = recoupling_coefficients_dst_src
-        .get(coefficient_start..coefficient_end)
-        .ok_or(OperationError::CoefficientCountMismatch {
-            expected: coefficient_end,
-            actual: recoupling_coefficients_dst_src.len(),
-        })?;
-    let source_len = element_count
-        .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination_len = element_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    if source.len() < source_len || destination.len() < destination_len {
-        return Err(OperationError::ElementCountMismatch {
-            expected: source_len.max(destination_len),
-            actual: source.len().min(destination.len()),
-        });
-    }
-
-    coefficient_scratch.clear();
-    coefficient_scratch.extend(
-        coefficients
-            .iter()
-            .map(|&coefficient| D::coefficient_as_data(coefficient)),
-    );
-
-    let lhs_shape = [element_count, src_count];
-    let lhs_strides = [1, element_count];
-    let rhs_shape = [src_count, dst_count];
-    let rhs_strides = [1, src_count];
-    let dst_shape = [element_count, dst_count];
-    let dst_strides = [1, element_count];
+    let dst_shape = [destination.len()];
+    let lhs_shape = [source.len()];
+    let rhs_shape = [coefficients.len()];
+    let flat_strides = [1];
     let lhs = D::dense_read(tenet_dense::DenseView::new_trusted(
-        &source[..source_len],
+        source,
         &lhs_shape,
-        &lhs_strides,
+        &flat_strides,
         0,
     ));
     let rhs = D::dense_read(tenet_dense::DenseView::new_trusted(
-        coefficient_scratch.as_slice(),
+        coefficients,
         &rhs_shape,
-        &rhs_strides,
+        &flat_strides,
         0,
     ));
     let output = D::dense_write(tenet_dense::DenseViewMut::new_trusted(
-        &mut destination[..destination_len],
+        destination,
         &dst_shape,
-        &dst_strides,
+        &flat_strides,
         0,
     ));
     dense
-        .matmul_into(output, lhs, rhs)
+        .matmul_batch_axpby_into(
+            output,
+            lhs,
+            rhs,
+            jobs,
+            D::one().dense_scalar(),
+            D::zero().dense_scalar(),
+        )
         .map_err(OperationError::Dense)
 }
 
@@ -965,178 +1071,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_structural_recoupling<A, E, D, C>(
-    kernels: &mut A,
-    dense: &mut E,
-    workspace: &mut TreeTransformWorkspace<D>,
-    layouts: &TreeTransformLayoutTable,
-    dst_layout_start: usize,
-    dst_count: usize,
-    src_layout_start: usize,
-    src_count: usize,
-    coefficient_start: usize,
-    element_count: usize,
-    recoupling_coefficients_dst_src: &[C],
-    source_conjugate: bool,
-    dst_data: &mut [D],
-    src_data: &[D],
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
-    C: Copy,
-{
-    let source_len = element_count
-        .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination_len = element_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
-
-    for src_index in 0..src_count {
-        let layout = layouts.entry(src_layout_start + src_index);
-        pack_layout_into_column(
-            kernels,
-            layouts,
-            layout,
-            src_data,
-            workspace.packed.source_mut().as_mut_slice(),
-            src_index * element_count,
-            source_conjugate,
-        )?;
-    }
-
-    {
-        let (source, destination) = workspace.packed.source_and_destination_mut();
-        recoupling_gemm(
-            dense,
-            &mut workspace.coefficient_scratch,
-            destination.as_mut_slice(),
-            source.as_slice(),
-            recoupling_coefficients_dst_src,
-            coefficient_start,
-            element_count,
-            src_count,
-            dst_count,
-        )?;
-    }
-
-    for dst_index in 0..dst_count {
-        let layout = layouts.entry(dst_layout_start + dst_index);
-        scatter_column_into_layout(
-            kernels,
-            &mut workspace.zero_strides,
-            layouts,
-            layout,
-            workspace.packed.destination().as_slice(),
-            dst_index * element_count,
-            dst_data,
-            alpha,
-            beta,
-        )?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn tree_transform_multi_with_structural_recoupling_profiled<A, E, D, C>(
-    kernels: &mut A,
-    dense: &mut E,
-    workspace: &mut TreeTransformWorkspace<D>,
-    layouts: &TreeTransformLayoutTable,
-    dst_layout_start: usize,
-    dst_count: usize,
-    src_layout_start: usize,
-    src_count: usize,
-    coefficient_start: usize,
-    element_count: usize,
-    recoupling_coefficients_dst_src: &[C],
-    source_conjugate: bool,
-    dst_data: &mut [D],
-    src_data: &[D],
-    alpha: D,
-    beta: D,
-    profile: &mut TreeTransformReplayProfile,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    E: DenseExecutor,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
-    C: Copy,
-{
-    let source_len = element_count
-        .checked_mul(src_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-    let destination_len = element_count
-        .checked_mul(dst_count)
-        .ok_or(OperationError::ElementCountOverflow)?;
-
-    let start = std::time::Instant::now();
-    workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
-    profile.multi_workspace_prepare += start.elapsed();
-
-    let start = std::time::Instant::now();
-    for src_index in 0..src_count {
-        let layout = layouts.entry(src_layout_start + src_index);
-        pack_layout_into_column_profiled(
-            kernels,
-            layouts,
-            layout,
-            src_data,
-            workspace.packed.source_mut().as_mut_slice(),
-            src_index * element_count,
-            source_conjugate,
-            profile,
-        )?;
-        profile.packed_columns += 1;
-    }
-    profile.multi_pack += start.elapsed();
-
-    let start = std::time::Instant::now();
-    {
-        let (source, destination) = workspace.packed.source_and_destination_mut();
-        recoupling_gemm(
-            dense,
-            &mut workspace.coefficient_scratch,
-            destination.as_mut_slice(),
-            source.as_slice(),
-            recoupling_coefficients_dst_src,
-            coefficient_start,
-            element_count,
-            src_count,
-            dst_count,
-        )?;
-    }
-    let elapsed = start.elapsed();
-    profile.multi_scalar_recoupling += elapsed;
-    profile.multi_matmul_total += elapsed;
-
-    let start = std::time::Instant::now();
-    for dst_index in 0..dst_count {
-        let layout = layouts.entry(dst_layout_start + dst_index);
-        scatter_column_into_layout_profiled(
-            kernels,
-            &mut workspace.zero_strides,
-            layouts,
-            layout,
-            workspace.packed.destination().as_slice(),
-            dst_index * element_count,
-            dst_data,
-            alpha,
-            beta,
-            profile,
-        )?;
-        profile.scattered_columns += 1;
-    }
-    profile.multi_scatter += start.elapsed();
-    Ok(())
-}
-
 fn pack_layout_into_column<A, T>(
     kernels: &mut A,
     layouts: &TreeTransformLayoutTable,
@@ -1163,39 +1097,6 @@ where
         source_conjugate,
         T::one(),
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pack_layout_into_column_profiled<A, T>(
-    kernels: &mut A,
-    layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
-    src_data: &[T],
-    packed: &mut [T],
-    packed_offset: usize,
-    source_conjugate: bool,
-    profile: &mut TreeTransformReplayProfile,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<T>,
-    T: Copy + One,
-{
-    let shape = layouts.shape(layout);
-    let start = std::time::Instant::now();
-    let packed_offset = offset_to_isize(packed_offset)?;
-    let result = kernels.copy_scale_strided(
-        packed,
-        src_data,
-        shape,
-        layouts.packed_strides(layout),
-        layouts.strides(layout),
-        packed_offset,
-        layout.offset,
-        source_conjugate,
-        T::one(),
-    );
-    profile.strided_kernel += start.elapsed();
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1227,40 +1128,4 @@ where
         alpha,
         beta,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn scatter_column_into_layout_profiled<A, T>(
-    kernels: &mut A,
-    zero_strides: &mut Vec<isize>,
-    layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
-    packed: &[T],
-    packed_offset: usize,
-    dst_data: &mut [T],
-    alpha: T,
-    beta: T,
-    profile: &mut TreeTransformReplayProfile,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<T>,
-    T: Copy,
-{
-    let shape = layouts.shape(layout);
-    let start = std::time::Instant::now();
-    let packed_offset = offset_to_isize(packed_offset)?;
-    let result = kernels.axpby_strided(
-        dst_data,
-        packed,
-        shape,
-        layouts.strides(layout),
-        layouts.packed_strides(layout),
-        layout.offset,
-        packed_offset,
-        alpha,
-        beta,
-    );
-    profile.strided_kernel += start.elapsed();
-    zero_strides.clear();
-    result
 }

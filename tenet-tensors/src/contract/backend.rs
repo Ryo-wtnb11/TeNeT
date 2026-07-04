@@ -407,8 +407,18 @@ where
         let lhs_shape = [lhs_data.len()];
         let rhs_shape = [rhs_data.len()];
         let flat_strides = [1];
-        let lhs = D::dense_read(DenseView::new_trusted(lhs_data, &lhs_shape, &flat_strides, 0));
-        let rhs = D::dense_read(DenseView::new_trusted(rhs_data, &rhs_shape, &flat_strides, 0));
+        let lhs = D::dense_read(DenseView::new_trusted(
+            lhs_data,
+            &lhs_shape,
+            &flat_strides,
+            0,
+        ));
+        let rhs = D::dense_read(DenseView::new_trusted(
+            rhs_data,
+            &rhs_shape,
+            &flat_strides,
+            0,
+        ));
         let output = D::dense_write(DenseViewMut::new_trusted(
             dst_data,
             &dst_shape,
