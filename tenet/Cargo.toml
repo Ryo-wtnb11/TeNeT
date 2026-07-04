@@ -23,3 +23,8 @@ tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense", default-features = false }
 tenet-matrixalgebra = { path = "../tenet-matrixalgebra", default-features = false }
 tenet-tensors = { path = "../tenet-tensors", default-features = false }
+
+[dev-dependencies]
+# Dev-only cycle (tenet-network depends on tenet): lets the tutorial's
+# `tensor!` examples run as doctests of this crate.
+tenet-network = { path = "../tenet-network", default-features = false }
