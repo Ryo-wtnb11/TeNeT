@@ -1282,6 +1282,200 @@ fn twist_is_trivial_on_bosonic_legs_and_involutive_on_fermionic_ones() {
     assert_eq!(t.twist(&[]).unwrap().data(), t.data());
 }
 
+/// Two-value fz2 `[v] <- [v]` fixture: even block 2.0, odd block 3.0, with
+/// each leg optionally dual, matching the TensorKit oracle tensors below.
+fn fz2_two_block(rt: &Runtime, dual: bool) -> Tensor {
+    let v = Space::fz2([(0, 1), (1, 1)]);
+    let v = if dual { v.dual() } else { v };
+    Tensor::from_block_fn(rt, [&v], [&v], |key, _| match key {
+        BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
+        _ => 3.0,
+    })
+    .unwrap()
+}
+
+/// TensorKit 0.17.0 oracle for `flip` (Julia 1.11.6):
+///
+/// ```julia
+/// using TensorKit
+/// V = Vect[FermionParity](0 => 1, 1 => 1)
+/// function mk(space)
+///     t = zeros(Float64, space)
+///     block(t, FermionParity(0)) .= 2.0
+///     block(t, FermionParity(1)) .= 3.0
+///     return t
+/// end
+/// show_blocks(name, t) = println(name, ": even=", block(t, FermionParity(0))[1, 1],
+///     " odd=", block(t, FermionParity(1))[1, 1], "  space=", space(t))
+/// t = mk(V ← V)
+/// show_blocks("A  flip(t,1)", flip(t, 1))
+/// show_blocks("A  flip(t,2)", flip(t, 2))
+/// show_blocks("A  flip(t,(1,2))", flip(t, (1, 2)))
+/// show_blocks("A  flip^2(t,2)", flip(flip(t, 2), 2))
+/// show_blocks("A  flip^4(t,2)", flip(flip(flip(flip(t, 2), 2), 2), 2))
+/// tb = mk(V' ← V')
+/// show_blocks("B  flip(t,1)", flip(tb, 1))
+/// show_blocks("B  flip(t,2)", flip(tb, 2))
+/// W = Z2Space(0 => 1, 1 => 1)
+/// tc = zeros(Float64, W ← W); block(tc, Z2Irrep(0)) .= 2.0; block(tc, Z2Irrep(1)) .= 3.0
+/// println("C  flip(t,(1,2)): odd=", block(flip(tc, (1, 2)), Z2Irrep(1))[1, 1])
+/// U = SU2Space(1 // 2 => 1)
+/// td = zeros(Float64, U' ← U); block(td, SU2Irrep(1 // 2)) .= 5.0
+/// println("D  flip(t,1): ", block(flip(td, 1), SU2Irrep(1 // 2))[1, 1])
+/// println("D  flip(t,2): ", block(flip(td, 2), SU2Irrep(1 // 2))[1, 1])
+/// ```
+///
+/// Output:
+///
+/// ```text
+/// A  flip(t,1): even=2.0 odd=3.0   space=V' ← V
+/// A  flip(t,2): even=2.0 odd=-3.0  space=V ← V'
+/// A  flip(t,(1,2)): even=2.0 odd=-3.0  space=V' ← V'
+/// A  flip^2(t,2): even=2.0 odd=-3.0  space=V ← V
+/// A  flip^4(t,2): even=2.0 odd=3.0   space=V ← V
+/// B  flip(t,1): even=2.0 odd=-3.0  space=V ← V'
+/// B  flip(t,2): even=2.0 odd=3.0   space=V' ← V
+/// C  flip(t,(1,2)): odd=3.0  (space flags toggle, values unchanged)
+/// D  flip(t,1): -5.0
+/// D  flip(t,2): 5.0
+/// ```
+#[test]
+fn flip_matches_tensorkit_fermionic_oracle() {
+    let rt = Runtime::builder().build().unwrap();
+
+    // Case A: V ← V (both legs non-dual as written).
+    let t = fz2_two_block(&rt, false);
+    assert_eq!(t.data(), &[2.0, 3.0]);
+    // Codomain leg, isdual = false: factor 1, only the space flag toggles.
+    let f0 = t.flip(&[0]).unwrap();
+    assert_eq!(f0.data(), &[2.0, 3.0]);
+    assert!(f0.space(0).unwrap().is_dual());
+    assert!(!t.space(0).unwrap().is_dual());
+    // Domain leg, isdual(dom) = false: factor θ = −1 on the odd block.
+    let f1 = t.flip(&[1]).unwrap();
+    assert_eq!(f1.data(), &[2.0, -3.0]);
+    // space(t, 1) is the outward dual view: dual before, non-dual after.
+    assert!(t.space(1).unwrap().is_dual());
+    assert!(!f1.space(1).unwrap().is_dual());
+    // Both legs.
+    assert_eq!(t.flip(&[0, 1]).unwrap().data(), &[2.0, -3.0]);
+    // flip is not an involution: flip² returns to the original spaces but
+    // scales the odd block by θ·χ̄ = −1; only flip⁴ = id.
+    let f2 = f1.flip(&[1]).unwrap();
+    assert_eq!(f2.data(), &[2.0, -3.0]);
+    assert_eq!(f2.space(1).unwrap(), t.space(1).unwrap());
+    let f4 = f2.flip(&[1]).unwrap().flip(&[1]).unwrap();
+    assert_eq!(f4.data(), t.data());
+    // A repeated leg in one call means "flip twice", sequentially.
+    assert_eq!(t.flip(&[1, 1]).unwrap().data(), f2.data());
+
+    // Case B: V' ← V' (both legs dual as written).
+    let tb = fz2_two_block(&rt, true);
+    // Codomain leg, isdual = true: factor χ·θ = −1 on the odd block.
+    assert_eq!(tb.flip(&[0]).unwrap().data(), &[2.0, -3.0]);
+    // Domain leg, isdual(dom) = true: factor χ = +1.
+    assert_eq!(tb.flip(&[1]).unwrap().data(), &[2.0, 3.0]);
+
+    // Out of range / empty.
+    assert!(t.flip(&[2]).is_err());
+    assert_eq!(t.flip(&[]).unwrap().data(), t.data());
+}
+
+/// Cases C and D of the oracle above: bosonic Z2 flip is purely structural,
+/// while SU(2) j = 1/2 legs pick up the Frobenius-Schur phase χ = −1 on a
+/// dual codomain leg (θ = +1: no sign from the domain side).
+#[test]
+fn flip_bosonic_is_structural_and_su2_carries_frobenius_schur_phase() {
+    let rt = Runtime::builder().build().unwrap();
+
+    let w = Space::z2([(0, 1), (1, 1)]);
+    let tc = Tensor::rand_with_seed(&rt, [&w], [&w], 11).unwrap();
+    let flipped = tc.flip(&[0, 1]).unwrap();
+    assert_eq!(flipped.data(), tc.data());
+    assert!(flipped.space(0).unwrap().is_dual());
+    assert!(!flipped.space(1).unwrap().is_dual());
+
+    let u = Space::su2([(1, 1)]); // j = 1/2
+    let ud = u.dual();
+    let td = Tensor::from_block_fn(&rt, [&ud], [&u], |_, _| 5.0).unwrap();
+    assert_eq!(td.flip(&[0]).unwrap().data(), &[-5.0]);
+    assert_eq!(td.flip(&[1]).unwrap().data(), &[5.0]);
+}
+
+/// `flip` moves both dtypes and composes with `twist` the way the legacy
+/// `fliptwist_s` bond-orientation fix does: `twist(flip(s, [0, 1]), [0])`
+/// on a fermionic diagonal `s` negates nothing twice (the two −1 factors
+/// cancel on the odd block).
+#[test]
+fn flip_c64_and_fliptwist_composition() {
+    let rt = Runtime::builder().build().unwrap();
+    let t = fz2_two_block(&rt, false).to_c64();
+    let flipped = t.flip(&[1]).unwrap();
+    assert_eq!(flipped.data_c64()[1].re, -3.0);
+
+    // fliptwist on s: V ← V. flip([0,1]) scales odd by θ = −1 (domain leg);
+    // twist([0]) scales odd by θ = −1 again: values return to the original
+    // while both legs are re-oriented.
+    let s = fz2_two_block(&rt, false);
+    let fixed = s.flip(&[0, 1]).unwrap().twist(&[0]).unwrap();
+    assert_eq!(fixed.data(), s.data());
+    assert!(fixed.space(0).unwrap().is_dual());
+}
+
+/// `sqrt` is the TensorKit `sqrt(::DiagonalTensorMap)` idiom: elementwise
+/// on the diagonal of a `[v] <- [v]` bond tensor, `√S · √S == S`, and a
+/// typed error on anything that is not a diagonal bond tensor. TensorKit
+/// 0.17.0 oracle (Julia 1.11.6):
+///
+/// ```julia
+/// using TensorKit
+/// V = Vect[FermionParity](0 => 1, 1 => 1)
+/// tt = randn(Float64, V ⊗ V ← V)
+/// U2, S, Vh = svd_compact(tt)
+/// println("S isa ", typeof(S))          # DiagonalTensorMap{Float64, …}
+/// sq = sqrt(S)
+/// println(sq.data .^ 2 ≈ S.data, " ", sq * sq ≈ S)   # true true
+/// ```
+#[test]
+fn sqrt_splits_singular_values_and_rejects_non_diagonal_tensors() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), Space::fz2([(0, 2), (1, 2)])] {
+        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 13).unwrap();
+        let s = t.svd_trunc(&Truncation::Full).unwrap().s;
+        let sqrt_s = s.sqrt().unwrap();
+        // √S · √S == S elementwise (both are diagonal on the same bond).
+        assert_close(sqrt_s.compose(&sqrt_s).unwrap().data(), s.data(), 1e-13);
+        // c64 branch agrees on nonnegative input.
+        let sqrt_c = s.to_c64().sqrt().unwrap();
+        for (a, b) in sqrt_c.data_c64().iter().zip(sqrt_s.data()) {
+            assert!((a.re - b).abs() < 1e-15 && a.im == 0.0);
+        }
+        // Not a diagonal bond form: the original rank-(2,1) tensor.
+        assert!(t.svd_trunc(&Truncation::Full).unwrap().u.sqrt().is_err());
+        assert!(t.sqrt().is_err());
+    }
+
+    // Equal legs but dense block: off-diagonal entries are rejected.
+    let v = Space::u1([(0, 2)]);
+    let dense = Tensor::rand_with_seed(&rt, [&v], [&v], 17).unwrap();
+    assert!(dense.sqrt().is_err());
+
+    // Negative diagonal entries: error for f64, principal root for c64
+    // (Julia: sqrt(-1.0) throws DomainError, sqrt(-1.0 + 0.0im) == im).
+    let neg = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| {
+        if indices[0] == indices[1] {
+            -4.0
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    assert!(neg.sqrt().is_err());
+    let root = neg.to_c64().sqrt().unwrap();
+    let diag = root.data_c64()[0];
+    assert!(diag.re.abs() < 1e-15 && (diag.im - 2.0).abs() < 1e-15);
+}
+
 /// TeNeT issue #8: Space constructors enforce the TensorKit GradedSpace
 /// sector-map invariant — zero-degeneracy sectors are dropped and duplicate
 /// sector labels are rejected at construction, so introspection, dim(), and

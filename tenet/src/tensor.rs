@@ -243,6 +243,48 @@ fn fill_block_elements<D: UserScalar>(
     Ok(())
 }
 
+/// Scales every fusion-tree block of `data` in place by the real factor
+/// `factor_of(key)` (skipping factor-1 blocks). Backs [`Tensor::twist`] and
+/// [`Tensor::flip`], whose effect on the storage is exactly a per-block
+/// phase.
+fn scale_blocks_impl<D: UserScalar>(
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    factor_of: &dyn Fn(&BlockKey) -> f64,
+) -> Result<(), Error> {
+    let structure = space.structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let factor = factor_of(block.key());
+        if factor == 1.0 {
+            continue;
+        }
+        let factor = D::from_real(factor);
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            data[position] = data[position] * factor;
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Quantum-dimension-weighted Frobenius inner product over the stored
 /// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
 /// matching TensorKit's `dot` (which conjugates its first argument). Real
@@ -748,19 +790,183 @@ impl Tensor {
         if legs.is_empty() {
             return Ok(self.clone());
         }
+        let nout = self.codomain_rank();
+        let rule = self.rule;
+        self.scaled_blocks(&self.space, &|key| match key {
+            BlockKey::FusionTree(key) => with_rule!(rule, rule, {
+                legs.iter()
+                    .map(|&leg| {
+                        rule.twist_scalar(if leg < nout {
+                            key.codomain_uncoupled()[leg]
+                        } else {
+                            key.domain_uncoupled()[leg - nout]
+                        })
+                    })
+                    .product()
+            }),
+            _ => 1.0,
+        })
+    }
+
+    /// TensorKit `flip(t, I)` (`tensors/indexmanipulations.jl:8-29`): return
+    /// a tensor isomorphic to `self` where the duality flag of each leg in
+    /// `legs` (flat indices, codomain first; a leg listed twice is flipped
+    /// twice, sequentially) is toggled, `space(t', i) = flip(space(t, i))`.
+    /// The stored sectors and the block layout are unchanged; each
+    /// fusion-tree block picks up the Z-isomorphism phase of
+    /// `fusiontrees/braiding_manipulations.jl:384-414` per flipped leg with
+    /// uncoupled sector `a` and pre-flip duality `d` (χ = Frobenius-Schur
+    /// phase, θ = ribbon twist; both real for every rule in scope):
+    /// codomain leg → `d ? χ·θ : 1`; domain leg → `d ? χ : θ`.
+    ///
+    /// Like TensorKit's, this `flip` is *not* an involution: flipping the
+    /// same leg twice returns to the original spaces but can scale odd
+    /// blocks (e.g. by θ = −1 on fermionic legs); only `flip⁴ = id` in
+    /// general.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::fz2([(0, 1), (1, 1)]);
+    /// let t = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
+    ///     BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
+    ///     _ => 3.0,
+    /// })?;
+    /// // TensorKit 0.17: flip(t, 2) on V ← V negates the odd block (θ = −1)
+    /// // and re-orients the domain leg (see the flip oracle test).
+    /// let flipped = t.flip(&[1])?;
+    /// assert_eq!(flipped.data(), &[2.0, -3.0]);
+    /// assert!(!flipped.space(1)?.is_dual()); // was dual: space(t, 1) = dual(v)
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn flip(&self, legs: &[usize]) -> Result<Self, Error> {
+        let rank = self.rank();
+        if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+            return Err(Error::InvalidArgument(format!(
+                "flip leg {leg} out of range for rank {rank}"
+            )));
+        }
+        if legs.is_empty() {
+            return Ok(self.clone());
+        }
+        let hom = self.space.homspace();
+        let nout = hom.codomain().len();
+        let leg_of = |leg: usize| {
+            if leg < nout {
+                &hom.codomain().legs()[leg]
+            } else {
+                &hom.domain().legs()[leg - nout]
+            }
+        };
+        // Sequential semantics for repeated legs (TensorKit flips one index
+        // at a time): record the duality each occurrence sees.
+        let mut flip_count = vec![0usize; rank];
+        let occurrences: Vec<(usize, bool)> = legs
+            .iter()
+            .map(|&leg| {
+                let dual = leg_of(leg).is_dual() ^ (flip_count[leg] % 2 == 1);
+                flip_count[leg] += 1;
+                (leg, dual)
+            })
+            .collect();
+
+        let toggled_leg = |index: usize, leg: &tenet_core::SectorLeg| {
+            if flip_count[index] % 2 == 1 {
+                tenet_core::SectorLeg::new(leg.iter(), !leg.is_dual())
+            } else {
+                leg.clone()
+            }
+        };
+        let new_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                hom.codomain()
+                    .legs()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, leg)| toggled_leg(index, leg)),
+            ),
+            FusionProductSpace::new(
+                hom.domain()
+                    .legs()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, leg)| toggled_leg(nout + index, leg)),
+            ),
+        );
+        let new_space = with_rule!(self.rule, rule, build_space(rule, new_hom))?;
+        // Flipping preserves the stored sectors, so the flipped space must
+        // reproduce the block layout exactly; anything else is a bug.
+        let old_structure = self.space.structure();
+        let new_structure = new_space.structure();
+        if new_structure.block_count() != old_structure.block_count() {
+            return Err(internal_layout_error("flip changed the block count"));
+        }
+        for index in 0..old_structure.block_count() {
+            let old_block = old_structure.block(index)?;
+            let new_block = new_structure.block(index)?;
+            if old_block.offset() != new_block.offset() || old_block.shape() != new_block.shape() {
+                return Err(internal_layout_error("flip changed the block layout"));
+            }
+        }
+
+        let rule = self.rule;
+        let flipped = self.scaled_blocks(&new_space, &|key| match key {
+            BlockKey::FusionTree(key) => with_rule!(rule, rule, {
+                occurrences
+                    .iter()
+                    .map(|&(leg, dual)| {
+                        let sector = if leg < nout {
+                            key.codomain_uncoupled()[leg]
+                        } else {
+                            key.domain_uncoupled()[leg - nout]
+                        };
+                        let chi = rule.frobenius_schur_phase_scalar(sector);
+                        let theta = rule.twist_scalar(sector);
+                        // TensorKit 0.17 flip coefficients (forward, real χ/θ).
+                        if leg < nout {
+                            if dual {
+                                chi * theta
+                            } else {
+                                1.0
+                            }
+                        } else if dual {
+                            chi
+                        } else {
+                            theta
+                        }
+                    })
+                    .product()
+            }),
+            _ => 1.0,
+        })?;
+        Ok(Self {
+            space: Arc::new(new_space),
+            ..flipped
+        })
+    }
+
+    /// Clones the storage scaled block-wise by `factor_of(key)` (evaluated
+    /// on the blocks of `structure_space`, whose layout must match the
+    /// stored one), shared by [`Self::twist`] and [`Self::flip`].
+    fn scaled_blocks(
+        &self,
+        structure_space: &DynamicFusionMapSpace,
+        factor_of: &dyn Fn(&BlockKey) -> f64,
+    ) -> Result<Self, Error> {
         let data = match &self.data {
             Data::F64(data) => {
                 let mut out = data.clone();
-                self.twist_impl(&mut out, legs)?;
+                scale_blocks_impl(structure_space, &mut out, factor_of)?;
                 Data::F64(out)
             }
             Data::C64(data) => {
                 let mut out = data.clone();
-                self.twist_impl(&mut out, legs)?;
+                scale_blocks_impl(structure_space, &mut out, factor_of)?;
                 Data::C64(out)
             }
             #[cfg(feature = "cuda")]
-            Data::CudaF64(_) => return Err(device_unsupported("twist")),
+            Data::CudaF64(_) => return Err(device_unsupported("twist/flip")),
         };
         Ok(Self {
             rt: self.rt.clone(),
@@ -768,54 +974,6 @@ impl Tensor {
             space: Arc::clone(&self.space),
             data,
         })
-    }
-
-    fn twist_impl<D: UserScalar>(&self, data: &mut [D], legs: &[usize]) -> Result<(), Error> {
-        let nout = self.codomain_rank();
-        let structure = self.space.structure();
-        for index in 0..structure.block_count() {
-            let block = structure.block(index)?;
-            let theta: f64 = match block.key() {
-                BlockKey::FusionTree(key) => with_rule!(self.rule, rule, {
-                    legs.iter()
-                        .map(|&leg| {
-                            rule.twist_scalar(if leg < nout {
-                                key.codomain_uncoupled()[leg]
-                            } else {
-                                key.domain_uncoupled()[leg - nout]
-                            })
-                        })
-                        .product()
-                }),
-                _ => 1.0,
-            };
-            if theta == 1.0 {
-                continue;
-            }
-            let factor = D::from_real(theta);
-            let shape = block.shape();
-            let strides = block.strides();
-            let offset = block.offset();
-            let count: usize = shape.iter().product();
-            let mut indices = vec![0usize; shape.len()];
-            for _ in 0..count {
-                let position = offset
-                    + indices
-                        .iter()
-                        .zip(strides)
-                        .map(|(&i, &s)| i * s)
-                        .sum::<usize>();
-                data[position] = data[position] * factor;
-                for axis in 0..shape.len() {
-                    indices[axis] += 1;
-                    if indices[axis] < shape[axis] {
-                        break;
-                    }
-                    indices[axis] = 0;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Wraps a same-runtime, same-rule result of an expert-layer call.
@@ -1994,6 +2152,114 @@ impl Tensor {
         })?;
         Ok(self.from_dyn(out))
     }
+
+    /// Elementwise square root of a diagonal bond tensor, i.e. the
+    /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)` idiom
+    /// (`tensors/diagonal.jl:384-390`: `sqrt.(d.data)` on the diagonal)
+    /// used to split singular values as `√S · √S = S` in Vidal-gauge /
+    /// gate-application updates.
+    ///
+    /// The receiver must be a diagonal bond tensor as produced by the
+    /// factorization paths ([`Self::svd_trunc`]'s `s`, eigenvalue factors):
+    /// one codomain leg equal to the one domain leg and every stored block
+    /// diagonal (off-diagonal entries exactly zero). Anything else — the
+    /// analog of calling this on a non-`DiagonalTensorMap` — is an
+    /// [`Error::InvalidArgument`]. For f64 tensors every diagonal entry must
+    /// be `>= 0` (Julia's real `sqrt` throws a `DomainError` there too;
+    /// convert with [`Self::to_c64`] first for the complex branch); c64
+    /// tensors take the principal complex square root.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::u1([(0, 2), (1, 2)]);
+    /// let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 7)?;
+    /// let s = t.svd_trunc(&Truncation::Full)?.s;
+    /// let sqrt_s = s.sqrt()?;
+    /// let composed = sqrt_s.compose(&sqrt_s)?;
+    /// let max_err = composed
+    ///     .data()
+    ///     .iter()
+    ///     .zip(s.data())
+    ///     .map(|(a, b)| (a - b).abs())
+    ///     .fold(0.0f64, f64::max);
+    /// assert!(max_err < 1e-12);
+    /// assert!(t.sqrt().is_err()); // not a diagonal bond tensor
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn sqrt(&self) -> Result<Self, Error> {
+        let hom = self.space.homspace();
+        if hom.codomain().len() != 1
+            || hom.domain().len() != 1
+            || hom.codomain().legs() != hom.domain().legs()
+        {
+            return Err(Error::InvalidArgument(
+                "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
+                 codomain and domain legs), like the `s` factor of svd_trunc"
+                    .to_string(),
+            ));
+        }
+        let data = match &self.data {
+            Data::F64(data) => Data::F64(sqrt_diagonal_impl(&self.space, data, &|value| {
+                if value < 0.0 {
+                    Err(Error::InvalidArgument(format!(
+                        "sqrt of a negative diagonal entry {value}; convert to c64 \
+                         with to_c64() for the complex square root"
+                    )))
+                } else {
+                    Ok(value.sqrt())
+                }
+            })?),
+            Data::C64(data) => Data::C64(sqrt_diagonal_impl(&self.space, data, &|value| {
+                Ok(value.sqrt())
+            })?),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => return Err(device_unsupported("sqrt")),
+        };
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data,
+        })
+    }
+}
+
+/// Takes the elementwise square root of the diagonal of every `[n, n]`
+/// block, verifying that all off-diagonal entries are exactly zero (the
+/// storage invariant of the diagonal bond tensors built by the
+/// factorization paths).
+fn sqrt_diagonal_impl<D: UserScalar + PartialEq>(
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+    sqrt_of: &dyn Fn(D) -> Result<D, Error>,
+) -> Result<Vec<D>, Error> {
+    let zero = D::from_real(0.0);
+    let mut out = vec![zero; data.len()];
+    let structure = space.structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        debug_assert_eq!(shape.len(), 2);
+        for row in 0..shape[0] {
+            for col in 0..shape[1] {
+                let position = offset + row * strides[0] + col * strides[1];
+                if row == col {
+                    out[position] = sqrt_of(data[position])?;
+                } else if data[position] != zero {
+                    return Err(Error::InvalidArgument(format!(
+                        "sqrt requires a diagonal bond tensor, but block {:?} has a \
+                         nonzero off-diagonal entry at ({row}, {col})",
+                        block.key()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
