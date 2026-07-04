@@ -457,6 +457,64 @@ mod tests {
         assert_eq!(direct, expected);
     }
 
+    /// GPU vertical: the same canonical direct replay executed on CUDA
+    /// storage must reproduce the host result bit-for-bit (same GEMM
+    /// ordering, overwrite semantics). Requires a CUDA device; run with
+    /// `cargo test --features cuda -- --ignored`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore]
+    fn storage_direct_replay_on_cuda_matches_host() {
+        use tenet_dense::CudaDenseContext;
+        use tenet_operations::cuda::{CudaStorage, CudaStorageGemm};
+
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([6], [6]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![3, 3], vec![3, 3]],
+        )
+        .unwrap();
+        let len = space.required_len().unwrap();
+        let lhs_data: Vec<f64> = (0..len).map(|i| 0.5 * i as f64 - 1.0).collect();
+        let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
+        let plan = compile_canonical_fusion_block_contract_plan(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(&space),
+            &DynamicFusionMapSpace::from_typed(&space),
+            &DynamicFusionMapSpace::from_typed(&space),
+            TensorContractAxisSpec::canonical(&[1], &[0]),
+        )
+        .unwrap();
+
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TensorContractWorkspace::default();
+        let mut expected = vec![0.0; len];
+        let mut gemm = HostStorageGemm::new(&mut backend, &mut workspace);
+        plan.execute_direct_on_storage(&mut gemm, &mut expected, &lhs_data, &rhs_data)
+            .unwrap();
+
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+        let lhs_dev = CudaStorage::upload(&ctx, &lhs_data).unwrap();
+        let rhs_dev = CudaStorage::upload(&ctx, &rhs_data).unwrap();
+        let mut dst_dev = CudaStorage::upload(&ctx, &vec![0.0; len]).unwrap();
+        plan.execute_direct_on_storage(
+            &mut CudaStorageGemm::new(&mut ctx),
+            &mut dst_dev,
+            &lhs_dev,
+            &rhs_dev,
+        )
+        .unwrap();
+        let result = dst_dev.download(&ctx).unwrap();
+
+        assert_eq!(result, expected);
+    }
+
     #[test]
     fn canonical_fusion_block_workspace_is_explicit_host_workspace() {
         let workspace = HostCanonicalFusionBlockContractWorkspace::<f64>::default();

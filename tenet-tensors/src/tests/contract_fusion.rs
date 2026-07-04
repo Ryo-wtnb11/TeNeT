@@ -1833,8 +1833,8 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     .unwrap();
     assert_eq!(plan.canonical_dst_nout(), 4);
     assert_eq!(plan.canonical_dst_nin(), 0);
-    assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[]);
-    assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[]);
+    assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[] as &[usize]);
+    assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[] as &[usize]);
     assert_eq!(plan.canonical_axes().output_axes(), &[0, 1, 2, 3]);
     assert_eq!(
         plan.output_transform(),

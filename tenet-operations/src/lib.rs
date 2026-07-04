@@ -8,6 +8,8 @@
 //! `SectorId`s, and scalar coefficients.
 
 pub mod axis;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 mod error;
 pub mod fusion_replay;
 mod host_scalar_kernels;

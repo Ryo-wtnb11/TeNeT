@@ -630,6 +630,12 @@ pub use tenferro_adapter::{DefaultDenseExecutor, DenseExecutorWithKernel};
 #[cfg(feature = "tenferro")]
 mod strided_adapter;
 
+#[cfg(feature = "cuda")]
+pub use cuda_adapter::{cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage};
+
+#[cfg(feature = "cuda")]
+mod cuda_adapter;
+
 #[cfg(feature = "tenferro")]
 mod tenferro_adapter {
     use super::*;

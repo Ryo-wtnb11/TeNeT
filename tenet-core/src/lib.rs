@@ -18,6 +18,8 @@ pub struct Trivial;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Placement {
     Host,
+    /// Storage resident on a CUDA device, identified by its ordinal.
+    Cuda(usize),
 }
 
 pub trait TensorStorage<T> {
