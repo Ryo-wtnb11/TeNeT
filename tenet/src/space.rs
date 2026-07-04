@@ -17,6 +17,7 @@ pub(crate) enum RuleKind {
     FZ2,
     SU2,
     U1FZ2,
+    FZ2U1SU2,
 }
 
 /// Dispatches on a [`RuleKind`], binding `$rule` to a reference to the
@@ -47,6 +48,24 @@ macro_rules! with_rule {
                 >::new(
                     tenet_core::U1FusionRule,
                     tenet_core::FermionParityFusionRule,
+                );
+                $body
+            }
+            $crate::space::RuleKind::FZ2U1SU2 => {
+                // Left-associated (fZ2 ⊠ U1) ⊠ SU2, matching TensorKit's
+                // left-associated triple product.
+                let $rule = &tenet_core::ProductFusionRule::<
+                    tenet_core::ProductFusionRule<
+                        tenet_core::FermionParityFusionRule,
+                        tenet_core::U1FusionRule,
+                    >,
+                    tenet_core::SU2FusionRule,
+                >::new(
+                    tenet_core::ProductFusionRule::new(
+                        tenet_core::FermionParityFusionRule,
+                        tenet_core::U1FusionRule,
+                    ),
+                    tenet_core::SU2FusionRule,
                 );
                 $body
             }
@@ -185,6 +204,41 @@ impl Space {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(Self::new(RuleKind::U1FZ2, sectors))
+    }
+
+    /// fZ2 x U(1) x SU(2) triple-product space from `((parity, charge,
+    /// twice_spin), degeneracy)` pairs (`parity`: `0` even / `1` odd,
+    /// `twice_spin = 2j`), left-associated as `(fZ2 ⊠ U1) ⊠ SU2` with the
+    /// TensorKit product-sector encoding applied pairwise.
+    ///
+    /// TensorKit equivalent: `Vect[FermionParity ⊠ Irrep[U₁] ⊠ Irrep[SU₂]]`.
+    pub fn fz2_u1_su2<I>(sectors: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = ((u8, i32, usize), usize)>,
+    {
+        let sectors = sectors
+            .into_iter()
+            .map(|((parity, charge, twice_spin), deg)| {
+                TensorKitProductCodec::try_encode(
+                    SectorId::new(usize::from(parity & 1)),
+                    U1Irrep::new(charge).sector_id(),
+                )
+                .and_then(|inner| {
+                    TensorKitProductCodec::try_encode(
+                        inner,
+                        SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+                    )
+                })
+                .map(|sector| (sector, deg))
+                .ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "product sector ({parity}, {charge}, {twice_spin}) does not fit the \
+                         sector-id encoding"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self::new(RuleKind::FZ2U1SU2, sectors))
     }
 
     /// The dual space: every sector is replaced by its dual and the dual

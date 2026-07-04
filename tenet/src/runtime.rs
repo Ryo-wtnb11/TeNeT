@@ -14,6 +14,8 @@ use crate::error::Error;
 pub(crate) type Ctx<Key> = TensorContractFusionExecutionContext<f64, Key>;
 pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
 pub(crate) type ProductKey = TreeTransformProductRuleCacheKey<BuiltinKey, BuiltinKey>;
+/// Cache key of the left-associated triple product `(fZ2 ⊠ U1) ⊠ SU2`.
+pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, BuiltinKey>;
 
 /// Per-rule expert-layer execution contexts (contraction resolution caches,
 /// tree-transform replay caches, dense backends and workspaces).
@@ -27,6 +29,7 @@ pub(crate) struct RuntimeState {
     pub(crate) fz2: Ctx<BuiltinKey>,
     pub(crate) su2: Ctx<BuiltinKey>,
     pub(crate) u1_fz2: Ctx<ProductKey>,
+    pub(crate) fz2_u1_su2: Ctx<TripleKey>,
     /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
     /// coupled-sector matrices), shared by all decomposition methods.
     pub(crate) dense: tenet_dense::DefaultDenseExecutor,
@@ -67,6 +70,23 @@ macro_rules! with_rule_ctx {
                     tenet_core::FermionParityFusionRule,
                 );
                 let $ctx = &mut $state.u1_fz2;
+                $body
+            }
+            $crate::space::RuleKind::FZ2U1SU2 => {
+                let $rule = &tenet_core::ProductFusionRule::<
+                    tenet_core::ProductFusionRule<
+                        tenet_core::FermionParityFusionRule,
+                        tenet_core::U1FusionRule,
+                    >,
+                    tenet_core::SU2FusionRule,
+                >::new(
+                    tenet_core::ProductFusionRule::new(
+                        tenet_core::FermionParityFusionRule,
+                        tenet_core::U1FusionRule,
+                    ),
+                    tenet_core::SU2FusionRule,
+                );
+                let $ctx = &mut $state.fz2_u1_su2;
                 $body
             }
         }

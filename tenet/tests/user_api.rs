@@ -520,3 +520,239 @@ fn leg_pairing_rules_on_asymmetric_charges() {
     let c = Tensor::rand(&rt, [&v], [&v]).unwrap();
     assert!(a.contract(&c, &[1], &[1]).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// fZ2 ⊠ U(1) ⊠ SU(2) triple product (left-associated, TensorKit `Vect[
+// FermionParity ⊠ Irrep[U₁] ⊠ Irrep[SU₂]]`). Hardcoded reference values from
+// TensorKit (Julia, `benchmarks` env), see comments at each assertion.
+// ---------------------------------------------------------------------------
+
+use tenet::core::{
+    FermionParityFusionRule, FusionRule, MultiplicityFreeRigidSymbols, ProductFusionRule,
+    ProductSectorCodec, SU2FusionRule, SU2Irrep, TensorKitProductCodec,
+};
+
+type TripleRule =
+    ProductFusionRule<ProductFusionRule<FermionParityFusionRule, U1FusionRule>, SU2FusionRule>;
+
+fn triple_rule() -> TripleRule {
+    ProductFusionRule::new(
+        ProductFusionRule::new(FermionParityFusionRule, U1FusionRule),
+        SU2FusionRule,
+    )
+}
+
+/// Packed sector id of `(parity ⊠ charge ⊠ twice_spin)`, left-associated.
+fn triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
+    let inner = TensorKitProductCodec::encode(
+        SectorId::new(usize::from(parity & 1)),
+        U1Irrep::new(charge).sector_id(),
+    );
+    TensorKitProductCodec::encode(inner, SU2Irrep::from_twice_spin(twice_spin).sector_id())
+}
+
+/// The Julia reference space:
+/// `S = Vect[FermionParity ⊠ Irrep[U₁] ⊠ Irrep[SU₂]]((0,0,0)=>1, (1,1,1//2)=>1, (0,2,0)=>1)`
+fn triple_space() -> Space {
+    Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 1), ((0, 2, 0), 1)]).unwrap()
+}
+
+#[test]
+fn fz2_u1_su2_codec_roundtrip_and_dual() {
+    // Encode/decode round-trip of the pairwise TensorKit codec for triples.
+    for &(parity, charge, twice_spin) in &[
+        (0u8, 0i32, 0usize),
+        (1, 1, 1),
+        (0, 2, 0),
+        (1, -1, 1),
+        (0, -2, 4),
+        (1, 5, 3),
+    ] {
+        let sector = triple_sector(parity, charge, twice_spin);
+        let (inner, su2) = TensorKitProductCodec::decode(sector).unwrap();
+        let (fz2, u1) = TensorKitProductCodec::decode(inner).unwrap();
+        assert_eq!(fz2, SectorId::new(usize::from(parity)));
+        assert_eq!(u1, U1Irrep::new(charge).sector_id());
+        assert_eq!(su2, SU2Irrep::from_twice_spin(twice_spin).sector_id());
+    }
+
+    // Dual: parity self-dual, charge negates, spin self-dual. Julia:
+    //   sectors(S') = {(0,0,0), (1,-1,1/2), (0,-2,0)}
+    let rule = triple_rule();
+    assert_eq!(rule.dual(triple_sector(1, 1, 1)), triple_sector(1, -1, 1));
+    assert_eq!(rule.dual(triple_sector(0, 2, 0)), triple_sector(0, -2, 0));
+    assert_eq!(rule.dual(triple_sector(0, 0, 0)), triple_sector(0, 0, 0));
+    assert_eq!(rule.vacuum(), triple_sector(0, 0, 0));
+}
+
+#[test]
+fn fz2_u1_su2_space_and_identity_invariants_vs_tensorkit() {
+    let rt = Runtime::builder().build().unwrap();
+    let s = triple_space();
+
+    // Julia: dim(S) = 4, dim(S') = 4, dim(S ⊗ S) = 16.
+    assert_eq!(s.dim(), 4);
+    assert_eq!(s.dual().dim(), 4);
+    assert_eq!(s.dual().dual(), s);
+
+    // Identity on S ⊗ S, built block-by-block: a fusion-tree pair block of
+    // `id` is the degeneracy identity when the codomain and domain trees
+    // coincide (two uncoupled legs, multiplicity-free: the uncoupled pair
+    // plus the shared coupled sector determine the tree).
+    let blocks = std::cell::Cell::new(0usize);
+    let id = Tensor::from_block_fn(&rt, [&s, &s], [&s, &s], |key, indices| {
+        let BlockKey::FusionTree(key) = key else {
+            return 0.0;
+        };
+        blocks.set(blocks.get() + 1);
+        let diag = key.codomain_uncoupled() == key.domain_uncoupled()
+            && indices[0] == indices[2]
+            && indices[1] == indices[3];
+        if diag {
+            1.0
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+
+    // Julia: length(collect(fusiontrees(id(S⊗S)))) = 20 tree pairs; every
+    // degeneracy is 1, so the fill runs exactly once per pair block.
+    assert_eq!(blocks.get(), 20);
+
+    // Julia: norm(id(S⊗S)) = 4.0 (= sqrt(Σ_c qdim_c · blockdim_c), i.e. the
+    // quantum-dimension-weighted Frobenius norm).
+    let norm = id.norm().unwrap();
+    assert!((norm - 4.0).abs() <= 1e-12, "norm(id) = {norm}");
+
+    // inner(id, id) = ‖id‖² = tr(id† id) = 16.0; Julia: tr(id(S⊗S)) = 16.0.
+    let inner = id.inner(&id).unwrap();
+    assert!((inner - 16.0).abs() <= 1e-12, "inner(id, id) = {inner}");
+
+    // Julia blocksectors of id(S⊗S): 6 coupled sectors with block dims
+    //   (0,0,0)=>1 (1,1,1/2)=>2 (0,2,0)=>3 (0,2,1)=>1 (1,3,1/2)=>2 (0,4,0)=>1
+    let spectra = id.svd_vals().unwrap();
+    assert_eq!(spectra.len(), 6);
+    let mut dims: Vec<(SectorId, usize)> = spectra
+        .iter()
+        .map(|entry| {
+            for value in &entry.values {
+                assert!((value - 1.0).abs() <= 1e-12);
+            }
+            (entry.sector, entry.values.len())
+        })
+        .collect();
+    dims.sort();
+    let mut expected = vec![
+        (triple_sector(0, 0, 0), 1),
+        (triple_sector(1, 1, 1), 2),
+        (triple_sector(0, 2, 0), 3),
+        (triple_sector(0, 2, 2), 1),
+        (triple_sector(1, 3, 1), 2),
+        (triple_sector(0, 4, 0), 1),
+    ];
+    expected.sort();
+    assert_eq!(dims, expected);
+}
+
+#[test]
+fn fz2_u1_su2_braid_fermion_sign_vs_tensorkit() {
+    let rt = Runtime::builder().build().unwrap();
+    let rule = triple_rule();
+
+    // Julia:
+    //   odd = Vect[I3]((1,1,1//2) => 1); W = Vect[I3]((0,2,0) => 1, (0,2,1) => 1)
+    //   t = ones(Float64, odd ⊗ odd ← W)
+    //   tb = braid(t, ((2,1),(3,)), (2,1,3))
+    //   block (0,2,0): 1.0 -> 1.0   (fermion −1 × SU2 spin-0 R −1)
+    //   block (0,2,1): 1.0 -> −1.0  (fermion −1 × SU2 spin-1 R +1)
+    //   braid(tb, ((2,1),(3,)), (1,2,3)) == t (roundtrip)
+    let odd = Space::fz2_u1_su2([((1, 1, 1), 1)]).unwrap();
+    let w = Space::fz2_u1_su2([((0, 2, 0), 1), ((0, 2, 2), 1)]).unwrap();
+    let t = Tensor::from_block_fn(&rt, [&odd, &odd], [&w], |_, _| 1.0).unwrap();
+    let tb = t.braid(&[1, 0], &[2], &[2, 1, 3]).unwrap();
+    let tbb = tb.braid(&[1, 0], &[2], &[1, 2, 3]).unwrap();
+    assert_close(tbb.data(), t.data(), 1e-12);
+
+    // Project the braided tensor onto each coupled sector: inner() weights
+    // by the quantum dimension, so the reference tensors see qdim(0,2,0)=1
+    // and qdim(0,2,1)=3.
+    for (sector, qdim, sign) in [
+        (triple_sector(0, 2, 0), 1.0, 1.0),
+        (triple_sector(0, 2, 2), 3.0, -1.0),
+    ] {
+        assert_eq!(rule.dim_scalar(sector), qdim);
+        let proj = Tensor::from_block_fn(&rt, [&odd, &odd], [&w], |key, _| match key {
+            BlockKey::FusionTree(key) if key.coupled() == Some(sector) => 1.0,
+            _ => 0.0,
+        })
+        .unwrap();
+        let before = proj.inner(&t).unwrap();
+        let after = proj.inner(&tb).unwrap();
+        assert!((before - qdim).abs() <= 1e-12, "before = {before}");
+        assert!(
+            (after - sign * qdim).abs() <= 1e-12,
+            "sector {sector:?}: after = {after}, expected {}",
+            sign * qdim
+        );
+    }
+}
+
+#[test]
+fn fz2_u1_su2_contraction_svd_and_rank5_smoke() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = triple_space();
+
+    // Rank-4 contraction + permute roundtrip.
+    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 91).unwrap();
+    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 92).unwrap();
+    let c = a.compose(&b).unwrap();
+    assert!(c.norm().unwrap() > 0.0);
+    let back = c
+        .permute(&[0, 2], &[1, 3])
+        .unwrap()
+        .permute(&[0, 2], &[1, 3])
+        .unwrap();
+    assert_close(back.data(), c.data(), 1e-12);
+
+    // Braid with levels and undo with swapped levels (rand tensor).
+    let braided = a.braid(&[1, 0], &[2, 3], &[2, 1, 3, 4]).unwrap();
+    let unbraided = braided.braid(&[1, 0], &[2, 3], &[1, 2, 3, 4]).unwrap();
+    assert_close(unbraided.data(), a.data(), 1e-12);
+
+    // svd_compact reconstruction + svd_trunc self-consistency: the error
+    // reported for a truncation equals the weighted norm distance between
+    // the full tensor and the truncated reconstruction.
+    let (u, s, vh) = a.svd_compact().unwrap();
+    let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
+    let diff = recon.add(&a, 1.0, -1.0).unwrap();
+    assert!(diff.norm().unwrap() <= 1e-10 * (1.0 + a.norm().unwrap()));
+
+    let trunc = a.svd_trunc(&Truncation::rank(6)).unwrap();
+    let recon_t = trunc
+        .u
+        .compose(&trunc.s)
+        .unwrap()
+        .compose(&trunc.vh)
+        .unwrap();
+    let err = recon_t.add(&a, 1.0, -1.0).unwrap().norm().unwrap();
+    assert!(
+        (err - trunc.error).abs() <= 1e-10 * (1.0 + trunc.error),
+        "reconstruction error {err} vs reported {}",
+        trunc.error
+    );
+
+    // Rank-5 (1|4) PEPS-shaped smoke: construct, contract two shared legs,
+    // permute roundtrip, adjoint involution.
+    let w = v.dual();
+    let p = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 93).unwrap();
+    let q = Tensor::rand_with_seed(&rt, [&v], [&w, &w, &v, &v], 94).unwrap();
+    let r = p.contract(&q, &[3, 4], &[1, 2]).unwrap();
+    assert_eq!(r.rank(), 6);
+    assert!(r.norm().unwrap() > 0.0);
+    let rp = p.permute(&[0, 2, 4], &[1, 3]).unwrap();
+    let p_back = rp.permute(&[0], &[3, 1, 4, 2]).unwrap();
+    assert_close(p_back.data(), p.data(), 1e-12);
+    let h = p.adjoint().unwrap().adjoint().unwrap();
+    assert_close(h.data(), p.data(), 1e-12);
+}

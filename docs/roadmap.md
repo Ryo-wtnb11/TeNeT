@@ -4,7 +4,7 @@
 TensorKit 並みの使い勝手。最重要軸 = Rust 準拠の保守性・拡張性 × 動的 rank でも速い。
 
 ## A. ユーザー層
-- [ ] fZ2⊠U(1)⊠SU(2) 3 因子積(Space + rule enum + TensorKit 数値クロスチェック)
+- [x] fZ2⊠U(1)⊠SU(2) 3 因子積(Space + rule enum + TensorKit 数値クロスチェック)
 - [ ] c64 スカラー(下層 FactorScalar は対応済み)→ eig_* 公開もここに依存
 - [ ] tensor! の shape-keyed plan cache(現状: 毎回 greedy 再計画)
 - [ ] cotengrust 移植(random-greedy / annealing / dynamic slicing / reconfigure)+ sliced 実行
