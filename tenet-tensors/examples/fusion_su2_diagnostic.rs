@@ -3,7 +3,7 @@ use tenet_core::{
 };
 use tenet_tensors::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
-    tensorcontract_fusion_explicit_plan_into_canonical_dst, tree_pair_transform_into_with_context,
+    tensorcontract_fusion_explicit_plan_into_canonical_dst, tree_transform_into_with_context,
     OutputAxisOrder, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
     TreeTransformExecutionContext,
 };
@@ -127,7 +127,7 @@ fn main() {
     .unwrap();
     let mut tree_context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-    tree_pair_transform_into_with_context(
+    tree_transform_into_with_context(
         &mut tree_context,
         &rule,
         plan.lhs_transform().clone(),
@@ -137,7 +137,7 @@ fn main() {
         0.0,
     )
     .unwrap();
-    tree_pair_transform_into_with_context(
+    tree_transform_into_with_context(
         &mut tree_context,
         &rule,
         plan.rhs_transform().clone(),

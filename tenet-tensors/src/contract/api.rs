@@ -5,7 +5,7 @@ use tenet_core::{
 
 use crate::lowering::adjoint_fusion_space_view;
 use crate::{
-    build_tree_pair_transform_group_plan, tree_pair_transform_into_with, DenseBlockScalar,
+    build_tree_pair_transform_group_plan, tree_transform_into_with, DenseBlockScalar,
     DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformWorkspace,
 };
@@ -621,7 +621,7 @@ where
 
     lhs_canonical.data_mut().fill(D::zero());
     rhs_canonical.data_mut().fill(D::zero());
-    tree_pair_transform_into_with_optional_storage_conjugation(
+    tree_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -632,7 +632,7 @@ where
         D::one(),
         D::zero(),
     )?;
-    tree_pair_transform_into_with_optional_storage_conjugation(
+    tree_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -736,7 +736,7 @@ where
     lhs_canonical.data_mut().fill(D::zero());
     rhs_canonical.data_mut().fill(D::zero());
     canonical_dst.data_mut().fill(D::zero());
-    tree_pair_transform_into_with_optional_storage_conjugation(
+    tree_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -747,7 +747,7 @@ where
         D::one(),
         D::zero(),
     )?;
-    tree_pair_transform_into_with_optional_storage_conjugation(
+    tree_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -771,7 +771,7 @@ where
         D::zero(),
     )?;
 
-    tree_pair_transform_into_with(
+    tree_transform_into_with(
         tree_backend,
         tree_workspace,
         rule,
@@ -784,7 +784,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_pair_transform_into_with_optional_storage_conjugation<
+fn tree_transform_into_with_optional_storage_conjugation<
     B,
     R,
     D,
@@ -800,7 +800,7 @@ fn tree_pair_transform_into_with_optional_storage_conjugation<
     backend: &mut B,
     workspace: &mut B::Workspace,
     rule: &R,
-    operation: crate::TreeTransformOperationKey,
+    operation: crate::TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     source_conjugate: bool,
@@ -815,7 +815,7 @@ where
     DSrc: HostReadableStorage<D>,
 {
     if !source_conjugate {
-        return tree_pair_transform_into_with(
+        return tree_transform_into_with(
             backend, workspace, rule, operation, dst, src, alpha, beta,
         );
     }

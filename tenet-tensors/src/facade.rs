@@ -14,7 +14,7 @@ use crate::tensortrace::{
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{
-    build_tree_pair_transform_group_plan, TreeTransformOperationKey, TreeTransformRuleCacheKey,
+    build_tree_pair_transform_group_plan, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformStructure;
@@ -230,7 +230,7 @@ pub fn tensoradd_fusion_into<
     rule: &R,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_conjugate: bool,
     alpha: D,
     beta: D,
@@ -276,7 +276,7 @@ pub fn tensoradd_fusion_into_with<
     rule: &R,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_conjugate: bool,
     alpha: D,
     beta: D,
@@ -293,7 +293,7 @@ where
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
     if source_conjugate
-        && matches!(&operation, TreeTransformOperationKey::Braid { .. })
+        && matches!(&operation, TreeTransformOperation::Braid { .. })
         && !rule.supports_unitary_braid_dagger()
     {
         return Err(OperationError::UnsupportedTreeTransformScope {
@@ -329,7 +329,7 @@ where
             beta,
         )
     } else {
-        tree_pair_transform_into_with(
+        tree_transform_into_with(
             backend,
             workspace,
             rule,
@@ -361,7 +361,7 @@ pub fn tensoradd_fusion_into_with_context<
     rule: &R,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_conjugate: bool,
     alpha: D,
     beta: D,
@@ -379,7 +379,7 @@ where
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
     if source_conjugate
-        && matches!(&operation, TreeTransformOperationKey::Braid { .. })
+        && matches!(&operation, TreeTransformOperation::Braid { .. })
         && !rule.supports_unitary_braid_dagger()
     {
         return Err(OperationError::UnsupportedTreeTransformScope {
@@ -394,7 +394,7 @@ where
         let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
         let dst_structure = std::sync::Arc::clone(dst.structure());
         let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
-        context.tree_pair_transform_into_raw_with_storage_conjugation(
+        context.tree_transform_into_raw_with_storage_conjugation(
             rule,
             lowered.into_operation(),
             &dst_structure,
@@ -406,7 +406,7 @@ where
             beta,
         )
     } else {
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             context,
             rule,
             lowered.into_operation(),
@@ -709,7 +709,7 @@ where
 /// `dst` and `src` block structures. The returned structure can be reused with
 /// [`tree_transform_execute_with`] as long as replay tensors have matching
 /// structures.
-pub fn tree_pair_transform_structure<
+pub fn tree_transform_structure<
     R,
     TDst,
     TSrc,
@@ -723,7 +723,7 @@ pub fn tree_pair_transform_structure<
     DSrc,
 >(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
@@ -740,9 +740,9 @@ where
 /// Compile and execute a tree-pair transform in one call.
 ///
 /// This is a convenience API. It rebuilds the transform structure on every call;
-/// hot tensor-network loops should call [`tree_pair_transform_structure`] once
+/// hot tensor-network loops should call [`tree_transform_structure`] once
 /// and replay the returned structure with [`tree_transform_execute_with`].
-pub fn tree_pair_transform_into<
+pub fn tree_transform_into<
     R,
     D,
     const DST_NOUT: usize,
@@ -755,7 +755,7 @@ pub fn tree_pair_transform_into<
     DSrc,
 >(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
@@ -770,7 +770,7 @@ where
 {
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
-    tree_pair_transform_into_with(
+    tree_transform_into_with(
         &mut backend,
         &mut workspace,
         rule,
@@ -787,11 +787,11 @@ where
 /// The backend and workspace are reused, but the transform structure is still
 /// rebuilt on every call. This mirrors a TensorKit-style one-call transformer
 /// application with explicit execution resources, not a cached transformer.
-/// Use [`tree_pair_transform_into_with_context`] when the categorical plan and
+/// Use [`tree_transform_into_with_context`] when the categorical plan and
 /// replay descriptor should be cached behind a caller-owned context. Use
-/// [`tree_pair_transform_structure`] plus [`tree_transform_execute_with`] for
+/// [`tree_transform_structure`] plus [`tree_transform_execute_with`] for
 /// the tightest loop when the exact replay descriptor is already known.
-pub fn tree_pair_transform_into_with<
+pub fn tree_transform_into_with<
     B,
     R,
     D,
@@ -807,7 +807,7 @@ pub fn tree_pair_transform_into_with<
     backend: &mut B,
     workspace: &mut B::Workspace,
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
@@ -821,11 +821,11 @@ where
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
-    let structure = tree_pair_transform_structure(rule, operation, dst, src)?;
+    let structure = tree_transform_structure(rule, operation, dst, src)?;
     tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
 }
 
-pub fn tree_pair_transform_into_with_context<
+pub fn tree_transform_into_with_context<
     B,
     R,
     D,
@@ -841,7 +841,7 @@ pub fn tree_pair_transform_into_with_context<
 >(
     context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
@@ -856,10 +856,10 @@ where
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
-    context.tree_pair_transform_into(rule, operation, dst, src, alpha, beta)
+    context.tree_transform_into(rule, operation, dst, src, alpha, beta)
 }
 
-pub fn all_codomain_tree_transform_into_with_context<
+pub(crate) fn all_codomain_tree_transform_into_with_context<
     B,
     R,
     D,
@@ -875,7 +875,7 @@ pub fn all_codomain_tree_transform_into_with_context<
 >(
     context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     alpha: D,
@@ -891,6 +891,435 @@ where
     DSrc: HostReadableStorage<D>,
 {
     context.all_codomain_tree_transform_into(rule, operation, dst, src, alpha, beta)
+}
+
+/// TensorKit `permute!`: symmetric-braiding permutation of tensor legs, written into `dst`.
+///
+/// Thin wrapper over [`tree_transform_into`] with
+/// [`TreeTransformOperation::permute`]; see [`TreeTransformOperation::permute`]
+/// for the axis-numbering convention.
+pub fn permute_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into(
+        rule,
+        TreeTransformOperation::permute(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `permute!`: symmetric-braiding permutation of tensor legs, with caller-owned backend/workspace.
+///
+/// Thin wrapper over [`tree_transform_into_with`] with
+/// [`TreeTransformOperation::permute`].
+pub fn permute_into_with<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_with(
+        backend,
+        workspace,
+        rule,
+        TreeTransformOperation::permute(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `permute!`: symmetric-braiding permutation of tensor legs, with a caller-owned caching execution context.
+///
+/// Thin wrapper over [`tree_transform_into_with_context`] with
+/// [`TreeTransformOperation::permute`].
+pub fn permute_into_with_context<
+    B,
+    R,
+    D,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: Clone + Eq + Hash,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_with_context(
+        context,
+        rule,
+        TreeTransformOperation::permute(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `braid!`: explicit braid with source-axis levels, written into `dst`.
+///
+/// Thin wrapper over [`tree_transform_into`] with
+/// [`TreeTransformOperation::braid`]; see [`TreeTransformOperation::braid`]
+/// for the axis-numbering convention.
+pub fn braid_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    codomain_levels: impl IntoIterator<Item = usize>,
+    domain_levels: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into(
+        rule,
+        TreeTransformOperation::braid(
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `braid!`: explicit braid with source-axis levels, with caller-owned backend/workspace.
+///
+/// Thin wrapper over [`tree_transform_into_with`] with
+/// [`TreeTransformOperation::braid`].
+pub fn braid_into_with<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    codomain_levels: impl IntoIterator<Item = usize>,
+    domain_levels: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_with(
+        backend,
+        workspace,
+        rule,
+        TreeTransformOperation::braid(
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `braid!`: explicit braid with source-axis levels, with a caller-owned caching execution context.
+///
+/// Thin wrapper over [`tree_transform_into_with_context`] with
+/// [`TreeTransformOperation::braid`].
+pub fn braid_into_with_context<
+    B,
+    R,
+    D,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    codomain_levels: impl IntoIterator<Item = usize>,
+    domain_levels: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: Clone + Eq + Hash,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_with_context(
+        context,
+        rule,
+        TreeTransformOperation::braid(
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `transpose!`: planar transpose of tensor legs, written into `dst`.
+///
+/// Thin wrapper over [`tree_transform_into`] with
+/// [`TreeTransformOperation::transpose`]; see [`TreeTransformOperation::transpose`]
+/// for the axis-numbering convention.
+pub fn transpose_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into(
+        rule,
+        TreeTransformOperation::transpose(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `transpose!`: planar transpose of tensor legs, with caller-owned backend/workspace.
+///
+/// Thin wrapper over [`tree_transform_into_with`] with
+/// [`TreeTransformOperation::transpose`].
+pub fn transpose_into_with<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_with(
+        backend,
+        workspace,
+        rule,
+        TreeTransformOperation::transpose(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// TensorKit `transpose!`: planar transpose of tensor legs, with a caller-owned caching execution context.
+///
+/// Thin wrapper over [`tree_transform_into_with_context`] with
+/// [`TreeTransformOperation::transpose`].
+pub fn transpose_into_with_context<
+    B,
+    R,
+    D,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: Clone + Eq + Hash,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_with_context(
+        context,
+        rule,
+        TreeTransformOperation::transpose(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
 }
 
 pub fn tensoradd_assign_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(

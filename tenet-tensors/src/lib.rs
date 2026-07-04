@@ -50,16 +50,20 @@ pub use contract::{
     TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
+pub(crate) use facade::all_codomain_tree_transform_into_with_context;
 pub use facade::{
-    all_codomain_tree_transform_into_with_context, copy_into, scaled_add_into, scaled_assign_into,
-    tensoradd_add_into, tensoradd_assign_into, tensoradd_execute_with, tensoradd_fusion_into,
-    tensoradd_fusion_into_with, tensoradd_fusion_into_with_context, tensoradd_into,
-    tensoradd_into_with, tensoradd_into_with_backend_and_conjugation,
-    tensoradd_into_with_conjugation, tensorcopy_into, tensorcopy_into_with,
-    tensortrace_execute_with, tensortrace_fusion_execute_with, tensortrace_fusion_into,
-    tensortrace_fusion_into_with, tensortrace_into, tensortrace_into_with,
-    tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
-    tree_pair_transform_structure, tree_transform_execute_with,
+    braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
+    permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
+};
+pub use facade::{
+    copy_into, scaled_add_into, scaled_assign_into, tensoradd_add_into, tensoradd_assign_into,
+    tensoradd_execute_with, tensoradd_fusion_into, tensoradd_fusion_into_with,
+    tensoradd_fusion_into_with_context, tensoradd_into, tensoradd_into_with,
+    tensoradd_into_with_backend_and_conjugation, tensoradd_into_with_conjugation, tensorcopy_into,
+    tensorcopy_into_with, tensortrace_execute_with, tensortrace_fusion_execute_with,
+    tensortrace_fusion_into, tensortrace_fusion_into_with, tensortrace_into, tensortrace_into_with,
+    tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
+    tree_transform_into_with_context, tree_transform_structure,
 };
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
@@ -95,7 +99,7 @@ pub use tree_transform::{
     build_tree_transform_group_plan, TreePairTransformCache, TreeTransformBlockSpec,
     TreeTransformBuiltinRuleCacheKey, TreeTransformCache, TreeTransformCacheStats,
     TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
-    TreeTransformOperationKey, TreeTransformPlanScope, TreeTransformProductRuleCacheKey,
+    TreeTransformOperation, TreeTransformPlanScope, TreeTransformProductRuleCacheKey,
     TreeTransformRuleCacheKey, TreeTransformSectorPlanKey, TreeTransformSourceGroupKey,
 };
 #[cfg(test)]

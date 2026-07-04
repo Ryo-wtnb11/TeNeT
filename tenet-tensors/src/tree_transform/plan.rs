@@ -17,7 +17,7 @@ use tenet_core::{
 
 use crate::OperationError;
 
-use super::operation::{TreeTransformOperationKey, ValidateBraidingSupport};
+use super::operation::{TreeTransformOperation, ValidateBraidingSupport};
 
 pub use tenet_operations::transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
@@ -33,7 +33,7 @@ pub use tenet_operations::transform_plan::{
 /// intentionally not represented by this scalar-coefficient API.
 pub fn build_tree_transform_group_plan<T, R, F>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
     mut transform: F,
 ) -> Result<TreeTransformGroupPlan<T>, OperationError>
@@ -113,7 +113,7 @@ where
 /// multiplicity-free rules.
 pub fn build_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
@@ -127,7 +127,7 @@ where
 /// multiplicity-free rules.
 pub fn build_tree_pair_transform_group_plan<R>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
@@ -140,7 +140,7 @@ where
 #[cfg(test)]
 pub(crate) fn build_unique_tree_transform_group_plan<T, R, F>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
     mut transform: F,
 ) -> Result<TreeTransformGroupPlan<T>, OperationError>
@@ -184,7 +184,7 @@ where
 #[cfg(test)]
 pub(crate) fn build_unique_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
@@ -213,11 +213,11 @@ where
         validate_all_codomain_fusion_tree_block(rule, index, src_key)?;
 
         let (dst_codomain_tree, coefficient) = match &operation {
-            TreeTransformOperationKey::Permute {
+            TreeTransformOperation::Permute {
                 codomain_permutation,
                 ..
             } => unique_permute_tree(rule, src_key.codomain_tree(), codomain_permutation)?,
-            TreeTransformOperationKey::Braid {
+            TreeTransformOperation::Braid {
                 codomain_permutation,
                 codomain_levels,
                 ..
@@ -227,7 +227,7 @@ where
                 codomain_permutation,
                 codomain_levels,
             )?,
-            TreeTransformOperationKey::Transpose { .. } => {
+            TreeTransformOperation::Transpose { .. } => {
                 unreachable!("all-codomain operation scope validation rejected transpose")
             }
         };
@@ -248,7 +248,7 @@ where
 
 pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
@@ -285,7 +285,7 @@ where
             src_keys.push(BlockKey::from(src_key.clone()));
 
             let transformed = match &operation {
-                TreeTransformOperationKey::Permute {
+                TreeTransformOperation::Permute {
                     codomain_permutation,
                     ..
                 } => multiplicity_free_permute_tree(
@@ -293,7 +293,7 @@ where
                     src_key.codomain_tree(),
                     codomain_permutation,
                 )?,
-                TreeTransformOperationKey::Braid {
+                TreeTransformOperation::Braid {
                     codomain_permutation,
                     codomain_levels,
                     ..
@@ -303,7 +303,7 @@ where
                     codomain_permutation,
                     codomain_levels,
                 )?,
-                TreeTransformOperationKey::Transpose { .. } => {
+                TreeTransformOperation::Transpose { .. } => {
                     unreachable!("all-codomain operation scope validation rejected transpose")
                 }
             };
@@ -354,13 +354,13 @@ where
 /// keys, so chi sweeps recompile plans without recomputing F/R-symbol
 /// contractions.
 pub(crate) type TreePairRowMemo<T, RuleKey> = HashMap<
-    (RuleKey, TreeTransformOperationKey, FusionTreeBlockKey),
+    (RuleKey, TreeTransformOperation, FusionTreeBlockKey),
     Arc<Vec<(FusionTreeBlockKey, T)>>,
 >;
 
 pub(crate) fn transformed_tree_pair_rows<R>(
     rule: &R,
-    operation: &TreeTransformOperationKey,
+    operation: &TreeTransformOperation,
     src_key: &FusionTreeBlockKey,
 ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, OperationError>
 where
@@ -368,7 +368,7 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
     let rows = match operation {
-        TreeTransformOperationKey::Permute {
+        TreeTransformOperation::Permute {
             codomain_permutation,
             domain_permutation,
         } => multiplicity_free_permute_tree_pair(
@@ -377,7 +377,7 @@ where
             codomain_permutation,
             domain_permutation,
         ),
-        TreeTransformOperationKey::Braid {
+        TreeTransformOperation::Braid {
             codomain_permutation,
             domain_permutation,
             codomain_levels,
@@ -390,7 +390,7 @@ where
             codomain_levels,
             domain_levels,
         ),
-        TreeTransformOperationKey::Transpose {
+        TreeTransformOperation::Transpose {
             codomain_permutation,
             domain_permutation,
         } => multiplicity_free_transpose_tree_pair(
@@ -405,7 +405,7 @@ where
 
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
@@ -427,7 +427,7 @@ where
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized<R, RuleKey>(
     rule: &R,
     rule_key: &RuleKey,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
     memo: &mut TreePairRowMemo<R::Scalar, RuleKey>,
     memo_hits: &mut usize,
@@ -458,7 +458,7 @@ where
 
 fn build_multiplicity_free_tree_pair_transform_group_plan_with_rows<R, F>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
     mut rows_for: F,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
@@ -466,7 +466,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     F: FnMut(
-        &TreeTransformOperationKey,
+        &TreeTransformOperation,
         &FusionTreeBlockKey,
     ) -> Result<Arc<Vec<(FusionTreeBlockKey, R::Scalar)>>, OperationError>,
 {
@@ -539,7 +539,7 @@ where
 #[cfg(test)]
 pub(crate) fn build_unique_tree_pair_transform_group_plan<R>(
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
@@ -566,11 +566,11 @@ where
         };
 
         let (dst_key, coefficient) = match &operation {
-            TreeTransformOperationKey::Permute {
+            TreeTransformOperation::Permute {
                 codomain_permutation,
                 domain_permutation,
             } => unique_permute_tree_pair(rule, src_key, codomain_permutation, domain_permutation)?,
-            TreeTransformOperationKey::Braid {
+            TreeTransformOperation::Braid {
                 codomain_permutation,
                 domain_permutation,
                 codomain_levels,
@@ -583,7 +583,7 @@ where
                 codomain_levels,
                 domain_levels,
             )?,
-            TreeTransformOperationKey::Transpose {
+            TreeTransformOperation::Transpose {
                 codomain_permutation,
                 domain_permutation,
             } => {
@@ -605,7 +605,7 @@ where
 }
 
 fn validate_all_codomain_operation_scope(
-    operation: &TreeTransformOperationKey,
+    operation: &TreeTransformOperation,
 ) -> Result<(), OperationError> {
     let scope_error = || OperationError::UnsupportedTreeTransformScope {
         operation: operation.clone(),
@@ -613,37 +613,37 @@ fn validate_all_codomain_operation_scope(
     };
 
     match operation {
-        TreeTransformOperationKey::Permute {
+        TreeTransformOperation::Permute {
             domain_permutation,
             ..
         } if domain_permutation.is_empty() => Ok(()),
-        TreeTransformOperationKey::Braid {
+        TreeTransformOperation::Braid {
             domain_permutation,
             domain_levels,
             ..
         } if domain_permutation.is_empty() && domain_levels.is_empty() => Ok(()),
-        TreeTransformOperationKey::Permute { .. } | TreeTransformOperationKey::Braid { .. } => {
+        TreeTransformOperation::Permute { .. } | TreeTransformOperation::Braid { .. } => {
             Err(scope_error())
         }
-        TreeTransformOperationKey::Transpose { .. } => Err(OperationError::UnsupportedTreeTransformScope {
+        TreeTransformOperation::Transpose { .. } => Err(OperationError::UnsupportedTreeTransformScope {
             operation: operation.clone(),
             message: "all-codomain UniqueFusion lowering supports explicit Permute or Braid operations",
         }),
     }
 }
 
-fn operation_source_axes(operation: &TreeTransformOperationKey) -> Vec<usize> {
+fn operation_source_axes(operation: &TreeTransformOperation) -> Vec<usize> {
     match operation {
-        TreeTransformOperationKey::Permute {
+        TreeTransformOperation::Permute {
             codomain_permutation,
             domain_permutation,
         }
-        | TreeTransformOperationKey::Braid {
+        | TreeTransformOperation::Braid {
             codomain_permutation,
             domain_permutation,
             ..
         }
-        | TreeTransformOperationKey::Transpose {
+        | TreeTransformOperation::Transpose {
             codomain_permutation,
             domain_permutation,
         } => codomain_permutation

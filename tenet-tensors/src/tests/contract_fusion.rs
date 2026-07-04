@@ -295,9 +295,9 @@ fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
     let permuted_space = space(&homspace);
     let mut rhs_permuted =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], permuted_space).unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
-        TreeTransformOperationKey::permute([1, 0], [2, 3]),
+        TreeTransformOperation::permute([1, 0], [2, 3]),
         &mut rhs_permuted,
         &rhs,
         1.0,
@@ -1846,7 +1846,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     assert_eq!(plan.canonical_axes().output_axes(), &[0, 1, 2, 3]);
     assert_eq!(
         plan.output_transform(),
-        &TreeTransformOperationKey::permute([0, 2, 1, 3], Vec::<usize>::new())
+        &TreeTransformOperation::permute([0, 2, 1, 3], Vec::<usize>::new())
     );
 
     let alpha = 2.0;
@@ -1870,7 +1870,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         }
     );
 
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
         plan.lhs_transform().clone(),
         &mut expected_lhs_canonical,
@@ -1879,7 +1879,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         0.0,
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
         plan.rhs_transform().clone(),
         &mut expected_rhs_canonical,
@@ -1898,7 +1898,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         0.0,
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
         plan.output_transform().clone(),
         &mut expected_dst,
@@ -2326,11 +2326,11 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     .unwrap();
     assert_eq!(
         plan.lhs_transform(),
-        &TreeTransformOperationKey::permute([3], [0, 1, 2])
+        &TreeTransformOperation::permute([3], [0, 1, 2])
     );
     assert_eq!(
         plan.rhs_transform(),
-        &TreeTransformOperationKey::permute([1, 2, 3], [0])
+        &TreeTransformOperation::permute([1, 2, 3], [0])
     );
     assert_eq!(plan.canonical_dst_nout(), 1);
     assert_eq!(plan.canonical_dst_nin(), 1);
@@ -2339,7 +2339,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     assert_eq!(plan.canonical_axes().output_axes(), &[0, 1]);
     assert_eq!(
         plan.output_transform(),
-        &TreeTransformOperationKey::permute([0], [1])
+        &TreeTransformOperation::permute([0], [1])
     );
 
     let err = tensorcontract_fusion_block_specs(
@@ -2357,18 +2357,18 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             }
         );
 
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
-        TreeTransformOperationKey::permute([3], [0, 1, 2]),
+        TreeTransformOperation::permute([3], [0, 1, 2]),
         &mut lhs_canonical,
         &lhs,
         1.0,
         0.0,
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
-        TreeTransformOperationKey::permute([1, 2, 3], [0]),
+        TreeTransformOperation::permute([1, 2, 3], [0]),
         &mut rhs_canonical,
         &rhs,
         1.0,
@@ -3259,7 +3259,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         &rule,
         &mut lhs_canonical,
         &lhs,
-        TreeTransformOperationKey::permute([3], [0, 1, 2]),
+        TreeTransformOperation::permute([3], [0, 1, 2]),
         lhs_conjugate,
         Complex64::one(),
         Complex64::zero(),
@@ -3269,7 +3269,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         &rule,
         &mut rhs_canonical,
         &rhs,
-        TreeTransformOperationKey::permute([1, 2, 3], [0]),
+        TreeTransformOperation::permute([1, 2, 3], [0]),
         rhs_conjugate,
         Complex64::one(),
         Complex64::zero(),
@@ -3510,7 +3510,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     .unwrap();
     let alpha = Complex64::new(2.0, 0.0);
     let beta = Complex64::new(3.0, 0.0);
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
         plan.lhs_transform().clone(),
         &mut lhs_canonical,
@@ -3519,7 +3519,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
         plan.rhs_transform().clone(),
         &mut rhs_canonical,
@@ -3538,7 +3538,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
         plan.output_transform().clone(),
         &mut expected_dst,

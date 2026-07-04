@@ -3,7 +3,7 @@
 //! execution crate).
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum TreeTransformOperationKey {
+pub enum TreeTransformOperation {
     Transpose {
         codomain_permutation: Vec<usize>,
         domain_permutation: Vec<usize>,
@@ -20,7 +20,7 @@ pub enum TreeTransformOperationKey {
     },
 }
 
-impl TreeTransformOperationKey {
+impl TreeTransformOperation {
     /// Build a planar transpose operation.
     ///
     /// The two permutations follow TensorKit's `Index2Tuple` convention:

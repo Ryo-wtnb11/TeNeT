@@ -10,7 +10,7 @@ use tenet_core::{
 use tenet_tensors::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
-    tree_pair_transform_into_with_context, HostTensorOperations, HostTreeFusionExecutionContext,
+    tree_transform_into_with_context, HostTensorOperations, HostTreeFusionExecutionContext,
     OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
     TensorContractFusionProfile, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
     TreeTransformExecutionContext, TreeTransformRuleCacheKey,
@@ -531,7 +531,7 @@ impl Su2NoncanonicalFixture {
         let mut rhs_canonical = self.rhs_canonical();
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
@@ -541,7 +541,7 @@ impl Su2NoncanonicalFixture {
             0.0,
         )
         .unwrap();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
@@ -552,7 +552,7 @@ impl Su2NoncanonicalFixture {
         )
         .unwrap();
         let elapsed = time_loop(iterations, || {
-            tree_pair_transform_into_with_context(
+            tree_transform_into_with_context(
                 &mut context,
                 &rule,
                 self.plan.lhs_transform().clone(),
@@ -562,7 +562,7 @@ impl Su2NoncanonicalFixture {
                 0.0,
             )
             .unwrap();
-            tree_pair_transform_into_with_context(
+            tree_transform_into_with_context(
                 &mut context,
                 &rule,
                 self.plan.rhs_transform().clone(),
@@ -590,7 +590,7 @@ impl Su2NoncanonicalFixture {
             f64,
             HostTensorOperations,
         >::default();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
@@ -600,7 +600,7 @@ impl Su2NoncanonicalFixture {
             0.0,
         )
         .unwrap();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
@@ -611,7 +611,7 @@ impl Su2NoncanonicalFixture {
         )
         .unwrap();
         let elapsed = time_loop(iterations, || {
-            tree_pair_transform_into_with_context(
+            tree_transform_into_with_context(
                 &mut context,
                 &rule,
                 self.plan.lhs_transform().clone(),
@@ -621,7 +621,7 @@ impl Su2NoncanonicalFixture {
                 0.0,
             )
             .unwrap();
-            tree_pair_transform_into_with_context(
+            tree_transform_into_with_context(
                 &mut context,
                 &rule,
                 self.plan.rhs_transform().clone(),
@@ -706,7 +706,7 @@ impl Su2NoncanonicalFixture {
         let rule = SU2FusionRule;
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
@@ -716,7 +716,7 @@ impl Su2NoncanonicalFixture {
             0.0,
         )
         .unwrap();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
@@ -992,7 +992,7 @@ impl Su2OutputScratchFixture {
         let rule = SU2FusionRule;
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.output_transform().clone(),
@@ -1004,7 +1004,7 @@ impl Su2OutputScratchFixture {
         .unwrap();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            tree_pair_transform_into_with_context(
+            tree_transform_into_with_context(
                 &mut context,
                 &rule,
                 self.plan.output_transform().clone(),

@@ -792,7 +792,7 @@ fn tensoradd_fusion_conjugation_lowers_source_adjoint_like_tensorkit() {
         &rule,
         &mut dst,
         &src,
-        TreeTransformOperationKey::permute([2], [0, 1]),
+        TreeTransformOperation::permute([2], [0, 1]),
         true,
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
@@ -818,7 +818,7 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
         &rule,
         &mut dst,
         &src,
-        TreeTransformOperationKey::permute([2], [0, 1]),
+        TreeTransformOperation::permute([2], [0, 1]),
         true,
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
@@ -835,7 +835,7 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
         &rule,
         &mut dst,
         &src,
-        TreeTransformOperationKey::permute([2], [0, 1]),
+        TreeTransformOperation::permute([2], [0, 1]),
         true,
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
@@ -851,7 +851,7 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
 #[test]
 fn tensoradd_source_adjoint_lowering_remaps_operation_axes_once() {
     let lowered = crate::lowering::lower_tensoradd_source_operation::<2, 1>(
-        TreeTransformOperationKey::permute([2], [0, 1]),
+        TreeTransformOperation::permute([2], [0, 1]),
         true,
     )
     .unwrap();
@@ -859,14 +859,14 @@ fn tensoradd_source_adjoint_lowering_remaps_operation_axes_once() {
     assert!(lowered.storage_conjugate());
     assert_eq!(
         lowered.into_operation(),
-        TreeTransformOperationKey::permute([0], [1, 2])
+        TreeTransformOperation::permute([0], [1, 2])
     );
 }
 
 #[test]
 fn tensoradd_source_adjoint_lowering_remaps_explicit_braid_levels_and_reverses_direction() {
     let lowered = crate::lowering::lower_tensoradd_source_operation::<2, 1>(
-        TreeTransformOperationKey::braid([2], [0, 1], [0, 2], [1]),
+        TreeTransformOperation::braid([2], [0, 1], [0, 2], [1]),
         true,
     )
     .unwrap();
@@ -874,7 +874,7 @@ fn tensoradd_source_adjoint_lowering_remaps_explicit_braid_levels_and_reverses_d
     assert!(lowered.storage_conjugate());
     assert_eq!(
         lowered.into_operation(),
-        TreeTransformOperationKey::braid([0], [1, 2], [1], [2, 0])
+        TreeTransformOperation::braid([0], [1, 2], [1], [2, 0])
     );
 }
 
@@ -892,7 +892,7 @@ fn tensoradd_source_adjoint_braid_extension_formula_tracks_source_strands() {
     let (lowered_codomain_levels, lowered_domain_levels) =
         reference_adjoint_reflected_braid_levels(2, 2, &codomain_levels, &domain_levels);
     let lowered = crate::lowering::lower_tensoradd_source_operation::<2, 2>(
-        TreeTransformOperationKey::braid(
+        TreeTransformOperation::braid(
             codomain_permutation,
             domain_permutation,
             codomain_levels,
@@ -908,7 +908,7 @@ fn tensoradd_source_adjoint_braid_extension_formula_tracks_source_strands() {
     assert_eq!(lowered_domain_levels, vec![40, 20]);
     assert_eq!(
         lowered.into_operation(),
-        TreeTransformOperationKey::braid([1, 2], [0, 3], [30, 10], [40, 20])
+        TreeTransformOperation::braid([1, 2], [0, 3], [30, 10], [40, 20])
     );
     assert_ne!(
         lowered_codomain_levels,
@@ -920,7 +920,7 @@ fn tensoradd_source_adjoint_braid_extension_formula_tracks_source_strands() {
 #[test]
 fn tensoradd_source_adjoint_braid_lowering_rejects_bad_axis_and_level_inputs() {
     let duplicate_axis = crate::lowering::lower_tensoradd_source_operation::<2, 1>(
-        TreeTransformOperationKey::braid([2], [0, 0], [0, 2], [1]),
+        TreeTransformOperation::braid([2], [0, 0], [0, 2], [1]),
         true,
     )
     .unwrap_err();
@@ -933,7 +933,7 @@ fn tensoradd_source_adjoint_braid_lowering_rejects_bad_axis_and_level_inputs() {
     );
 
     let bad_level_count = crate::lowering::lower_tensoradd_source_operation::<2, 1>(
-        TreeTransformOperationKey::braid([2], [0, 1], [0], [1]),
+        TreeTransformOperation::braid([2], [0, 1], [0], [1]),
         true,
     )
     .unwrap_err();
@@ -946,7 +946,7 @@ fn tensoradd_source_adjoint_braid_lowering_rejects_bad_axis_and_level_inputs() {
     );
 
     let duplicate_level = crate::lowering::lower_tensoradd_source_operation::<2, 1>(
-        TreeTransformOperationKey::braid([2], [0, 1], [0, 1], [1]),
+        TreeTransformOperation::braid([2], [0, 1], [0, 1], [1]),
         true,
     )
     .unwrap_err();
@@ -987,7 +987,7 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_requires_unitary_dagger_rule()
         dst_space,
     )
     .unwrap();
-    let operation = TreeTransformOperationKey::braid([1], [0], [0], [1]);
+    let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
 
     let err = tensoradd_fusion_into(
         &rule,
@@ -1031,7 +1031,7 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_matches_manual_inverse_braid_r
     let src = TensorMap::<Complex64, 2, 0>::from_vec_with_fusion_space(src_data.clone(), src_space)
         .unwrap();
     let operation =
-        TreeTransformOperationKey::braid(Vec::<usize>::new(), [1, 0], [0, 1], Vec::<usize>::new());
+        TreeTransformOperation::braid(Vec::<usize>::new(), [1, 0], [0, 1], Vec::<usize>::new());
     let mut actual = TensorMap::<Complex64, 0, 2>::from_vec_with_fusion_space(
         vec![Complex64::zero()],
         dst_space.clone(),
@@ -1061,9 +1061,9 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_matches_manual_inverse_braid_r
         dst_space,
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
-        TreeTransformOperationKey::braid(Vec::<usize>::new(), [1, 0], Vec::<usize>::new(), [1, 0]),
+        TreeTransformOperation::braid(Vec::<usize>::new(), [1, 0], Vec::<usize>::new(), [1, 0]),
         &mut expected,
         &adjoint_src,
         Complex64::new(1.0, 0.0),
@@ -1095,7 +1095,7 @@ fn tensoradd_fusion_source_adjoint_domain_only_braid_matches_manual_inverse_brai
     let src = TensorMap::<Complex64, 0, 2>::from_vec_with_fusion_space(src_data.clone(), src_space)
         .unwrap();
     let operation =
-        TreeTransformOperationKey::braid([1, 0], Vec::<usize>::new(), Vec::<usize>::new(), [0, 1]);
+        TreeTransformOperation::braid([1, 0], Vec::<usize>::new(), Vec::<usize>::new(), [0, 1]);
     let mut actual = TensorMap::<Complex64, 2, 0>::from_vec_with_fusion_space(
         vec![Complex64::zero()],
         dst_space.clone(),
@@ -1125,9 +1125,9 @@ fn tensoradd_fusion_source_adjoint_domain_only_braid_matches_manual_inverse_brai
         dst_space,
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
-        TreeTransformOperationKey::braid([1, 0], Vec::<usize>::new(), [1, 0], Vec::<usize>::new()),
+        TreeTransformOperation::braid([1, 0], Vec::<usize>::new(), [1, 0], Vec::<usize>::new()),
         &mut expected,
         &adjoint_src,
         Complex64::new(1.0, 0.0),
@@ -1161,7 +1161,7 @@ fn tensoradd_fusion_source_adjoint_mixed_braid_matches_manual_inverse_braid_refe
     let src_data = vec![Complex64::new(0.5, -2.0)];
     let src = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(src_data.clone(), src_space)
         .unwrap();
-    let operation = TreeTransformOperationKey::braid([0], [1], [0], [1]);
+    let operation = TreeTransformOperation::braid([0], [1], [0], [1]);
     let mut actual = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
         vec![Complex64::zero()],
         dst_space.clone(),
@@ -1191,9 +1191,9 @@ fn tensoradd_fusion_source_adjoint_mixed_braid_matches_manual_inverse_braid_refe
         dst_space,
     )
     .unwrap();
-    tree_pair_transform_into(
+    tree_transform_into(
         &rule,
-        TreeTransformOperationKey::braid([1], [0], [0], [1]),
+        TreeTransformOperation::braid([1], [0], [0], [1]),
         &mut expected,
         &adjoint_src,
         Complex64::new(1.0, 0.0),

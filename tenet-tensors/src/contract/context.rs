@@ -1403,7 +1403,7 @@ where
             alpha,
             D::zero(),
         )?;
-        self.tree_context.tree_pair_transform_into(
+        self.tree_context.tree_transform_into(
             rule,
             plan.output_transform().clone(),
             dst,
@@ -1527,7 +1527,7 @@ where
     >(
         &mut self,
         rule: &R,
-        operation: crate::TreeTransformOperationKey,
+        operation: crate::TreeTransformOperation,
         source_conjugate: bool,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc>,
@@ -1555,7 +1555,7 @@ where
                 &src_replay_structure,
                 source_conjugate,
             )?;
-        self.tree_context.tree_pair_transform_structure_into_raw(
+        self.tree_context.tree_transform_structure_into_raw(
             structure.as_ref(),
             &dst_structure,
             &src_replay_structure,

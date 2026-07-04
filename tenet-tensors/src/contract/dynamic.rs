@@ -13,7 +13,7 @@ use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{
     DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
-    RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperationKey,
+    RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperation,
     TreeTransformRuleCacheKey, TreeTransformStructure, TreeTransformWorkspace,
 };
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
@@ -463,7 +463,7 @@ where
     {
         let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
         let lhs_scratch = scratch.prepare_lhs(lhs_space.clone())?;
-        tree_context.tree_pair_transform_structure_into_raw(
+        tree_context.tree_transform_structure_into_raw(
             lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
             &lhs_transform.replay_structure,
@@ -476,7 +476,7 @@ where
     {
         let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
         let rhs_scratch = scratch.prepare_rhs(rhs_space.clone())?;
-        tree_context.tree_pair_transform_structure_into_raw(
+        tree_context.tree_transform_structure_into_raw(
             rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
             &rhs_transform.replay_structure,
@@ -568,7 +568,7 @@ where
         )?;
     }
     let dst_structure = std::sync::Arc::clone(dst.structure());
-    tree_context.tree_pair_transform_structure_into_raw(
+    tree_context.tree_transform_structure_into_raw(
         canonical_dst.output_transform_structure.as_ref(),
         &dst_structure,
         &canonical_dst_structure,
@@ -661,7 +661,7 @@ where
         let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
         let lhs_scratch =
             scratch.prepare_lhs_from_storage(lhs_space.clone(), lhs.storage(), D::zero())?;
-        tree_context.tree_pair_transform_structure_into_raw(
+        tree_context.tree_transform_structure_into_raw(
             lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
             &lhs_transform.replay_structure,
@@ -675,7 +675,7 @@ where
         let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
         let rhs_scratch =
             scratch.prepare_rhs_from_storage(rhs_space.clone(), rhs.storage(), D::zero())?;
-        tree_context.tree_pair_transform_structure_into_raw(
+        tree_context.tree_transform_structure_into_raw(
             rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
             &rhs_transform.replay_structure,
@@ -770,7 +770,7 @@ where
         )?;
     }
     let dst_structure = std::sync::Arc::clone(dst.structure());
-    tree_context.tree_pair_transform_structure_into_raw(
+    tree_context.tree_transform_structure_into_raw(
         canonical_dst.output_transform_structure.as_ref(),
         &dst_structure,
         &canonical_dst_structure,
@@ -853,7 +853,7 @@ where
         profile.lhs_scratch_prepare += start.elapsed();
 
         let start = std::time::Instant::now();
-        tree_context.tree_pair_transform_structure_into_raw_profiled(
+        tree_context.tree_transform_structure_into_raw_profiled(
             lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
             &lhs_transform.replay_structure,
@@ -873,7 +873,7 @@ where
         profile.rhs_scratch_prepare += start.elapsed();
 
         let start = std::time::Instant::now();
-        tree_context.tree_pair_transform_structure_into_raw_profiled(
+        tree_context.tree_transform_structure_into_raw_profiled(
             rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
             &rhs_transform.replay_structure,
@@ -984,7 +984,7 @@ where
 
     let dst_structure = std::sync::Arc::clone(dst.structure());
     let start = std::time::Instant::now();
-    tree_context.tree_pair_transform_structure_into_raw_profiled(
+    tree_context.tree_transform_structure_into_raw_profiled(
         canonical_dst.output_transform_structure.as_ref(),
         &dst_structure,
         &canonical_dst_structure,
@@ -1080,7 +1080,7 @@ struct DynamicFusionTransformedSourceLastEntry<RuleKey> {
     nout: usize,
     homspace: FusionTreeHomSpace,
     replay_structure: Arc<BlockStructure>,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_conjugate: bool,
     entry: DynamicFusionTransformedSourceEntry,
 }
@@ -1095,7 +1095,7 @@ where
         nout: usize,
         homspace: &FusionTreeHomSpace,
         replay_structure: &Arc<BlockStructure>,
-        operation: &TreeTransformOperationKey,
+        operation: &TreeTransformOperation,
         source_conjugate: bool,
     ) -> bool {
         &self.rule == rule
@@ -1116,7 +1116,7 @@ struct DynamicFusionCanonicalDstLastEntry<RuleKey> {
     canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
-    output_transform: TreeTransformOperationKey,
+    output_transform: TreeTransformOperation,
     output_dst: DynamicFusionLastSpaceKey,
     entry: DynamicFusionCanonicalDstEntry,
 }
@@ -1326,7 +1326,7 @@ where
         tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         rule: &R,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-        operation: &TreeTransformOperationKey,
+        operation: &TreeTransformOperation,
         source_conjugate: bool,
     ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
     where
@@ -1716,7 +1716,7 @@ struct DynamicFusionTransformedSourceFastKey<RuleKey> {
     nout: usize,
     homspace: FusionTreeHomSpace,
     replay_structure_ptr: usize,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_conjugate: bool,
 }
 
@@ -1726,7 +1726,7 @@ struct DynamicFusionTransformedSourceSpaceKey<RuleKey> {
     nout: usize,
     homspace: FusionTreeHomSpace,
     structure: BlockStructureCacheKey,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_conjugate: bool,
 }
 
@@ -1738,7 +1738,7 @@ struct DynamicFusionCanonicalDstFastKey<RuleKey> {
     canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
-    output_transform: TreeTransformOperationKey,
+    output_transform: TreeTransformOperation,
     output_dst: DynamicFusionFastSpaceKey,
 }
 
@@ -1750,7 +1750,7 @@ struct DynamicFusionCanonicalDstSpaceKey<RuleKey> {
     canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
-    output_transform: TreeTransformOperationKey,
+    output_transform: TreeTransformOperation,
     output_dst: DynamicFusionSpaceKey,
 }
 
@@ -1798,7 +1798,7 @@ fn transformed_source_space_and_structure<
 >(
     rule: &R,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    operation: &TreeTransformOperationKey,
+    operation: &TreeTransformOperation,
     source_conjugate: bool,
 ) -> Result<(DynamicFusionMapSpace, std::sync::Arc<BlockStructure>), OperationError>
 where
@@ -1881,7 +1881,7 @@ fn tree_pair_transform_typed_to_dynamic<
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &mut DynamicFusionScratch<D>,
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     src_replay_structure: &std::sync::Arc<BlockStructure>,
@@ -1927,7 +1927,7 @@ fn tree_pair_transform_dynamic_to_typed<
     tree_backend: &mut BT,
     tree_workspace: &mut BT::Workspace,
     rule: &R,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     src: &DynamicFusionScratch<D>,
     alpha: D,

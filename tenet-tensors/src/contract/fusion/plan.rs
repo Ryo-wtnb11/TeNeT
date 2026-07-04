@@ -1,16 +1,16 @@
 use tenet_core::{FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
-use crate::{OperationError, TreeTransformOperationKey};
+use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::structure::TensorContractAxisPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TensorContractFusionExplicitPlan {
-    lhs_transform: TreeTransformOperationKey,
-    rhs_transform: TreeTransformOperationKey,
-    output_transform: TreeTransformOperationKey,
+    lhs_transform: TreeTransformOperation,
+    rhs_transform: TreeTransformOperation,
+    output_transform: TreeTransformOperation,
     canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
@@ -24,17 +24,17 @@ pub struct TensorContractFusionExplicitPlan {
 
 impl TensorContractFusionExplicitPlan {
     #[inline]
-    pub fn lhs_transform(&self) -> &TreeTransformOperationKey {
+    pub fn lhs_transform(&self) -> &TreeTransformOperation {
         &self.lhs_transform
     }
 
     #[inline]
-    pub fn rhs_transform(&self) -> &TreeTransformOperationKey {
+    pub fn rhs_transform(&self) -> &TreeTransformOperation {
         &self.rhs_transform
     }
 
     #[inline]
-    pub fn output_transform(&self) -> &TreeTransformOperationKey {
+    pub fn output_transform(&self) -> &TreeTransformOperation {
         &self.output_transform
     }
 
@@ -56,7 +56,7 @@ impl TensorContractFusionExplicitPlan {
     pub(crate) fn output_transform_is_identity(&self) -> bool {
         let canonical_rank = self.canonical_dst_nout + self.canonical_dst_nin;
         match &self.output_transform {
-            TreeTransformOperationKey::Permute {
+            TreeTransformOperation::Permute {
                 codomain_permutation,
                 domain_permutation,
             } => {
@@ -219,16 +219,16 @@ where
     let canonical_dst_nout = lhs_canonical_nout;
     let canonical_dst_nin = rhs_canonical_nin;
     let canonical_output_rank = canonical_dst_nout + canonical_dst_nin;
-    let output_transform = TreeTransformOperationKey::permute(
+    let output_transform = TreeTransformOperation::permute(
         axis_plan.output_axes[..DST_NOUT].to_vec(),
         axis_plan.output_axes[DST_NOUT..].to_vec(),
     );
     Ok(TensorContractFusionExplicitPlan {
-        lhs_transform: TreeTransformOperationKey::permute(
+        lhs_transform: TreeTransformOperation::permute(
             axis_plan.lhs_open_axes,
             axis_plan.lhs_contracting_axes,
         ),
-        rhs_transform: TreeTransformOperationKey::permute(
+        rhs_transform: TreeTransformOperation::permute(
             axis_plan.rhs_contracting_axes,
             axis_plan.rhs_open_axes,
         ),

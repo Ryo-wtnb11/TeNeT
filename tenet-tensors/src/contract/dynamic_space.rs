@@ -7,7 +7,7 @@ use tenet_core::{
 };
 
 use crate::tree_transform::build_tree_pair_transform_group_plan;
-use crate::{OperationError, TreeTransformOperationKey};
+use crate::{OperationError, TreeTransformOperation};
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
 /// spaces enumerate the full tree set of their hom spaces, so the coupled
@@ -66,7 +66,7 @@ impl DynamicFusionMapSpace {
     pub(crate) fn transformed_from_typed<R, const NOUT: usize, const NIN: usize>(
         rule: &R,
         source: &FusionTensorMapSpace<NOUT, NIN>,
-        operation: &TreeTransformOperationKey,
+        operation: &TreeTransformOperation,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -382,17 +382,17 @@ fn contracted_external_sectors_match(
         .all(|(&lhs_axis, &rhs_axis)| lhs_external[lhs_axis] == rhs_external[rhs_axis])
 }
 
-fn tree_transform_operation_axes(operation: &TreeTransformOperationKey) -> (&[usize], &[usize]) {
+fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize], &[usize]) {
     match operation {
-        TreeTransformOperationKey::Transpose {
+        TreeTransformOperation::Transpose {
             codomain_permutation,
             domain_permutation,
         }
-        | TreeTransformOperationKey::Permute {
+        | TreeTransformOperation::Permute {
             codomain_permutation,
             domain_permutation,
         }
-        | TreeTransformOperationKey::Braid {
+        | TreeTransformOperation::Braid {
             codomain_permutation,
             domain_permutation,
             ..

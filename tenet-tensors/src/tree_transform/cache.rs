@@ -16,7 +16,7 @@ use crate::cache::{
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
 use super::helpers::fusion_tree_group_block_keys;
-use super::operation::{TreeTransformOperationKey, TreeTransformRuleCacheKey};
+use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 #[cfg(test)]
 use super::plan::TreeTransformGroupBlockSpec;
 use super::plan::{
@@ -34,7 +34,7 @@ pub enum TreeTransformPlanScope {
 pub struct TreeTransformSectorPlanKey<RuleKey> {
     rule: RuleKey,
     scope: TreeTransformPlanScope,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     source_groups: Vec<TreeTransformSourceGroupKey>,
 }
 
@@ -44,7 +44,7 @@ where
 {
     pub fn tree_pair<R>(
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError>
     where
@@ -60,7 +60,7 @@ where
 
     pub fn all_codomain<R>(
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError>
     where
@@ -77,7 +77,7 @@ where
     fn new(
         rule: RuleKey,
         scope: TreeTransformPlanScope,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
         let source_groups = src_structure
@@ -104,7 +104,7 @@ where
     }
 
     #[inline]
-    pub fn operation(&self) -> &TreeTransformOperationKey {
+    pub fn operation(&self) -> &TreeTransformOperation {
         &self.operation
     }
 
@@ -145,13 +145,13 @@ impl TreeTransformSourceGroupKey {
 #[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformGroupPlanKey {
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     groups: Vec<TreeTransformCachedGroupKey>,
 }
 
 #[cfg(test)]
 impl TreeTransformGroupPlanKey {
-    pub fn new<Groups>(operation: TreeTransformOperationKey, groups: Groups) -> Self
+    pub fn new<Groups>(operation: TreeTransformOperation, groups: Groups) -> Self
     where
         Groups: IntoIterator<Item = TreeTransformCachedGroupKey>,
     {
@@ -162,7 +162,7 @@ impl TreeTransformGroupPlanKey {
     }
 
     pub fn from_plan<T>(
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         plan: &TreeTransformGroupPlan<T>,
     ) -> Self {
         Self::new(
@@ -297,7 +297,7 @@ struct TreeTransformLastStructure<T, RuleKey> {
     structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
     rule: RuleKey,
     scope: TreeTransformPlanScope,
-    operation: TreeTransformOperationKey,
+    operation: TreeTransformOperation,
     dst_ptr: *const BlockStructure,
     src_ptr: *const BlockStructure,
     storage_conjugate: bool,
@@ -384,7 +384,7 @@ where
         &mut self,
         rule_key: &RuleKey,
         scope: TreeTransformPlanScope,
-        operation: &TreeTransformOperationKey,
+        operation: &TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
@@ -421,7 +421,7 @@ where
         structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
         rule: RuleKey,
         scope: TreeTransformPlanScope,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
@@ -487,7 +487,7 @@ where
     >(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
@@ -551,7 +551,7 @@ where
     pub fn get_or_compile_tree_pair_structures<R>(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
@@ -619,7 +619,7 @@ where
     pub fn get_or_compile_tree_pair_structures_with_storage_conjugation<R>(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
@@ -701,7 +701,7 @@ where
     >(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
@@ -775,7 +775,7 @@ where
         &mut self,
         rule_key: RuleKey,
         scope: TreeTransformPlanScope,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
@@ -824,7 +824,7 @@ where
         &mut self,
         rule_key: RuleKey,
         scope: TreeTransformPlanScope,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
@@ -847,7 +847,7 @@ where
         &mut self,
         rule_key: RuleKey,
         scope: TreeTransformPlanScope,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         plan_key: TreeTransformSectorPlanKey<RuleKey>,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,

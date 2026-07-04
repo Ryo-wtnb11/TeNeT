@@ -11,7 +11,7 @@ use tenet_core::{
 use crate::cache::OperationCachePolicy;
 use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
-    TreeTransformCache, TreeTransformOperationKey, TreeTransformRuleCacheKey,
+    TreeTransformCache, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use crate::{
     RecouplingCoefficientAction, ReportsPlacement, TreeTransformReplayProfile,
@@ -150,7 +150,7 @@ where
     RuleKey: Clone + Eq + Hash,
     B: TreeTransformBackend<D, C>,
 {
-    pub fn tree_pair_transform_into<
+    pub fn tree_transform_into<
         R,
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -163,7 +163,7 @@ where
     >(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
@@ -184,7 +184,7 @@ where
     }
 
     #[allow(dead_code)]
-    pub(crate) fn tree_pair_transform_into_storage_workspace<
+    pub(crate) fn tree_transform_into_storage_workspace<
         R,
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -198,7 +198,7 @@ where
         &mut self,
         storage_workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,
@@ -230,7 +230,7 @@ where
     pub(crate) fn get_or_compile_tree_pair_structure_with_storage_conjugation<R>(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst_structure: &Arc<BlockStructure>,
         src_structure: &Arc<BlockStructure>,
         storage_conjugate: bool,
@@ -249,10 +249,10 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_pair_transform_into_raw_with_storage_conjugation<R>(
+    pub(crate) fn tree_transform_into_raw_with_storage_conjugation<R>(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst_structure: &std::sync::Arc<BlockStructure>,
         src_structure: &std::sync::Arc<BlockStructure>,
         dst_data: &mut [D],
@@ -289,7 +289,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_pair_transform_structure_into_raw(
+    pub(crate) fn tree_transform_structure_into_raw(
         &mut self,
         structure: &TreeTransformStructure<C>,
         dst_structure: &Arc<BlockStructure>,
@@ -317,7 +317,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_pair_transform_structure_into_raw_profiled(
+    pub(crate) fn tree_transform_structure_into_raw_profiled(
         &mut self,
         structure: &TreeTransformStructure<C>,
         dst_structure: &Arc<BlockStructure>,
@@ -359,7 +359,7 @@ where
     >(
         &mut self,
         rule: &R,
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
         alpha: D,

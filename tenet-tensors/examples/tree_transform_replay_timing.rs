@@ -8,10 +8,10 @@ use tenet_core::{
     U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    tree_pair_transform_into, tree_pair_transform_into_with, tree_pair_transform_into_with_context,
-    tree_pair_transform_structure, tree_transform_execute_with, DenseTreeTransformOperations,
+    tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
+    tree_transform_into_with_context, tree_transform_structure, DenseTreeTransformOperations,
     HostTensorOperations, TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext,
-    TreeTransformOperationKey, TreeTransformRuleCacheKey, TreeTransformWorkspace,
+    TreeTransformOperation, TreeTransformRuleCacheKey, TreeTransformWorkspace,
 };
 
 fn main() {
@@ -134,7 +134,7 @@ fn bench_product(
     oneshot_iters: usize,
 ) -> Timings {
     let (rule, src_space, dst_space) = product_fixture();
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let mut src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
             .unwrap();
@@ -143,12 +143,11 @@ fn bench_product(
             .unwrap();
 
     let compile = time_loop(build_iters, || {
-        let structure =
-            tree_pair_transform_structure(&rule, operation.clone(), &dst, &src).unwrap();
+        let structure = tree_transform_structure(&rule, operation.clone(), &dst, &src).unwrap();
         black_box(structure);
     });
 
-    let structure = tree_pair_transform_structure(&rule, operation.clone(), &dst, &src).unwrap();
+    let structure = tree_transform_structure(&rule, operation.clone(), &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     let dense_replay = time_loop(replay_iters, || {
@@ -185,7 +184,7 @@ fn bench_product(
     let mut rebuild_workspace = TreeTransformWorkspace::default();
     let rebuild_execute = time_loop(rebuild_execute_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into_with(
+        tree_transform_into_with(
             &mut rebuild_backend,
             &mut rebuild_workspace,
             &rule,
@@ -201,7 +200,7 @@ fn bench_product(
 
     type ProductRuleKey = <ProductRule as TreeTransformRuleCacheKey>::Key;
     let mut context = TreeTransformExecutionContext::<f64, ProductRuleKey>::default();
-    tree_pair_transform_into_with_context(
+    tree_transform_into_with_context(
         &mut context,
         &rule,
         operation.clone(),
@@ -213,7 +212,7 @@ fn bench_product(
     .unwrap();
     let dense_context_hit_execute = time_loop(context_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &rule,
             operation.clone(),
@@ -228,7 +227,7 @@ fn bench_product(
 
     let mut host_context =
         TreeTransformExecutionContext::<f64, ProductRuleKey, f64, HostTensorOperations>::default();
-    tree_pair_transform_into_with_context(
+    tree_transform_into_with_context(
         &mut host_context,
         &rule,
         operation.clone(),
@@ -240,7 +239,7 @@ fn bench_product(
     .unwrap();
     let host_context_hit_execute = time_loop(context_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut host_context,
             &rule,
             operation.clone(),
@@ -255,7 +254,7 @@ fn bench_product(
 
     let oneshot = time_loop(oneshot_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into(
+        tree_transform_into(
             &rule,
             operation.clone(),
             &mut dst,
@@ -286,7 +285,7 @@ fn bench_su2(
     oneshot_iters: usize,
 ) -> Timings {
     let (structure, src_space, dst_space) = su2_recoupling_fixture();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
         vec![10.0, 20.0],
         src_space.clone(),
@@ -302,12 +301,11 @@ fn bench_su2(
 
     let compile = time_loop(build_iters, || {
         let structure =
-            tree_pair_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
+            tree_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
         black_box(structure);
     });
 
-    let compiled =
-        tree_pair_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
+    let compiled = tree_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     let dense_replay = time_loop(replay_iters, || {
@@ -344,7 +342,7 @@ fn bench_su2(
     let mut rebuild_workspace = TreeTransformWorkspace::default();
     let rebuild_execute = time_loop(rebuild_execute_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into_with(
+        tree_transform_into_with(
             &mut rebuild_backend,
             &mut rebuild_workspace,
             &SU2FusionRule,
@@ -360,7 +358,7 @@ fn bench_su2(
 
     let mut context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-    tree_pair_transform_into_with_context(
+    tree_transform_into_with_context(
         &mut context,
         &SU2FusionRule,
         operation.clone(),
@@ -372,7 +370,7 @@ fn bench_su2(
     .unwrap();
     let dense_context_hit_execute = time_loop(context_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut context,
             &SU2FusionRule,
             operation.clone(),
@@ -391,7 +389,7 @@ fn bench_su2(
         f64,
         HostTensorOperations,
     >::default();
-    tree_pair_transform_into_with_context(
+    tree_transform_into_with_context(
         &mut host_context,
         &SU2FusionRule,
         operation.clone(),
@@ -403,7 +401,7 @@ fn bench_su2(
     .unwrap();
     let host_context_hit_execute = time_loop(context_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into_with_context(
+        tree_transform_into_with_context(
             &mut host_context,
             &SU2FusionRule,
             operation.clone(),
@@ -418,7 +416,7 @@ fn bench_su2(
 
     let oneshot = time_loop(oneshot_iters, || {
         src.data_mut().copy_from_slice(&[10.0, 20.0]);
-        tree_pair_transform_into(
+        tree_transform_into(
             &SU2FusionRule,
             operation.clone(),
             &mut dst,

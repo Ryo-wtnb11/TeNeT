@@ -8,7 +8,7 @@ pub use cache::{
     TreeTransformSectorPlanKey, TreeTransformSourceGroupKey,
 };
 pub use operation::{
-    TreeTransformBuiltinRuleCacheKey, TreeTransformOperationKey, TreeTransformProductRuleCacheKey,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformProductRuleCacheKey,
     TreeTransformRuleCacheKey,
 };
 pub use plan::{

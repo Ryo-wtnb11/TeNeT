@@ -3,7 +3,7 @@ use core::fmt;
 use tenet_core::{BlockKey, BraidingStyleKind, CoreError, FusionStyleKind};
 use tenet_dense::DenseError;
 
-use crate::TreeTransformOperationKey;
+use crate::TreeTransformOperation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationError {
@@ -71,15 +71,15 @@ pub enum OperationError {
         actual: usize,
     },
     UnsupportedFusionStyle {
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         style: FusionStyleKind,
     },
     UnsupportedBraidingStyle {
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         style: BraidingStyleKind,
     },
     UnsupportedTreeTransformScope {
-        operation: TreeTransformOperationKey,
+        operation: TreeTransformOperation,
         message: &'static str,
     },
     UnsupportedTensorContractScope {

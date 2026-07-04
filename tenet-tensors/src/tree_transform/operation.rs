@@ -8,9 +8,9 @@ use tenet_core::{
 
 use crate::OperationError;
 
-pub use tenet_operations::TreeTransformOperationKey;
+pub use tenet_operations::TreeTransformOperation;
 
-/// Rule-aware validation for [`TreeTransformOperationKey`]; lives in the
+/// Rule-aware validation for [`TreeTransformOperation`]; lives in the
 /// symmetric layer because it consumes the fusion rule's braiding style.
 pub trait ValidateBraidingSupport {
     fn validate_braiding_support<R>(&self, rule: &R) -> Result<(), OperationError>
@@ -18,7 +18,7 @@ pub trait ValidateBraidingSupport {
         R: FusionRule;
 }
 
-impl ValidateBraidingSupport for TreeTransformOperationKey {
+impl ValidateBraidingSupport for TreeTransformOperation {
     fn validate_braiding_support<R>(&self, rule: &R) -> Result<(), OperationError>
     where
         R: FusionRule,

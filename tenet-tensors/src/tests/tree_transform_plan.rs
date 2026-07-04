@@ -201,7 +201,7 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
 
     let plan = build_unique_tree_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperationKey::transpose([1, 0], [0]),
+        TreeTransformOperation::transpose([1, 0], [0]),
         &src_structure,
         |src| {
             if src == &src_tree1 {
@@ -230,7 +230,7 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
 fn single_output_unique_tree_transform_helper_rejects_simple_fusion() {
     let src_key = fusion_tree_test_key([1, 1, 1], [1], 1, [false, false, false], [false]);
     let src_structure = packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::transpose([2, 1, 0], [0]);
+    let operation = TreeTransformOperation::transpose([2, 1, 0], [0]);
 
     let err = build_unique_tree_transform_group_plan(
         &SimpleSu2Rule,
@@ -277,7 +277,7 @@ fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
         ],
     )
     .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
     let plan = build_tree_transform_group_plan(&SimpleSu2Rule, operation, &src_structure, |src| {
         if src == &src_tree0 {
@@ -330,7 +330,7 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
         ],
     )
     .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
     let plan =
         build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation, &src_structure)
@@ -420,12 +420,22 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
-    let compiled =
-        tree_pair_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
+    let compiled = tree_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     assert!(compiled.has_pack_gemm_scatter_blocks());
-    tree_pair_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0).unwrap();
+    braid_into(
+        &SU2FusionRule,
+        [0, 2, 1, 3],
+        [],
+        [0, 1, 2, 3],
+        [],
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
 
     assert!((dst.data()[0] - 22.320_508_075_688_77).abs() < 1.0e-12);
     assert!((dst.data()[1] + 1.339_745_962_155_612_7).abs() < 1.0e-12);
@@ -469,8 +479,8 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
         structure.clone(),
     )
     .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let compiled = tree_pair_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let compiled = tree_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
@@ -524,7 +534,7 @@ fn tree_transform_structure_sorts_replay_blocks_by_tensorkit_weight() {
 }
 
 #[test]
-fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
+fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],
         Some(0),
@@ -558,8 +568,8 @@ fn tree_pair_transform_structure_replays_su2_recoupling_without_recompiling() {
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let structure = tree_pair_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let structure = tree_transform_structure(&SU2FusionRule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
     let expected = |initial: [f64; 2], source: [f64; 2], alpha: f64, beta: f64| {
@@ -625,7 +635,7 @@ fn tree_row_memo_survives_structure_change() {
         [2, 1],
         [1, 1, 1],
     );
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
     let make = |keys: &[BlockKey]| {
@@ -715,7 +725,7 @@ fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
     {
@@ -811,7 +821,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
         large_structure,
     )
     .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
     {
@@ -895,7 +905,7 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
@@ -973,7 +983,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     context
@@ -1034,7 +1044,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     context
@@ -1042,7 +1052,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
         .set_policy(OperationCachePolicy::task_local_lru(1));
 
     context
-        .tree_pair_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
@@ -1061,7 +1071,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
     assert_eq!(context.cache().structure_len(), 1);
 
     context
-        .tree_pair_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
+        .tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
@@ -1105,12 +1115,12 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
     let mut dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
     let mut context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
 
     context
-        .tree_pair_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
@@ -1156,7 +1166,7 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
 
     let plan = build_tree_pair_transform_group_plan(
         &SU2FusionRule,
-        TreeTransformOperationKey::permute([1], [0]),
+        TreeTransformOperation::permute([1], [0]),
         &src_structure,
     )
     .unwrap();
@@ -1205,9 +1215,7 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
     let mut dst =
         TensorMap::<f64, 1, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
             .unwrap();
-    let operation = TreeTransformOperationKey::permute([1], [0]);
-
-    tree_pair_transform_into(&SU2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
+    permute_into(&SU2FusionRule, [1], [0], &mut dst, &src, 3.0, 5.0).unwrap();
 
     assert_eq!(dst.structure().block(0).unwrap().key(), &expected_dst_key);
     assert!((dst.data()[0] - 31.0).abs() < 1.0e-12);
@@ -1254,9 +1262,9 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
         dst_structure,
     )
     .unwrap();
-    let operation = TreeTransformOperationKey::permute([1], [0]);
+    let operation = TreeTransformOperation::permute([1], [0]);
 
-    tree_pair_transform_into(
+    tree_transform_into(
         &SU2FusionRule,
         operation,
         &mut dst,
@@ -1277,7 +1285,7 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
 
     let local_domain_identity = build_tree_pair_transform_group_plan(
         &Z2FusionRule,
-        TreeTransformOperationKey::permute([1, 0], [0]),
+        TreeTransformOperation::permute([1, 0], [0]),
         &src_structure,
     )
     .unwrap_err();
@@ -1291,7 +1299,7 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
 
     build_tree_pair_transform_group_plan(
         &Z2FusionRule,
-        TreeTransformOperationKey::permute([1, 0], [2]),
+        TreeTransformOperation::permute([1, 0], [2]),
         &src_structure,
     )
     .unwrap();
@@ -1311,7 +1319,7 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
         [1],
     ));
     let src_tree = expect_tree_key(&src_key);
-    let operation = TreeTransformOperationKey::permute([0, 2], [1]);
+    let operation = TreeTransformOperation::permute([0, 2], [1]);
     let (dst_tree, coefficient) =
         unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
     let dst_key = BlockKey::from(dst_tree);
@@ -1325,7 +1333,7 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
         TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![2.0], dst_space, dst_structure)
             .unwrap();
 
-    tree_pair_transform_into(&Z2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
+    tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 3.0, 5.0).unwrap();
 
     assert_eq!(dst.structure().block(0).unwrap().key(), &dst_key);
     assert_eq!(dst.data(), &[3.0 * coefficient * 7.0 + 5.0 * 2.0]);
@@ -1345,7 +1353,7 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
         [1],
     ));
     let src_tree = expect_tree_key(&src_key);
-    let operation = TreeTransformOperationKey::permute([0, 2], [1]);
+    let operation = TreeTransformOperation::permute([0, 2], [1]);
     let (dst_tree, _) = unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
     let expected_missing = BlockKey::from(dst_tree);
     let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
@@ -1358,7 +1366,7 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
         TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, wrong_dst_structure)
             .unwrap();
 
-    let err = tree_pair_transform_structure(&Z2FusionRule, operation, &dst, &src).unwrap_err();
+    let err = tree_transform_structure(&Z2FusionRule, operation, &dst, &src).unwrap_err();
 
     assert_eq!(
         err,
@@ -1376,7 +1384,7 @@ fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() 
 
     let plan = build_tree_pair_transform_group_plan(
         &rule,
-        TreeTransformOperationKey::permute([1, 0], [2]),
+        TreeTransformOperation::permute([1, 0], [2]),
         src_structure,
     )
     .unwrap();
@@ -1391,7 +1399,7 @@ fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() 
 #[test]
 fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
             .unwrap();
@@ -1415,7 +1423,7 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
         expected[dst_offset] += 2.0 * spec.coefficients_src_by_dst()[0] * src.data()[src_offset];
     }
 
-    tree_pair_transform_into(&rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
+    tree_transform_into(&rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
 
     assert_eq!(dst.structure(), dst_space.subblock_structure());
     for (actual, expected) in dst.data().iter().zip(expected) {
@@ -1429,7 +1437,7 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
 #[test]
 fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
         vec![Complex64::new(10.0, 1.0), Complex64::new(20.0, -2.0)],
         src_space.clone(),
@@ -1461,16 +1469,16 @@ fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
                 * alpha;
     }
 
-    tree_pair_transform_into(&rule, operation, &mut dst, &src, alpha, beta).unwrap();
+    tree_transform_into(&rule, operation, &mut dst, &src, alpha, beta).unwrap();
 
     assert_eq!(dst.structure(), dst_space.subblock_structure());
     assert_eq!(dst.data(), expected.as_slice());
 }
 
 #[test]
-fn tree_pair_transform_structure_replays_product_without_recompiling() {
+fn tree_transform_structure_replays_product_without_recompiling() {
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let mut src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
             .unwrap();
@@ -1479,7 +1487,7 @@ fn tree_pair_transform_structure_replays_product_without_recompiling() {
             .unwrap();
     let plan =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), src.structure()).unwrap();
-    let structure = tree_pair_transform_structure(&rule, operation, &dst, &src).unwrap();
+    let structure = tree_transform_structure(&rule, operation, &dst, &src).unwrap();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
 
@@ -1548,7 +1556,7 @@ fn tree_pair_transform_structure_replays_product_without_recompiling() {
 fn tree_pair_transform_context_accepts_custom_host_storage() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src = test_host_read_fusion_tensor_map(vec![10.0_f64, 20.0], src_space);
     let mut dst = test_host_fusion_tensor_map(vec![1.0_f64, 2.0], dst_space);
     let plan =
@@ -1564,7 +1572,7 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
     );
     let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
 
-    tree_pair_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, 2.0, 3.0)
+    tree_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, 2.0, 3.0)
         .unwrap();
 
     assert_eq!(context.cache().plan_len(), 1);
@@ -1581,7 +1589,7 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
 fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
             .unwrap();
@@ -1637,14 +1645,14 @@ fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
     let structure = cache
         .get_or_compile_tree_pair(
             &rule,
-            TreeTransformOperationKey::permute([1, 0], [2]),
+            TreeTransformOperation::permute([1, 0], [2]),
             &dst,
             &src,
         )
         .unwrap();
     let plan = build_tree_pair_transform_group_plan(
         &rule,
-        TreeTransformOperationKey::permute([1, 0], [2]),
+        TreeTransformOperation::permute([1, 0], [2]),
         src.structure(),
     )
     .unwrap();
@@ -1681,7 +1689,7 @@ fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
 fn tree_pair_transform_context_storage_workspace_replays_and_caches_product_transform() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let allocations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let src =
         TensorMap::<f64, 2, 1, Trivial, TrackingStorage<f64>>::from_storage_with_fusion_space(
@@ -1713,7 +1721,7 @@ fn tree_pair_transform_context_storage_workspace_replays_and_caches_product_tran
     >::default();
 
     context
-        .tree_pair_transform_into_storage_workspace(
+        .tree_transform_into_storage_workspace(
             &mut storage_workspace,
             &rule,
             operation,
@@ -1738,7 +1746,7 @@ fn tree_pair_transform_context_storage_workspace_replays_and_caches_product_tran
 fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
-    let operation = TreeTransformOperationKey::permute([1, 0], [2]);
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
     let mut src =
         TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space.clone())
             .unwrap();
@@ -1759,7 +1767,7 @@ fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
     );
 
     context
-        .tree_pair_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0)
+        .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0)
         .unwrap();
 
     assert_eq!(context.cache().plan_len(), 1);
@@ -1782,16 +1790,8 @@ fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
         -1.0,
         0.5,
     );
-    tree_pair_transform_into_with_context(
-        &mut context,
-        &rule,
-        operation,
-        &mut dst,
-        &src,
-        -1.0,
-        0.5,
-    )
-    .unwrap();
+    tree_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, -1.0, 0.5)
+        .unwrap();
 
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
@@ -1816,9 +1816,9 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
     let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
 
     context
-        .tree_pair_transform_into(
+        .tree_transform_into(
             &rule,
-            TreeTransformOperationKey::permute([1, 0], [2]),
+            TreeTransformOperation::permute([1, 0], [2]),
             &mut dst,
             &src,
             1.0,
@@ -1830,9 +1830,9 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
 
     dst.data_mut().copy_from_slice(&[1.0, 2.0]);
     context
-        .tree_pair_transform_into(
+        .tree_transform_into(
             &rule,
-            TreeTransformOperationKey::braid([1, 0], [2], [1, 0], [2]),
+            TreeTransformOperation::braid([1, 0], [2], [1, 0], [2]),
             &mut dst,
             &src,
             1.0,
@@ -1848,7 +1848,7 @@ fn tree_transform_execution_context_misses_on_different_tree_pair_operation() {
 fn unique_tree_transform_plan_builder_rejects_generic_fusion() {
     let src_key = fusion_tree_test_key([1, 1], [1], 1, [false, false], [false]);
     let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0]);
+    let operation = TreeTransformOperation::braid([1, 0], [0], [1, 0], [0]);
 
     let err = build_unique_tree_transform_group_plan(
         &GenericMultiplicityRule,
@@ -1871,18 +1871,16 @@ fn unique_tree_transform_plan_builder_rejects_generic_fusion() {
 
 #[test]
 fn tree_transform_operation_key_distinguishes_permute_from_explicit_braid() {
-    assert!(TreeTransformOperationKey::permute([1, 0], [0]).requires_symmetric_braiding());
-    assert!(!TreeTransformOperationKey::transpose([1, 0], [0]).requires_symmetric_braiding());
-    assert!(
-        !TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0]).requires_symmetric_braiding()
-    );
+    assert!(TreeTransformOperation::permute([1, 0], [0]).requires_symmetric_braiding());
+    assert!(!TreeTransformOperation::transpose([1, 0], [0]).requires_symmetric_braiding());
+    assert!(!TreeTransformOperation::braid([1, 0], [0], [1, 0], [0]).requires_symmetric_braiding());
 }
 
 #[test]
 fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding() {
     let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
     let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::permute([1, 0], [0]);
+    let operation = TreeTransformOperation::permute([1, 0], [0]);
 
     let err = build_unique_tree_transform_group_plan(
         &UniqueAnyonicRule,
@@ -1911,7 +1909,7 @@ fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_lo
 
     let plan = build_unique_tree_transform_group_plan(
         &UniquePlanarRule,
-        TreeTransformOperationKey::braid([1, 0], [0], [1, 0], [0]),
+        TreeTransformOperation::braid([1, 0], [0], [1, 0], [0]),
         &src_structure,
         |src| Ok((src.clone(), 1.0_f64)),
     )
@@ -1934,7 +1932,7 @@ fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueAnyonicRule,
-        TreeTransformOperationKey::braid([1, 0], Vec::<usize>::new(), [0, 1], Vec::<usize>::new()),
+        TreeTransformOperation::braid([1, 0], Vec::<usize>::new(), [0, 1], Vec::<usize>::new()),
         &src_structure,
     )
     .unwrap();
@@ -1955,7 +1953,7 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+        TreeTransformOperation::permute([1, 0], Vec::<usize>::new()),
         &src_structure,
     )
     .unwrap();
@@ -1970,7 +1968,7 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
     let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::braid([1, 0], [0], [0, 1], [0]);
+    let operation = TreeTransformOperation::braid([1, 0], [0], [0, 1], [0]);
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
@@ -2002,7 +2000,7 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+        TreeTransformOperation::permute([1, 0], Vec::<usize>::new()),
         &src_structure,
     )
     .unwrap();
@@ -2023,7 +2021,7 @@ fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+        TreeTransformOperation::permute([1, 0], Vec::<usize>::new()),
         &src_structure,
     )
     .unwrap_err();
@@ -2041,7 +2039,7 @@ fn unique_all_codomain_plan_builder_rejects_nonempty_domain_tree() {
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new()),
+        TreeTransformOperation::permute([1, 0], Vec::<usize>::new()),
         &src_structure,
     )
     .unwrap_err();
@@ -2056,7 +2054,7 @@ fn unique_all_codomain_plan_builder_rejects_nonempty_domain_tree() {
 fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
     let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::permute([1, 0], Vec::<usize>::new());
+    let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
         &UniqueAnyonicRule,
@@ -2103,7 +2101,7 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
 
     let plan = build_unique_tree_pair_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperationKey::permute([0], [2, 1]),
+        TreeTransformOperation::permute([0], [2, 1]),
         &src_structure,
     )
     .unwrap();
@@ -2143,7 +2141,7 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
 
     let plan = build_unique_tree_pair_transform_group_plan(
         &UniqueAnyonicRule,
-        TreeTransformOperationKey::braid([1], [0], [0], [1]),
+        TreeTransformOperation::braid([1], [0], [0], [1]),
         &src_structure,
     )
     .unwrap();
@@ -2169,7 +2167,7 @@ fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
     ));
     let expected_dst_key = src_key.clone();
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::transpose([1], [0]);
+    let operation = TreeTransformOperation::transpose([1], [0]);
 
     let plan =
         build_unique_tree_pair_transform_group_plan(&UniqueZ2Rule, operation, &src_structure)
@@ -2206,7 +2204,7 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
         [1],
     ));
     let src_structure = packed_fixture_structure(4, [(src_key.clone(), vec![1, 1, 1, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::transpose([2, 0], [3, 1]);
+    let operation = TreeTransformOperation::transpose([2, 0], [3, 1]);
 
     let plan =
         build_unique_tree_pair_transform_group_plan(&UniqueZ2Rule, operation, &src_structure)
@@ -2634,10 +2632,8 @@ fn tree_transform_group_plan_compiles_across_degeneracy_shapes_without_layout_le
     )
     .unwrap();
     let plan = TreeTransformGroupPlan::new(vec![spec]);
-    let key = TreeTransformGroupPlanKey::from_plan(
-        TreeTransformOperationKey::transpose([1, 0], [0]),
-        &plan,
-    );
+    let key =
+        TreeTransformGroupPlanKey::from_plan(TreeTransformOperation::transpose([1, 0], [0]), &plan);
     let large_spec = TreeTransformGroupBlockSpec::from_block_groups(
         &dst_large,
         &dst_large.fusion_tree_groups()[0],
@@ -2648,7 +2644,7 @@ fn tree_transform_group_plan_compiles_across_degeneracy_shapes_without_layout_le
     .unwrap();
     let large_plan = TreeTransformGroupPlan::new(vec![large_spec]);
     let large_key = TreeTransformGroupPlanKey::from_plan(
-        TreeTransformOperationKey::transpose([1, 0], [0]),
+        TreeTransformOperation::transpose([1, 0], [0]),
         &large_plan,
     );
     let mut cache = TreeTransformGroupPlanCache::new();
@@ -2684,19 +2680,19 @@ fn tree_transform_group_plan_cache_key_tracks_operation_but_not_coefficients() {
     )]);
 
     let transpose = TreeTransformGroupPlanKey::from_plan(
-        TreeTransformOperationKey::transpose([1, 0], [0]),
+        TreeTransformOperation::transpose([1, 0], [0]),
         &plan_a,
     );
     let same_operation_different_coefficients = TreeTransformGroupPlanKey::from_plan(
-        TreeTransformOperationKey::transpose([1, 0], [0]),
+        TreeTransformOperation::transpose([1, 0], [0]),
         &plan_b,
     );
     let different_permutation = TreeTransformGroupPlanKey::from_plan(
-        TreeTransformOperationKey::transpose([0, 1], [0]),
+        TreeTransformOperation::transpose([0, 1], [0]),
         &plan_a,
     );
     let braid = TreeTransformGroupPlanKey::from_plan(
-        TreeTransformOperationKey::braid([1, 0], [0], [2], [0]),
+        TreeTransformOperation::braid([1, 0], [0], [2], [0]),
         &plan_a,
     );
 
@@ -2719,7 +2715,7 @@ fn tree_transform_sector_plan_key_is_rule_scope_and_source_sector_only() {
     .unwrap();
     let src_large =
         packed_fixture_structure(2, [(src_key1, vec![3, 1]), (src_key2, vec![3, 1])]).unwrap();
-    let operation = TreeTransformOperationKey::transpose([1, 0], [0]);
+    let operation = TreeTransformOperation::transpose([1, 0], [0]);
 
     let z2_small =
         TreeTransformSectorPlanKey::tree_pair(&Z2FusionRule, operation.clone(), &src_small)
@@ -2766,7 +2762,7 @@ fn tree_transform_structure_cache_key_tracks_concrete_layout() {
     .unwrap();
     let plan_key = TreeTransformSectorPlanKey::tree_pair(
         &Z2FusionRule,
-        TreeTransformOperationKey::transpose([1, 0], [0]),
+        TreeTransformOperation::transpose([1, 0], [0]),
         &src,
     )
     .unwrap();
