@@ -13,10 +13,13 @@ use tenet_tensors::OperationError;
 /// or mixing runtimes).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
-    /// Structural error bubbled up from `tenet-core`.
-    Core(CoreError),
-    /// Execution error bubbled up from the expert operation layer.
-    Operation(OperationError),
+    /// Structural error bubbled up from `tenet-core` (boxed: the expert
+    /// error types are large, and boxing keeps `Result<_, Error>` returns
+    /// small — the `clippy::result_large_err` fix).
+    Core(Box<CoreError>),
+    /// Execution error bubbled up from the expert operation layer (boxed,
+    /// same reason).
+    Operation(Box<OperationError>),
     /// The operands carry different fusion rules (e.g. U1 vs Z2).
     RuleMismatch,
     /// The operands belong to different [`crate::prelude::Runtime`]s.
@@ -60,12 +63,12 @@ impl std::error::Error for Error {}
 
 impl From<CoreError> for Error {
     fn from(err: CoreError) -> Self {
-        Self::Core(err)
+        Self::Core(Box::new(err))
     }
 }
 
 impl From<OperationError> for Error {
     fn from(err: OperationError) -> Self {
-        Self::Operation(err)
+        Self::Operation(Box::new(err))
     }
 }
