@@ -32,6 +32,14 @@ where
 {
     type Workspace;
 
+    /// Worker count this backend is configured to run transforms with.
+    /// The execution context mirrors it into the plan-compile cache, so the
+    /// one configured knob drives both replay and compile parallelism;
+    /// backends without a thread setting stay serial.
+    fn transform_threads(&self) -> usize {
+        1
+    }
+
     fn tree_transform_structure_into<
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -424,6 +432,11 @@ where
     C: Copy + Sync,
 {
     type Workspace = TreeTransformWorkspace<D>;
+
+    #[inline]
+    fn transform_threads(&self) -> usize {
+        DenseTreeTransformOperations::transform_threads(self)
+    }
 
     fn tree_transform_structure_into<
         const DST_NOUT: usize,

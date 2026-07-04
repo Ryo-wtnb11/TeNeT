@@ -615,6 +615,77 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
 }
 
 #[test]
+fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
+    // TensorKit treetransformers.jl:69-90 parity: threaded transformer
+    // construction must produce the same transformer as the serial build.
+    // The parallel path only prefills the tree-row memo; assembly is the
+    // serial code, so the plans must be *equal*, not just numerically close.
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+    };
+
+    let key = |coupled: usize, inner: [usize; 2]| {
+        all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(coupled),
+            [false, false, false, false],
+            inner,
+            [1, 1, 1],
+        )
+    };
+    let keys = [
+        key(0, [0, 1]),
+        key(0, [2, 1]),
+        key(2, [2, 1]),
+        key(2, [2, 3]),
+    ];
+    let src_structure = packed_fixture_structure(
+        4,
+        keys.iter().map(|key| (key.clone(), vec![1usize, 1, 1, 1])),
+    )
+    .unwrap();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+
+    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+            &SU2FusionRule,
+            &rule_key,
+            operation.clone(),
+            &src_structure,
+            memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        )
+        .unwrap();
+        (plan, hits, misses)
+    };
+
+    let mut serial_memo = TreePairRowMemo::default();
+    let (serial_plan, serial_hits, serial_misses) = build(1, &mut serial_memo);
+    let mut parallel_memo = TreePairRowMemo::default();
+    let (parallel_plan, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
+
+    assert_eq!(parallel_plan, serial_plan);
+    // Stats semantics are unchanged: prefilled rows still count as misses.
+    assert_eq!(
+        (parallel_hits, parallel_misses),
+        (serial_hits, serial_misses)
+    );
+    assert!(parallel_misses > 0);
+    assert_eq!(parallel_memo.len(), serial_memo.len());
+
+    // Warm memo: a second parallel build finds every row prefetched-free.
+    let (warm_plan, warm_hits, warm_misses) = build(8, &mut parallel_memo);
+    assert_eq!(warm_plan, serial_plan);
+    assert_eq!(warm_hits, parallel_misses);
+    assert_eq!(warm_misses, 0);
+}
+
+#[test]
 fn tree_row_memo_survives_structure_change() {
     // TensorKit fstranspose/fsbraid cache parity: a truncation step changes the tree
     // subset of a structure, so the sector-keyed plan cache misses — but

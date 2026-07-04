@@ -7,7 +7,8 @@ use tenet_core::{
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
     multiplicity_free_transpose_tree_pair, BlockKey, BlockStructure, FusionRule,
-    FusionTreeBlockKey, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    FusionTreeBlockGroup, FusionTreeBlockKey, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -423,6 +424,10 @@ where
 /// Memoized plan build: recoupling rows come from a shape-independent
 /// tree-granular memo (TensorKit `fstranspose`/`fsbraid` `@cached` analog), so recompiling
 /// for a new degeneracy pattern reuses every F/R-symbol contraction.
+///
+/// `threads <= 1` is the untouched serial path; `threads > 1` runs the
+/// parallel compile (see [`build_tree_pair_transform_group_plan_parallel`]),
+/// which produces a plan identical to the serial build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized<R, RuleKey>(
     rule: &R,
@@ -432,12 +437,25 @@ pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized<R,
     memo: &mut TreePairRowMemo<R::Scalar, RuleKey>,
     memo_hits: &mut usize,
     memo_misses: &mut usize,
+    threads: usize,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     RuleKey: Clone + Eq + std::hash::Hash,
 {
+    if threads > 1 {
+        return build_tree_pair_transform_group_plan_parallel(
+            rule,
+            rule_key,
+            operation,
+            src_structure,
+            memo,
+            memo_hits,
+            memo_misses,
+            threads,
+        );
+    }
     build_multiplicity_free_tree_pair_transform_group_plan_with_rows(
         rule,
         operation,
@@ -454,6 +472,126 @@ where
             Ok(rows)
         },
     )
+}
+
+/// Parallel plan compile: the analog of TensorKit's threaded
+/// `TreeTransformer` construction (`treetransformers.jl:69-90`, one work
+/// item per fusion block over `min(nthreads, nblocks)` workers), on rayon's
+/// global pool — the pool strided-kernel's threaded kernels and the parallel
+/// replay already use — with `with_min_len` bounding the split count to
+/// `threads`.
+///
+/// Two parallel phases with a serial merge between them, so the memo needs
+/// no locks and the workspace `unsafe` ban is never tested:
+///
+/// 1. recoupling rows for memo-missing source trees, one work item per tree
+///    (the F/R-symbol contractions, the dominant compile cost), collected
+///    into a plain `Vec`;
+/// 2. serial: stats + memo insertion in block order (identical counts and
+///    entries to the serial build);
+/// 3. group spec assembly (dst-key dedup + coefficient matrix), one work
+///    item per fusion-tree group, reading the now-complete memo.
+///
+/// TensorKit gates construction threading on the thread count alone — row
+/// cost scales with tree count, not degeneracy, so the replay byte-length
+/// gate does not apply; a single missing row / single group degenerates to
+/// a serial chunk by construction.
+#[allow(clippy::too_many_arguments)]
+fn build_tree_pair_transform_group_plan_parallel<R, RuleKey>(
+    rule: &R,
+    rule_key: &RuleKey,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+    memo: &mut TreePairRowMemo<R::Scalar, RuleKey>,
+    memo_hits: &mut usize,
+    memo_misses: &mut usize,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: Clone + Eq + std::hash::Hash,
+{
+    use rayon::prelude::*;
+
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    let source_axes = operation_source_axes(&operation);
+    let groups = src_structure.fusion_tree_groups();
+
+    // Memo-missing source trees, in block order (block keys are unique
+    // within a structure, so no dedup is needed). `rows_by_src` collects
+    // this structure's rows keyed by tree only: phase 3 workers read it
+    // instead of the memo, so the memo's RuleKey never crosses threads.
+    let mut missing = Vec::new();
+    let mut rows_by_src =
+        HashMap::<FusionTreeBlockKey, Arc<Vec<(FusionTreeBlockKey, R::Scalar)>>>::new();
+    for group in &groups {
+        for &src_block_index in group.block_indices() {
+            let block = src_structure.block(src_block_index)?;
+            let BlockKey::FusionTree(src_key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index: src_block_index,
+                });
+            };
+            let memo_key = (rule_key.clone(), operation.clone(), src_key.clone());
+            if let Some(rows) = memo.get(&memo_key) {
+                *memo_hits += 1;
+                rows_by_src.insert(src_key.clone(), Arc::clone(rows));
+            } else {
+                *memo_misses += 1;
+                missing.push((memo_key, src_key.clone()));
+            }
+        }
+    }
+
+    // Phase 1 (parallel): rows for the missing trees. The RuleKey is not
+    // needed inside the workers (and carries no Send/Sync bound), so the
+    // memo keys stay on this thread and zip back up in order afterwards.
+    let (memo_keys, missing_src_keys): (Vec<_>, Vec<_>) = missing.into_iter().unzip();
+    let chunk = missing_src_keys.len().div_ceil(threads).max(1);
+    let computed: Vec<(
+        FusionTreeBlockKey,
+        Arc<Vec<(FusionTreeBlockKey, R::Scalar)>>,
+    )> = missing_src_keys
+        .into_par_iter()
+        .with_min_len(chunk)
+        .map(|src_key| {
+            let rows = transformed_tree_pair_rows(rule, &operation, &src_key)?;
+            Ok((src_key, Arc::new(rows)))
+        })
+        .collect::<Result<_, OperationError>>()?;
+    // Phase 2 (serial): memo insertion, preserving block order.
+    for (memo_key, (src_key, rows)) in memo_keys.into_iter().zip(computed) {
+        rows_by_src.insert(src_key, Arc::clone(&rows));
+        memo.insert(memo_key, rows);
+    }
+
+    // Phase 3 (parallel): per-group spec assembly against the now-complete
+    // memo (every source tree was either a hit or inserted above).
+    let group_chunk = groups.len().div_ceil(threads).max(1);
+    let specs = groups
+        .into_par_iter()
+        .with_min_len(group_chunk)
+        .map(|group| {
+            assemble_tree_pair_group_spec(src_structure, &group, &source_axes, &mut |src_key| {
+                match rows_by_src.get(src_key) {
+                    Some(rows) => Ok(Arc::clone(rows)),
+                    // Unreachable by construction (every tree was collected
+                    // above); recomputing is pure, so stay correct anyway.
+                    None => transformed_tree_pair_rows(rule, &operation, src_key).map(Arc::new),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+
+    Ok(TreeTransformGroupPlan::new(specs))
 }
 
 fn build_multiplicity_free_tree_pair_transform_group_plan_with_rows<R, F>(
@@ -481,59 +619,79 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        let src_block_indices = group.block_indices();
-        let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
-        let mut dst_keys = Vec::<BlockKey>::new();
-        let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
-        let mut rows = Vec::<Vec<R::Scalar>>::new();
-
-        for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
-            let block = src_structure.block(src_block_index)?;
-            let BlockKey::FusionTree(src_key) = block.key() else {
-                return Err(OperationError::ExpectedFusionTreeBlock {
-                    tensor: "src",
-                    index: src_block_index,
-                });
-            };
-            src_keys.push(BlockKey::from(src_key.clone()));
-
-            let transformed = rows_for(&operation, src_key)?;
-
-            for row in &mut rows {
-                row.push(R::Scalar::zero());
-            }
-            for (dst_tree_key, coefficient) in transformed.iter() {
-                let dst_key = BlockKey::from(dst_tree_key.clone());
-                let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
-                    dst_row
-                } else {
-                    let dst_row = dst_keys.len();
-                    dst_index_by_key.insert(dst_key.clone(), dst_row);
-                    dst_keys.push(dst_key);
-                    rows.push(vec![R::Scalar::zero(); src_column + 1]);
-                    dst_row
-                };
-                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
-            }
-        }
-
-        let src_count = src_keys.len();
-        let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
-        for row in rows {
-            recoupling_coefficients_dst_src.extend(row);
-        }
-        specs.push(
-            TreeTransformGroupBlockSpec::multi(
-                group.group_key().clone(),
-                dst_keys,
-                src_keys,
-                recoupling_coefficients_dst_src,
-            )
-            .with_source_axes(source_axes.clone()),
-        );
+        specs.push(assemble_tree_pair_group_spec(
+            src_structure,
+            &group,
+            &source_axes,
+            &mut |src_key| rows_for(&operation, src_key),
+        )?);
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+/// Assemble one group's block spec (destination-key dedup plus the
+/// `U[dst, src]` recoupling coefficient matrix) from per-tree recoupling
+/// rows. Groups are independent, which is what lets the parallel compile map
+/// over them.
+fn assemble_tree_pair_group_spec<T, F>(
+    src_structure: &BlockStructure,
+    group: &FusionTreeBlockGroup,
+    source_axes: &[usize],
+    rows_for: &mut F,
+) -> Result<TreeTransformGroupBlockSpec<T>, OperationError>
+where
+    T: Clone + Add<Output = T> + Zero,
+    F: FnMut(&FusionTreeBlockKey) -> Result<Arc<Vec<(FusionTreeBlockKey, T)>>, OperationError>,
+{
+    let src_block_indices = group.block_indices();
+    let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
+    let mut dst_keys = Vec::<BlockKey>::new();
+    let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+    let mut rows = Vec::<Vec<T>>::new();
+
+    for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
+        let block = src_structure.block(src_block_index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index: src_block_index,
+            });
+        };
+        src_keys.push(BlockKey::from(src_key.clone()));
+
+        let transformed = rows_for(src_key)?;
+
+        for row in &mut rows {
+            row.push(T::zero());
+        }
+        for (dst_tree_key, coefficient) in transformed.iter() {
+            let dst_key = BlockKey::from(dst_tree_key.clone());
+            let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
+                dst_row
+            } else {
+                let dst_row = dst_keys.len();
+                dst_index_by_key.insert(dst_key.clone(), dst_row);
+                dst_keys.push(dst_key);
+                rows.push(vec![T::zero(); src_column + 1]);
+                dst_row
+            };
+            rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
+        }
+    }
+
+    let src_count = src_keys.len();
+    let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
+    for row in rows {
+        recoupling_coefficients_dst_src.extend(row);
+    }
+    Ok(TreeTransformGroupBlockSpec::multi(
+        group.group_key().clone(),
+        dst_keys,
+        src_keys,
+        recoupling_coefficients_dst_src,
+    )
+    .with_source_axes(source_axes.to_vec()))
 }
 
 #[cfg(test)]

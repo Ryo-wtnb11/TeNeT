@@ -243,6 +243,10 @@ pub struct TreeTransformCache<T, RuleKey> {
     // survives degeneracy changes, so chi sweeps recompile plans without
     // recomputing F/R-symbol contractions (TensorKit @cached fstranspose/fsbraid).
     tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
+    // Worker count for plan compilation (missing tree-row computation).
+    // Not a second knob: the execution context propagates the backend's
+    // `transform_threads` here, so one setting drives replay and compile.
+    transform_threads: usize,
 }
 
 pub type TreePairTransformCache<T, RuleKey> = TreeTransformCache<T, RuleKey>;
@@ -314,6 +318,7 @@ impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
             policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
+            transform_threads: 1,
         }
     }
 }
@@ -335,7 +340,21 @@ where
             policy,
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
+            transform_threads: 1,
         }
+    }
+
+    #[inline]
+    pub fn transform_threads(&self) -> usize {
+        self.transform_threads
+    }
+
+    /// Plan-compile worker count; the execution context keeps this in sync
+    /// with the backend's `transform_threads`, so the one configured knob
+    /// drives both replay and compile parallelism. `threads <= 1` is the
+    /// untouched serial compile path.
+    pub fn set_transform_threads(&mut self, threads: usize) {
+        self.transform_threads = threads.max(1);
     }
 
     #[inline]
@@ -535,6 +554,7 @@ where
                 &mut self.tree_rows,
                 &mut self.stats.tree_row_hits,
                 &mut self.stats.tree_row_misses,
+                self.transform_threads,
             )?;
             self.insert_plan(plan_key.clone(), plan);
         }
@@ -603,6 +623,7 @@ where
                 &mut self.tree_rows,
                 &mut self.stats.tree_row_hits,
                 &mut self.stats.tree_row_misses,
+                self.transform_threads,
             )?;
             self.insert_plan(plan_key.clone(), plan);
         }
@@ -672,6 +693,7 @@ where
                 &mut self.tree_rows,
                 &mut self.stats.tree_row_hits,
                 &mut self.stats.tree_row_misses,
+                self.transform_threads,
             )?;
             self.insert_plan(plan_key.clone(), plan);
         }

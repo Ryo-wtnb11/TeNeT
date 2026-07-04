@@ -1379,7 +1379,11 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
     ) -> Self::Scalar;
 }
 
-pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols {
+// `Sync` because the tree-transform plan compile computes recoupling rows
+// for independent source trees in parallel, sharing the rule across workers
+// (TensorKit threaded transformer construction parity: sector types are
+// plain shareable data). All rule implementations are plain data.
+pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar;
 
     fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
@@ -1723,7 +1727,8 @@ impl<LeftRule, RightRule, Codec> MultiplicityFreeRigidSymbols
 where
     LeftRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
     RightRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    Codec: ProductSectorCodec,
+    // Sync via the trait's supertrait; the codec is a PhantomData marker.
+    Codec: ProductSectorCodec + Sync,
 {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
