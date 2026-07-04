@@ -18,9 +18,9 @@ pub mod prelude {
     pub use crate::error::Error;
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::space::Space;
-    pub use crate::tensor::Tensor;
+    pub use crate::tensor::{EighTrunc, SvdTrunc, Tensor};
     pub use tenet_core::{BlockKey, FusionTreeBlockKey, SectorId};
-    pub use tenet_matrixalgebra::Truncation;
+    pub use tenet_matrixalgebra::{SectorSpectrum, Truncation};
 }
 
 pub mod core {

@@ -27,6 +27,9 @@ pub(crate) struct RuntimeState {
     pub(crate) fz2: Ctx<BuiltinKey>,
     pub(crate) su2: Ctx<BuiltinKey>,
     pub(crate) u1_fz2: Ctx<ProductKey>,
+    /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
+    /// coupled-sector matrices), shared by all decomposition methods.
+    pub(crate) dense: tenet_dense::DefaultDenseExecutor,
 }
 
 /// Dispatches on a [`crate::space::RuleKind`], binding `$rule` to the

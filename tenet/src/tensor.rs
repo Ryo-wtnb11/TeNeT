@@ -16,11 +16,36 @@ use tenet_core::{
     BlockKey, BlockStructure, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     SectorId,
 };
+use tenet_matrixalgebra::{DynFactor, SectorSpectrum, Truncation};
 use tenet_tensors::{DynamicFusionMapSpace, TensorContractSpec, TreeTransformOperation};
 
 use crate::error::Error;
 use crate::runtime::{with_rule_ctx, Runtime};
 use crate::space::{with_rule, RuleKind, Space};
+
+/// Result of [`Tensor::svd_trunc`]: `t ~ u * s * vh` with the truncated bond
+/// (TensorKit 0.17 / MatrixAlgebraKit `svd_trunc`). `singular_values` holds
+/// the kept per-sector spectra and `error` the quantum-dimension-weighted
+/// 2-norm of everything discarded.
+#[derive(Clone, Debug)]
+pub struct SvdTrunc {
+    pub u: Tensor,
+    pub s: Tensor,
+    pub vh: Tensor,
+    pub singular_values: Vec<SectorSpectrum>,
+    pub error: f64,
+}
+
+/// Result of [`Tensor::eigh_trunc`]: `t ~ v * d * v^H` with the truncated
+/// bond; `error` is the quantum-dimension-weighted 2-norm of the discarded
+/// eigenvalues.
+#[derive(Clone, Debug)]
+pub struct EighTrunc {
+    pub d: Tensor,
+    pub v: Tensor,
+    pub eigenvalues: Vec<SectorSpectrum>,
+    pub error: f64,
+}
 
 /// Degeneracy table of one tensor leg, keyed by the *internal* sectors of
 /// the corresponding hom-space [`tenet_core::SectorLeg`]. Used only while
@@ -638,5 +663,286 @@ impl Tensor {
             ));
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Decompositions and matrix functions (TensorKit 0.17 / MatrixAlgebraKit
+    // names, transparently over the tenet-matrixalgebra dynamic cores).
+    // -----------------------------------------------------------------------
+
+    /// Wraps a dynamic factor produced by the matrixalgebra layer.
+    fn from_dyn(&self, (space, data): DynFactor<f64>) -> Self {
+        Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::new(space),
+            data,
+        }
+    }
+
+    /// Compact SVD `t = u * s * vh` (MatrixAlgebraKit `svd_compact`):
+    /// per coupled sector the bond is `min(rows, cols)`.
+    pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::svd_compact_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((
+            self.from_dyn(out.u),
+            self.from_dyn(out.s),
+            self.from_dyn(out.vh),
+        ))
+    }
+
+    /// Full SVD `t = u * s * vh` (MatrixAlgebraKit `svd_full`): square
+    /// unitaries per sector, rectangular diagonal `s`.
+    pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::svd_full_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((
+            self.from_dyn(out.u),
+            self.from_dyn(out.s),
+            self.from_dyn(out.vh),
+        ))
+    }
+
+    /// Truncated SVD (MatrixAlgebraKit `svd_trunc`); see [`SvdTrunc`].
+    pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::svd_trunc_dyn(
+                &mut state.dense,
+                rule,
+                &self.space,
+                &self.data,
+                truncation,
+            )
+        })?;
+        Ok(SvdTrunc {
+            u: self.from_dyn(out.u),
+            s: self.from_dyn(out.s),
+            vh: self.from_dyn(out.vh),
+            singular_values: out.singular_values,
+            error: out.error,
+        })
+    }
+
+    /// All singular values per coupled sector, descending (MatrixAlgebraKit
+    /// `svd_vals`).
+    pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::svd_vals_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })
+        .map_err(Into::into)
+    }
+
+    /// Compact QR `t = q * r` (MatrixAlgebraKit `qr_compact`): `q` has
+    /// orthonormal columns per coupled sector.
+    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let (q, r) = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::qr_compact_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((self.from_dyn(q), self.from_dyn(r)))
+    }
+
+    /// Full QR `t = q * r` (MatrixAlgebraKit `qr_full`): square `q` per
+    /// sector.
+    pub fn qr_full(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let (q, r) = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::qr_full_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((self.from_dyn(q), self.from_dyn(r)))
+    }
+
+    /// Compact LQ `t = l * q` (MatrixAlgebraKit `lq_compact`): `q` has
+    /// orthonormal rows per coupled sector.
+    pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let (l, q) = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::lq_compact_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((self.from_dyn(l), self.from_dyn(q)))
+    }
+
+    /// Full LQ `t = l * q` (MatrixAlgebraKit `lq_full`): square `q` per
+    /// sector.
+    pub fn lq_full(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let (l, q) = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::lq_full_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((self.from_dyn(l), self.from_dyn(q)))
+    }
+
+    /// Left isometry factorization `t = v * c` (TensorKit 0.17 `left_orth`,
+    /// default QR kind): `v` isometric, `c` the corestriction.
+    pub fn left_orth(&self) -> Result<(Self, Self), Error> {
+        self.qr_compact()
+    }
+
+    /// Right isometry factorization `t = c * vh` (TensorKit 0.17
+    /// `right_orth`, default LQ kind): `vh` has orthonormal rows.
+    pub fn right_orth(&self) -> Result<(Self, Self), Error> {
+        self.lq_compact()
+    }
+
+    /// Left null space `n : codomain <- W` with `n^H * t = 0` (MatrixAlgebraKit
+    /// `left_null`).
+    pub fn left_null(&self) -> Result<Self, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::left_null_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok(self.from_dyn(out))
+    }
+
+    /// Right null space `n : W <- domain` with `t * n^H = 0` (MatrixAlgebraKit
+    /// `right_null`).
+    pub fn right_null(&self) -> Result<Self, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::right_null_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok(self.from_dyn(out))
+    }
+
+    /// Left polar decomposition `t = w * p` (MatrixAlgebraKit `left_polar`):
+    /// `w` isometric, `p` positive on the domain.
+    pub fn left_polar(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let (w, p) = with_rule_ctx!(self.rule, state, rule, ctx, {
+            tenet_matrixalgebra::left_polar_dyn(
+                &mut state.dense,
+                ctx,
+                rule,
+                &self.space,
+                &self.data,
+            )
+        })?;
+        Ok((self.from_dyn(w), self.from_dyn(p)))
+    }
+
+    /// Right polar decomposition `t = p * w` (MatrixAlgebraKit
+    /// `right_polar`): `p` positive on the codomain, `w` isometric.
+    pub fn right_polar(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let (p, w) = with_rule_ctx!(self.rule, state, rule, ctx, {
+            tenet_matrixalgebra::right_polar_dyn(
+                &mut state.dense,
+                ctx,
+                rule,
+                &self.space,
+                &self.data,
+            )
+        })?;
+        Ok((self.from_dyn(p), self.from_dyn(w)))
+    }
+
+    /// Full Hermitian eigendecomposition `t = v * d * v^H` (MatrixAlgebraKit
+    /// `eigh_full`), returned as `(d, v)`. Requires an endomorphism with
+    /// Hermitian coupled blocks.
+    pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::eigh_full_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })?;
+        Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+    }
+
+    /// Truncated Hermitian eigendecomposition (MatrixAlgebraKit
+    /// `eigh_trunc`); see [`EighTrunc`].
+    pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::eigh_trunc_dyn(
+                &mut state.dense,
+                rule,
+                &self.space,
+                &self.data,
+                truncation,
+            )
+        })?;
+        Ok(EighTrunc {
+            d: self.from_dyn(out.d),
+            v: self.from_dyn(out.v),
+            eigenvalues: out.eigenvalues,
+            error: out.error,
+        })
+    }
+
+    /// All Hermitian eigenvalues per coupled sector, descending by magnitude
+    /// (MatrixAlgebraKit `eigh_vals`).
+    pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::eigh_vals_dyn(&mut state.dense, rule, &self.space, &self.data)
+        })
+        .map_err(Into::into)
+    }
+
+    // eig_full / eig_trunc / eig_vals are deferred to the c64 milestone: the
+    // general eigendecomposition is complex-valued and the user layer is
+    // f64-only today. The expert layer (`tenet_matrixalgebra::eig_*_dyn`)
+    // already supports them.
+
+    /// Matrix exponential of a Hermitian endomorphism, `exp(t) = v exp(d)
+    /// v^H` (TensorKit `exp`, via the eigendecomposition).
+    pub fn exp(&self) -> Result<Self, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule_ctx!(self.rule, state, rule, ctx, {
+            tenet_matrixalgebra::exp_dyn(&mut state.dense, ctx, rule, &self.space, &self.data)
+        })?;
+        Ok(self.from_dyn(out))
+    }
+
+    /// True inverse of a full-rank endomorphism (MatrixAlgebraKit-style
+    /// `inv`); fails when any coupled block is rank-deficient at working
+    /// precision.
+    pub fn inv(&self) -> Result<Self, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule_ctx!(self.rule, state, rule, ctx, {
+            tenet_matrixalgebra::inv_dyn(&mut state.dense, ctx, rule, &self.space, &self.data)
+        })?;
+        Ok(self.from_dyn(out))
+    }
+
+    /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
+    /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
+    pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let out = with_rule_ctx!(self.rule, state, rule, ctx, {
+            tenet_matrixalgebra::pinv_dyn(
+                &mut state.dense,
+                ctx,
+                rule,
+                &self.space,
+                &self.data,
+                rcond,
+            )
+        })?;
+        Ok(self.from_dyn(out))
     }
 }
