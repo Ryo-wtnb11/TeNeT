@@ -1,0 +1,46 @@
+# TeNeT ロードマップ(2026-07-04 棚卸し)
+
+完成像: fZ2⊠U(1)⊠SU(2) の TN 計算、縮約パス最適化、CPU/GPU 両対応、
+TensorKit 並みの使い勝手。最重要軸 = Rust 準拠の保守性・拡張性 × 動的 rank でも速い。
+
+## A. ユーザー層
+- [ ] fZ2⊠U(1)⊠SU(2) 3 因子積(Space + rule enum + TensorKit 数値クロスチェック)
+- [ ] c64 スカラー(下層 FactorScalar は対応済み)→ eig_* 公開もここに依存
+- [ ] tensor! の shape-keyed plan cache(現状: 毎回 greedy 再計画)
+- [ ] cotengrust 移植(random-greedy / annealing / dynamic slicing / reconfigure)+ sliced 実行
+- [ ] 部分トレース(network IR が単一オペランド対角を拒否 → tensor! で書けない。expert 層 tensortrace_into は存在)
+- [ ] TK export 未 wrap: twist / repartition / catdomain / catcodomain / id / isomorphism / unitary / isometry / tr / ishermitian / project_*
+- [ ] left_orth / right_orth の positive gauge(MAK 逸脱、doc 記載済み)
+- [x] tutorial 書き直し(実行中)
+
+## B. 実行層(CPU)
+- [ ] sector 並列接続: tenferro#1297 マージ後に matmul_rank2_batch seam を接続
+- [ ] transform 側並列(T12 phase 2、TK の _add_*_kernel_threaded 相当)— SU(2) cold transform が実アプリのボトルネック
+- [ ] typed/dyn execute_resolution の統合(小、~60 行重複)
+
+## C. GPU(T19 継続)
+- [ ] Runtime::cuda(dev)(#1296 マージ待ち)
+- [ ] device 側 α/β + inactive scale blocks(#1296 の view accum で表現可能)
+- [ ] tree-transform recoupling / scale / strided copy の device kernel
+- [ ] dynamic route の device scratch(ScratchStorage::reset_filled の stream-ordered 実装)
+- [ ] device 分解(cuSOLVER 経由、DenseExecutor device 配線)
+- [ ] CUDA grouped GEMM(stream 並列、#1293 の CUDA 後続 issue)
+- [ ] GPU ベンチ(χ スケーリング)、将来 4×A100 マルチ GPU
+
+## D. 外部依存
+- [ ] tenferro#1296(CUDA view accum, stage 2)レビュー待ち(CI 緑)
+- [ ] tenferro#1297(CPU grouped GEMM)レビュー待ち
+- [ ] T21: tenferro in-place 分解(svd/qr/eigh into preallocated)issue intake から
+- [ ] strided-rs#135 レビュー待ち
+- [ ] stage-2 残制限: view 出力 × k=0 × β≠1 の strided scale kernel
+
+## E. 物理応用(= API 検証)
+- [ ] simple update / CTMRG デモをユーザー層で実装
+- [ ] finite-torus コードの新ユーザー層移行
+
+## 完了済み(2026-07-03〜04)
+coupled-sector レイアウト一本化 / canonical 直 GEMM(mul! パリティ)/
+GEMM recoupling(T20)/ resolution cache 統合(T18 + MRU ring)/
+batched-GEMM seam(T12 phase 0)/ GPU 縦切り A100 実証(T19)/
+命名監査 P0-P2 / 動的 rank ユーザー層 / 分解メソッド一式 / tensor! マクロ。
+TensorKit との直接対決は全 24 項目で同等以上。
