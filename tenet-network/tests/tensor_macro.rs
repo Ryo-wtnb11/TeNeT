@@ -234,3 +234,35 @@ fn contracted_leg_degeneracy_mismatch_is_rejected_with_both_legs_spelled_out() {
         "unexpected message: {message}"
     );
 }
+
+/// Field-access operands parse without parentheses: `svd.u[...]`,
+/// `pair.0[...]`, and `conj(svd.u)[...]` all work and agree with the
+/// parenthesized spelling.
+#[test]
+fn field_access_operands_parse_and_contract() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 401).unwrap();
+    let svd = t.svd_trunc(&Truncation::Full).unwrap();
+
+    // svd.u : [v, v] <- [bond], svd.vh : [bond] <- [v].
+    let bare = tensor!([i, j; m] = svd.u[i, j; k] * svd.s[k; l] * svd.vh[l; m]).unwrap();
+    let parens = tensor!([i, j; m] = (svd.u)[i, j; k] * (svd.s)[k; l] * (svd.vh)[l; m]).unwrap();
+    assert_close(bare.data(), parens.data(), 1e-15);
+    assert_close(bare.data(), t.data(), 1e-10);
+
+    // conj() around a field-access chain, reducing to the norm.
+    let n2 = tensor!([] = conj(svd.u)[i, j; k] * svd.u[i, j; k])
+        .unwrap()
+        .scalar()
+        .unwrap()
+        .try_f64()
+        .unwrap();
+    let norm = svd.u.norm().unwrap();
+    assert!((n2 - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
+
+    // Tuple-index fields.
+    let qr = t.qr_compact().unwrap();
+    let recomposed = tensor!([i, j; m] = qr.0[i, j; k] * qr.1[k; m]).unwrap();
+    assert_close(recomposed.data(), t.data(), 1e-10);
+}

@@ -10,14 +10,22 @@
 //! - The output signature comes first: `[codomain; domain]`; `;` optional
 //!   (`[a, b]` = all-codomain output, `[]` = scalar / rank-0 output).
 //! - RHS terms are `expr[labels]` products; `expr` is an identifier, a
-//!   parenthesized expression, or `conj(expr)` marking an adjoint operand.
-//!   Each `expr` must evaluate to a `Tensor` or `&Tensor`.
+//!   field-access chain (`svd.u`, `pair.0`), a parenthesized expression, or
+//!   `conj(expr)` marking an adjoint operand. Each `expr` must evaluate to
+//!   a `Tensor` or `&Tensor`.
 //! - A label appearing on two operands is contracted; a label appearing
 //!   twice on ONE operand is a partial trace of that operand (TensorKit
 //!   `@tensor a[i, i; j]`); a label appearing once must be listed in the
 //!   output. Violations are compile errors.
 //! - Lowers to `tenet_network::contract_network` (planner IR directly; no
 //!   einsum strings).
+//!
+//! **Fermionic semantics**: `tensor!` follows TensorKit `@tensor` /
+//! `tensorcontract!` — dual contracted legs are twisted with the fermionic
+//! supertrace twist. `Tensor::compose` / `&a * &b` (TensorKit `A * B` /
+//! `mul!`) never twist. Bosonic rules are identical either way; fermionic
+//! rules can differ by signs — see the worked example on
+//! `Tensor::compose`.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -56,11 +64,32 @@ impl Parse for LabelGroup {
     }
 }
 
-/// One RHS operand: `expr[labels]`, `(expr)[labels]` or `conj(expr)[labels]`.
+/// One RHS operand: `expr[labels]`, `(expr)[labels]` or `conj(expr)[labels]`,
+/// where a bare `expr` is an identifier optionally followed by a
+/// field-access chain (`svd.u[a; b]`, `pair.0[i, j]`).
 struct Operand {
     tensor: Expr,
     conj: bool,
     group: LabelGroup,
+}
+
+/// Parses `ident (. member)*` up to the operand's `[labels]` bracket,
+/// building the field-access chain (`svd.u`, `x.0.1` is out of scope: a
+/// float-literal chain — parenthesize instead).
+fn parse_field_chain(input: ParseStream) -> syn::Result<Expr> {
+    let ident: Ident = input.parse()?;
+    let mut expr: Expr = syn::parse_quote!(#ident);
+    while input.peek(Token![.]) {
+        input.parse::<Token![.]>()?;
+        let member: syn::Member = input.parse()?;
+        expr = Expr::Field(syn::ExprField {
+            attrs: Vec::new(),
+            base: Box::new(expr),
+            dot_token: Default::default(),
+            member,
+        });
+    }
+    Ok(expr)
 }
 
 impl Parse for Operand {
@@ -70,7 +99,8 @@ impl Parse for Operand {
             if ident != "conj" {
                 return Err(syn::Error::new(
                     ident.span(),
-                    "expected `conj(...)`, an identifier, or a parenthesized expression",
+                    "expected `conj(...)`, an identifier or field access, or a \
+                     parenthesized expression",
                 ));
             }
             let content;
@@ -81,8 +111,7 @@ impl Parse for Operand {
             parenthesized!(content in input);
             (content.parse::<Expr>()?, false)
         } else {
-            let ident: Ident = input.parse()?;
-            (syn::parse_quote!(#ident), false)
+            (parse_field_chain(input)?, false)
         };
         let group: LabelGroup = input.parse()?;
         Ok(Self {
@@ -221,7 +250,54 @@ fn option_tokens(value: Option<usize>) -> proc_macro2::TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::check_labels;
+    use super::{check_labels, Operand};
+    use quote::ToTokens;
+
+    fn parse_operand(source: &str) -> syn::Result<Operand> {
+        syn::parse_str::<Operand>(source)
+    }
+
+    #[test]
+    fn operand_accepts_bare_identifier() {
+        let op = parse_operand("a[i, j]").unwrap();
+        assert!(!op.conj);
+        assert_eq!(op.tensor.to_token_stream().to_string(), "a");
+        assert_eq!(op.group.labels, ["i", "j"]);
+    }
+
+    #[test]
+    fn operand_accepts_field_access_chain() {
+        let op = parse_operand("svd.u[a; b]").unwrap();
+        assert!(!op.conj);
+        assert_eq!(op.tensor.to_token_stream().to_string(), "svd . u");
+        assert_eq!(op.group.labels, ["a", "b"]);
+        assert_eq!(op.group.split, Some(1));
+
+        let op = parse_operand("net.site.left[i]").unwrap();
+        assert_eq!(op.tensor.to_token_stream().to_string(), "net . site . left");
+    }
+
+    #[test]
+    fn operand_accepts_tuple_index_field() {
+        let op = parse_operand("pair.0[i, j]").unwrap();
+        assert_eq!(op.tensor.to_token_stream().to_string(), "pair . 0");
+    }
+
+    #[test]
+    fn operand_conj_and_parens_still_parse() {
+        let op = parse_operand("conj(svd.u)[a; b]").unwrap();
+        assert!(op.conj);
+        assert_eq!(op.tensor.to_token_stream().to_string(), "svd . u");
+
+        let op = parse_operand("(f(x))[i]").unwrap();
+        assert!(!op.conj);
+        assert_eq!(op.tensor.to_token_stream().to_string(), "f (x)");
+    }
+
+    #[test]
+    fn operand_rejects_non_conj_call() {
+        assert!(parse_operand("foo(x)[i]").is_err());
+    }
 
     fn labels(groups: &[&[&str]]) -> Vec<Vec<String>> {
         groups
