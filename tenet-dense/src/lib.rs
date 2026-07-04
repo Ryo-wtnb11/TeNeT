@@ -452,6 +452,22 @@ impl DenseScalar {
     }
 }
 
+/// One GEMM of a batched matmul over shared flat buffers: the column-major
+/// `rows x cols` destination block at `dst_offset` receives
+/// `alpha * lhs_block * rhs_block + beta * dst_block`. Offsets are element
+/// offsets relative to the corresponding view's own offset. Callers guarantee
+/// the destination blocks of a batch are pairwise disjoint, so executors may
+/// run jobs in any order or concurrently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DenseGemmBatchJob {
+    pub dst_offset: usize,
+    pub lhs_offset: usize,
+    pub rhs_offset: usize,
+    pub rows: usize,
+    pub contracted: usize,
+    pub cols: usize,
+}
+
 pub trait DenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
@@ -505,6 +521,137 @@ pub trait DenseExecutor {
             message: "executor does not implement the accumulate-form matmul".to_string(),
         })
     }
+
+    /// Batched accumulate-form matmul over shared flat buffers: for each job,
+    /// the destination block receives `alpha * lhs_block * rhs_block + beta *
+    /// dst_block` (column-major, BLAS gemm semantics; see
+    /// [`DenseGemmBatchJob`]). The default executes the jobs serially through
+    /// `matmul_axpby_into`; batch-capable backends override it.
+    fn matmul_batch_axpby_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        jobs: &[DenseGemmBatchJob],
+        alpha: DenseScalar,
+        beta: DenseScalar,
+    ) -> Result<(), DenseError> {
+        match (output, lhs, rhs) {
+            (DenseWrite::F32(out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
+                matmul_batch_axpby_serial(
+                    self,
+                    out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    alpha,
+                    beta,
+                    |view: DenseViewMut<'_, f32>| DenseWrite::F32(view),
+                    |view: DenseView<'_, f32>| DenseRead::F32(view),
+                )
+            }
+            (DenseWrite::F64(out), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                matmul_batch_axpby_serial(
+                    self,
+                    out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    alpha,
+                    beta,
+                    |view: DenseViewMut<'_, f64>| DenseWrite::F64(view),
+                    |view: DenseView<'_, f64>| DenseRead::F64(view),
+                )
+            }
+            (DenseWrite::C32(out), DenseRead::C32(lhs), DenseRead::C32(rhs)) => {
+                matmul_batch_axpby_serial(
+                    self,
+                    out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    alpha,
+                    beta,
+                    |view: DenseViewMut<'_, Complex32>| DenseWrite::C32(view),
+                    |view: DenseView<'_, Complex32>| DenseRead::C32(view),
+                )
+            }
+            (DenseWrite::C64(out), DenseRead::C64(lhs), DenseRead::C64(rhs)) => {
+                matmul_batch_axpby_serial(
+                    self,
+                    out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    alpha,
+                    beta,
+                    |view: DenseViewMut<'_, Complex64>| DenseWrite::C64(view),
+                    |view: DenseView<'_, Complex64>| DenseRead::C64(view),
+                )
+            }
+            _ => Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "matmul_batch_axpby_into",
+                message: "batched matmul requires matching f32/f64/c32/c64 operands".to_string(),
+            }),
+        }
+    }
+}
+
+/// Serial fallback for [`DenseExecutor::matmul_batch_axpby_into`]: one
+/// `matmul_axpby_into` per job over rank-2 sub-views of the shared buffers.
+#[allow(clippy::too_many_arguments)]
+fn matmul_batch_axpby_serial<E, T, W, R>(
+    executor: &mut E,
+    mut output: DenseViewMut<'_, T>,
+    lhs: DenseView<'_, T>,
+    rhs: DenseView<'_, T>,
+    jobs: &[DenseGemmBatchJob],
+    alpha: DenseScalar,
+    beta: DenseScalar,
+    wrap_write: W,
+    wrap_read: R,
+) -> Result<(), DenseError>
+where
+    E: DenseExecutor + ?Sized,
+    W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
+    R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
+{
+    fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseError> {
+        base.checked_add(offset)
+            .ok_or(DenseError::OffsetOverflow { value: offset })
+    }
+
+    for job in jobs {
+        let lhs_shape = [job.rows, job.contracted];
+        let lhs_strides = [1, job.rows];
+        let rhs_shape = [job.contracted, job.cols];
+        let rhs_strides = [1, job.contracted];
+        let dst_shape = [job.rows, job.cols];
+        let dst_strides = [1, job.rows];
+        let lhs_view = DenseView::new(
+            lhs.data(),
+            &lhs_shape,
+            &lhs_strides,
+            batch_offset(lhs.offset(), job.lhs_offset)?,
+        )?;
+        let rhs_view = DenseView::new(
+            rhs.data(),
+            &rhs_shape,
+            &rhs_strides,
+            batch_offset(rhs.offset(), job.rhs_offset)?,
+        )?;
+        let dst_offset = batch_offset(output.offset(), job.dst_offset)?;
+        let dst_view = DenseViewMut::new(output.data_mut(), &dst_shape, &dst_strides, dst_offset)?;
+        executor.matmul_axpby_into(
+            wrap_write(dst_view),
+            wrap_read(lhs_view),
+            wrap_read(rhs_view),
+            alpha,
+            beta,
+        )?;
+    }
+    Ok(())
 }
 
 /// Low-level dense matmul kernel boundary used by dense executors.
@@ -643,9 +790,10 @@ mod tenferro_adapter {
     use super::strided_adapter::StridedKernelBackend;
     use tenferro_cpu::CpuBackend;
     use tenferro_linalg::LinalgBackend;
+    use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
     use tenferro_tensor::{
-        DotGeneralConfig, Tensor, TensorDot, TensorRead, TensorView, TensorViewMut, TensorWrite,
-        TypedTensorView, TypedTensorViewMut,
+        BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, Tensor, TensorDot, TensorRead,
+        TensorView, TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
     };
 
     #[derive(Debug)]
@@ -740,6 +888,19 @@ mod tenferro_adapter {
         ) -> Result<(), DenseError> {
             self.inner.matmul_axpby_into(output, lhs, rhs, alpha, beta)
         }
+
+        fn matmul_batch_axpby_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            jobs: &[DenseGemmBatchJob],
+            alpha: DenseScalar,
+            beta: DenseScalar,
+        ) -> Result<(), DenseError> {
+            self.inner
+                .matmul_batch_axpby_into(output, lhs, rhs, jobs, alpha, beta)
+        }
     }
 
     impl<K> DenseExecutor for DenseExecutorWithKernel<K>
@@ -800,6 +961,16 @@ mod tenferro_adapter {
             rhs: DenseRead<'_>,
         ) -> Result<(), DenseError> {
             let dtype = output.dtype();
+            #[cfg(feature = "cpu-blas-core")]
+            if dtype == lhs.dtype()
+                && dtype == rhs.dtype()
+                && matches!(
+                    dtype,
+                    DenseDType::F32 | DenseDType::F64 | DenseDType::C32 | DenseDType::C64
+                )
+            {
+                return self.tenferro_matmul_into(output, lhs, rhs);
+            }
             if dtype == lhs.dtype() && dtype == rhs.dtype() && self.kernel.supports_matmul(dtype) {
                 self.kernel.matmul_into(output, lhs, rhs)
             } else {
@@ -831,6 +1002,53 @@ mod tenferro_adapter {
             self.backend
                 .dot_general_read_into_accum(lhs, rhs, &self.matmul_config, accumulation, output)
                 .map_err(|err| tenferro_error("dot_general_accum", err))
+        }
+
+        fn matmul_batch_axpby_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            jobs: &[DenseGemmBatchJob],
+            alpha: DenseScalar,
+            beta: DenseScalar,
+        ) -> Result<(), DenseError> {
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            let grouped_jobs: Vec<GroupedGemmJob> = jobs
+                .iter()
+                .map(|job| {
+                    GroupedGemmJob::new(
+                        job.dst_offset,
+                        job.lhs_offset,
+                        job.rhs_offset,
+                        job.rows,
+                        job.contracted,
+                        job.cols,
+                    )
+                })
+                .collect();
+            let accumulation = tenferro_tensor::DotGeneralAccumulation {
+                lhs_conj: false,
+                rhs_conj: false,
+                alpha: tenferro_scalar(alpha),
+                beta: tenferro_scalar(beta),
+            };
+            let config = GroupedGemmConfig::new(&grouped_jobs, accumulation);
+            // The grouped path ignores the analysis cache today; a fresh
+            // default keeps the call self-contained.
+            let mut cache = <CpuBackend as BackendRuntimeCache>::RuntimeCache::default();
+            BackendCachedDot::grouped_gemm_cached(
+                &mut self.backend,
+                &mut cache,
+                None,
+                lhs,
+                rhs,
+                &config,
+                output,
+            )
+            .map_err(|err| tenferro_error("grouped_gemm", err))
         }
     }
 
