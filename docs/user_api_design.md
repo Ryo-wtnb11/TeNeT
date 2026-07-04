@@ -71,6 +71,18 @@ let z = c.inner(&d)?;
 基準: `permute`/`braid`/`transpose`/`twist`/`repartition`、構築系は
 `id`/`isomorphism`/`unitary`/`isometry`。
 
+## 縮約適合性の契約(2026-07-04 合意)
+
+- **index object は作らない**(ITensor 方式は採らない)。脚は位置で指定し、
+  ラベルは `tensor!` 式内の一時的な束縛。
+- **適合性は Space の同一性で担保する**(TensorKit 方式):
+  縮約でつながる脚は Space が構造的に等しく(sector 内容 + 縮退次元)、
+  かつ片側が dual であること。違反は実行時の型付きエラー
+  (leg duality / space mismatch)。
+- `tensor!` マクロはラベルの整合(片側にしか現れない添字、重複等)を
+  コンパイル時に検査できる。Space の一致は実行時検査(低レイヤの既存
+  ゲートがそのまま担う)。
+
 ## 型設計
 
 - `Space`: sector→degeneracy の列 + 双対フラグ。`SectorLeg` の薄い高レベル形。
