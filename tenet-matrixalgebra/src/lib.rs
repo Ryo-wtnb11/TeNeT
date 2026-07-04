@@ -22,12 +22,17 @@ mod matrix_functions;
 pub mod truncation;
 
 pub use factorize::{
-    eig_full, eig_trunc, eig_vals, eigh_full, eigh_trunc, eigh_vals, left_null, left_polar,
-    lq_compact, lq_full, qr_compact, qr_full, right_null, right_polar, svd_compact, svd_full,
-    svd_trunc, svd_vals, EigFull, EigTrunc, EighFull, EighTrunc, FactorScalar, SectorSpectrum,
-    SpectrumMagnitude, SvdCompact, SvdFull, SvdTrunc,
+    eig_full, eig_full_dyn, eig_trunc, eig_trunc_dyn, eig_vals, eig_vals_dyn, eigh_full,
+    eigh_full_dyn, eigh_trunc, eigh_trunc_dyn, eigh_vals, eigh_vals_dyn, left_null, left_null_dyn,
+    left_orth, left_orth_dyn, left_polar, left_polar_dyn, lq_compact, lq_compact_dyn, lq_full,
+    lq_full_dyn, qr_compact, qr_compact_dyn, qr_full, qr_full_dyn, right_null, right_null_dyn,
+    right_orth, right_orth_dyn, right_polar, right_polar_dyn, svd_compact, svd_compact_dyn,
+    svd_full, svd_full_dyn, svd_trunc, svd_trunc_dyn, svd_vals, svd_vals_dyn, DynFactor, EigFull,
+    EigFullDyn, EigTrunc, EigTruncDyn, EighFull, EighFullDyn, EighTrunc, EighTruncDyn,
+    FactorScalar, SectorSpectrum, SpectrumMagnitude, SvdCompact, SvdCompactDyn, SvdFull,
+    SvdFullDyn, SvdTrunc, SvdTruncDyn,
 };
-pub use matrix_functions::{exp, inv, pinv};
+pub use matrix_functions::{exp, exp_dyn, inv, inv_dyn, pinv, pinv_dyn};
 pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
 
 #[cfg(test)]
