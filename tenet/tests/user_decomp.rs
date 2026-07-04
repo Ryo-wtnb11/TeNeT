@@ -360,3 +360,20 @@ fn svd_recomposes_on_non_dualization_closed_charges() {
     assert!(identity.abs() < 1e-12);
     assert_eq!(recon.data(), &[4.0, 0.0, 0.0, 3.0, 0.0, 2.0]);
 }
+
+/// Truncation that discards an entire coupled sector must keep the kept
+/// factors addable against the untruncated tensor (TensorKit parity via
+/// graded legs: spaces carry per-sector degeneracies independently of
+/// populated blocks), with reconstruction distance equal to the reported
+/// truncation error.
+#[test]
+fn truncated_factors_recompose_and_add_against_untruncated() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::u1([(0, 2), (1, 1), (2, 1)]);
+    let t = Tensor::rand_with_seed(&rt, [&v], [&v], 7).unwrap();
+    let svd = t.svd_trunc(&Truncation::rank(2)).unwrap();
+    let recomposed = svd.u.compose(&svd.s).unwrap().compose(&svd.vh).unwrap();
+    let diff = t.add(&recomposed, 1.0, -1.0).unwrap();
+    let err = diff.norm().unwrap();
+    assert!((err - svd.error).abs() < 1e-10);
+}
