@@ -67,8 +67,8 @@ fn run_itebd(chi: usize, schedule: &[(f64, usize)]) -> f64 {
     let h = heisenberg_two_site(&rt, &p);
     let trunc = Truncation::rank(chi).and(Truncation::relative_cutoff(1e-8));
 
-    // Charge-balanced start so every leg's sectors are populated (the
-    // network validator sizes legs from populated blocks; see the example).
+    // Charge-balanced entangled start (converges faster than a product
+    // state; a strict Neel start also works, see the regression test below).
     let vb = Space::u1([(0, 1)]);
     let va = Space::u1([(1, 1), (-1, 1)]);
     let mut ga = Tensor::from_block_fn(&rt, [&vb, &p], [&va], |_, _| 1.0).unwrap();
@@ -84,6 +84,54 @@ fn run_itebd(chi: usize, schedule: &[(f64, usize)]) -> f64 {
         }
     }
     0.5 * (bond_energy(&h, &lb, &ga, &la, &gb) + bond_energy(&h, &la, &gb, &lb, &ga))
+}
+
+/// Regression: a strict Neel product state built on the FULL physical space.
+///
+/// Each site tensor has a physical leg whose spaces contain both charges but
+/// where one charge participates in NO fusion tree on that tensor (the
+/// singleton bond legs fix the total charge): site A populates only `up`,
+/// site B only `dn`. Legs used to carry sector sets without degeneracies, so
+/// leg dimensions and result-block shapes were derived from populated blocks
+/// only, and the contraction with the gate's full physical leg was rejected.
+/// With graded legs (sector -> degeneracy on the leg itself) it must work.
+#[test]
+fn neel_product_state_contracts_with_the_full_gate() {
+    let rt = Runtime::builder().build().unwrap();
+    let p = Space::u1([(1, 1), (-1, 1)]);
+    let h = heisenberg_two_site(&rt, &p);
+
+    // |up dn>: bonds {0} -> {+1} -> {0}; a has no tree with phys charge -1,
+    // b none with +1.
+    let vl = Space::u1([(0, 1)]);
+    let vm = Space::u1([(1, 1)]);
+    let vr = Space::u1([(0, 1)]);
+    let a = Tensor::from_block_fn(&rt, [&vl, &p], [&vm], |_, _| 1.0).unwrap();
+    let b = Tensor::from_block_fn(&rt, [&vm, &p], [&vr], |_, _| 1.0).unwrap();
+
+    // The legs report the full graded space, not just populated sectors.
+    assert_eq!(a.leg_dims().unwrap(), vec![1, 2, 1]);
+    assert_eq!(a.space(1).unwrap(), p);
+
+    let psi = tensor!([l, pa, pb; r] = a[l, pa; m] * b[m, pb; r]).unwrap();
+    assert!((psi.norm().unwrap() - 1.0).abs() < 1e-12);
+
+    // theta = h |psi>: this contraction used to be rejected with a leg
+    // dimension mismatch against the gate's full physical leg.
+    let theta = tensor!([l, pa, pb; r] = a[l, qa; m] * b[m, qb; r] * h[pa, pb; qa, qb]).unwrap();
+
+    // h |up dn> = -1/4 |up dn> + 1/2 |dn up>, so <psi|h|psi> = -1/4 and
+    // |h psi|^2 = 1/16 + 1/4 = 5/16.
+    let energy = tensor!([] = conj(psi)[l, pa, pb; r] * h[pa, pb; qa, qb] * psi[l, qa, qb; r])
+        .unwrap()
+        .scalar()
+        .unwrap();
+    assert!((energy - (-0.25)).abs() < 1e-12, "energy = {energy}");
+    let theta_norm = theta.norm().unwrap();
+    assert!(
+        (theta_norm - (5.0f64 / 16.0).sqrt()).abs() < 1e-12,
+        "|h psi| = {theta_norm}"
+    );
 }
 
 /// Fast variant: tiny chi and few steps, loose tolerance.

@@ -206,3 +206,25 @@ fn wrong_input_codomain_split_is_rejected() {
     let result = tensor!([i; k] = t[i, j;] * u[j; k]);
     assert!(matches!(result, Err(Error::InvalidArgument(_))));
 }
+
+/// Contracted legs are validated structurally at plan time: same sectors AND
+/// same per-sector degeneracies (mutually dual spaces). A degeneracy mismatch
+/// is rejected with a message naming the label and both legs' content.
+#[test]
+fn contracted_leg_degeneracy_mismatch_is_rejected_with_both_legs_spelled_out() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let w = Space::u1([(-1, 2), (0, 4), (1, 2)]); // charge 0 degeneracy differs
+    let t = Tensor::rand_with_seed(&rt, [&v], [&v], 163).unwrap();
+    let u = Tensor::rand_with_seed(&rt, [&w], [&w], 164).unwrap();
+    let err = tensor!([i; k] = t[i; j] * u[j; k]).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("space mismatch for contracted label `j`"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("mutually dual"),
+        "unexpected message: {message}"
+    );
+}

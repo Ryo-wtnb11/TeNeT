@@ -133,6 +133,7 @@ impl Network {
         // labels and leg dims rotate by the original codomain rank.
         let mut lowered_labels = Vec::with_capacity(tensors.len());
         let mut infos = Vec::with_capacity(tensors.len());
+        let mut lowered_spaces = Vec::with_capacity(tensors.len());
         for (i, (&tensor, labels)) in tensors.iter().zip(&self.inputs).enumerate() {
             if labels.len() != tensor.rank() {
                 return Err(invalid(format!(
@@ -151,15 +152,23 @@ impl Network {
                 }
             }
             let dims = tensor.leg_dims()?;
+            let spaces = (0..tensor.rank())
+                .map(|axis| tensor.space(axis))
+                .collect::<Result<Vec<_>, _>>()?;
             if self.conj[i] {
                 let c = tensor.codomain_rank();
                 lowered_labels.push(rotate(labels, c));
                 infos.push(DenseTensorInfo::new(rotate(&dims, c)));
+                // Adjoint legs: `space(t', i) = dual(space(t, sigma(i)))`
+                // with sigma the codomain/domain rotation.
+                lowered_spaces.push(rotate(&spaces, c).iter().map(|s| s.dual()).collect());
             } else {
                 lowered_labels.push(labels.clone());
                 infos.push(DenseTensorInfo::new(dims));
+                lowered_spaces.push(spaces);
             }
         }
+        validate_contracted_leg_spaces(&lowered_labels, &lowered_spaces)?;
 
         let ir = NetworkIR::from_labels(lowered_labels, self.output.clone()).map_err(invalid)?;
         let plan = if ir.tensors().len() == 1 {
@@ -183,6 +192,38 @@ impl Network {
     pub fn contract(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
         self.plan(tensors, &GreedyDenseOptimizer)?.execute(tensors)
     }
+}
+
+/// Structural leg compatibility of every contracted label pair, checked at
+/// plan time against the operands' graded leg spaces (sectors, per-sector
+/// degeneracies and duality). A contracted pair must be mutually dual
+/// spaces — the same rule the expert layer's `validate_composed_leg`
+/// enforces after the pre-contraction permutes (verbatim spaces, one side
+/// dual). TensorKit `SpaceMismatch` analog with both legs spelled out.
+fn validate_contracted_leg_spaces(
+    labels: &[Vec<TemporaryLabel>],
+    spaces: &[Vec<tenet::prelude::Space>],
+) -> Result<(), Error> {
+    let mut seen: HashMap<&TemporaryLabel, (usize, usize)> = HashMap::new();
+    for (operand, operand_labels) in labels.iter().enumerate() {
+        for (axis, label) in operand_labels.iter().enumerate() {
+            let Some(&(prev_operand, prev_axis)) = seen.get(label) else {
+                seen.insert(label, (operand, axis));
+                continue;
+            };
+            let lhs = &spaces[prev_operand][prev_axis];
+            let rhs = &spaces[operand][axis];
+            if *rhs != lhs.dual() {
+                return Err(invalid(format!(
+                    "space mismatch for contracted label `{label}`: operand {prev_operand} \
+                     leg {prev_axis} is {lhs:?}, operand {operand} leg {axis} is {rhs:?}; \
+                     contracted legs must be mutually dual (same sectors and degeneracies, \
+                     one side dual)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {

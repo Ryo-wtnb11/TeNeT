@@ -113,11 +113,10 @@ impl State {
     /// Charge-balanced singlet-like start, `∝ ... (|up dn> + |dn up>) ...`
     /// per unit cell: bond B-A carries charge 0, bond A-B charges ±1.
     ///
-    /// (A strict Neel product state has a phys leg whose only *populated*
-    /// sector is `+1` on A / `-1` on B; the `tensor!` network validator
-    /// derives leg dimensions from populated blocks and then rejects the
-    /// contraction with the gate's full physical leg — see the API-gap
-    /// notes. This start populates every sector of every leg.)
+    /// (A strict Neel product state — phys leg populated only in `+1` on A /
+    /// `-1` on B — also works now that legs carry per-sector degeneracies;
+    /// see the `neel_product_state_contracts_with_the_full_gate` test. The
+    /// entangled start is kept because it converges faster.)
     fn init(rt: &Runtime, p: &Space) -> Result<Self, Error> {
         let vb = Space::u1([(0, 1)]);
         let va = Space::u1([(1, 1), (-1, 1)]);
