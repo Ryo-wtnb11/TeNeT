@@ -38,16 +38,32 @@ let p = c.permute([0, 2], [1, 3])?;
 let t = c.transpose()?;
 let h = c.adjoint()?;
 
-// 分解(matrixalgebra 層の thin wrapper)
-let svd = c.tsvd(&Truncation::rank(64))?;        // svd.u, svd.s, svd.vh, svd.error
-let (q, r) = c.leftorth()?;                      // QR
+// 分解(matrixalgebra 層と同名を透過: TensorKit 0.17 = MatrixAlgebraKit 系)
+let svd = c.svd_trunc(&Truncation::rank(64))?;   // svd.u, svd.s, svd.vh, svd.error
+let (u, s, vh) = c.svd_compact()?;
+let (q, r) = c.qr_compact()?;
+let (v, _) = c.left_orth()?;
+let n0 = c.left_null()?;
 let x = c.exp()?;                                // eigh 経由の行列関数
 
-// スカラー演算・ノルム
+// スカラー演算・ノルム(VectorInterface 相当)
 let n = c.norm()?;
 let s = c.scale(0.5)?;
 let w = c.add(&d, 1.0, -1.0)?;                   // w = c - d
+let z = c.inner(&d)?;
 ```
+
+## 命名規則(2026-07-04 追記)
+
+分解・行列関数の名前は **TensorKit 0.17 の export 一覧 = MatrixAlgebraKit 系に
+一致させる**(`svd_trunc`/`svd_compact`/`svd_full`/`svd_vals`、`qr_compact`/
+`qr_full`/`qr_null`、`lq_*`、`left_orth`/`right_orth`、`left_null`/`right_null`、
+`left_polar`/`right_polar`、`eigh_full`/`eigh_trunc`/`eigh_vals`、`eig_*`、
+`exp`、`pinv`)。`tsvd`/`leftorth` 等の旧名は 0.17 の export に存在しないため
+**採用しない**(alias も作らない)。tenet-matrixalgebra は既にこの命名なので、
+ユーザー層は同名メソッドの透過のみ。インデックス操作も同様に export 一覧
+基準: `permute`/`braid`/`transpose`/`twist`/`repartition`、構築系は
+`id`/`isomorphism`/`unitary`/`isometry`。
 
 ## 型設計
 
