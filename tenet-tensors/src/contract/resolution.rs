@@ -50,6 +50,11 @@ pub(crate) struct ContractionResolutionStats {
 }
 
 /// Structural full key: reachable identically from typed and dynamic callers.
+/// `core_only` separates the route-resolution namespace from the dynamic
+/// route's internal scratch plans: a scratch contraction can carry exactly
+/// the spaces/axes of the facade contraction that spawned it (identity
+/// operand transforms, e.g. a fermionic twist-only contraction), and its
+/// core plan must never alias the facade's dynamic resolution.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FullKey<RuleKey> {
     rule: RuleKey,
@@ -57,6 +62,7 @@ struct FullKey<RuleKey> {
     lhs: FullSpaceKey,
     rhs: FullSpaceKey,
     axes: TensorContractSpecOwned,
+    core_only: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -86,6 +92,7 @@ struct FastKey<RuleKey> {
     lhs: FastSpaceKey,
     rhs: FastSpaceKey,
     axes: TensorContractSpecOwned,
+    core_only: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -112,6 +119,7 @@ struct LastEntry<RuleKey> {
     lhs: LastSpace,
     rhs: LastSpace,
     axes: RawAxes,
+    core_only: bool,
     full_key: Option<FullKey<RuleKey>>,
     resolution: Resolution,
 }
@@ -277,7 +285,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        self.get_or_resolve_with(rule, dst, lhs, rhs, axes, || {
+        self.get_or_resolve_with(rule, dst, lhs, rhs, axes, false, || {
             resolve(
                 rule,
                 dst,
@@ -305,7 +313,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let resolution = self.get_or_resolve_with(rule, dst, lhs, rhs, axes, || {
+        let resolution = self.get_or_resolve_with(rule, dst, lhs, rhs, axes, true, || {
             compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)
                 .map(|plan| Resolution::Core(Arc::new(plan)))
         })?;
@@ -325,6 +333,7 @@ where
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
+        core_only: bool,
         resolve_cold: impl FnOnce() -> Result<Resolution, OperationError>,
     ) -> Result<Resolution, OperationError>
     where
@@ -335,6 +344,7 @@ where
         if self.policy.stores_entries() {
             let position = self.last.iter().position(|last| {
                 last.rule == rule_key
+                    && last.core_only == core_only
                     && last.dst.matches(dst)
                     && last.lhs.matches(lhs)
                     && last.rhs.matches(rhs)
@@ -379,12 +389,13 @@ where
                 lhs: FastSpaceKey::from_space(lhs),
                 rhs: FastSpaceKey::from_space(rhs),
                 axes: axes_key.clone(),
+                core_only,
             };
             if let Some(resolution) = self.fast.get(&fast_key) {
                 self.stats.hits += 1;
                 self.stats.fast_hits += 1;
                 let resolution = resolution.clone();
-                self.remember_last(&rule_key, dst, lhs, rhs, axes, None, &resolution);
+                self.remember_last(&rule_key, dst, lhs, rhs, axes, core_only, None, &resolution);
                 return Ok(resolution);
             }
 
@@ -394,13 +405,23 @@ where
                 lhs: FullSpaceKey::from_space(lhs)?,
                 rhs: FullSpaceKey::from_space(rhs)?,
                 axes: axes_key.clone(),
+                core_only,
             };
             if let Some(resolution) = self.resolved.get(&full_key) {
                 self.stats.hits += 1;
                 let resolution = resolution.clone();
                 self.touch(&full_key);
                 self.fast.insert(fast_key, resolution.clone());
-                self.remember_last(&rule_key, dst, lhs, rhs, axes, Some(full_key), &resolution);
+                self.remember_last(
+                    &rule_key,
+                    dst,
+                    lhs,
+                    rhs,
+                    axes,
+                    core_only,
+                    Some(full_key),
+                    &resolution,
+                );
                 return Ok(resolution);
             }
 
@@ -412,7 +433,16 @@ where
                 self.enforce_lru_limit(max_entries);
             }
             self.fast.insert(fast_key, resolution.clone());
-            self.remember_last(&rule_key, dst, lhs, rhs, axes, Some(full_key), &resolution);
+            self.remember_last(
+                &rule_key,
+                dst,
+                lhs,
+                rhs,
+                axes,
+                core_only,
+                Some(full_key),
+                &resolution,
+            );
             return Ok(resolution);
         }
 
@@ -428,6 +458,7 @@ where
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
+        core_only: bool,
         full_key: Option<FullKey<RuleKey>>,
         resolution: &Resolution,
     ) {
@@ -439,6 +470,7 @@ where
                 lhs: LastSpace::from_space(lhs),
                 rhs: LastSpace::from_space(rhs),
                 axes: RawAxes::from_axes(axes),
+                core_only,
                 full_key,
                 resolution: resolution.clone(),
             },
