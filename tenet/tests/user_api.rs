@@ -211,18 +211,12 @@ fn permute_preserves_the_weighted_norm() {
             (vec![0, 3], vec![1, 2]),
             (vec![0, 1, 2], vec![3]),
         ] {
-            match c.permute(&cod, &dom) {
-                Ok(p) => {
-                    let permuted_norm = p.norm().unwrap();
-                    assert!(
-                        (permuted_norm - norm).abs() <= 1e-10 * (1.0 + norm),
-                        "norm changed under permute {cod:?} | {dom:?}: {norm} -> {permuted_norm}"
-                    );
-                }
-                // (3, 1) splits exceed the current 2-legs-per-side ceiling.
-                Err(Error::UnsupportedRank { .. }) => {}
-                Err(err) => panic!("unexpected permute error: {err}"),
-            }
+            let p = c.permute(&cod, &dom).unwrap();
+            let permuted_norm = p.norm().unwrap();
+            assert!(
+                (permuted_norm - norm).abs() <= 1e-10 * (1.0 + norm),
+                "norm changed under permute {cod:?} | {dom:?}: {norm} -> {permuted_norm}"
+            );
         }
     }
 }
@@ -331,12 +325,149 @@ fn mixing_rules_or_runtimes_is_rejected() {
     ));
 }
 
+/// Rank-5 PEPS-shaped tensors (1 codomain leg, 4 domain legs): construct,
+/// contract over shared legs, permute, adjoint, norm — no rank ceiling.
 #[test]
-fn rank_ceiling_is_reported() {
+fn rank_five_peps_shape_u1_and_su2() {
     let rt = Runtime::builder().build().unwrap();
-    let v = u1_space();
-    assert!(matches!(
-        Tensor::rand(&rt, [&v, &v, &v], [&v]),
-        Err(Error::UnsupportedRank { nout: 3, nin: 1 })
-    ));
+    for v in [u1_space(), su2_space()] {
+        let a = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 81).unwrap();
+        assert_eq!(a.codomain_rank(), 1);
+        assert_eq!(a.domain_rank(), 4);
+        assert_eq!(a.rank(), 5);
+        let norm = a.norm().unwrap();
+        assert!(norm > 0.0);
+
+        // Contract two rank-5 tensors over two shared legs (a's domain legs
+        // against b's dual domain legs): rank-6 result.
+        let w = v.dual();
+        let b = Tensor::rand_with_seed(&rt, [&v], [&w, &w, &v, &v], 82).unwrap();
+        let c = a.contract(&b, &[3, 4], &[1, 2]).unwrap();
+        assert_eq!(c.codomain_rank(), 3);
+        assert_eq!(c.domain_rank(), 3);
+        assert!(c.norm().unwrap() > 0.0);
+
+        // Permute across a (3, 2) split and back; weighted norm invariant.
+        let p = a.permute(&[0, 2, 4], &[1, 3]).unwrap();
+        assert_eq!(p.codomain_rank(), 3);
+        let p_norm = p.norm().unwrap();
+        assert!((p_norm - norm).abs() <= 1e-10 * (1.0 + norm));
+        let back = p.permute(&[0], &[3, 1, 4, 2]).unwrap();
+        assert_close(back.data(), a.data(), 1e-12);
+
+        // Adjoint is an involution and swaps the split.
+        let h = a.adjoint().unwrap();
+        assert_eq!(h.codomain_rank(), 4);
+        assert_eq!(h.domain_rank(), 1);
+        let hh = h.adjoint().unwrap();
+        assert_close(hh.data(), a.data(), 1e-12);
+    }
+}
+
+/// Cross-checks a rank-5 x rank-5 contraction elementwise against a typed
+/// expert-layer call with `NOUT = 1, NIN = 4`.
+#[test]
+fn rank_five_contract_cross_checks_against_expert_layer() {
+    let rule = U1FusionRule;
+    let deg = 2usize;
+    let sectors = [
+        U1Irrep::new(-1).sector_id(),
+        U1Irrep::new(0).sector_id(),
+        U1Irrep::new(1).sector_id(),
+    ];
+    let leg = || SectorLeg::new(sectors, false);
+    // Dual leg of `Space::u1([(-1, deg), (0, deg), (1, deg)])`: the charge
+    // set is symmetric, so only the dual flag flips.
+    let dual_leg = || SectorLeg::new(sectors, true);
+    let leg_dim = sectors.len() * deg;
+    let lhs_homspace = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg(), leg(), leg(), leg()]),
+        )
+    };
+    let rhs_homspace = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([dual_leg(), dual_leg(), leg(), leg()]),
+        )
+    };
+    let space_1x4 = |hom: FusionTreeHomSpace| {
+        let key_count = hom.fusion_tree_keys(&rule).len();
+        let dense =
+            TensorMapSpace::<1, 4>::from_dims([leg_dim], [leg_dim, leg_dim, leg_dim, leg_dim])
+                .unwrap();
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            dense,
+            hom,
+            &rule,
+            vec![vec![deg; 5]; key_count],
+        )
+        .unwrap()
+    };
+
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::u1([(-1, deg), (0, deg), (1, deg)]);
+    let w = v.dual();
+    let a = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 91).unwrap();
+    let b = Tensor::rand_with_seed(&rt, [&v], [&w, &w, &v, &v], 92).unwrap();
+
+    // Expert-layer twins share the flat storage (identical coupled layout).
+    let lhs = TensorMap::<f64, 1, 4>::from_vec_with_fusion_space(
+        a.data().to_vec(),
+        space_1x4(lhs_homspace()),
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 1, 4>::from_vec_with_fusion_space(
+        b.data().to_vec(),
+        space_1x4(rhs_homspace()),
+    )
+    .unwrap();
+
+    let lhs_axes = [3usize, 4];
+    let rhs_axes = [1usize, 2];
+    let output_axes: Vec<usize> = (0..6).collect();
+    let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+        &rule,
+        lhs.fusion_space().unwrap().homspace(),
+        rhs.fusion_space().unwrap().homspace(),
+        &lhs_axes,
+        &rhs_axes,
+        &output_axes,
+        3,
+    )
+    .unwrap();
+    let key_count = dst_hom.fusion_tree_keys(&rule).len();
+    let dense =
+        TensorMapSpace::<3, 3>::from_dims([leg_dim, leg_dim, leg_dim], [leg_dim, leg_dim, leg_dim])
+            .unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        dense,
+        dst_hom,
+        &rule,
+        vec![vec![deg; 6]; key_count],
+    )
+    .unwrap();
+    let dst_len = dst_space.required_len().unwrap();
+    let mut dst =
+        TensorMap::<f64, 3, 3>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space).unwrap();
+    let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
+    context
+        .tensorcontract_fusion_into(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new(
+                &lhs_axes,
+                &rhs_axes,
+                OutputAxisOrder::from_axes(&output_axes),
+            ),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    let user = a.contract(&b, &lhs_axes, &rhs_axes).unwrap();
+    assert_close(user.data(), dst.data(), 1e-12);
 }

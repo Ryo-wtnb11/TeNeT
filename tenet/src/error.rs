@@ -9,8 +9,8 @@ use tenet_tensors::OperationError;
 /// [`crate::prelude::Space`] / [`crate::prelude::Runtime`] API.
 ///
 /// Expert-layer errors ([`CoreError`], [`OperationError`]) are passed through
-/// unchanged; the remaining variants report user-level misuse (mixing rules,
-/// mixing runtimes, or exceeding the current rank ceiling).
+/// unchanged; the remaining variants report user-level misuse (mixing rules
+/// or mixing runtimes).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     /// Structural error bubbled up from `tenet-core`.
@@ -21,13 +21,6 @@ pub enum Error {
     RuleMismatch,
     /// The operands belong to different [`crate::prelude::Runtime`]s.
     RuntimeMismatch,
-    /// The requested codomain/domain ranks exceed the user-layer ceiling.
-    UnsupportedRank {
-        /// Requested codomain rank.
-        nout: usize,
-        /// Requested domain rank.
-        nin: usize,
-    },
     /// Invalid user input (axes, sectors, spaces); the message says what.
     InvalidArgument(String),
 }
@@ -39,12 +32,6 @@ impl fmt::Display for Error {
             Self::Operation(err) => write!(f, "operation error: {err}"),
             Self::RuleMismatch => write!(f, "operands use different fusion rules"),
             Self::RuntimeMismatch => write!(f, "operands belong to different runtimes"),
-            Self::UnsupportedRank { nout, nin } => write!(
-                f,
-                "unsupported rank: {nout} codomain x {nin} domain legs \
-                 (user layer currently supports at most {} legs per side)",
-                crate::tensor::MAX_LEGS_PER_SIDE
-            ),
             Self::InvalidArgument(message) => write!(f, "invalid argument: {message}"),
         }
     }

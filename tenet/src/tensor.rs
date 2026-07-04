@@ -1,52 +1,33 @@
 //! User-layer symmetric tensor: dynamic rank, rule-erased, runtime-carrying.
 //!
-//! A [`Tensor`] wraps the expert-layer [`tenet_core::TensorMap`] machinery:
-//! the concrete fusion rule is erased behind [`crate::space::RuleKind`] and
-//! the const-generic codomain/domain ranks are erased behind an internal
-//! enum. Operations lock the shared [`Runtime`] state once and dispatch to
-//! the expert layer.
+//! A [`Tensor`] stores a [`tenet_tensors::DynamicFusionMapSpace`] handle plus
+//! flat `f64` storage in the TensorKit-equivalent coupled-sector matrix
+//! layout. The concrete fusion rule is erased behind
+//! [`crate::space::RuleKind`]; rank is fully dynamic (no ceiling), matching
+//! TensorKit's `tensorcontract!`. Operations lock the shared [`Runtime`]
+//! state once and dispatch to the dynamic expert entry points
+//! (`tensorcontract_fusion_dyn_into`, `tree_transform_dyn_into`,
+//! `adjoint_dyn`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockStructure, FusionProductSpace, FusionRule, FusionTensorMapSpace,
-    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorMapSpace,
+    BlockKey, BlockStructure, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
+    SectorId,
 };
-use tenet_tensors::{
-    tree_transform_into_with_context, TensorContractSpec, TreeTransformOperation,
-    TreeTransformRuleCacheKey,
-};
+use tenet_tensors::{DynamicFusionMapSpace, TensorContractSpec, TreeTransformOperation};
 
 use crate::error::Error;
-use crate::runtime::{with_rule_ctx, Ctx, Runtime};
+use crate::runtime::{with_rule_ctx, Runtime};
 use crate::space::{with_rule, RuleKind, Space};
 
-/// Current user-layer rank ceiling: legs per side (codomain or domain).
-///
-// ponytail: ceiling 2 legs per side (total rank <= 4). The expert layer is
-// const-generic in (NOUT, NIN), so every extra split multiplies the
-// monomorphized contract/transform stacks by ~5 rules; the dispatch tables
-// below stay hand-written and small at 2. Upgrade path: extend `ErasedMap`
-// and the three dispatch matches, or expose tenet-tensors' dynamic-space
-// entry points publicly and delete the tables.
-pub(crate) const MAX_LEGS_PER_SIDE: usize = 2;
-
-/// Common trait bound bundle for the erased rules.
-trait UserRule: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Sized {}
-impl<R> UserRule for R where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Sized
-{
-}
-
-// ---------------------------------------------------------------------------
-// Leg bookkeeping: per-axis degeneracies keyed by internal leg sectors.
-// ---------------------------------------------------------------------------
-
 /// Degeneracy table of one tensor leg, keyed by the *internal* sectors of
-/// the corresponding hom-space [`tenet_core::SectorLeg`].
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LegInfo {
+/// the corresponding hom-space [`tenet_core::SectorLeg`]. Used only while
+/// constructing a fresh tensor; afterwards the space handle carries all
+/// structure.
+#[derive(Clone, Debug)]
+struct LegInfo {
     degs: BTreeMap<SectorId, usize>,
 }
 
@@ -57,164 +38,11 @@ impl LegInfo {
         }
     }
 
-    /// Leg after crossing between codomain and domain: sector keys are
-    /// dualized (degeneracies follow their sector).
-    fn dualized<R: FusionRule>(&self, rule: &R) -> Self {
-        Self {
-            degs: self
-                .degs
-                .iter()
-                .map(|(&sector, &deg)| (rule.dual(sector), deg))
-                .collect(),
-        }
-    }
-
     fn deg(&self, sector: SectorId) -> Result<usize, Error> {
         self.degs.get(&sector).copied().ok_or_else(|| {
             Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
         })
     }
-
-    fn dim<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(&self, rule: &R) -> usize {
-        self.degs
-            .iter()
-            .map(|(&sector, &deg)| deg * (rule.dim_scalar(sector).round() as usize))
-            .sum()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rank erasure: enum over the supported (NOUT, NIN) splits.
-// ---------------------------------------------------------------------------
-
-/// Rank-erased tensor storage: one variant per supported codomain/domain
-/// split, each holding the concretely typed expert-layer [`TensorMap`].
-#[derive(Clone, Debug)]
-enum ErasedMap {
-    R0x0(TensorMap<f64, 0, 0>),
-    R1x0(TensorMap<f64, 1, 0>),
-    R0x1(TensorMap<f64, 0, 1>),
-    R1x1(TensorMap<f64, 1, 1>),
-    R2x0(TensorMap<f64, 2, 0>),
-    R0x2(TensorMap<f64, 0, 2>),
-    R2x1(TensorMap<f64, 2, 1>),
-    R1x2(TensorMap<f64, 1, 2>),
-    R2x2(TensorMap<f64, 2, 2>),
-}
-
-/// Runs `$body` with `$m` bound to the typed [`TensorMap`] of any variant.
-macro_rules! on_map {
-    ($map:expr, $m:ident => $body:expr) => {
-        match $map {
-            ErasedMap::R0x0($m) => $body,
-            ErasedMap::R1x0($m) => $body,
-            ErasedMap::R0x1($m) => $body,
-            ErasedMap::R1x1($m) => $body,
-            ErasedMap::R2x0($m) => $body,
-            ErasedMap::R0x2($m) => $body,
-            ErasedMap::R2x1($m) => $body,
-            ErasedMap::R1x2($m) => $body,
-            ErasedMap::R2x2($m) => $body,
-        }
-    };
-}
-
-impl ErasedMap {
-    fn nout(&self) -> usize {
-        match self {
-            Self::R0x0(_) | Self::R0x1(_) | Self::R0x2(_) => 0,
-            Self::R1x0(_) | Self::R1x1(_) | Self::R1x2(_) => 1,
-            Self::R2x0(_) | Self::R2x1(_) | Self::R2x2(_) => 2,
-        }
-    }
-
-    fn nin(&self) -> usize {
-        match self {
-            Self::R0x0(_) | Self::R1x0(_) | Self::R2x0(_) => 0,
-            Self::R0x1(_) | Self::R1x1(_) | Self::R2x1(_) => 1,
-            Self::R0x2(_) | Self::R1x2(_) | Self::R2x2(_) => 2,
-        }
-    }
-
-    fn data(&self) -> &[f64] {
-        on_map!(self, m => m.data())
-    }
-
-    fn data_vec(&self) -> Vec<f64> {
-        self.data().to_vec()
-    }
-
-    fn structure(&self) -> &Arc<BlockStructure> {
-        on_map!(self, m => m.structure())
-    }
-
-    fn hom(&self) -> &FusionTreeHomSpace {
-        on_map!(self, m => m
-            .fusion_space()
-            .expect("user-layer tensors always carry a fusion space")
-            .homspace())
-    }
-
-    /// Same tensor with replaced flat data (same fusion space and layout).
-    fn with_data(&self, data: Vec<f64>) -> Result<Self, Error> {
-        fn rebuilt<const N: usize, const I: usize>(
-            map: &TensorMap<f64, N, I>,
-            data: Vec<f64>,
-        ) -> Result<TensorMap<f64, N, I>, Error> {
-            let fusion_space = Arc::clone(
-                map.fusion_space()
-                    .expect("user-layer tensors always carry a fusion space"),
-            );
-            TensorMap::from_vec_with_shared_fusion_space(data, fusion_space).map_err(Into::into)
-        }
-        Ok(match self {
-            Self::R0x0(m) => Self::R0x0(rebuilt(m, data)?),
-            Self::R1x0(m) => Self::R1x0(rebuilt(m, data)?),
-            Self::R0x1(m) => Self::R0x1(rebuilt(m, data)?),
-            Self::R1x1(m) => Self::R1x1(rebuilt(m, data)?),
-            Self::R2x0(m) => Self::R2x0(rebuilt(m, data)?),
-            Self::R0x2(m) => Self::R0x2(rebuilt(m, data)?),
-            Self::R2x1(m) => Self::R2x1(rebuilt(m, data)?),
-            Self::R1x2(m) => Self::R1x2(rebuilt(m, data)?),
-            Self::R2x2(m) => Self::R2x2(rebuilt(m, data)?),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Typed kernels: the only places that touch const-generic expert entry points.
-// ---------------------------------------------------------------------------
-
-/// Builds the coupled-layout fusion space for `NOUT + NIN` legs from a hom
-/// space and per-leg degeneracy tables.
-fn build_fusion_space<R: UserRule, const NOUT: usize, const NIN: usize>(
-    rule: &R,
-    hom: FusionTreeHomSpace,
-    legs: &[LegInfo],
-) -> Result<FusionTensorMapSpace<NOUT, NIN>, Error> {
-    debug_assert_eq!(legs.len(), NOUT + NIN);
-    let keys = hom.fusion_tree_keys(rule);
-    let mut shapes = Vec::with_capacity(keys.len());
-    for key in &keys {
-        let mut shape = Vec::with_capacity(NOUT + NIN);
-        for (leg, &sector) in legs[..NOUT].iter().zip(key.codomain_uncoupled()) {
-            shape.push(leg.deg(sector)?);
-        }
-        for (leg, &sector) in legs[NOUT..].iter().zip(key.domain_uncoupled()) {
-            shape.push(leg.deg(sector)?);
-        }
-        shapes.push(shape);
-    }
-    let mut codomain_dims = [0usize; NOUT];
-    for (dim, leg) in codomain_dims.iter_mut().zip(&legs[..NOUT]) {
-        *dim = leg.dim(rule);
-    }
-    let mut domain_dims = [0usize; NIN];
-    for (dim, leg) in domain_dims.iter_mut().zip(&legs[NOUT..]) {
-        *dim = leg.dim(rule);
-    }
-    let dense = TensorMapSpace::<NOUT, NIN>::from_dims(codomain_dims, domain_dims)?;
-    FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, rule, shapes).map_err(Into::into)
 }
 
 /// How a freshly built tensor is filled.
@@ -238,382 +66,64 @@ fn rand_unit(state: &mut u64) -> f64 {
     ((splitmix64(state) >> 11) as f64) / ((1u64 << 52) as f64) - 1.0
 }
 
-fn construct_typed<R: UserRule, const NOUT: usize, const NIN: usize>(
-    rule: &R,
-    hom: FusionTreeHomSpace,
-    legs: &[LegInfo],
-    fill: Fill<'_>,
-) -> Result<TensorMap<f64, NOUT, NIN>, Error> {
-    let space = build_fusion_space::<R, NOUT, NIN>(rule, hom, legs)?;
-    match fill {
-        Fill::Zeros => {
-            let len = space.required_len()?;
-            TensorMap::from_vec_with_fusion_space(vec![0.0; len], space).map_err(Into::into)
-        }
-        Fill::Rand(seed) => {
-            let len = space.required_len()?;
-            let mut state = seed;
-            let data = (0..len).map(|_| rand_unit(&mut state)).collect();
-            TensorMap::from_vec_with_fusion_space(data, space).map_err(Into::into)
-        }
-        Fill::BlockFn(fill) => {
-            TensorMap::from_block_fn_with_fusion_space(space, 0.0, fill).map_err(Into::into)
-        }
-    }
-}
-
-/// Runtime `(nout, nin)` to const-generic construction dispatch.
-fn construct_erased<R: UserRule>(
+/// Builds the coupled-layout dynamic fusion space for the given hom space
+/// and per-leg degeneracy tables.
+fn build_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     rule: &R,
     hom: FusionTreeHomSpace,
     legs: &[LegInfo],
     nout: usize,
-    nin: usize,
-    fill: Fill<'_>,
-) -> Result<ErasedMap, Error> {
-    Ok(match (nout, nin) {
-        (0, 0) => ErasedMap::R0x0(construct_typed::<R, 0, 0>(rule, hom, legs, fill)?),
-        (1, 0) => ErasedMap::R1x0(construct_typed::<R, 1, 0>(rule, hom, legs, fill)?),
-        (0, 1) => ErasedMap::R0x1(construct_typed::<R, 0, 1>(rule, hom, legs, fill)?),
-        (1, 1) => ErasedMap::R1x1(construct_typed::<R, 1, 1>(rule, hom, legs, fill)?),
-        (2, 0) => ErasedMap::R2x0(construct_typed::<R, 2, 0>(rule, hom, legs, fill)?),
-        (0, 2) => ErasedMap::R0x2(construct_typed::<R, 0, 2>(rule, hom, legs, fill)?),
-        (2, 1) => ErasedMap::R2x1(construct_typed::<R, 2, 1>(rule, hom, legs, fill)?),
-        (1, 2) => ErasedMap::R1x2(construct_typed::<R, 1, 2>(rule, hom, legs, fill)?),
-        (2, 2) => ErasedMap::R2x2(construct_typed::<R, 2, 2>(rule, hom, legs, fill)?),
-        (nout, nin) => return Err(Error::UnsupportedRank { nout, nin }),
-    })
-}
-
-fn transform_typed<
-    R: UserRule,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
->(
-    ctx: &mut Ctx<R::Key>,
-    rule: &R,
-    src: &TensorMap<f64, SRC_NOUT, SRC_NIN>,
-    operation: TreeTransformOperation,
-    dst_hom: FusionTreeHomSpace,
-    dst_legs: &[LegInfo],
-) -> Result<TensorMap<f64, DST_NOUT, DST_NIN>, Error> {
-    let space = build_fusion_space::<R, DST_NOUT, DST_NIN>(rule, dst_hom, dst_legs)?;
-    let len = space.required_len()?;
-    let mut dst = TensorMap::from_vec_with_fusion_space(vec![0.0; len], space)?;
-    tree_transform_into_with_context(
-        ctx.tree_context_mut(),
-        rule,
-        operation,
-        &mut dst,
-        src,
-        1.0,
-        0.0,
-    )?;
-    Ok(dst)
-}
-
-/// Which tree transform a leg re-arrangement uses.
-enum TransformKind<'a> {
-    Permute,
-    Braid { levels: &'a [usize] },
-    Transpose,
-}
-
-/// Shared implementation of permute / braid / transpose: computes the
-/// destination hom space and leg tables, then dispatches to the typed
-/// tree-transform kernel.
-fn transform_erased<R: UserRule>(
-    ctx: &mut Ctx<R::Key>,
-    rule: &R,
-    map: &ErasedMap,
-    legs: &[LegInfo],
-    codomain_axes: &[usize],
-    domain_axes: &[usize],
-    kind: TransformKind<'_>,
-) -> Result<(ErasedMap, Vec<LegInfo>), Error> {
-    let nout = map.nout();
-    let rank = legs.len();
-    let dst_hom = map.hom().permute(rule, codomain_axes, domain_axes)?;
-
-    let mut dst_legs = Vec::with_capacity(rank);
-    for &axis in codomain_axes {
-        dst_legs.push(if axis < nout {
-            legs[axis].clone()
-        } else {
-            legs[axis].dualized(rule)
-        });
+) -> Result<DynamicFusionMapSpace, Error> {
+    debug_assert_eq!(legs.len(), nout + hom.domain().len());
+    let keys = hom.fusion_tree_keys(rule);
+    let mut shapes = Vec::with_capacity(keys.len());
+    for key in &keys {
+        let mut shape = Vec::with_capacity(legs.len());
+        for (leg, &sector) in legs[..nout].iter().zip(key.codomain_uncoupled()) {
+            shape.push(leg.deg(sector)?);
+        }
+        for (leg, &sector) in legs[nout..].iter().zip(key.domain_uncoupled()) {
+            shape.push(leg.deg(sector)?);
+        }
+        shapes.push(shape);
     }
-    for &axis in domain_axes {
-        dst_legs.push(if axis >= nout {
-            legs[axis].clone()
-        } else {
-            legs[axis].dualized(rule)
-        });
-    }
+    DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, shapes).map_err(Into::into)
+}
 
-    let operation = match kind {
-        TransformKind::Permute => TreeTransformOperation::permute(
-            codomain_axes.iter().copied(),
-            domain_axes.iter().copied(),
-        ),
-        TransformKind::Braid { levels } => {
-            if levels.len() != rank {
-                return Err(Error::InvalidArgument(format!(
-                    "braid levels must list one level per source axis \
-                     (expected {rank}, got {})",
-                    levels.len()
-                )));
+/// Fills every symmetry-allowed block element via `fill(key, indices)`,
+/// mirroring [`tenet_core::TensorMap::from_block_fn_with_fusion_space`]
+/// (degeneracy coordinates local to the block, codomain axes first, first
+/// axis fastest).
+fn fill_block_elements(
+    structure: &BlockStructure,
+    data: &mut [f64],
+    fill: &mut dyn FnMut(&BlockKey, &[usize]) -> f64,
+) -> Result<(), Error> {
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            data[position] = fill(block.key(), &indices);
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
             }
-            TreeTransformOperation::braid(
-                codomain_axes.iter().copied(),
-                domain_axes.iter().copied(),
-                levels[..nout].iter().copied(),
-                levels[nout..].iter().copied(),
-            )
         }
-        TransformKind::Transpose => TreeTransformOperation::transpose(
-            codomain_axes.iter().copied(),
-            domain_axes.iter().copied(),
-        ),
-    };
-
-    let dst_nout = codomain_axes.len();
-    let dst = match (map, dst_nout) {
-        (ErasedMap::R0x0(m), 0) => ErasedMap::R0x0(transform_typed::<R, 0, 0, 0, 0>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x0(m), 1) => ErasedMap::R1x0(transform_typed::<R, 1, 0, 1, 0>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x0(m), 0) => ErasedMap::R0x1(transform_typed::<R, 0, 1, 1, 0>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R0x1(m), 1) => ErasedMap::R1x0(transform_typed::<R, 1, 0, 0, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R0x1(m), 0) => ErasedMap::R0x1(transform_typed::<R, 0, 1, 0, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R2x0(m), 2) => ErasedMap::R2x0(transform_typed::<R, 2, 0, 2, 0>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R2x0(m), 1) => ErasedMap::R1x1(transform_typed::<R, 1, 1, 2, 0>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R2x0(m), 0) => ErasedMap::R0x2(transform_typed::<R, 0, 2, 2, 0>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x1(m), 2) => ErasedMap::R2x0(transform_typed::<R, 2, 0, 1, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x1(m), 1) => ErasedMap::R1x1(transform_typed::<R, 1, 1, 1, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x1(m), 0) => ErasedMap::R0x2(transform_typed::<R, 0, 2, 1, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R0x2(m), 2) => ErasedMap::R2x0(transform_typed::<R, 2, 0, 0, 2>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R0x2(m), 1) => ErasedMap::R1x1(transform_typed::<R, 1, 1, 0, 2>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R0x2(m), 0) => ErasedMap::R0x2(transform_typed::<R, 0, 2, 0, 2>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R2x1(m), 2) => ErasedMap::R2x1(transform_typed::<R, 2, 1, 2, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R2x1(m), 1) => ErasedMap::R1x2(transform_typed::<R, 1, 2, 2, 1>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x2(m), 2) => ErasedMap::R2x1(transform_typed::<R, 2, 1, 1, 2>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R1x2(m), 1) => ErasedMap::R1x2(transform_typed::<R, 1, 2, 1, 2>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (ErasedMap::R2x2(m), 2) => ErasedMap::R2x2(transform_typed::<R, 2, 2, 2, 2>(
-            ctx, rule, m, operation, dst_hom, &dst_legs,
-        )?),
-        (map, dst_nout) => {
-            return Err(Error::UnsupportedRank {
-                nout: dst_nout,
-                nin: map.nout() + map.nin() - dst_nout,
-            })
-        }
-    };
-    Ok((dst, dst_legs))
-}
-
-fn contract_typed<R: UserRule, const P: usize, const K: usize, const Q: usize>(
-    ctx: &mut Ctx<R::Key>,
-    rule: &R,
-    lhs: &TensorMap<f64, P, K>,
-    rhs: &TensorMap<f64, K, Q>,
-    dst_hom: FusionTreeHomSpace,
-    dst_legs: &[LegInfo],
-) -> Result<TensorMap<f64, P, Q>, Error> {
-    let space = build_fusion_space::<R, P, Q>(rule, dst_hom, dst_legs)?;
-    let len = space.required_len()?;
-    let mut dst = TensorMap::from_vec_with_fusion_space(vec![0.0; len], space)?;
-    let lhs_axes: Vec<usize> = (P..P + K).collect();
-    let rhs_axes: Vec<usize> = (0..K).collect();
-    ctx.tensorcontract_fusion_into(
-        rule,
-        &mut dst,
-        lhs,
-        rhs,
-        TensorContractSpec::with_default_output_order(&lhs_axes, &rhs_axes),
-        1.0,
-        0.0,
-    )?;
-    Ok(dst)
-}
-
-/// Composition-shaped contraction dispatch: `lhs` must already be split as
-/// `(open | contracted)` and `rhs` as `(contracted | open)`.
-fn compose_erased<R: UserRule>(
-    ctx: &mut Ctx<R::Key>,
-    rule: &R,
-    lhs: &ErasedMap,
-    rhs: &ErasedMap,
-    dst_hom: FusionTreeHomSpace,
-    dst_legs: &[LegInfo],
-) -> Result<ErasedMap, Error> {
-    use ErasedMap as M;
-    macro_rules! arm {
-        ($l:expr, $r:expr, $DV:ident, $P:literal, $K:literal, $Q:literal) => {
-            M::$DV(contract_typed::<R, $P, $K, $Q>(
-                ctx, rule, $l, $r, dst_hom, dst_legs,
-            )?)
-        };
     }
-    Ok(match (lhs, rhs) {
-        // K = 0 (outer products)
-        (M::R0x0(l), M::R0x0(r)) => arm!(l, r, R0x0, 0, 0, 0),
-        (M::R0x0(l), M::R0x1(r)) => arm!(l, r, R0x1, 0, 0, 1),
-        (M::R0x0(l), M::R0x2(r)) => arm!(l, r, R0x2, 0, 0, 2),
-        (M::R1x0(l), M::R0x0(r)) => arm!(l, r, R1x0, 1, 0, 0),
-        (M::R1x0(l), M::R0x1(r)) => arm!(l, r, R1x1, 1, 0, 1),
-        (M::R1x0(l), M::R0x2(r)) => arm!(l, r, R1x2, 1, 0, 2),
-        (M::R2x0(l), M::R0x0(r)) => arm!(l, r, R2x0, 2, 0, 0),
-        (M::R2x0(l), M::R0x1(r)) => arm!(l, r, R2x1, 2, 0, 1),
-        (M::R2x0(l), M::R0x2(r)) => arm!(l, r, R2x2, 2, 0, 2),
-        // K = 1
-        (M::R0x1(l), M::R1x0(r)) => arm!(l, r, R0x0, 0, 1, 0),
-        (M::R0x1(l), M::R1x1(r)) => arm!(l, r, R0x1, 0, 1, 1),
-        (M::R0x1(l), M::R1x2(r)) => arm!(l, r, R0x2, 0, 1, 2),
-        (M::R1x1(l), M::R1x0(r)) => arm!(l, r, R1x0, 1, 1, 0),
-        (M::R1x1(l), M::R1x1(r)) => arm!(l, r, R1x1, 1, 1, 1),
-        (M::R1x1(l), M::R1x2(r)) => arm!(l, r, R1x2, 1, 1, 2),
-        (M::R2x1(l), M::R1x0(r)) => arm!(l, r, R2x0, 2, 1, 0),
-        (M::R2x1(l), M::R1x1(r)) => arm!(l, r, R2x1, 2, 1, 1),
-        (M::R2x1(l), M::R1x2(r)) => arm!(l, r, R2x2, 2, 1, 2),
-        // K = 2
-        (M::R0x2(l), M::R2x0(r)) => arm!(l, r, R0x0, 0, 2, 0),
-        (M::R0x2(l), M::R2x1(r)) => arm!(l, r, R0x1, 0, 2, 1),
-        (M::R0x2(l), M::R2x2(r)) => arm!(l, r, R0x2, 0, 2, 2),
-        (M::R1x2(l), M::R2x0(r)) => arm!(l, r, R1x0, 1, 2, 0),
-        (M::R1x2(l), M::R2x1(r)) => arm!(l, r, R1x1, 1, 2, 1),
-        (M::R1x2(l), M::R2x2(r)) => arm!(l, r, R1x2, 1, 2, 2),
-        (M::R2x2(l), M::R2x0(r)) => arm!(l, r, R2x0, 2, 2, 0),
-        (M::R2x2(l), M::R2x1(r)) => arm!(l, r, R2x1, 2, 2, 1),
-        (M::R2x2(l), M::R2x2(r)) => arm!(l, r, R2x2, 2, 2, 2),
-        (lhs, rhs) => {
-            return Err(Error::InvalidArgument(format!(
-                "composition shape mismatch: lhs domain rank {} vs rhs codomain rank {}",
-                lhs.nin(),
-                rhs.nout()
-            )))
-        }
-    })
-}
-
-/// General axis contraction, lowered to permutes plus one composition-shaped
-/// contraction (the same lowering the expert layer documents for
-/// `tensorcontract!`). Returns the result in the default output order:
-/// `lhs` open axes ascending (codomain side), then `rhs` open axes ascending
-/// (domain side).
-fn contract_erased<R: UserRule>(
-    ctx: &mut Ctx<R::Key>,
-    rule: &R,
-    lhs: (&ErasedMap, &[LegInfo]),
-    rhs: (&ErasedMap, &[LegInfo]),
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-) -> Result<(ErasedMap, Vec<LegInfo>), Error> {
-    let (lhs_map, lhs_legs) = lhs;
-    let (rhs_map, rhs_legs) = rhs;
-    if lhs_axes.len() != rhs_axes.len() {
-        return Err(Error::InvalidArgument(format!(
-            "contracted axis lists differ in length: {} vs {}",
-            lhs_axes.len(),
-            rhs_axes.len()
-        )));
-    }
-    let lhs_open = open_axes(lhs_axes, lhs_legs.len())?;
-    let rhs_open = open_axes(rhs_axes, rhs_legs.len())?;
-    let contracted = lhs_axes.len();
-
-    // Bring lhs to (open | contracted) and rhs to (contracted | open),
-    // skipping the transform when the tensor is already in that shape.
-    let lhs_ready = lhs_map.nout() == lhs_open.len()
-        && lhs_open.iter().copied().eq(0..lhs_open.len())
-        && lhs_axes.iter().copied().eq(lhs_open.len()..lhs_legs.len());
-    let rhs_ready = rhs_map.nout() == contracted && rhs_axes.iter().copied().eq(0..contracted);
-
-    let lhs_permuted;
-    let (lhs_map, lhs_legs) = if lhs_ready {
-        (lhs_map, lhs_legs)
-    } else {
-        lhs_permuted = transform_erased(
-            ctx,
-            rule,
-            lhs_map,
-            lhs_legs,
-            &lhs_open,
-            lhs_axes,
-            TransformKind::Permute,
-        )?;
-        (&lhs_permuted.0, lhs_permuted.1.as_slice())
-    };
-    let rhs_permuted;
-    let (rhs_map, rhs_legs) = if rhs_ready {
-        (rhs_map, rhs_legs)
-    } else {
-        rhs_permuted = transform_erased(
-            ctx,
-            rule,
-            rhs_map,
-            rhs_legs,
-            rhs_axes,
-            &rhs_open,
-            TransformKind::Permute,
-        )?;
-        (&rhs_permuted.0, rhs_permuted.1.as_slice())
-    };
-
-    let dst_hom = FusionTreeHomSpace::compose(rule, lhs_map.hom(), rhs_map.hom())?;
-    let mut dst_legs = lhs_legs[..lhs_map.nout()].to_vec();
-    dst_legs.extend_from_slice(&rhs_legs[rhs_map.nout()..]);
-    let dst = compose_erased(ctx, rule, lhs_map, rhs_map, dst_hom, &dst_legs)?;
-    Ok((dst, dst_legs))
-}
-
-fn open_axes(contracted: &[usize], rank: usize) -> Result<Vec<usize>, Error> {
-    let mut seen = vec![false; rank];
-    for &axis in contracted {
-        if axis >= rank || seen[axis] {
-            return Err(Error::InvalidArgument(format!(
-                "invalid contracted axis list {contracted:?} for rank {rank}"
-            )));
-        }
-        seen[axis] = true;
-    }
-    Ok((0..rank).filter(|&axis| !seen[axis]).collect())
+    Ok(())
 }
 
 /// Quantum-dimension-weighted Frobenius inner product over the stored
@@ -667,17 +177,37 @@ fn weighted_inner<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     Ok(total)
 }
 
+/// Which tree transform a leg re-arrangement uses.
+enum TransformKind<'a> {
+    Permute,
+    Braid { levels: &'a [usize] },
+    Transpose,
+}
+
+fn open_axes(contracted: &[usize], rank: usize) -> Result<Vec<usize>, Error> {
+    let mut seen = vec![false; rank];
+    for &axis in contracted {
+        if axis >= rank || seen[axis] {
+            return Err(Error::InvalidArgument(format!(
+                "invalid contracted axis list {contracted:?} for rank {rank}"
+            )));
+        }
+        seen[axis] = true;
+    }
+    Ok((0..rank).filter(|&axis| !seen[axis]).collect())
+}
+
 // ---------------------------------------------------------------------------
 // Public tensor type.
 // ---------------------------------------------------------------------------
 
 /// A block-sparse symmetric tensor with dynamic rank, tied to a [`Runtime`].
 ///
-/// `Tensor` is the user-layer face of [`tenet_core::TensorMap`]: the fusion
-/// rule (U1 / Z2 / fZ2 / SU2 / U1 x fZ2) is fixed per tensor by the
-/// [`Space`]s it was built from, and the codomain/domain split is a runtime
-/// property. Mixing tensors of different rules or different runtimes in one
-/// operation is an error.
+/// `Tensor` is the user-layer face of the expert layer's dynamic-rank
+/// machinery: the fusion rule (U1 / Z2 / fZ2 / SU2 / U1 x fZ2) is fixed per
+/// tensor by the [`Space`]s it was built from, and the codomain/domain split
+/// is a runtime property with no rank ceiling. Mixing tensors of different
+/// rules or different runtimes in one operation is an error.
 ///
 /// Scalar type is currently `f64`.
 ///
@@ -706,10 +236,8 @@ fn weighted_inner<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
 pub struct Tensor {
     rt: Runtime,
     rule: RuleKind,
-    /// Per-axis degeneracy tables (codomain axes first), keyed by the
-    /// internal sectors of the corresponding hom-space legs.
-    legs: Vec<LegInfo>,
-    map: ErasedMap,
+    space: Arc<DynamicFusionMapSpace>,
+    data: Vec<f64>,
 }
 
 impl Tensor {
@@ -742,14 +270,29 @@ impl Tensor {
             .chain(domain.iter())
             .map(|space| LegInfo::from_space(space))
             .collect();
-        let map = with_rule!(rule_kind, rule, {
-            construct_erased(rule, hom, &legs, codomain.len(), domain.len(), fill)
+        let (space, data) = with_rule!(rule_kind, rule, {
+            let space = build_space(rule, hom, &legs, codomain.len())?;
+            let len = space.required_len()?;
+            let mut data = vec![0.0; len];
+            match fill {
+                Fill::Zeros => {}
+                Fill::Rand(seed) => {
+                    let mut state = seed;
+                    for value in &mut data {
+                        *value = rand_unit(&mut state);
+                    }
+                }
+                Fill::BlockFn(fill) => {
+                    fill_block_elements(space.structure(), &mut data, fill)?;
+                }
+            }
+            Ok::<_, Error>((space, data))
         })?;
         Ok(Self {
             rt: rt.clone(),
             rule: rule_kind,
-            legs,
-            map,
+            space: Arc::new(space),
+            data,
         })
     }
 
@@ -811,23 +354,23 @@ impl Tensor {
 
     /// Number of codomain legs.
     pub fn codomain_rank(&self) -> usize {
-        self.map.nout()
+        self.space.nout()
     }
 
     /// Number of domain legs.
     pub fn domain_rank(&self) -> usize {
-        self.map.nin()
+        self.space.nin()
     }
 
     /// Total number of legs.
     pub fn rank(&self) -> usize {
-        self.legs.len()
+        self.space.rank()
     }
 
     /// Flat storage in the TensorKit-equivalent coupled-sector matrix
     /// layout (column-major inside each coupled block).
     pub fn data(&self) -> &[f64] {
-        self.map.data()
+        &self.data
     }
 
     fn check_same_world(&self, other: &Self) -> Result<(), Error> {
@@ -866,23 +409,45 @@ impl Tensor {
         rhs_axes: &[usize],
     ) -> Result<Self, Error> {
         self.check_same_world(rhs)?;
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(Error::InvalidArgument(format!(
+                "contracted axis lists differ in length: {} vs {}",
+                lhs_axes.len(),
+                rhs_axes.len()
+            )));
+        }
+        open_axes(lhs_axes, self.rank())?;
+        open_axes(rhs_axes, rhs.rank())?;
         let mut state = self.rt.lock();
-        let (map, legs) = with_rule_ctx!(self.rule, state, rule, ctx, {
-            contract_erased(
-                ctx,
+        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctx, {
+            let dst_space = DynamicFusionMapSpace::contracted(
                 rule,
-                (&self.map, &self.legs),
-                (&rhs.map, &rhs.legs),
+                &self.space,
+                &rhs.space,
                 lhs_axes,
                 rhs_axes,
-            )
+            )?;
+            let mut data = vec![0.0; dst_space.required_len()?];
+            ctx.tensorcontract_fusion_dyn_into(
+                rule,
+                &dst_space,
+                &mut data,
+                &self.space,
+                &self.data,
+                &rhs.space,
+                &rhs.data,
+                TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
+                1.0,
+                0.0,
+            )?;
+            Ok::<_, Error>((dst_space, data))
         })?;
         drop(state);
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
-            legs,
-            map,
+            space: Arc::new(space),
+            data,
         })
     }
 
@@ -948,51 +513,70 @@ impl Tensor {
         domain_axes: &[usize],
         kind: TransformKind<'_>,
     ) -> Result<Self, Error> {
+        let rank = self.rank();
+        let nout = self.codomain_rank();
+        let operation = match kind {
+            TransformKind::Permute => TreeTransformOperation::permute(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+            ),
+            TransformKind::Braid { levels } => {
+                if levels.len() != rank {
+                    return Err(Error::InvalidArgument(format!(
+                        "braid levels must list one level per source axis \
+                         (expected {rank}, got {})",
+                        levels.len()
+                    )));
+                }
+                TreeTransformOperation::braid(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                    levels[..nout].iter().copied(),
+                    levels[nout..].iter().copied(),
+                )
+            }
+            TransformKind::Transpose => TreeTransformOperation::transpose(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+            ),
+        };
+
         let mut state = self.rt.lock();
-        let (map, legs) = with_rule_ctx!(self.rule, state, rule, ctx, {
-            transform_erased(
-                ctx,
+        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctx, {
+            let dst_space = self.space.transformed(rule, &operation)?;
+            let mut data = vec![0.0; dst_space.required_len()?];
+            ctx.tree_context_mut().tree_transform_dyn_into(
                 rule,
-                &self.map,
-                &self.legs,
-                codomain_axes,
-                domain_axes,
-                kind,
-            )
+                operation,
+                &Arc::clone(dst_space.structure()),
+                self.space.structure(),
+                &mut data,
+                &self.data,
+                1.0,
+                0.0,
+            )?;
+            Ok::<_, Error>((dst_space, data))
         })?;
         drop(state);
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
-            legs,
-            map,
+            space: Arc::new(space),
+            data,
         })
     }
 
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
     /// conjugate-transposes every block (real scalars: transpose only).
     pub fn adjoint(&self) -> Result<Self, Error> {
-        use ErasedMap as M;
-        let map = with_rule!(self.rule, rule, {
-            Ok::<_, Error>(match &self.map {
-                M::R0x0(m) => M::R0x0(tenet_tensors::adjoint(rule, m)?),
-                M::R1x0(m) => M::R0x1(tenet_tensors::adjoint(rule, m)?),
-                M::R0x1(m) => M::R1x0(tenet_tensors::adjoint(rule, m)?),
-                M::R1x1(m) => M::R1x1(tenet_tensors::adjoint(rule, m)?),
-                M::R2x0(m) => M::R0x2(tenet_tensors::adjoint(rule, m)?),
-                M::R0x2(m) => M::R2x0(tenet_tensors::adjoint(rule, m)?),
-                M::R2x1(m) => M::R1x2(tenet_tensors::adjoint(rule, m)?),
-                M::R1x2(m) => M::R2x1(tenet_tensors::adjoint(rule, m)?),
-                M::R2x2(m) => M::R2x2(tenet_tensors::adjoint(rule, m)?),
-            })
+        let (space, data) = with_rule!(self.rule, rule, {
+            tenet_tensors::adjoint_dyn(rule, &self.space, &self.data)
         })?;
-        let mut legs = self.legs[self.codomain_rank()..].to_vec();
-        legs.extend_from_slice(&self.legs[..self.codomain_rank()]);
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
-            legs,
-            map,
+            space: Arc::new(space),
+            data,
         })
     }
 
@@ -1000,24 +584,23 @@ impl Tensor {
     /// (`norm(t)^2 = sum_c dim(c) * |block_c|^2`), matching TensorKit's
     /// `norm`.
     pub fn norm(&self) -> Result<f64, Error> {
-        let data = self.map.data();
         with_rule!(self.rule, rule, {
-            weighted_inner(rule, self.map.structure(), data, data)
+            weighted_inner(rule, self.space.structure(), &self.data, &self.data)
         })
         .map(f64::sqrt)
     }
 
     /// Returns `factor * self`.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
-        let mut data = self.map.data_vec();
+        let mut data = self.data.clone();
         for value in &mut data {
             *value *= factor;
         }
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
-            legs: self.legs.clone(),
-            map: self.map.with_data(data)?,
+            space: Arc::clone(&self.space),
+            data,
         })
     }
 
@@ -1025,15 +608,15 @@ impl Tensor {
     /// same spaces (identical hom space and block layout).
     pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
         self.check_same_space(other)?;
-        let mut data = self.map.data_vec();
-        for (value, &rhs) in data.iter_mut().zip(other.map.data()) {
+        let mut data = self.data.clone();
+        for (value, &rhs) in data.iter_mut().zip(&other.data) {
             *value = alpha * *value + beta * rhs;
         }
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
-            legs: self.legs.clone(),
-            map: self.map.with_data(data)?,
+            space: Arc::clone(&self.space),
+            data,
         })
     }
 
@@ -1043,18 +626,13 @@ impl Tensor {
     pub fn inner(&self, other: &Self) -> Result<f64, Error> {
         self.check_same_space(other)?;
         with_rule!(self.rule, rule, {
-            weighted_inner(
-                rule,
-                self.map.structure(),
-                self.map.data(),
-                other.map.data(),
-            )
+            weighted_inner(rule, self.space.structure(), &self.data, &other.data)
         })
     }
 
     fn check_same_space(&self, other: &Self) -> Result<(), Error> {
         self.check_same_world(other)?;
-        if self.map.hom() != other.map.hom() || self.map.structure() != other.map.structure() {
+        if *self.space != *other.space {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
