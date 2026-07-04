@@ -43,6 +43,55 @@ pub trait Rank2Gemm<D> {
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>;
+
+    /// Executes a batch of independent GEMMs addressed by offsets into shared
+    /// buffers: for each job, the `rows x cols` destination matrix at
+    /// `dst[job.dst_offset..]` receives `alpha * lhs_part * rhs_part + beta *
+    /// dst_part` (column-major). The plan layer guarantees the destination
+    /// ranges of a batch are pairwise disjoint, so implementations may run
+    /// jobs in any order or concurrently. The default executes them in order.
+    fn matmul_rank2_batch(
+        &mut self,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        D: Copy,
+    {
+        for job in jobs {
+            let lhs_slice = direct_slice(lhs, job.lhs_offset, job.rows, job.contracted)?;
+            let rhs_slice = direct_slice(rhs, job.rhs_offset, job.contracted, job.cols)?;
+            let dst_slice = direct_slice_mut(dst, job.dst_offset, job.rows, job.cols)?;
+            self.matmul_rank2(
+                dst_slice,
+                lhs_slice,
+                rhs_slice,
+                job.rows,
+                job.contracted,
+                job.cols,
+                alpha,
+                beta,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// One GEMM of a fully-direct canonical batch. Offsets address coupled-sector
+/// matrices inside the operands' storage buffers; a batch's destination
+/// ranges never overlap (validated when the plan is assembled).
+#[derive(Clone, Copy, Debug)]
+pub struct Rank2GemmBatchJob {
+    pub dst_offset: usize,
+    pub lhs_offset: usize,
+    pub rhs_offset: usize,
+    pub rows: usize,
+    pub contracted: usize,
+    pub cols: usize,
 }
 
 pub struct HostCanonicalFusionBlockContractWorkspace<T> {
@@ -73,6 +122,11 @@ pub struct CanonicalFusionBlockContractPlan {
     rhs_structure: Arc<BlockStructure>,
     inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
     groups: Vec<CanonicalFusionBlockContractGroupPlan>,
+    // Precompiled batch over the groups when every operand is a direct
+    // coupled-sector matrix; replay hands it to the backend in a single
+    // `matmul_rank2_batch` call. `None` marks a non-direct plan — a valid
+    // compile output used only for route decisions, never replayed.
+    direct_batch: Option<Vec<Rank2GemmBatchJob>>,
 }
 
 impl CanonicalFusionBlockContractPlan {
@@ -81,28 +135,29 @@ impl CanonicalFusionBlockContractPlan {
     /// symmetric route layer sends anything else through dynamic
     /// materialization.
     pub fn is_fully_direct(&self) -> bool {
-        self.groups.iter().all(|group| {
-            group.lhs.direct_offset.is_some()
-                && group.rhs.direct_offset.is_some()
-                && group.dst.direct_offset.is_some()
-        })
+        self.direct_batch.is_some()
     }
 
     /// Assembles a compiled plan; called by the symmetric compile layer.
+    /// Non-direct groups yield a route-decision-only plan (no batch);
+    /// overlapping destination ranges are rejected because that invariant is
+    /// what lets backends run the batch jobs concurrently.
     pub fn from_parts(
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
         inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
         groups: Vec<CanonicalFusionBlockContractGroupPlan>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, OperationError> {
+        let direct_batch = compile_direct_batch(&groups)?;
+        Ok(Self {
             dst_structure,
             lhs_structure,
             rhs_structure,
             inactive_dst_scale_blocks,
             groups,
-        }
+            direct_batch,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -136,9 +191,14 @@ impl CanonicalFusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         let _ = fusion_workspace;
-        for group in &self.groups {
-            execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
-        }
+        gemm.matmul_rank2_batch(
+            dst_data,
+            lhs_data,
+            rhs_data,
+            self.direct_batch()?,
+            alpha,
+            beta,
+        )?;
         Ok(())
     }
 
@@ -258,10 +318,23 @@ impl CanonicalFusionBlockContractPlan {
         let lhs_data = lhs.data();
         let rhs_data = rhs.data();
         let _ = fusion_workspace;
-        for group in &self.groups {
-            execute_group_direct(gemm, group, dst.data_mut(), lhs_data, rhs_data, alpha, beta)?;
-        }
+        gemm.matmul_rank2_batch(
+            dst.data_mut(),
+            lhs_data,
+            rhs_data,
+            self.direct_batch()?,
+            alpha,
+            beta,
+        )?;
         Ok(())
+    }
+
+    fn direct_batch(&self) -> Result<&[Rank2GemmBatchJob], OperationError> {
+        self.direct_batch
+            .as_deref()
+            .ok_or(OperationError::UnsupportedTensorContractScope {
+                message: NON_COUPLED_OPERAND_MESSAGE,
+            })
     }
 
     /// Storage-aware raw replay for callers whose operands are scratch buffers
@@ -315,9 +388,14 @@ impl CanonicalFusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         let _ = fusion_workspace;
-        for group in &self.groups {
-            execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
-        }
+        gemm.matmul_rank2_batch(
+            dst_data,
+            lhs_data,
+            rhs_data,
+            self.direct_batch()?,
+            alpha,
+            beta,
+        )?;
         Ok(())
     }
 
@@ -387,9 +465,14 @@ impl CanonicalFusionBlockContractPlan {
         )?;
 
         let _ = fusion_workspace;
-        for group in &self.groups {
-            execute_group_direct(gemm, group, dst.data_mut(), lhs_data, rhs_data, alpha, beta)?;
-        }
+        gemm.matmul_rank2_batch(
+            dst.data_mut(),
+            lhs_data,
+            rhs_data,
+            self.direct_batch()?,
+            alpha,
+            beta,
+        )?;
         Ok(())
     }
 
@@ -707,6 +790,49 @@ where
     Ok(())
 }
 
+/// Lowers the group list to batch jobs. A non-direct group yields `None`
+/// (route-decision-only plan); a direct batch additionally enforces pairwise
+/// disjoint destination ranges so backends may execute jobs in any order.
+fn compile_direct_batch(
+    groups: &[CanonicalFusionBlockContractGroupPlan],
+) -> Result<Option<Vec<Rank2GemmBatchJob>>, OperationError> {
+    let mut jobs = Vec::with_capacity(groups.len());
+    for group in groups {
+        let (Some(lhs_offset), Some(rhs_offset), Some(dst_offset)) = (
+            group.lhs.direct_offset,
+            group.rhs.direct_offset,
+            group.dst.direct_offset,
+        ) else {
+            return Ok(None);
+        };
+        jobs.push(Rank2GemmBatchJob {
+            dst_offset,
+            lhs_offset,
+            rhs_offset,
+            rows: group.lhs.rows,
+            contracted: group.lhs.cols,
+            cols: group.rhs.cols,
+        });
+    }
+    let mut dst_ranges: Vec<(usize, usize)> = jobs
+        .iter()
+        .map(|job| direct_matrix_len(job.rows, job.cols).map(|len| (job.dst_offset, len)))
+        .collect::<Result<_, _>>()?;
+    dst_ranges.sort_unstable();
+    for pair in dst_ranges.windows(2) {
+        let (base, len) = pair[0];
+        let end = base
+            .checked_add(len)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if end > pair[1].0 {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "canonical contraction groups must write disjoint destination ranges",
+            });
+        }
+    }
+    Ok(Some(jobs))
+}
+
 /// Direct-only group execution: every operand's coupled-sector matrix sits
 /// in storage, so the group is a single GEMM with alpha/beta applied by the
 /// kernel. Non-direct layouts are a plan-construction bug (the compile layer
@@ -779,4 +905,74 @@ where
         alpha,
         beta,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_group(rows: usize, cols: usize, offset: Option<usize>) -> FusionBlockMatrixGroup {
+        FusionBlockMatrixGroup {
+            coupled: SectorId::new(0),
+            rows,
+            cols,
+            needs_clear: false,
+            direct_offset: offset,
+            block_indices: Vec::new(),
+            subblocks: Vec::new(),
+        }
+    }
+
+    fn group_plan(
+        dims: (usize, usize, usize),
+        offsets: (usize, usize, usize),
+    ) -> CanonicalFusionBlockContractGroupPlan {
+        let (rows, contracted, cols) = dims;
+        let (lhs_offset, rhs_offset, dst_offset) = offsets;
+        CanonicalFusionBlockContractGroupPlan::new(
+            direct_group(rows, contracted, Some(lhs_offset)),
+            direct_group(contracted, cols, Some(rhs_offset)),
+            direct_group(rows, cols, Some(dst_offset)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn direct_batch_lowers_disjoint_groups() {
+        let groups = vec![
+            group_plan((2, 3, 4), (0, 0, 0)),
+            group_plan((3, 2, 5), (6, 12, 8)),
+        ];
+        let batch = compile_direct_batch(&groups).unwrap().unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].dst_offset, 0);
+        assert_eq!(batch[0].rows * batch[0].cols, 8);
+        assert_eq!(batch[1].dst_offset, 8);
+        assert_eq!(batch[1].contracted, 2);
+    }
+
+    #[test]
+    fn direct_batch_rejects_overlapping_destination_ranges() {
+        // First dst covers [0, 8); second starts at 7.
+        let groups = vec![
+            group_plan((2, 3, 4), (0, 0, 0)),
+            group_plan((3, 2, 5), (6, 12, 7)),
+        ];
+        let error = compile_direct_batch(&groups).unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope { .. }
+        ));
+    }
+
+    #[test]
+    fn non_direct_group_yields_route_decision_only_plan() {
+        let plan = CanonicalFusionBlockContractGroupPlan::new(
+            direct_group(2, 3, None),
+            direct_group(3, 4, Some(0)),
+            direct_group(2, 4, Some(0)),
+        )
+        .unwrap();
+        assert!(compile_direct_batch(&[plan]).unwrap().is_none());
+    }
 }

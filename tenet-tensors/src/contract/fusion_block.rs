@@ -581,13 +581,13 @@ where
             dst_group.clone(),
         )?);
     }
-    Ok(CanonicalFusionBlockContractPlan::from_parts(
+    CanonicalFusionBlockContractPlan::from_parts(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs_space.structure()),
         Arc::clone(rhs_space.structure()),
         fusion_scale_block_layouts_excluding(dst_space.structure(), &active_dst_blocks)?,
         groups,
-    ))
+    )
 }
 
 /// Host implementation of [`StorageGemm`] over host-readable storages.
