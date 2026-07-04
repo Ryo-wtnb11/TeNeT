@@ -20,7 +20,7 @@ pub mod prelude {
     pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::space::{SectorLabel, Space};
-    pub use crate::tensor::{Dtype, EigTrunc, EighTrunc, SvdTrunc, Tensor};
+    pub use crate::tensor::{Dtype, EigTrunc, EighTrunc, Scalar, SvdTrunc, Tensor, TensorScalar};
     pub use num_complex::Complex64;
     pub use tenet_core::{BlockKey, FusionTreeBlockKey, SectorId};
     pub use tenet_matrixalgebra::{SectorSpectrum, Truncation};

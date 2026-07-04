@@ -36,7 +36,7 @@ fn su2_space() -> Space {
 fn svd_compact_reconstructs_u1_and_su2() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 101).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 101).unwrap();
         let (u, s, vh) = t.svd_compact().unwrap();
         let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
         assert!(relative_distance(&recon, &t) < 1e-10);
@@ -48,7 +48,7 @@ fn svd_compact_reconstructs_u1_and_su2() {
 fn svd_compact_reconstructs_rank_five_peps_split() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 102).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v, &v, &v], 102).unwrap();
         let (u, s, vh) = t.svd_compact().unwrap();
         assert_eq!(u.codomain_rank(), 1);
         assert_eq!(u.domain_rank(), 1);
@@ -74,7 +74,7 @@ fn svd_trunc_error_matches_discarded_weighted_norm() {
         ),
     ];
     for (v, dim_of) in cases {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 103).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 103).unwrap();
         let full = t.svd_vals().unwrap();
 
         let rank = 6usize;
@@ -129,7 +129,7 @@ fn svd_trunc_error_matches_discarded_weighted_norm() {
 fn qr_and_lq_factorizations() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 104).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 104).unwrap();
 
         // QR: Q R = t and Q is an isometry (Q^H Q = id, so Q^H t = R).
         let (q, r) = t.qr_compact().unwrap();
@@ -168,7 +168,7 @@ fn null_spaces_annihilate_the_tensor() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
         // Tall map: codomain strictly larger, so a left null space exists.
-        let tall = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 105).unwrap();
+        let tall = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 105).unwrap();
         let n = tall.left_null().unwrap();
         let nh_t = n.adjoint().unwrap().compose(&tall).unwrap();
         assert!(nh_t.norm().unwrap() < 1e-10 * (1.0 + tall.norm().unwrap()));
@@ -179,7 +179,7 @@ fn null_spaces_annihilate_the_tensor() {
         assert!(relative_distance(&proj, &nh) < 1e-10);
 
         // Wide map: domain strictly larger, so a right null space exists.
-        let wide = Tensor::rand_with_seed(&rt, [&v], [&v, &v], 106).unwrap();
+        let wide = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v], 106).unwrap();
         let n = wide.right_null().unwrap();
         let t_nh = wide.compose(&n.adjoint().unwrap()).unwrap();
         assert!(t_nh.norm().unwrap() < 1e-10 * (1.0 + wide.norm().unwrap()));
@@ -190,7 +190,7 @@ fn null_spaces_annihilate_the_tensor() {
 fn polar_decompositions_reconstruct() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 107).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 107).unwrap();
         let (w, p) = t.left_polar().unwrap();
         assert!(relative_distance(&w.compose(&p).unwrap(), &t) < 1e-10);
         let (p, w) = t.right_polar().unwrap();
@@ -202,7 +202,7 @@ fn polar_decompositions_reconstruct() {
 fn eigh_reconstructs_a_hermitized_tensor() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 108).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 108).unwrap();
         let h = a.add(&a.adjoint().unwrap(), 0.5, 0.5).unwrap();
 
         let (d, vec) = h.eigh_full().unwrap();
@@ -234,9 +234,9 @@ fn eigh_reconstructs_a_hermitized_tensor() {
 fn exp_of_zero_acts_as_identity() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let z = Tensor::zeros(&rt, [&v], [&v]).unwrap();
+        let z = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
         let e = z.exp().unwrap();
-        let x = Tensor::rand_with_seed(&rt, [&v], [&v], 109).unwrap();
+        let x = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 109).unwrap();
         let ex = e.compose(&x).unwrap();
         assert!(relative_distance(&ex, &x) < 1e-10);
         // exp(0) is idempotent (a projector equal to the identity).
@@ -250,17 +250,17 @@ fn inv_and_pinv_sanity() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
         // Well-conditioned square map: Gram matrix of a random tensor.
-        let a = Tensor::rand_with_seed(&rt, [&v], [&v], 110).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 110).unwrap();
         let t = a.compose(&a.adjoint().unwrap()).unwrap();
         let ti = t.inv().unwrap();
-        let x = Tensor::rand_with_seed(&rt, [&v], [&v], 111).unwrap();
+        let x = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 111).unwrap();
         let round_trip = ti.compose(&t).unwrap().compose(&x).unwrap();
         assert!(relative_distance(&round_trip, &x) < 1e-8);
 
         // pinv on a tall map: t^+ t = id on the domain.
-        let tall = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 112).unwrap();
+        let tall = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 112).unwrap();
         let pinv = tall.pinv(1e-12).unwrap();
-        let x = Tensor::rand_with_seed(&rt, [&v], [&v], 113).unwrap();
+        let x = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 113).unwrap();
         let round_trip = pinv.compose(&tall).unwrap().compose(&x).unwrap();
         assert!(relative_distance(&round_trip, &x) < 1e-8);
     }
@@ -296,7 +296,7 @@ fn svd_compact_cross_checks_against_typed_expert_layer() {
 
     let rt = Runtime::builder().build().unwrap();
     let v = Space::u1([(-1, deg), (0, deg), (1, deg)]);
-    let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 114).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 114).unwrap();
 
     // Expert-layer twin shares the flat storage (identical coupled layout).
     let typed =
@@ -321,7 +321,7 @@ fn svd_recomposes_on_non_dualization_closed_charges() {
     let w = Space::u1([(0, 2), (1, 1), (2, 1)]);
     let charge = |c: i32| U1Irrep::new(c).sector_id();
 
-    let t = Tensor::rand_with_seed(&rt, [&w], [&w], 103).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&w], [&w], 103).unwrap();
     let (u, s, vh) = t.svd_compact().unwrap();
     let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
     assert!(relative_distance(&recon, &t) < 1e-10);
@@ -370,7 +370,7 @@ fn svd_recomposes_on_non_dualization_closed_charges() {
 fn truncated_factors_recompose_and_add_against_untruncated() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::u1([(0, 2), (1, 1), (2, 1)]);
-    let t = Tensor::rand_with_seed(&rt, [&v], [&v], 7).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 7).unwrap();
     let svd = t.svd_trunc(&Truncation::rank(2)).unwrap();
     let recomposed = svd.u.compose(&svd.s).unwrap().compose(&svd.vh).unwrap();
     let diff = t.add(&recomposed, 1.0, -1.0).unwrap();

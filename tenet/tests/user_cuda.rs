@@ -34,7 +34,7 @@ fn su2_space() -> Space {
 fn to_cuda_requires_cuda_runtime() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let t = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
     let err = t.to_cuda().unwrap_err();
     assert!(matches!(err, Error::InvalidArgument(_)), "got {err:?}");
 }
@@ -43,7 +43,7 @@ fn to_cuda_requires_cuda_runtime() {
 fn c64_to_cuda_is_explicit_error() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let t = Tensor::rand_c64(&rt, [&v], [&v]).unwrap();
+    let t = Tensor::rand(&rt, Dtype::C64, [&v], [&v]).unwrap();
     let err = t.to_cuda().unwrap_err();
     assert!(matches!(err, Error::UnsupportedOnDevice(_)), "got {err:?}");
 }
@@ -53,8 +53,8 @@ fn c64_to_cuda_is_explicit_error() {
 fn u1_contract_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
-    let b = Tensor::rand(&rt, [&v], [&v, &v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v, &v]).unwrap();
 
     let host = a.compose(&b).unwrap();
 
@@ -79,8 +79,8 @@ fn su2_rank5_peps_contract_on_cuda_matches_host() {
 
     // PEPS-shaped rank-5 tensors: (phys, left, up) <- (right, down),
     // contracted over the two bond legs (canonical core form).
-    let a = Tensor::rand(&rt, [&phys, &bond, &bond], [&bond, &bond]).unwrap();
-    let b = Tensor::rand(&rt, [&bond, &bond], [&phys, &bond, &bond]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&phys, &bond, &bond], [&bond, &bond]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&bond, &bond], [&phys, &bond, &bond]).unwrap();
 
     let host = a.compose(&b).unwrap();
 
@@ -101,8 +101,8 @@ fn su2_rank5_peps_contract_on_cuda_matches_host() {
 fn contract_with_explicit_axes_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v, &v], [&v, &v]).unwrap();
-    let b = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
 
     // Core form written out explicitly: a's domain against b's codomain.
     let host = a.contract(&b, &[2, 3], &[0, 1]).unwrap();
@@ -122,8 +122,8 @@ fn contract_with_explicit_axes_on_cuda_matches_host() {
 fn non_canonical_contract_on_cuda_is_explicit_error() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v], [&v, &v]).unwrap();
-    let b = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v, &v]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
 
     // Reversed pairing of the contracted legs is not the canonical core
     // form; the host handles it via tree transforms, the device must
@@ -144,7 +144,7 @@ fn non_canonical_contract_on_cuda_is_explicit_error() {
 fn unsupported_ops_on_device_are_explicit_errors() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let t = Tensor::rand(&rt, [&v, &v], [&v])
+    let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v])
         .unwrap()
         .to_cuda()
         .unwrap();
@@ -172,8 +172,8 @@ fn unsupported_ops_on_device_are_explicit_errors() {
 fn mixed_placement_contract_is_placement_error() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v], [&v]).unwrap();
-    let b = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
     let b_dev = b.to_cuda().unwrap();
 
     let err = a.compose(&b_dev).unwrap_err();
@@ -188,8 +188,14 @@ fn cross_runtime_device_contract_is_runtime_error() {
     let rt1 = Runtime::builder().cuda(0).build().unwrap();
     let rt2 = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt1, [&v], [&v]).unwrap().to_cuda().unwrap();
-    let b = Tensor::rand(&rt2, [&v], [&v]).unwrap().to_cuda().unwrap();
+    let a = Tensor::rand(&rt1, Dtype::F64, [&v], [&v])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let b = Tensor::rand(&rt2, Dtype::F64, [&v], [&v])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
 
     let err = a.compose(&b).unwrap_err();
     assert!(matches!(err, Error::RuntimeMismatch), "got {err:?}");
@@ -200,7 +206,7 @@ fn cross_runtime_device_contract_is_runtime_error() {
 fn to_cuda_to_host_round_trip_is_identity() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let t = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
+    let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
     let back = t.to_cuda().unwrap().to_host().unwrap();
     assert_eq!(back.data(), t.data());
 }
@@ -237,8 +243,8 @@ fn assert_spectra_close(
 fn norm_inner_add_scale_on_cuda_match_host_u1() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
-    let b = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
     let a_dev = a.to_cuda().unwrap();
     let b_dev = b.to_cuda().unwrap();
 
@@ -248,8 +254,8 @@ fn norm_inner_add_scale_on_cuda_match_host_u1() {
 
     let inner = a.inner(&b).unwrap();
     let inner_dev = a_dev.inner(&b_dev).unwrap();
-    assert!((inner_dev.re - inner.re).abs() <= 1e-12 * (1.0 + inner.re.abs()));
-    assert_eq!(inner_dev.im, 0.0);
+    assert!((inner_dev.re() - inner.re()).abs() <= 1e-12 * (1.0 + inner.re().abs()));
+    assert_eq!(inner_dev.im(), 0.0);
 
     let sum = a.add(&b, 1.5, -0.5).unwrap();
     let sum_dev = a_dev.add(&b_dev, 1.5, -0.5).unwrap();
@@ -272,8 +278,8 @@ fn norm_and_inner_on_cuda_apply_su2_quantum_dimension_weights() {
     // device permute, which slice 1 does not have; instead the host norm of
     // the *same* tensor is the reference — it already carries the per-sector
     // dim(c) weights that a raw unweighted device reduction would miss.
-    let a = Tensor::rand(&rt, [&phys, &bond], [&bond]).unwrap();
-    let b = Tensor::rand(&rt, [&phys, &bond], [&bond]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&phys, &bond], [&bond]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&phys, &bond], [&bond]).unwrap();
     let a_dev = a.to_cuda().unwrap();
     let b_dev = b.to_cuda().unwrap();
 
@@ -286,10 +292,10 @@ fn norm_and_inner_on_cuda_apply_su2_quantum_dimension_weights() {
 
     let inner = a.inner(&b).unwrap();
     let inner_dev = a_dev.inner(&b_dev).unwrap();
-    assert!((inner_dev.re - inner.re).abs() <= 1e-12 * (1.0 + inner.re.abs()));
+    assert!((inner_dev.re() - inner.re()).abs() <= 1e-12 * (1.0 + inner.re().abs()));
 
     // Consistency: <a, a> == norm(a)^2 on device.
-    let self_inner = a_dev.inner(&a_dev).unwrap().re;
+    let self_inner = a_dev.inner(&a_dev).unwrap().re();
     assert!((self_inner - norm_dev * norm_dev).abs() <= 1e-12 * (1.0 + self_inner));
 }
 
@@ -300,8 +306,8 @@ fn svd_compact_on_cuda_matches_host() {
     let v = u1_space();
     let bond = su2_space();
     for t in [
-        Tensor::rand(&rt, [&v, &v], [&v]).unwrap(),
-        Tensor::rand(&rt, [&bond, &bond], [&bond]).unwrap(),
+        Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap(),
+        Tensor::rand(&rt, Dtype::F64, [&bond, &bond], [&bond]).unwrap(),
     ] {
         let (hu, hs, hvh) = t.svd_compact().unwrap();
         let (du, ds, dvh) = t.to_cuda().unwrap().svd_compact().unwrap();
@@ -329,7 +335,7 @@ fn svd_trunc_on_cuda_matches_host_spectrum_and_error() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
     let truncation = Truncation::Rank(3);
-    let t = Tensor::rand(&rt, [&v, &v], [&v]).unwrap();
+    let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
 
     let host = t.svd_trunc(&truncation).unwrap();
     let dev = t.to_cuda().unwrap().svd_trunc(&truncation).unwrap();
@@ -362,8 +368,8 @@ fn qr_compact_on_cuda_matches_host_factors() {
     let v = u1_space();
     let bond = su2_space();
     for t in [
-        Tensor::rand(&rt, [&v, &v], [&v]).unwrap(),
-        Tensor::rand(&rt, [&bond, &bond], [&bond]).unwrap(),
+        Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap(),
+        Tensor::rand(&rt, Dtype::F64, [&bond, &bond], [&bond]).unwrap(),
     ] {
         let (hq, hr) = t.qr_compact().unwrap();
         let (dq, dr) = t.to_cuda().unwrap().qr_compact().unwrap();
@@ -386,7 +392,7 @@ fn qr_compact_on_cuda_matches_host_factors() {
 fn eigh_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
     // Hermitian endomorphism: t = a + a^dagger.
     let t = a.add(&a.adjoint().unwrap(), 1.0, 1.0).unwrap();
 
@@ -413,7 +419,7 @@ fn eigh_on_cuda_matches_host() {
 fn eigh_trunc_on_cuda_matches_host_spectrum_and_error() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
     let t = a.add(&a.adjoint().unwrap(), 1.0, 1.0).unwrap();
     let truncation = Truncation::Rank(4);
 
@@ -448,8 +454,8 @@ fn device_pipeline_contract_svd_trunc_matches_host_pipeline() {
     let bond = su2_space();
     let truncation = Truncation::Rank(4);
 
-    let a = Tensor::rand(&rt, [&phys, &bond], [&bond]).unwrap();
-    let b = Tensor::rand(&rt, [&bond], [&phys, &bond]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&phys, &bond], [&bond]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&bond], [&phys, &bond]).unwrap();
 
     // Host pipeline.
     let host_c = a.compose(&b).unwrap();

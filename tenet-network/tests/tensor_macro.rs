@@ -28,8 +28,8 @@ fn su2_space() -> Space {
 fn pairwise_macro_matches_direct_contract() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 101).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 102).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 101).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 102).unwrap();
 
         let c = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
         let expected = a.contract(&b, &[2, 3], &[0, 1]).unwrap();
@@ -43,8 +43,8 @@ fn pairwise_macro_matches_direct_contract() {
 fn macro_accepts_parenthesized_operand_expressions() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 103).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 104).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 103).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 104).unwrap();
     let pair = (a, b);
 
     let c = tensor!([i, j; m, n] = (pair.0)[i, j; k, l] * (pair.1)[k, l; m, n]).unwrap();
@@ -56,8 +56,8 @@ fn macro_accepts_parenthesized_operand_expressions() {
 fn permuted_output_labels_match_contract_ordered() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 111).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 112).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 111).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 112).unwrap();
 
         let c = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
         let expected = a
@@ -71,7 +71,7 @@ fn permuted_output_labels_match_contract_ordered() {
 fn single_tensor_macro_is_a_permute() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, [&v], [&v], 121).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 121).unwrap();
         let p = tensor!([j; i] = t[i; j]).unwrap();
         let expected = t.permute(&[1], &[0]).unwrap();
         assert_close(p.data(), expected.data(), 1e-12);
@@ -82,10 +82,12 @@ fn single_tensor_macro_is_a_permute() {
 fn scalar_output_with_conj_matches_norm_squared() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 131).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 131).unwrap();
         let n2 = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l])
             .unwrap()
             .scalar()
+            .unwrap()
+            .try_f64()
             .unwrap();
         let norm = a.norm().unwrap();
         assert!(
@@ -102,12 +104,14 @@ fn scalar_output_with_conj_matches_norm_squared() {
 fn three_tensor_chain_with_conj_matches_manual_contraction() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let psi = Tensor::rand_with_seed(&rt, [&v], [&v, &v], 141).unwrap();
-        let h = Tensor::rand_with_seed(&rt, [&v], [&v], 142).unwrap();
+        let psi = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v], 141).unwrap();
+        let h = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 142).unwrap();
 
         let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
             .unwrap()
             .scalar()
+            .unwrap()
+            .try_f64()
             .unwrap();
 
         // Manual: m1 = H |psi> with legs (p; l, r), then close with the bra.
@@ -118,6 +122,8 @@ fn three_tensor_chain_with_conj_matches_manual_contraction() {
             .contract(&m1, &[2, 0, 1], &[0, 1, 2])
             .unwrap()
             .scalar()
+            .unwrap()
+            .try_f64()
             .unwrap();
 
         assert!(
@@ -135,10 +141,10 @@ fn greedy_order_beats_naive_left_to_right_on_a_chain() {
     let rt = Runtime::builder().build().unwrap();
     let dim = |d: usize| Space::u1([(0, d)]);
     let (va, vb, vc, vd, ve) = (dim(4), dim(8), dim(4), dim(2), dim(2));
-    let t1 = Tensor::rand_with_seed(&rt, [&va], [&vb], 151).unwrap();
-    let t2 = Tensor::rand_with_seed(&rt, [&vb], [&vc], 152).unwrap();
-    let t3 = Tensor::rand_with_seed(&rt, [&vc], [&vd], 153).unwrap();
-    let t4 = Tensor::rand_with_seed(&rt, [&vd], [&ve], 154).unwrap();
+    let t1 = Tensor::rand_with_seed(&rt, Dtype::F64, [&va], [&vb], 151).unwrap();
+    let t2 = Tensor::rand_with_seed(&rt, Dtype::F64, [&vb], [&vc], 152).unwrap();
+    let t3 = Tensor::rand_with_seed(&rt, Dtype::F64, [&vc], [&vd], 153).unwrap();
+    let t4 = Tensor::rand_with_seed(&rt, Dtype::F64, [&vd], [&ve], 154).unwrap();
     let tensors = [&t1, &t2, &t3, &t4];
 
     let label = |s: &str| TemporaryLabel::from(s);
@@ -200,8 +206,8 @@ fn greedy_order_beats_naive_left_to_right_on_a_chain() {
 fn wrong_input_codomain_split_is_rejected() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let t = Tensor::rand_with_seed(&rt, [&v], [&v], 161).unwrap();
-    let u = Tensor::rand_with_seed(&rt, [&v], [&v], 162).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 161).unwrap();
+    let u = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 162).unwrap();
     // t is [v] <- [v] (codomain rank 1) but written as [i, j; ].
     let result = tensor!([i; k] = t[i, j;] * u[j; k]);
     assert!(matches!(result, Err(Error::InvalidArgument(_))));
@@ -215,8 +221,8 @@ fn contracted_leg_degeneracy_mismatch_is_rejected_with_both_legs_spelled_out() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
     let w = Space::u1([(-1, 2), (0, 4), (1, 2)]); // charge 0 degeneracy differs
-    let t = Tensor::rand_with_seed(&rt, [&v], [&v], 163).unwrap();
-    let u = Tensor::rand_with_seed(&rt, [&w], [&w], 164).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 163).unwrap();
+    let u = Tensor::rand_with_seed(&rt, Dtype::F64, [&w], [&w], 164).unwrap();
     let err = tensor!([i; k] = t[i; j] * u[j; k]).unwrap_err();
     let message = err.to_string();
     assert!(

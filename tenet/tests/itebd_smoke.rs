@@ -56,8 +56,10 @@ fn bond_energy(h: &Tensor, l_out: &Tensor, g1: &Tensor, l_mid: &Tensor, g2: &Ten
     let num = tensor!([] = conj(theta)[l, pa, pb; r] * h[pa, pb; qa, qb] * theta[l, qa, qb; r])
         .unwrap()
         .scalar()
+        .unwrap()
+        .try_f64()
         .unwrap();
-    num / theta.inner(&theta).unwrap().re
+    num / theta.inner(&theta).unwrap().re()
 }
 
 /// Runs the schedule from a Neel state; returns the energy per bond.
@@ -125,6 +127,8 @@ fn neel_product_state_contracts_with_the_full_gate() {
     let energy = tensor!([] = conj(psi)[l, pa, pb; r] * h[pa, pb; qa, qb] * psi[l, qa, qb; r])
         .unwrap()
         .scalar()
+        .unwrap()
+        .try_f64()
         .unwrap();
     assert!((energy - (-0.25)).abs() < 1e-12, "energy = {energy}");
     let theta_norm = theta.norm().unwrap();

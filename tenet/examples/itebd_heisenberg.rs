@@ -93,8 +93,9 @@ fn bond_energy(
     let theta = tensor!([l, pa, pb; r] = l_out[l; x] * g1[x, pa; y] * l_mid[y; z]
         * g2[z, pb; w] * l_out[w; r])?;
     let num = tensor!([] = conj(theta)[l, pa, pb; r] * h[pa, pb; qa, qb] * theta[l, qa, qb; r])?
-        .scalar()?;
-    Ok(num / theta.inner(&theta)?.re)
+        .scalar()?
+        .try_f64()?;
+    Ok(num / theta.inner(&theta)?.re())
 }
 
 /// Weighted bond dimension of a diagonal λ (its single codomain leg).

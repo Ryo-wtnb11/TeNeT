@@ -154,6 +154,15 @@ impl Space {
     /// U(1)-graded space from `(charge, degeneracy)` pairs.
     ///
     /// TensorKit equivalent: `U1Space(charge => degeneracy, ...)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate sector label — a programming bug in the
+    /// constructor call, mirroring TensorKit's `ArgumentError` at
+    /// `GradedSpace` construction (`gradedspace.jl:49-56`). The
+    /// [`Self::product`] / [`Self::fz2_u1_su2`] constructors return
+    /// `Result` instead only because their product-sector *encoding* can
+    /// fail on data-dependent capacity, not for duplicates.
     pub fn u1<I>(charges: I) -> Self
     where
         I: IntoIterator<Item = (i32, usize)>,
@@ -170,6 +179,11 @@ impl Space {
     /// Z2-graded space from `(parity, degeneracy)` pairs (`0` even, `1` odd).
     ///
     /// TensorKit equivalent: `Z2Space(0 => deg_even, 1 => deg_odd)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate sector label (TensorKit `ArgumentError`
+    /// parity); see [`Self::u1`].
     pub fn z2<I>(parities: I) -> Self
     where
         I: IntoIterator<Item = (u8, usize)>,
@@ -187,6 +201,11 @@ impl Space {
     /// (`0` even, `1` odd), with fermionic braiding.
     ///
     /// TensorKit equivalent: `Vect[FermionParity](0 => deg_even, 1 => deg_odd)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate sector label (TensorKit `ArgumentError`
+    /// parity); see [`Self::u1`].
     pub fn fz2<I>(parities: I) -> Self
     where
         I: IntoIterator<Item = (u8, usize)>,
@@ -205,6 +224,11 @@ impl Space {
     /// is spin-1/2 and `2` is spin-1).
     ///
     /// TensorKit equivalent: `SU2Space(j => degeneracy, ...)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate sector label (TensorKit `ArgumentError`
+    /// parity); see [`Self::u1`].
     pub fn su2<I>(spins: I) -> Self
     where
         I: IntoIterator<Item = (usize, usize)>,

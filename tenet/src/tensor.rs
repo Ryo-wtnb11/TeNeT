@@ -50,12 +50,71 @@ pub enum Dtype {
     C64,
 }
 
+/// A scalar produced by a [`Tensor`] reduction ([`Tensor::scalar`],
+/// [`Tensor::inner`], [`Tensor::tr`]): the variant matches the producing
+/// tensor's [`Dtype`], mirroring TensorKit, where `dot`/`tr` on a real
+/// tensor return a real scalar. Non-exhaustive so future precisions
+/// (f32/c32) can add variants.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scalar {
+    /// Real double precision.
+    F64(f64),
+    /// Complex double precision.
+    C64(Complex64),
+}
+
+impl Scalar {
+    /// The real part (the value itself for real variants).
+    pub fn re(self) -> f64 {
+        match self {
+            Self::F64(value) => value,
+            Self::C64(value) => value.re,
+        }
+    }
+
+    /// The imaginary part (exactly `0.0` for real variants).
+    pub fn im(self) -> f64 {
+        match self {
+            Self::F64(_) => 0.0,
+            Self::C64(value) => value.im,
+        }
+    }
+
+    /// The value as `f64`; [`Error::DtypeMismatch`] on complex variants.
+    /// Use [`Self::re`] when you deliberately want the real part of a
+    /// complex scalar.
+    pub fn try_f64(self) -> Result<f64, Error> {
+        match self {
+            Self::F64(value) => Ok(value),
+            Self::C64(_) => Err(Error::DtypeMismatch),
+        }
+    }
+
+    /// Widens to [`Complex64`] (exact for every variant).
+    pub fn to_c64(self) -> Complex64 {
+        match self {
+            Self::F64(value) => Complex64::new(value, 0.0),
+            Self::C64(value) => value,
+        }
+    }
+}
+
+impl std::fmt::Display for Scalar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::F64(value) => write!(f, "{value}"),
+            Self::C64(value) => write!(f, "{value}"),
+        }
+    }
+}
+
 /// Dtype-erased flat storage in the coupled-sector matrix layout. The
 /// device variant shares the immutable buffer behind an `Arc` (operations
 /// always write fresh destinations), keeping `Tensor: Clone` cheap and the
 /// host paths untouched.
 #[derive(Clone, Debug)]
-enum Data {
+pub enum Data {
     F64(Vec<f64>),
     C64(Vec<Complex64>),
     #[cfg(feature = "cuda")]
@@ -72,10 +131,20 @@ fn device_unsupported(what: &str) -> Error {
     ))
 }
 
+/// The scalar types a [`Tensor`] can store: `f64` and [`Complex64`]. This
+/// trait is **sealed** (its supertrait is crate-private); it exists so
+/// [`Tensor::from_block_fn`] can infer the constructed dtype from the fill
+/// closure's return type.
+pub trait TensorScalar: UserScalar {}
+
+impl TensorScalar for f64 {}
+impl TensorScalar for Complex64 {}
+
 /// The scalar types the user layer stores: the expert-layer scalar machinery
 /// plus the glue to lift typed data into the erased [`Data`] storage and to
-/// pick the matching per-scalar execution context.
-trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
+/// pick the matching per-scalar execution context. Crate-private supertrait
+/// sealing [`TensorScalar`].
+pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
     fn lift(data: Vec<Self>) -> Data;
     fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key>;
     fn rand_unit(state: &mut u64) -> Self;
@@ -375,10 +444,12 @@ fn open_axes(contracted: &[usize], rank: usize) -> Result<Vec<usize>, Error> {
 /// rules or different runtimes in one operation is an error.
 ///
 /// Scalar type: each tensor stores either real `f64` or complex
-/// [`Complex64`] data, fixed at construction ([`Self::rand`] vs
-/// [`Self::rand_c64`] and so on) and reported by [`Self::dtype`]. Operations
-/// dispatch on the stored dtype internally; mixing dtypes in one operation
-/// is [`Error::DtypeMismatch`] (widen explicitly with [`Self::to_c64`]).
+/// [`Complex64`] data, fixed at construction (the [`Dtype`] token of
+/// [`Self::rand`], [`Self::zeros`] and so on; [`Self::from_block_fn`]
+/// infers it from the fill closure) and reported by [`Self::dtype`].
+/// Operations dispatch on the stored dtype internally; mixing dtypes in one
+/// operation is [`Error::DtypeMismatch`] (widen explicitly with
+/// [`Self::to_c64`]).
 ///
 /// # Examples
 ///
@@ -466,52 +537,46 @@ impl Tensor {
         })
     }
 
-    /// Zero tensor on `codomain <- domain`. All spaces must share one
-    /// fusion rule.
-    pub fn zeros<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    /// Zero tensor of the given [`Dtype`] on `codomain <- domain`
+    /// (TensorKit `zeros(Float64, W ← V)` / `zeros(ComplexF64, W ← V)`).
+    /// All spaces must share one fusion rule.
+    pub fn zeros<'a, C, D>(
+        rt: &Runtime,
+        dtype: Dtype,
+        codomain: C,
+        domain: D,
+    ) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
-        Self::build::<_, _, f64>(rt, codomain, domain, Fill::Zeros)
+        match dtype {
+            Dtype::F64 => Self::build::<_, _, f64>(rt, codomain, domain, Fill::Zeros),
+            Dtype::C64 => Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Zeros),
+        }
     }
 
-    /// Complex (c64) zero tensor on `codomain <- domain`.
-    pub fn zeros_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-    {
-        Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Zeros)
-    }
-
-    /// Random tensor on `codomain <- domain`, entries uniform in `[-1, 1)`.
+    /// Random tensor of the given [`Dtype`] on `codomain <- domain`
+    /// (TensorKit `rand(Float64, W ← V)` / `rand(ComplexF64, W ← V)`):
+    /// entries (real and imaginary parts for [`Dtype::C64`]) uniform in
+    /// `[-1, 1)`.
     ///
     /// Deterministic per runtime: the n-th `rand`-family call on a given
     /// runtime always produces the same tensor. Use [`Self::rand_with_seed`]
     /// for an explicit stream.
-    pub fn rand<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    pub fn rand<'a, C, D>(rt: &Runtime, dtype: Dtype, codomain: C, domain: D) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
-        Self::build::<_, _, f64>(rt, codomain, domain, Fill::Rand(rt.next_rand_seed()))
-    }
-
-    /// Complex (c64) random tensor: real and imaginary parts each uniform in
-    /// `[-1, 1)`; same determinism as [`Self::rand`].
-    pub fn rand_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-    {
-        Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Rand(rt.next_rand_seed()))
+        Self::rand_with_seed(rt, dtype, codomain, domain, rt.next_rand_seed())
     }
 
     /// Random tensor with an explicit seed (splitmix64 stream, entries
     /// uniform in `[-1, 1)`).
     pub fn rand_with_seed<'a, C, D>(
         rt: &Runtime,
+        dtype: Dtype,
         codomain: C,
         domain: D,
         seed: u64,
@@ -520,21 +585,10 @@ impl Tensor {
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
-        Self::build::<_, _, f64>(rt, codomain, domain, Fill::Rand(seed))
-    }
-
-    /// Complex (c64) random tensor with an explicit seed.
-    pub fn rand_with_seed_c64<'a, C, D>(
-        rt: &Runtime,
-        codomain: C,
-        domain: D,
-        seed: u64,
-    ) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-    {
-        Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Rand(seed))
+        match dtype {
+            Dtype::F64 => Self::build::<_, _, f64>(rt, codomain, domain, Fill::Rand(seed)),
+            Dtype::C64 => Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Rand(seed)),
+        }
     }
 
     /// Tensor filled block-by-block: `fill(key, indices)` is called for
@@ -542,10 +596,14 @@ impl Tensor {
     /// to the block (degeneracy coordinates, codomain axes first). Mirrors
     /// [`tenet_core::TensorMap::from_block_fn_with_fusion_space`].
     ///
+    /// The constructed dtype follows the closure's return type (`f64` or
+    /// [`Complex64`], the two [`TensorScalar`] impls) — no dtype token
+    /// needed.
+    ///
     /// The fusion-tree `key` labels domain legs with the domain `Space`'s
     /// own sectors (TensorKit's `f2.uncoupled`), not their duals; on both
     /// sides the uncoupled sectors fuse to the tree's coupled sector.
-    pub fn from_block_fn<'a, C, D, F>(
+    pub fn from_block_fn<'a, C, D, S, F>(
         rt: &Runtime,
         codomain: C,
         domain: D,
@@ -554,22 +612,8 @@ impl Tensor {
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
-        F: FnMut(&BlockKey, &[usize]) -> f64,
-    {
-        Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
-    }
-
-    /// Complex (c64) [`Self::from_block_fn`]: `fill` returns [`Complex64`].
-    pub fn from_block_fn_c64<'a, C, D, F>(
-        rt: &Runtime,
-        codomain: C,
-        domain: D,
-        mut fill: F,
-    ) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-        F: FnMut(&BlockKey, &[usize]) -> Complex64,
+        S: TensorScalar,
+        F: FnMut(&BlockKey, &[usize]) -> S,
     {
         Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
     }
@@ -582,6 +626,7 @@ impl Tensor {
     /// (`tensors/linalg.jl:102-158`).
     fn structural(
         rt: &Runtime,
+        dtype: Dtype,
         codomain: Vec<&Space>,
         domain: Vec<&Space>,
         embed: bool,
@@ -621,7 +666,10 @@ impl Tensor {
                 data[region.offset + i * (region.rows + 1)] = 1.0;
             }
         }
-        Ok(t)
+        Ok(match dtype {
+            Dtype::F64 => t,
+            Dtype::C64 => t.to_c64(),
+        })
     }
 
     /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`,
@@ -633,25 +681,17 @@ impl Tensor {
     ///
     /// let rt = Runtime::builder().build()?;
     /// let v = Space::u1([(0, 2), (1, 1)]);
-    /// let t = Tensor::rand(&rt, [&v], [&v])?;
-    /// let id = Tensor::id(&rt, [&v])?;
+    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+    /// let id = Tensor::id(&rt, Dtype::F64, [&v])?;
     /// assert_eq!(id.compose(&t)?.data(), t.data());
     /// # Ok::<(), tenet::prelude::Error>(())
     /// ```
-    pub fn id<'a, S>(rt: &Runtime, spaces: S) -> Result<Self, Error>
+    pub fn id<'a, S>(rt: &Runtime, dtype: Dtype, spaces: S) -> Result<Self, Error>
     where
         S: IntoIterator<Item = &'a Space>,
     {
         let spaces: Vec<&Space> = spaces.into_iter().collect();
-        Self::structural(rt, spaces.clone(), spaces, false, "id")
-    }
-
-    /// Complex (c64) [`Self::id`].
-    pub fn id_c64<'a, S>(rt: &Runtime, spaces: S) -> Result<Self, Error>
-    where
-        S: IntoIterator<Item = &'a Space>,
-    {
-        Ok(Self::id(rt, spaces)?.to_c64())
+        Self::structural(rt, dtype, spaces.clone(), spaces, false, "id")
     }
 
     /// The canonical structural isomorphism `codomain <- domain` (TensorKit
@@ -667,19 +707,25 @@ impl Tensor {
     /// let rt = Runtime::builder().build()?;
     /// let v = Space::u1([(0, 1), (1, 1)]);
     /// let fused = v.dual().fuse(&v)?;
-    /// let f = Tensor::isomorphism(&rt, [&fused], [&v.dual(), &v])?;
+    /// let f = Tensor::isomorphism(&rt, Dtype::F64, [&fused], [&v.dual(), &v])?;
     /// // Unitary: f† ∘ f is the identity on the product space.
     /// let roundtrip = f.adjoint()?.compose(&f)?;
-    /// assert_eq!(roundtrip.data(), Tensor::id(&rt, [&v.dual(), &v])?.data());
+    /// assert_eq!(roundtrip.data(), Tensor::id(&rt, Dtype::F64, [&v.dual(), &v])?.data());
     /// # Ok::<(), tenet::prelude::Error>(())
     /// ```
-    pub fn isomorphism<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    pub fn isomorphism<'a, C, D>(
+        rt: &Runtime,
+        dtype: Dtype,
+        codomain: C,
+        domain: D,
+    ) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
         Self::structural(
             rt,
+            dtype,
             codomain.into_iter().collect(),
             domain.into_iter().collect(),
             false,
@@ -687,39 +733,27 @@ impl Tensor {
         )
     }
 
-    /// Complex (c64) [`Self::isomorphism`].
-    pub fn isomorphism_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-    {
-        Ok(Self::isomorphism(rt, codomain, domain)?.to_c64())
-    }
-
     /// TensorKit `unitary(W ← V)` (`tensors/linalg.jl:129-132`): identical
     /// to [`Self::isomorphism`] — TensorKit only adds a Euclidean
     /// inner-product check, which every tenet fusion rule satisfies.
-    pub fn unitary<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    pub fn unitary<'a, C, D>(
+        rt: &Runtime,
+        dtype: Dtype,
+        codomain: C,
+        domain: D,
+    ) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
         Self::structural(
             rt,
+            dtype,
             codomain.into_iter().collect(),
             domain.into_iter().collect(),
             false,
             "unitary",
         )
-    }
-
-    /// Complex (c64) [`Self::unitary`].
-    pub fn unitary_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-    {
-        Ok(Self::unitary(rt, codomain, domain)?.to_c64())
     }
 
     /// The canonical isometry `codomain <- domain` (TensorKit
@@ -735,32 +769,29 @@ impl Tensor {
     /// let rt = Runtime::builder().build()?;
     /// let small = Space::su2([(0, 1), (1, 1)]);
     /// let big = Space::su2([(0, 2), (1, 3), (2, 1)]);
-    /// let w = Tensor::isometry(&rt, [&big], [&small])?;
-    /// let id = Tensor::id(&rt, [&small])?;
+    /// let w = Tensor::isometry(&rt, Dtype::F64, [&big], [&small])?;
+    /// let id = Tensor::id(&rt, Dtype::F64, [&small])?;
     /// assert_eq!(w.adjoint()?.compose(&w)?.data(), id.data());
     /// # Ok::<(), tenet::prelude::Error>(())
     /// ```
-    pub fn isometry<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    pub fn isometry<'a, C, D>(
+        rt: &Runtime,
+        dtype: Dtype,
+        codomain: C,
+        domain: D,
+    ) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
         Self::structural(
             rt,
+            dtype,
             codomain.into_iter().collect(),
             domain.into_iter().collect(),
             true,
             "isometry",
         )
-    }
-
-    /// Complex (c64) [`Self::isometry`].
-    pub fn isometry_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
-    where
-        C: IntoIterator<Item = &'a Space>,
-        D: IntoIterator<Item = &'a Space>,
-    {
-        Ok(Self::isometry(rt, codomain, domain)?.to_c64())
     }
 
     /// TensorKit `twist(t, inds)` (`tensors/indexmanipulations.jl:62-97`):
@@ -775,7 +806,7 @@ impl Tensor {
     ///
     /// let rt = Runtime::builder().build()?;
     /// let v = Space::fz2([(0, 1), (1, 1)]);
-    /// let t = Tensor::rand(&rt, [&v], [&v])?;
+    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
     /// let twisted = t.twist(&[0])?;
     /// assert_eq!(twisted.twist(&[0])?.data(), t.data()); // θ² = 1
     /// # Ok::<(), tenet::prelude::Error>(())
@@ -1085,9 +1116,24 @@ impl Tensor {
     /// Flat `f64` storage in the TensorKit-equivalent coupled-sector matrix
     /// layout (column-major inside each coupled block).
     ///
+    /// This is an **internal-packing inspection API** (tests, debugging,
+    /// oracle comparisons), not a general element-access API:
+    ///
+    /// - The slice is the internal buffer in the coupled-sector matrix
+    ///   layout; element positions depend on block order, the fusion-tree
+    ///   basis, and column-major packing.
+    /// - That layout is **not a stable ABI**: it may change between
+    ///   versions without notice.
+    /// - There are no implicit device copies: on a device tensor this
+    ///   panics — download explicitly with `to_host()` first.
+    /// - For semantic access, prefer the operation APIs (contractions,
+    ///   [`Self::scalar`], norms); a stable block iterator / dense export
+    ///   would be a separate future API.
+    ///
     /// # Panics
     ///
-    /// Panics if the tensor stores c64 data; use [`Self::data_c64`] then.
+    /// Panics if the tensor stores c64 data (use [`Self::data_c64`]) or is
+    /// device-resident (use `to_host()`).
     pub fn data(&self) -> &[f64] {
         match &self.data {
             Data::F64(data) => data,
@@ -1099,9 +1145,14 @@ impl Tensor {
 
     /// Flat [`Complex64`] storage in the coupled-sector matrix layout.
     ///
+    /// The same caveats as [`Self::data`] apply: this inspects the internal
+    /// coupled-sector packing (layout-dependent, not a stable ABI, no
+    /// implicit device copies; intended for tests and debugging).
+    ///
     /// # Panics
     ///
-    /// Panics if the tensor stores f64 data; use [`Self::data`] then.
+    /// Panics if the tensor stores f64 data (use [`Self::data`]) or is
+    /// device-resident (use `to_host()`).
     pub fn data_c64(&self) -> &[Complex64] {
         match &self.data {
             Data::C64(data) => data,
@@ -1204,28 +1255,17 @@ impl Tensor {
         Ok(())
     }
 
-    /// The single element of a rank-0 (scalar) f64 tensor, e.g. the result
-    /// of contracting every leg. Errors on tensors with legs and on c64
-    /// tensors (use [`Self::scalar_c64`]).
-    pub fn scalar(&self) -> Result<f64, Error> {
+    /// The single element of a rank-0 (scalar) tensor, e.g. the result of
+    /// contracting every leg. The returned [`Scalar`] variant matches
+    /// [`Self::dtype`] (`F64` for f64 tensors, `C64` for c64 tensors);
+    /// errors on tensors with legs.
+    pub fn scalar(&self) -> Result<Scalar, Error> {
         self.check_rank0()?;
         match &self.data {
-            Data::F64(data) => Ok(data.iter().sum()),
-            Data::C64(_) => Err(Error::DtypeMismatch),
+            Data::F64(data) => Ok(Scalar::F64(data.iter().sum())),
+            Data::C64(data) => Ok(Scalar::C64(data.iter().sum())),
             #[cfg(feature = "cuda")]
             Data::CudaF64(_) => Err(device_unsupported("scalar()")),
-        }
-    }
-
-    /// The single element of a rank-0 (scalar) tensor as [`Complex64`];
-    /// works for both dtypes (f64 widens with zero imaginary part).
-    pub fn scalar_c64(&self) -> Result<Complex64, Error> {
-        self.check_rank0()?;
-        match &self.data {
-            Data::F64(data) => Ok(Complex64::new(data.iter().sum(), 0.0)),
-            Data::C64(data) => Ok(data.iter().sum()),
-            #[cfg(feature = "cuda")]
-            Data::CudaF64(_) => Err(device_unsupported("scalar_c64()")),
         }
     }
 
@@ -1247,10 +1287,43 @@ impl Tensor {
 
     /// Categorical composition `self * rhs`: contracts `self`'s domain with
     /// `rhs`'s codomain, leg by leg. TensorKit `A * B` (`mul!` on coupled
-    /// blocks), which — unlike [`Self::contract`] / TensorKit
-    /// `tensorcontract!` — never inserts the fermionic supertrace twist on
-    /// dual composed legs (TensorKit `tensoroperations.jl:388-420` twists
-    /// only in `blas_contract!`, never in `mul!`).
+    /// blocks); also available as the `&a * &b` operator (see the
+    /// [`std::ops::Mul`] impl, which panics instead of returning `Result`).
+    ///
+    /// # Fermionic semantics: `compose` vs `contract`
+    ///
+    /// `compose` / `&a * &b` is TensorKit's `A * B` / `mul!`: **no**
+    /// fermionic supertrace twist is inserted on dual composed legs.
+    /// [`Self::contract`] and the `tensor!` macro are TensorKit's
+    /// `tensorcontract!` / `@tensor`: dual contracted legs **are** twisted
+    /// (TensorKit `tensoroperations.jl:388-420` twists only in
+    /// `blas_contract!`, never in `mul!`). For bosonic rules the two agree
+    /// exactly; for fermionic rules (fZ2 and products containing it) they
+    /// can differ by signs. Worked example — the odd sector flips sign:
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::fz2([(0, 1), (1, 1)]);
+    /// // a : v <- v*, b : v* <- v; the composed legs are dual (v*).
+    /// let odd = |key: &BlockKey| matches!(key, BlockKey::FusionTree(k)
+    ///     if k.codomain_uncoupled()[0].id() == 1);
+    /// let a = Tensor::from_block_fn(&rt, [&v], [&v.dual()], |k, _| if odd(k) { 2.0 } else { 5.0 })?;
+    /// let b = Tensor::from_block_fn(&rt, [&v.dual()], [&v], |k, _| if odd(k) { 3.0 } else { 7.0 })?;
+    /// let composed = a.compose(&b)?;                    // mul! semantics: no twist
+    /// let contracted = a.contract(&b, &[1], &[0])?;     // tensorcontract!: twist on v*
+    /// assert_eq!(composed.data()[0], contracted.data()[0]);  // even sector agrees
+    /// assert_eq!(composed.data()[1], -contracted.data()[1]); // odd sector: sign flip
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    ///
+    /// Rule of thumb: use `compose` when you mean operator/matrix
+    /// multiplication of tensor maps (TensorKit `A * B`); use
+    /// [`Self::contract`] / `tensor!` when you mean index-notation
+    /// contraction (TensorKit `@tensor`). Bosonic results are identical.
+    #[doc(alias = "mul")]
+    #[doc(alias = "matmul")]
     pub fn compose(&self, rhs: &Self) -> Result<Self, Error> {
         if self.domain_rank() != rhs.codomain_rank() {
             return Err(Error::InvalidArgument(format!(
@@ -1285,6 +1358,13 @@ impl Tensor {
     /// list order), with the default output order: `self`'s open axes
     /// ascending become the codomain, `rhs`'s open axes ascending become the
     /// domain. TensorKit `tensorcontract!` with default `pAB`.
+    ///
+    /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`
+    /// (and the `tensor!` macro), this **twists** dual contracted legs with
+    /// the fermionic supertrace twist — unlike [`Self::compose`] / `&a * &b`
+    /// (TensorKit `A * B` / `mul!`), which never does. Bosonic rules are
+    /// unaffected; fermionic rules can differ by signs. See the worked
+    /// example on [`Self::compose`].
     pub fn contract(
         &self,
         rhs: &Self,
@@ -1589,10 +1669,10 @@ impl Tensor {
     }
 
     /// TensorKit `tr`: full trace of an endomorphism (`domain == codomain`)
-    /// to a scalar, pairing codomain leg `i` with domain leg `i`. Returned
-    /// as [`Complex64`] for both dtypes (f64 tensors give an exactly-real
-    /// result). Fermionic rules give the supertrace, matching TensorKit.
-    pub fn tr(&self) -> Result<Complex64, Error> {
+    /// to a scalar, pairing codomain leg `i` with domain leg `i`. The
+    /// returned [`Scalar`] variant matches [`Self::dtype`]. Fermionic rules
+    /// give the supertrace, matching TensorKit.
+    pub fn tr(&self) -> Result<Scalar, Error> {
         let hom = self.space.homspace();
         if hom.codomain().legs() != hom.domain().legs() {
             return Err(Error::InvalidArgument(
@@ -1601,7 +1681,7 @@ impl Tensor {
         }
         let nout = self.codomain_rank();
         let pairs: Vec<(usize, usize)> = (0..nout).map(|i| (i, nout + i)).collect();
-        self.trace_pairs(&pairs)?.scalar_c64()
+        self.trace_pairs(&pairs)?.scalar()
     }
 
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
@@ -1724,21 +1804,24 @@ impl Tensor {
 
     /// Frobenius inner product `<self, other>` with `self` conjugated,
     /// weighted by coupled-sector quantum dimensions, matching TensorKit's
-    /// `dot(x, y)`. Always returned as [`Complex64`]: real tensors give an
-    /// exactly-zero imaginary part, so `t.inner(&t)?.re == t.norm()?.powi(2)`
-    /// up to floating-point error. Both tensors must live on the same spaces
-    /// and store the same dtype.
-    pub fn inner(&self, other: &Self) -> Result<Complex64, Error> {
+    /// `dot(x, y)`. The returned [`Scalar`] variant matches the operands'
+    /// dtype: f64 tensors give `Scalar::F64` (the result is exactly real),
+    /// so `t.inner(&t)?.re() == t.norm()?.powi(2)` up to floating-point
+    /// error. Both tensors must live on the same spaces and store the same
+    /// dtype.
+    pub fn inner(&self, other: &Self) -> Result<Scalar, Error> {
         self.check_same_space(other)?;
         match (&self.data, &other.data) {
             (Data::F64(a), Data::F64(b)) => with_rule!(self.rule, rule, {
-                weighted_inner(rule, self.space.structure(), a, b)
+                weighted_inner(rule, self.space.structure(), a, b).map(|v| Scalar::F64(v.re))
             }),
             (Data::C64(a), Data::C64(b)) => with_rule!(self.rule, rule, {
-                weighted_inner(rule, self.space.structure(), a, b)
+                weighted_inner(rule, self.space.structure(), a, b).map(Scalar::C64)
             }),
             #[cfg(feature = "cuda")]
-            (Data::CudaF64(a), Data::CudaF64(b)) => self.weighted_inner_cuda(a, b),
+            (Data::CudaF64(a), Data::CudaF64(b)) => {
+                self.weighted_inner_cuda(a, b).map(|v| Scalar::F64(v.re))
+            }
             _ => Err(Error::DtypeMismatch),
         }
     }
@@ -2174,7 +2257,7 @@ impl Tensor {
     ///
     /// let rt = Runtime::builder().build()?;
     /// let v = Space::u1([(0, 2), (1, 2)]);
-    /// let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 7)?;
+    /// let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 7)?;
     /// let s = t.svd_trunc(&Truncation::Full)?.s;
     /// let sqrt_s = s.sqrt()?;
     /// let composed = sqrt_s.compose(&sqrt_s)?;
@@ -2223,6 +2306,34 @@ impl Tensor {
             space: Arc::clone(&self.space),
             data,
         })
+    }
+}
+
+/// TensorKit `A * B` as an operator: `&a * &b` is exactly
+/// [`Tensor::compose`] (categorical composition / `mul!` on coupled blocks,
+/// **no** fermionic supertrace twist — see the fermionic-semantics note on
+/// [`Tensor::compose`]).
+///
+/// # Panics
+///
+/// Panics on any composition error (space/rule/runtime/dtype mismatch),
+/// printing both hom spaces — mirroring TensorKit, where `A * B` throws
+/// `SpaceMismatch` (nalgebra and ndarray panic on shape mismatch the same
+/// way). Use [`Tensor::compose`] directly when you want the `Result`.
+impl std::ops::Mul<&Tensor> for &Tensor {
+    type Output = Tensor;
+
+    fn mul(self, rhs: &Tensor) -> Tensor {
+        match self.compose(rhs) {
+            Ok(out) => out,
+            Err(err) => panic!(
+                "Tensor * Tensor (compose) failed: {err}\n  lhs: {:?} <- {:?}\n  rhs: {:?} <- {:?}",
+                self.codomain_spaces(),
+                self.domain_spaces(),
+                rhs.codomain_spaces(),
+                rhs.domain_spaces(),
+            ),
+        }
     }
 }
 
@@ -2296,7 +2407,7 @@ struct SectorRegion {
 
 #[cfg(feature = "cuda")]
 fn dense_err(err: tenet_dense::DenseError) -> Error {
-    Error::Operation(OperationError::Dense(err))
+    Error::from(OperationError::Dense(err))
 }
 
 #[cfg(feature = "cuda")]

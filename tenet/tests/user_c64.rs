@@ -43,12 +43,12 @@ fn assert_close_c64(actual: &[Complex64], expected: &[Complex64], tol: f64) {
 fn c64_construction() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let zero = Tensor::zeros_c64(&rt, [&v, &v], [&v, &v]).unwrap();
+        let zero = Tensor::zeros(&rt, Dtype::C64, [&v, &v], [&v, &v]).unwrap();
         assert_eq!(zero.dtype(), Dtype::C64);
         assert_eq!(zero.norm().unwrap(), 0.0);
 
-        let a = Tensor::rand_with_seed_c64(&rt, [&v, &v], [&v, &v], 7).unwrap();
-        let b = Tensor::rand_with_seed_c64(&rt, [&v, &v], [&v, &v], 7).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v, &v], 7).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v, &v], 7).unwrap();
         assert_eq!(a.dtype(), Dtype::C64);
         assert_eq!(a.data_c64(), b.data_c64(), "same seed must reproduce");
         assert!(a.norm().unwrap() > 0.0);
@@ -57,7 +57,7 @@ fn c64_construction() {
             "random c64 data must have nonzero imaginary parts"
         );
 
-        // from_block_fn_c64 agrees with two f64 from_block_fn fills.
+        // A Complex64-returning from_block_fn agrees with two f64 fills.
         let fill_re = |key: &BlockKey, indices: &[usize]| -> f64 {
             let BlockKey::FusionTree(key) = key else {
                 return 0.0;
@@ -70,7 +70,7 @@ fn c64_construction() {
             };
             (key.domain_uncoupled()[0].id() as f64) - indices[1] as f64 * 0.5
         };
-        let c = Tensor::from_block_fn_c64(&rt, [&v], [&v, &v], |key, indices| {
+        let c = Tensor::from_block_fn(&rt, [&v], [&v, &v], |key, indices| {
             Complex64::new(fill_re(key, indices), fill_im(key, indices))
         })
         .unwrap();
@@ -86,10 +86,10 @@ fn c64_construction() {
 fn c64_contract_matches_real_imag_decomposition() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 11).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 12).unwrap();
-        let c = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 13).unwrap();
-        let d = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 14).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 11).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 12).unwrap();
+        let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 13).unwrap();
+        let d = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 14).unwrap();
 
         let x = complexify(&a, &b);
         let y = complexify(&c, &d);
@@ -120,8 +120,8 @@ fn c64_contract_matches_real_imag_decomposition() {
 fn c64_adjoint_conjugates() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 21).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 22).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 21).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 22).unwrap();
         let x = complexify(&a, &b);
 
         let dagger = x.adjoint().unwrap();
@@ -142,11 +142,11 @@ fn c64_adjoint_conjugates() {
 fn c64_inner_hermitian_symmetry_and_norm() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let x = Tensor::rand_with_seed_c64(&rt, [&v, &v], [&v, &v], 31).unwrap();
-        let y = Tensor::rand_with_seed_c64(&rt, [&v, &v], [&v, &v], 32).unwrap();
+        let x = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v, &v], 31).unwrap();
+        let y = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v, &v], 32).unwrap();
 
-        let xy = x.inner(&y).unwrap();
-        let yx = y.inner(&x).unwrap();
+        let xy = x.inner(&y).unwrap().to_c64();
+        let yx = y.inner(&x).unwrap().to_c64();
         assert!((xy - yx.conj()).norm() <= 1e-12 * (1.0 + xy.norm()));
         assert!(
             xy.im.abs() > 0.0,
@@ -155,8 +155,8 @@ fn c64_inner_hermitian_symmetry_and_norm() {
 
         let xx = x.inner(&x).unwrap();
         let norm = x.norm().unwrap();
-        assert!(xx.im.abs() <= 1e-12 * (1.0 + xx.re));
-        assert!((xx.re - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
+        assert!(xx.im().abs() <= 1e-12 * (1.0 + xx.re()));
+        assert!((xx.re() - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
     }
 }
 
@@ -164,7 +164,7 @@ fn c64_inner_hermitian_symmetry_and_norm() {
 fn c64_svd_compact_recomposes_and_u_unitary() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed_c64(&rt, [&v, &v], [&v], 41).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v], 41).unwrap();
         let (u, s, vh) = t.svd_compact().unwrap();
         assert_eq!(u.dtype(), Dtype::C64);
         assert_eq!(s.dtype(), Dtype::C64);
@@ -176,7 +176,7 @@ fn c64_svd_compact_recomposes_and_u_unitary() {
         // U^H U = id on the bond: inner-based unitarity check.
         let gram = u.adjoint().unwrap().compose(&u).unwrap();
         let bond = gram.domain_spaces()[0].clone();
-        let id = Tensor::from_block_fn_c64(&rt, [&bond], [&bond], |_, indices| {
+        let id = Tensor::from_block_fn(&rt, [&bond], [&bond], |_, indices| {
             if indices[0] == indices[1] {
                 one()
             } else {
@@ -188,8 +188,8 @@ fn c64_svd_compact_recomposes_and_u_unitary() {
         assert!(gram_diff <= 1e-10 * (1.0 + id.norm().unwrap()));
         // <U, U> = dim of the bond space (weighted trace of U^H U).
         let trace = u.inner(&u).unwrap();
-        assert!((trace.re - bond.dim() as f64).abs() <= 1e-10 * (1.0 + bond.dim() as f64));
-        assert!(trace.im.abs() <= 1e-12 * (1.0 + trace.re));
+        assert!((trace.re() - bond.dim() as f64).abs() <= 1e-10 * (1.0 + bond.dim() as f64));
+        assert!(trace.im().abs() <= 1e-12 * (1.0 + trace.re()));
     }
 }
 
@@ -200,7 +200,7 @@ fn c64_svd_compact_recomposes_and_u_unitary() {
 fn eig_full_of_real_tensor_is_c64_and_recomposes() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 51).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 51).unwrap();
         assert_eq!(t.dtype(), Dtype::F64);
 
         let (d, w) = t.eig_full().unwrap();
@@ -229,7 +229,7 @@ fn eig_full_of_real_tensor_is_c64_and_recomposes() {
 fn c64_eig_and_eigh_trunc_on_hermitized_tensor() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed_c64(&rt, [&v, &v], [&v, &v], 61).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v, &v], 61).unwrap();
         // h = (t + t^H) / 2 is Hermitian.
         let h = t.add(&t.adjoint().unwrap(), 0.5, 0.5).unwrap();
 
@@ -274,18 +274,20 @@ fn tensor_macro_conj_expectation_value_is_real() {
     for p in [u1_space(), su2_space()] {
         let l = p.clone();
         let r = p.dual();
-        let psi = Tensor::rand_with_seed_c64(&rt, [&p], [&l, &r], 71).unwrap();
-        let h0 = Tensor::rand_with_seed_c64(&rt, [&p], [&p], 72).unwrap();
+        let psi = Tensor::rand_with_seed(&rt, Dtype::C64, [&p], [&l, &r], 71).unwrap();
+        let h0 = Tensor::rand_with_seed(&rt, Dtype::C64, [&p], [&p], 72).unwrap();
         let h = h0.add(&h0.adjoint().unwrap(), 0.5, 0.5).unwrap();
 
         let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
             .unwrap()
-            .scalar_c64()
-            .unwrap();
+            .scalar()
+            .unwrap()
+            .to_c64();
         let n = tensor!([] = conj(psi)[p; l, r] * psi[p; l, r])
             .unwrap()
-            .scalar_c64()
-            .unwrap();
+            .scalar()
+            .unwrap()
+            .to_c64();
         assert!(n.re > 0.0);
         assert!(n.im.abs() <= 1e-12 * (1.0 + n.re), "norm not real: {n}");
         assert!(
@@ -294,7 +296,7 @@ fn tensor_macro_conj_expectation_value_is_real() {
         );
         // Cross-check against the method-level inner: <psi, H psi>.
         let hpsi = h.compose(&psi).unwrap();
-        let via_inner = psi.inner(&hpsi).unwrap();
+        let via_inner = psi.inner(&hpsi).unwrap().to_c64();
         assert!((via_inner - e).norm() <= 1e-10 * (1.0 + e.norm()));
     }
 }
@@ -303,8 +305,8 @@ fn tensor_macro_conj_expectation_value_is_real() {
 fn mixed_dtype_operations_are_rejected() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, [&v], [&v], 81).unwrap();
-    let b = Tensor::rand_with_seed_c64(&rt, [&v], [&v], 82).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 81).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 82).unwrap();
 
     assert!(matches!(a.compose(&b), Err(Error::DtypeMismatch)));
     assert!(matches!(
@@ -321,8 +323,6 @@ fn mixed_dtype_operations_are_rejected() {
         a.add_c64(&b, one(), one()),
         Err(Error::DtypeMismatch)
     ));
-    assert!(matches!(b.scalar(), Err(_)));
-
     // Explicit widening makes them compatible.
     let widened = a.to_c64();
     assert_eq!(widened.dtype(), Dtype::C64);
@@ -337,29 +337,32 @@ fn structural_constructors_c64_and_twist_on_c64_data() {
     let fused = l.dual().fuse(&l).unwrap();
 
     // c64 structural constructors are the widened f64 ones.
-    let id = Tensor::id_c64(&rt, [&l]).unwrap();
+    let id = Tensor::id(&rt, Dtype::C64, [&l]).unwrap();
     assert_eq!(id.dtype(), Dtype::C64);
     assert_eq!(
         id.data_c64(),
-        Tensor::id(&rt, [&l]).unwrap().to_c64().data_c64()
+        Tensor::id(&rt, Dtype::F64, [&l])
+            .unwrap()
+            .to_c64()
+            .data_c64()
     );
-    let f = Tensor::isomorphism_c64(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    let f = Tensor::isomorphism(&rt, Dtype::C64, [&fused], [&l.dual(), &l]).unwrap();
     assert_eq!(f.dtype(), Dtype::C64);
     assert_eq!(
-        Tensor::unitary_c64(&rt, [&fused], [&l.dual(), &l])
+        Tensor::unitary(&rt, Dtype::C64, [&fused], [&l.dual(), &l])
             .unwrap()
             .data_c64(),
         f.data_c64()
     );
     let big = Space::fz2([(0, 2), (1, 3)]);
-    let w = Tensor::isometry_c64(&rt, [&big], [&l]).unwrap();
+    let w = Tensor::isometry(&rt, Dtype::C64, [&big], [&l]).unwrap();
     assert_eq!(
         w.adjoint().unwrap().compose(&w).unwrap().data_c64(),
         id.data_c64()
     );
 
     // twist preserves the c64 dtype and stays an involution.
-    let t = Tensor::rand_with_seed_c64(&rt, [&l.dual()], [&l], 11).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::C64, [&l.dual()], [&l], 11).unwrap();
     let twisted = t.twist(&[0]).unwrap();
     assert_eq!(twisted.dtype(), Dtype::C64);
     assert_ne!(twisted.data_c64(), t.data_c64());

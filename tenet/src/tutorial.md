@@ -35,9 +35,9 @@ let s = Space::su2([(0, 2), (1, 2)]);
 assert_eq!(s.dim(), 6);
 
 // Tensors on codomain <- domain leg lists.
-let a = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
+let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
 assert_eq!((a.codomain_rank(), a.domain_rank(), a.rank()), (2, 2, 4));
-let z = Tensor::zeros(&rt, [&v], [&v])?;
+let z = Tensor::zeros(&rt, Dtype::F64, [&v], [&v])?;
 assert_eq!(z.norm()?, 0.0);
 # Ok::<(), Error>(())
 ```
@@ -67,15 +67,19 @@ assert_eq!(a.compose(&b)?.data(), &[10.0, 21.0]);
 
 ### Scalar dtype
 
-User-layer tensors store either `f64` or `c64`, fixed at construction.
-Real constructors are [`prelude::Tensor::zeros`], [`prelude::Tensor::rand`],
-and [`prelude::Tensor::from_block_fn`]; complex constructors are
-[`prelude::Tensor::zeros_c64`], [`prelude::Tensor::rand_c64`], and
-[`prelude::Tensor::from_block_fn_c64`]. TeNeT does not promote mixed dtypes
-implicitly: widen explicitly with [`prelude::Tensor::to_c64`].
+User-layer tensors store either `f64` or `c64`, fixed at construction by
+the [`prelude::Dtype`] token: `Tensor::zeros(&rt, Dtype::F64, ...)`,
+`Tensor::rand(&rt, Dtype::C64, ...)`, and so on (TensorKit's
+`rand(ComplexF64, W ← V)` leading type argument).
+[`prelude::Tensor::from_block_fn`] needs no token — the dtype follows the
+fill closure's return type (`f64` or [`prelude::Complex64`]). TeNeT does
+not promote mixed dtypes implicitly: widen explicitly with
+[`prelude::Tensor::to_c64`].
 
-The weighted inner product always returns [`prelude::Complex64`]. For real
-tensors the imaginary part is exactly zero up to floating-point roundoff.
+Scalar results ([`prelude::Tensor::scalar`], [`prelude::Tensor::inner`],
+[`prelude::Tensor::tr`]) return a [`prelude::Scalar`] whose variant matches
+the tensor's dtype — real tensors give `Scalar::F64`, so no `.re` noise on
+real code paths; use `re()` / `im()` / `try_f64()` / `to_c64()` to unwrap.
 
 ```rust
 use tenet::prelude::*;
@@ -83,16 +87,21 @@ use tenet::prelude::*;
 let rt = Runtime::builder().build()?;
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
 
-let re = Tensor::rand(&rt, [&v], [&v])?;
-let cx = Tensor::from_block_fn_c64(&rt, [&v], [&v], |_, indices| {
+let re = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+let cx = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| {
     Complex64::new(indices[0] as f64, -(indices[1] as f64))
 })?;
 assert_eq!(re.dtype(), Dtype::F64);
 assert_eq!(cx.dtype(), Dtype::C64);
 
-let inner = re.inner(&re)?;
-assert!(inner.im.abs() <= 1e-14);
-assert!((inner.re - re.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + inner.re));
+// inner on f64 tensors is Scalar::F64: exactly real, try_f64() succeeds.
+let inner = re.inner(&re)?.try_f64()?;
+assert!((inner - re.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + inner));
+
+// inner on c64 tensors is Scalar::C64.
+let cc = cx.inner(&cx)?;
+assert!(matches!(cc, Scalar::C64(_)));
+assert!(cc.im().abs() <= 1e-12 * (1.0 + cc.re()));
 
 assert!(matches!(re.compose(&cx), Err(Error::DtypeMismatch)));
 assert!(re.to_c64().compose(&cx).is_ok());
@@ -135,20 +144,20 @@ let rt = Runtime::builder().build()?;
 let v = Space::u1([(0, 2), (1, 1)]);
 
 // Codomain-vs-domain legs of the same Space contract directly...
-let a = Tensor::rand(&rt, [&v], [&v])?;
+let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
 let _ = a.compose(&a)?;
 
 // ...domain-vs-domain legs need one side built from the dual space.
-let b = Tensor::rand(&rt, [&v], [&v.dual()])?;
+let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v.dual()])?;
 let _ = a.contract(&b, &[1], &[1])?;
 
 // Mixing fusion rules is a typed runtime error.
-let z = Tensor::rand(&rt, [&Space::z2([(0, 1), (1, 1)])], [&Space::z2([(0, 1), (1, 1)])])?;
+let z = Tensor::rand(&rt, Dtype::F64, [&Space::z2([(0, 1), (1, 1)])], [&Space::z2([(0, 1), (1, 1)])])?;
 assert!(matches!(a.compose(&z), Err(Error::RuleMismatch)));
 
 // So is mixing runtimes.
 let rt2 = Runtime::builder().build()?;
-let c = Tensor::rand(&rt2, [&v], [&v])?;
+let c = Tensor::rand(&rt2, Dtype::F64, [&v], [&v])?;
 assert!(matches!(a.compose(&c), Err(Error::RuntimeMismatch)));
 # Ok::<(), Error>(())
 ```
@@ -211,15 +220,15 @@ use tenet_network::tensor;
 
 let rt = Runtime::builder().build()?;
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
-let b = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
+let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
 
 // Pairwise contraction with an explicit output signature.
 let c = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n])?;
 assert_eq!((c.codomain_rank(), c.domain_rank()), (2, 2));
 
 // conj() + rank-0 output computes the weighted self inner product.
-let n2 = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l])?.scalar()?;
+let n2 = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l])?.scalar()?.try_f64()?;
 let norm = a.norm()?;
 assert!((n2 - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 
@@ -228,9 +237,9 @@ let p = tensor!([j, i; m, n] = c[i, j; m, n])?;
 assert_eq!(p.rank(), 4);
 
 // N-ary: an energy contraction; greedy planning picks the order.
-let psi = Tensor::rand(&rt, [&v], [&v, &v])?;
-let h = Tensor::rand(&rt, [&v], [&v])?;
-let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])?.scalar()?;
+let psi = Tensor::rand(&rt, Dtype::F64, [&v], [&v, &v])?;
+let h = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])?.scalar()?.try_f64()?;
 assert!(e.is_finite());
 # Ok::<(), Error>(())
 ```
@@ -256,10 +265,15 @@ see the tensor's shape.
 `tensor!` lowers to pairwise steps over the explicit method API, which is
 available directly when you want to spell the axes:
 
-- [`prelude::Tensor::compose`] — categorical composition `a * b` (domain
-  of `a` against codomain of `b`, leg by leg).
-- [`prelude::Tensor::contract`] — contract arbitrary axis pairs; output is
-  `a`'s open axes (ascending) as codomain, `b`'s open axes as domain.
+- [`prelude::Tensor::compose`] — categorical composition (TensorKit
+  `A * B` / `mul!`), also spelled `&a * &b`. **No** fermionic supertrace
+  twist on dual composed legs.
+- [`prelude::Tensor::contract`] — contract arbitrary axis pairs (TensorKit
+  `tensorcontract!`); output is `a`'s open axes (ascending) as codomain,
+  `b`'s open axes as domain. Like `tensor!`, this **twists** dual
+  contracted legs on fermionic rules — bosonic results are identical to
+  `compose`, fermionic ones can differ by signs; see the fermionic note on
+  [`prelude::Tensor::compose`].
 - [`prelude::Tensor::contract_ordered`] — same with an explicit output
   axis order (TensorKit's `pAB`).
 - [`prelude::Tensor::permute`] / [`prelude::Tensor::braid`] /
@@ -274,8 +288,8 @@ use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
-let b = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
+let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
 
 let c1 = a.compose(&b)?;
 let c2 = a.contract(&b, &[2, 3], &[0, 1])?;
@@ -360,7 +374,7 @@ use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let t = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
+let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
 
 // Truncated SVD across the codomain | domain split.
 let svd = t.svd_trunc(&Truncation::rank(6))?;
@@ -469,10 +483,10 @@ let p = Space::u1([(-1, 1), (1, 1)]);
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
 
 // Two-site wavefunction with two physical and two virtual legs.
-let psi = Tensor::rand(&rt, [&p, &p], [&v, &v])?;
+let psi = Tensor::rand(&rt, Dtype::F64, [&p, &p], [&v, &v])?;
 
 // Hermitian two-site Hamiltonian and the imaginary-time gate.
-let h0 = Tensor::rand(&rt, [&p, &p], [&p, &p])?;
+let h0 = Tensor::rand(&rt, Dtype::F64, [&p, &p], [&p, &p])?;
 let h = h0.add(&h0.adjoint()?, 0.5, 0.5)?;
 let tau = 0.05;
 let gate = h.scale(-tau)?.exp()?;

@@ -32,20 +32,20 @@ fn su2_space() -> Space {
 fn rand_and_zeros_construction_u1_and_su2() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let zero = Tensor::zeros(&rt, [&v, &v], [&v, &v]).unwrap();
+        let zero = Tensor::zeros(&rt, Dtype::F64, [&v, &v], [&v, &v]).unwrap();
         assert_eq!(zero.norm().unwrap(), 0.0);
         assert_eq!(zero.codomain_rank(), 2);
         assert_eq!(zero.domain_rank(), 2);
 
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 7).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 7).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 7).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 7).unwrap();
         assert_eq!(a.data(), b.data(), "same seed must reproduce the data");
         assert_eq!(a.data().len(), zero.data().len());
         assert!(a.norm().unwrap() > 0.0);
 
         // The runtime's own stream advances between calls.
-        let c = Tensor::rand(&rt, [&v, &v], [&v, &v]).unwrap();
-        let d = Tensor::rand(&rt, [&v, &v], [&v, &v]).unwrap();
+        let c = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v]).unwrap();
+        let d = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v]).unwrap();
         assert_ne!(c.data(), d.data());
     }
 }
@@ -63,8 +63,8 @@ fn space_dual_roundtrip_and_dim() {
 fn compose_equals_contract_on_matching_axes() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 1).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 2).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 1).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 2).unwrap();
 
     let composed = a.compose(&b).unwrap();
     let contracted = a.contract(&b, &[2, 3], &[0, 1]).unwrap();
@@ -78,8 +78,8 @@ fn compose_equals_contract_on_matching_axes() {
 fn contract_ordered_matches_permuted_default_order() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 3).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 4).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 3).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 4).unwrap();
 
     let default_order = a.contract(&b, &[3, 2], &[0, 1]).unwrap();
     let reordered = a
@@ -131,8 +131,8 @@ fn contract_cross_checks_against_expert_layer() {
     // User-layer tensors.
     let rt = Runtime::builder().build().unwrap();
     let v = Space::u1([(-1, deg), (0, deg), (1, deg)]);
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 11).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 12).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 11).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 12).unwrap();
 
     // Expert-layer twins share the flat storage (identical coupled layout).
     let lhs =
@@ -190,7 +190,7 @@ fn contract_cross_checks_against_expert_layer() {
 fn permute_roundtrip_restores_the_tensor() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let c = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 21).unwrap();
+        let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 21).unwrap();
         // [0, 2 | 1, 3] is an involution on axis positions.
         let p = c.permute(&[0, 2], &[1, 3]).unwrap();
         let back = p.permute(&[0, 2], &[1, 3]).unwrap();
@@ -204,7 +204,7 @@ fn permute_preserves_the_weighted_norm() {
     // SU2 exercises the quantum-dimension weighting: raw unweighted data
     // norms are *not* preserved when legs bend between codomain and domain.
     for v in [u1_space(), su2_space()] {
-        let c = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 22).unwrap();
+        let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 22).unwrap();
         let norm = c.norm().unwrap();
         for (cod, dom) in [
             (vec![0, 2], vec![1, 3]),
@@ -225,7 +225,7 @@ fn permute_preserves_the_weighted_norm() {
 fn transpose_and_adjoint_involutions() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let c = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 31).unwrap();
+        let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 31).unwrap();
 
         let h = c.adjoint().unwrap();
         assert_eq!(h.codomain_rank(), 2);
@@ -242,7 +242,7 @@ fn transpose_and_adjoint_involutions() {
 fn braid_with_trivial_levels_matches_permute_for_bosonic_rules() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let c = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 41).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 41).unwrap();
     let p = c.permute(&[1, 0], &[2, 3]).unwrap();
     let b = c.braid(&[1, 0], &[2, 3], &[0, 1, 2, 3]).unwrap();
     assert_close(b.data(), p.data(), 1e-12);
@@ -252,11 +252,11 @@ fn braid_with_trivial_levels_matches_permute_for_bosonic_rules() {
 fn vector_interface_identities() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let c = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 51).unwrap();
-        let d = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 52).unwrap();
+        let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 51).unwrap();
+        let d = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 52).unwrap();
 
         let norm = c.norm().unwrap();
-        let inner_cc = c.inner(&c).unwrap().re;
+        let inner_cc = c.inner(&c).unwrap().re();
         assert!((inner_cc - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 
         let scaled = c.scale(0.5).unwrap();
@@ -264,8 +264,8 @@ fn vector_interface_identities() {
 
         // w = c - d; |w|^2 = <c,c> - 2<c,d> + <d,d>.
         let w = c.add(&d, 1.0, -1.0).unwrap();
-        let expected = inner_cc - 2.0 * c.inner(&d).unwrap().re + d.inner(&d).unwrap().re;
-        let actual = w.inner(&w).unwrap().re;
+        let expected = inner_cc - 2.0 * c.inner(&d).unwrap().re() + d.inner(&d).unwrap().re();
+        let actual = w.inner(&w).unwrap().re();
         assert!((actual - expected).abs() <= 1e-10 * (1.0 + expected.abs()));
     }
 }
@@ -275,13 +275,13 @@ fn fz2_and_product_rule_smoke() {
     let rt = Runtime::builder().build().unwrap();
 
     let f = Space::fz2([(0, 2), (1, 2)]);
-    let a = Tensor::rand_with_seed(&rt, [&f, &f], [&f, &f], 61).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&f, &f], [&f, &f], 62).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&f, &f], [&f, &f], 61).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&f, &f], [&f, &f], 62).unwrap();
     assert!(a.compose(&b).unwrap().norm().unwrap() > 0.0);
 
     let p = Space::product([((-1, 1), 2), ((0, 0), 2), ((1, 1), 2)]).unwrap();
-    let a = Tensor::rand_with_seed(&rt, [&p, &p], [&p, &p], 63).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&p, &p], [&p, &p], 64).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&p, &p], [&p, &p], 63).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&p, &p], [&p, &p], 64).unwrap();
     let c = a.compose(&b).unwrap();
     assert!(c.norm().unwrap() > 0.0);
     let back = c
@@ -300,25 +300,25 @@ fn mixing_rules_or_runtimes_is_rejected() {
 
     // Mixed rules inside one construction.
     assert!(matches!(
-        Tensor::rand(&rt, [&u], [&z]),
+        Tensor::rand(&rt, Dtype::F64, [&u], [&z]),
         Err(Error::RuleMismatch)
     ));
 
     // Mixed rules across an operation.
-    let a = Tensor::rand_with_seed(&rt, [&u], [&u], 71).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&z], [&z], 72).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&u], [&u], 71).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 72).unwrap();
     assert!(matches!(a.compose(&b), Err(Error::RuleMismatch)));
     assert!(matches!(a.add(&b, 1.0, 1.0), Err(Error::RuleMismatch)));
     assert!(matches!(a.inner(&b), Err(Error::RuleMismatch)));
 
     // Same rule, different runtimes.
     let rt2 = Runtime::builder().build().unwrap();
-    let c = Tensor::rand_with_seed(&rt2, [&u], [&u], 73).unwrap();
+    let c = Tensor::rand_with_seed(&rt2, Dtype::F64, [&u], [&u], 73).unwrap();
     assert!(matches!(a.compose(&c), Err(Error::RuntimeMismatch)));
 
     // Same rule and runtime, different spaces.
     let w = Space::u1([(0, 1), (1, 1)]);
-    let d = Tensor::rand_with_seed(&rt, [&w], [&w], 74).unwrap();
+    let d = Tensor::rand_with_seed(&rt, Dtype::F64, [&w], [&w], 74).unwrap();
     assert!(matches!(
         a.add(&d, 1.0, 1.0),
         Err(Error::InvalidArgument(_))
@@ -331,7 +331,7 @@ fn mixing_rules_or_runtimes_is_rejected() {
 fn rank_five_peps_shape_u1_and_su2() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
-        let a = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 81).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v, &v, &v], 81).unwrap();
         assert_eq!(a.codomain_rank(), 1);
         assert_eq!(a.domain_rank(), 4);
         assert_eq!(a.rank(), 5);
@@ -341,7 +341,7 @@ fn rank_five_peps_shape_u1_and_su2() {
         // Contract two rank-5 tensors over two shared legs (a's domain legs
         // against b's dual domain legs): rank-6 result.
         let w = v.dual();
-        let b = Tensor::rand_with_seed(&rt, [&v], [&w, &w, &v, &v], 82).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&w, &w, &v, &v], 82).unwrap();
         let c = a.contract(&b, &[3, 4], &[1, 2]).unwrap();
         assert_eq!(c.codomain_rank(), 3);
         assert_eq!(c.domain_rank(), 3);
@@ -409,8 +409,8 @@ fn rank_five_contract_cross_checks_against_expert_layer() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::u1([(-1, deg), (0, deg), (1, deg)]);
     let w = v.dual();
-    let a = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 91).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v], [&w, &w, &v, &v], 92).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v, &v, &v], 91).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&w, &w, &v, &v], 92).unwrap();
 
     // Expert-layer twins share the flat storage (identical coupled layout).
     let lhs = TensorMap::<f64, 1, 4>::from_vec_with_fusion_space(
@@ -496,7 +496,7 @@ fn compose_works_on_non_dualization_closed_charge_sets() {
     assert_eq!(a.compose(&b).unwrap().data(), &[10.0, 21.0]);
 
     // The original repro: a random endomorphism composes with itself.
-    let r = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let r = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
     assert!(r.compose(&r).is_ok());
 }
 
@@ -506,18 +506,18 @@ fn compose_works_on_non_dualization_closed_charge_sets() {
 fn leg_pairing_rules_on_asymmetric_charges() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::u1([(0, 1), (1, 1)]);
-    let a = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
 
     // Domain V does NOT pair with codomain V' (TensorKit SpaceMismatch).
-    let bad = Tensor::rand(&rt, [&v.dual()], [&v]).unwrap();
+    let bad = Tensor::rand(&rt, Dtype::F64, [&v.dual()], [&v]).unwrap();
     assert!(a.compose(&bad).is_err());
 
     // Domain-vs-domain legs contract when exactly one side is the dual.
-    let b = Tensor::rand(&rt, [&v], [&v.dual()]).unwrap();
+    let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v.dual()]).unwrap();
     assert!(a.contract(&b, &[1], &[1]).is_ok());
 
     // ...and are rejected when both sides carry the same Space.
-    let c = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    let c = Tensor::rand(&rt, Dtype::F64, [&v], [&v]).unwrap();
     assert!(a.contract(&c, &[1], &[1]).is_err());
 }
 
@@ -626,7 +626,7 @@ fn fz2_u1_su2_space_and_identity_invariants_vs_tensorkit() {
     assert!((norm - 4.0).abs() <= 1e-12, "norm(id) = {norm}");
 
     // inner(id, id) = ‖id‖² = tr(id† id) = 16.0; Julia: tr(id(S⊗S)) = 16.0.
-    let inner = id.inner(&id).unwrap().re;
+    let inner = id.inner(&id).unwrap().re();
     assert!((inner - 16.0).abs() <= 1e-12, "inner(id, id) = {inner}");
 
     // Julia blocksectors of id(S⊗S): 6 coupled sectors with block dims
@@ -687,8 +687,8 @@ fn fz2_u1_su2_braid_fermion_sign_vs_tensorkit() {
             _ => 0.0,
         })
         .unwrap();
-        let before = proj.inner(&t).unwrap().re;
-        let after = proj.inner(&tb).unwrap().re;
+        let before = proj.inner(&t).unwrap().re();
+        let after = proj.inner(&tb).unwrap().re();
         assert!((before - qdim).abs() <= 1e-12, "before = {before}");
         assert!(
             (after - sign * qdim).abs() <= 1e-12,
@@ -704,8 +704,8 @@ fn fz2_u1_su2_contraction_svd_and_rank5_smoke() {
     let v = triple_space();
 
     // Rank-4 contraction + permute roundtrip.
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 91).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 92).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 91).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 92).unwrap();
     let c = a.compose(&b).unwrap();
     assert!(c.norm().unwrap() > 0.0);
     let back = c
@@ -745,8 +745,8 @@ fn fz2_u1_su2_contraction_svd_and_rank5_smoke() {
     // Rank-5 (1|4) PEPS-shaped smoke: construct, contract two shared legs,
     // permute roundtrip, adjoint involution.
     let w = v.dual();
-    let p = Tensor::rand_with_seed(&rt, [&v], [&v, &v, &v, &v], 93).unwrap();
-    let q = Tensor::rand_with_seed(&rt, [&v], [&w, &w, &v, &v], 94).unwrap();
+    let p = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v, &v, &v], 93).unwrap();
+    let q = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&w, &w, &v, &v], 94).unwrap();
     let r = p.contract(&q, &[3, 4], &[1, 2]).unwrap();
     assert_eq!(r.rank(), 6);
     assert!(r.norm().unwrap() > 0.0);
@@ -1106,15 +1106,15 @@ fn fuser_oracle_scalar(
         oracle_entry(&labels, indices)
     };
     let fused = l.dual().fuse(l).unwrap();
-    let fuser = Tensor::isomorphism(rt, [&fused], [&l.dual(), l])
+    let fuser = Tensor::isomorphism(rt, Dtype::F64, [&fused], [&l.dual(), l])
         .unwrap()
         .twist(twists)
         .unwrap();
     let t = Tensor::from_block_fn(rt, [&l.dual(), l], [m], fill).unwrap();
     let w = Tensor::from_block_fn(rt, [&fused], [m], fill).unwrap();
     let value = w.inner(&fuser.compose(&t).unwrap()).unwrap();
-    assert_eq!(value.im, 0.0);
-    value.re
+    assert_eq!(value.im(), 0.0);
+    value.re()
 }
 
 fn assert_rel(value: f64, expected: f64) {
@@ -1178,11 +1178,11 @@ fn fuser_contraction_and_twist_match_tensorkit_fz2() {
         oracle_entry(&labels, indices)
     };
     let fused = l.dual().fuse(&l).unwrap();
-    let f = Tensor::isomorphism(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    let f = Tensor::isomorphism(&rt, Dtype::F64, [&fused], [&l.dual(), &l]).unwrap();
     let t = Tensor::from_block_fn(&rt, [&l.dual(), &l], [&m], fill).unwrap();
     let w = Tensor::from_block_fn(&rt, [&fused], [&m], fill).unwrap();
     let contracted = f.contract(&t, &[1, 2], &[0, 1]).unwrap();
-    assert_rel(w.inner(&contracted).unwrap().re, -2.01748090133e6);
+    assert_rel(w.inner(&contracted).unwrap().re(), -2.01748090133e6);
 }
 
 #[test]
@@ -1200,11 +1200,11 @@ fn fuser_contraction_matches_tensorkit_su2() {
 fn id_is_the_identity_and_has_tensorkit_norm() {
     let rt = Runtime::builder().build().unwrap();
     let l = Space::u1([(0, 1), (1, 2)]);
-    let id = Tensor::id(&rt, [&l.dual(), &l]).unwrap();
+    let id = Tensor::id(&rt, Dtype::F64, [&l.dual(), &l]).unwrap();
     // Julia: norm(id(dual(l) ⊗ l)) = 3.0.
     assert!((id.norm().unwrap() - 3.0).abs() < 1e-12);
     for seed in [3, 4] {
-        let t = Tensor::rand_with_seed(&rt, [&l.dual(), &l], [&l], seed).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&l.dual(), &l], [&l], seed).unwrap();
         assert_eq!(id.compose(&t).unwrap().data(), t.data());
     }
     // Identity is self-adjoint and idempotent.
@@ -1221,9 +1221,9 @@ fn fuser_roundtrips_to_identity_on_both_sides() {
         Space::fz2([(0, 1), (1, 2)]),
     ] {
         let fused = l.dual().fuse(&l).unwrap();
-        let f = Tensor::isomorphism(&rt, [&fused], [&l.dual(), &l]).unwrap();
-        let product_id = Tensor::id(&rt, [&l.dual(), &l]).unwrap();
-        let fused_id = Tensor::id(&rt, [&fused]).unwrap();
+        let f = Tensor::isomorphism(&rt, Dtype::F64, [&fused], [&l.dual(), &l]).unwrap();
+        let product_id = Tensor::id(&rt, Dtype::F64, [&l.dual(), &l]).unwrap();
+        let fused_id = Tensor::id(&rt, Dtype::F64, [&fused]).unwrap();
         assert_close(
             f.adjoint().unwrap().compose(&f).unwrap().data(),
             product_id.data(),
@@ -1242,13 +1242,13 @@ fn unitary_matches_isomorphism_and_rejects_non_isomorphic_spaces() {
     let rt = Runtime::builder().build().unwrap();
     let l = Space::u1([(0, 1), (1, 2)]);
     let fused = l.dual().fuse(&l).unwrap();
-    let iso = Tensor::isomorphism(&rt, [&fused], [&l.dual(), &l]).unwrap();
-    let uni = Tensor::unitary(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    let iso = Tensor::isomorphism(&rt, Dtype::F64, [&fused], [&l.dual(), &l]).unwrap();
+    let uni = Tensor::unitary(&rt, Dtype::F64, [&fused], [&l.dual(), &l]).unwrap();
     assert_eq!(iso.data(), uni.data());
 
     let other = Space::u1([(0, 2), (1, 2)]);
-    assert!(Tensor::isomorphism(&rt, [&other], [&l]).is_err());
-    assert!(Tensor::unitary(&rt, [&other], [&l]).is_err());
+    assert!(Tensor::isomorphism(&rt, Dtype::F64, [&other], [&l]).is_err());
+    assert!(Tensor::unitary(&rt, Dtype::F64, [&other], [&l]).is_err());
 }
 
 #[test]
@@ -1256,12 +1256,12 @@ fn isometry_embeds_isometrically_and_rejects_too_small_codomains() {
     let rt = Runtime::builder().build().unwrap();
     let small = Space::su2([(0, 1), (1, 1)]);
     let big = Space::su2([(0, 2), (1, 3), (2, 1)]);
-    let w = Tensor::isometry(&rt, [&big], [&small]).unwrap();
+    let w = Tensor::isometry(&rt, Dtype::F64, [&big], [&small]).unwrap();
     // Julia: norm(W' * W - id(small)) = 0.0, norm(W) = sqrt(3).
-    let id = Tensor::id(&rt, [&small]).unwrap();
+    let id = Tensor::id(&rt, Dtype::F64, [&small]).unwrap();
     assert_eq!(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
     assert!((w.norm().unwrap() - 3f64.sqrt()).abs() < 1e-12);
-    assert!(Tensor::isometry(&rt, [&small], [&big]).is_err());
+    assert!(Tensor::isometry(&rt, Dtype::F64, [&small], [&big]).is_err());
 }
 
 #[test]
@@ -1269,12 +1269,12 @@ fn twist_is_trivial_on_bosonic_legs_and_involutive_on_fermionic_ones() {
     let rt = Runtime::builder().build().unwrap();
     // Bosonic rules: θ = +1 everywhere, twist is the identity.
     for l in [Space::u1([(0, 1), (1, 2)]), Space::su2([(0, 1), (1, 2)])] {
-        let t = Tensor::rand_with_seed(&rt, [&l, &l], [&l], 5).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&l, &l], [&l], 5).unwrap();
         assert_eq!(t.twist(&[0, 1, 2]).unwrap().data(), t.data());
     }
     // Fermionic rule: θ(odd) = −1, twist² = id and odd blocks flip sign.
     let l = Space::fz2([(0, 1), (1, 2)]);
-    let t = Tensor::rand_with_seed(&rt, [&l, &l], [&l], 6).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&l, &l], [&l], 6).unwrap();
     let twisted = t.twist(&[2]).unwrap();
     assert_ne!(twisted.data(), t.data());
     assert_eq!(twisted.twist(&[2]).unwrap().data(), t.data());
@@ -1389,7 +1389,7 @@ fn flip_bosonic_is_structural_and_su2_carries_frobenius_schur_phase() {
     let rt = Runtime::builder().build().unwrap();
 
     let w = Space::z2([(0, 1), (1, 1)]);
-    let tc = Tensor::rand_with_seed(&rt, [&w], [&w], 11).unwrap();
+    let tc = Tensor::rand_with_seed(&rt, Dtype::F64, [&w], [&w], 11).unwrap();
     let flipped = tc.flip(&[0, 1]).unwrap();
     assert_eq!(flipped.data(), tc.data());
     assert!(flipped.space(0).unwrap().is_dual());
@@ -1440,7 +1440,7 @@ fn flip_c64_and_fliptwist_composition() {
 fn sqrt_splits_singular_values_and_rejects_non_diagonal_tensors() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), Space::fz2([(0, 2), (1, 2)])] {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v], 13).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 13).unwrap();
         let s = t.svd_trunc(&Truncation::Full).unwrap().s;
         let sqrt_s = s.sqrt().unwrap();
         // √S · √S == S elementwise (both are diagonal on the same bond).
@@ -1457,7 +1457,7 @@ fn sqrt_splits_singular_values_and_rejects_non_diagonal_tensors() {
 
     // Equal legs but dense block: off-diagonal entries are rejected.
     let v = Space::u1([(0, 2)]);
-    let dense = Tensor::rand_with_seed(&rt, [&v], [&v], 17).unwrap();
+    let dense = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 17).unwrap();
     assert!(dense.sqrt().is_err());
 
     // Negative diagonal entries: error for f64, principal root for c64

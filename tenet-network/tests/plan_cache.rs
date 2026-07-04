@@ -20,8 +20,8 @@ fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
 
 fn chain(rt: &Runtime, dim: usize, seed: u64) -> (Tensor, Tensor) {
     let v = Space::u1([(-1, dim), (0, dim), (1, dim)]);
-    let a = Tensor::rand_with_seed(rt, [&v, &v], [&v, &v], seed).unwrap();
-    let b = Tensor::rand_with_seed(rt, [&v, &v], [&v, &v], seed + 1).unwrap();
+    let a = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed).unwrap();
+    let b = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed + 1).unwrap();
     (a, b)
 }
 

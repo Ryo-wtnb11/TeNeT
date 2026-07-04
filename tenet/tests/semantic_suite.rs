@@ -82,7 +82,7 @@ fn permute_composition_law() {
             let rank = ncod + ndom;
             let cod: Vec<&Space> = std::iter::repeat(&v).take(ncod).collect();
             let dom: Vec<&Space> = std::iter::repeat(&v).take(ndom).collect();
-            let t = Tensor::rand_with_seed(&rt, cod, dom, seed).unwrap();
+            let t = Tensor::rand_with_seed(&rt, Dtype::F64, cod, dom, seed).unwrap();
             for _ in 0..3 {
                 let s1 = rand_perm(&mut state, rank);
                 let n1 = 1 + rand_below(&mut state, rank - 1);
@@ -108,7 +108,7 @@ fn braid_inverse_roundtrip() {
     let rt = Runtime::builder().build().unwrap();
     let mut state = 0x5EED_0002u64;
     for (name, v, _) in spaces() {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 21).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 21).unwrap();
         for _ in 0..3 {
             let s = rand_perm(&mut state, 4);
             let levels = rand_perm(&mut state, 4)
@@ -142,7 +142,7 @@ fn bosonic_braid_equals_permute() {
         if fermionic {
             continue;
         }
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 31).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 31).unwrap();
         for _ in 0..3 {
             let s = rand_perm(&mut state, 4);
             let levels = rand_perm(&mut state, 4)
@@ -166,7 +166,7 @@ fn bosonic_braid_equals_permute() {
 fn yang_baxter_adjacent_swaps() {
     let rt = Runtime::builder().build().unwrap();
     for (name, v, _) in spaces() {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v, &v], [&v], 41).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v, &v], [&v], 41).unwrap();
         let swap = |t: &Tensor, i: usize| {
             let mut cod = vec![0usize, 1, 2];
             cod.swap(i, i + 1);
@@ -188,8 +188,8 @@ fn yang_baxter_adjacent_swaps() {
 fn adjoint_involution_and_antihomomorphism() {
     let rt = Runtime::builder().build().unwrap();
     for (name, v, _) in spaces() {
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 51).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 52).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 51).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 52).unwrap();
         let round = a.adjoint().unwrap().adjoint().unwrap();
         assert_close(round.data(), a.data(), 1e-12);
         let lhs = a.compose(&b).unwrap().adjoint().unwrap();
@@ -208,12 +208,13 @@ fn trace_cyclicity() {
     for (name, v, _) in spaces() {
         for (ncod, seed) in [(1usize, 61u64), (2, 62)] {
             let cod: Vec<&Space> = std::iter::repeat(&v).take(ncod).collect();
-            let a = Tensor::rand_with_seed(&rt, cod.clone(), cod.clone(), seed).unwrap();
-            let b = Tensor::rand_with_seed(&rt, cod.clone(), cod, seed + 100).unwrap();
+            let a =
+                Tensor::rand_with_seed(&rt, Dtype::F64, cod.clone(), cod.clone(), seed).unwrap();
+            let b = Tensor::rand_with_seed(&rt, Dtype::F64, cod.clone(), cod, seed + 100).unwrap();
             let ab = a.compose(&b).unwrap().tr().unwrap();
             let ba = b.compose(&a).unwrap().tr().unwrap();
-            assert_scalar_close(ab.re, ba.re, 1e-12);
-            assert_scalar_close(ab.im, ba.im, 1e-12);
+            assert_scalar_close(ab.re(), ba.re(), 1e-12);
+            assert_scalar_close(ab.im(), ba.im(), 1e-12);
             let _ = name;
         }
     }
@@ -226,7 +227,7 @@ fn twist_squares_to_identity_and_naturality() {
     let rt = Runtime::builder().build().unwrap();
     let mut state = 0x5EED_0004u64;
     for (name, v, fermionic) in spaces() {
-        let t = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 71).unwrap();
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 71).unwrap();
         for leg in 0..4usize {
             let twice = t.twist(&[leg]).unwrap().twist(&[leg]).unwrap();
             assert_close(twice.data(), t.data(), 1e-12);
@@ -250,11 +251,11 @@ fn twist_squares_to_identity_and_naturality() {
 fn isometry_and_unitary_are_isometric() {
     let rt = Runtime::builder().build().unwrap();
     for (name, v, _) in spaces() {
-        let id = Tensor::id(&rt, [&v]).unwrap();
-        let u = Tensor::unitary(&rt, [&v], [&v]).unwrap();
+        let id = Tensor::id(&rt, Dtype::F64, [&v]).unwrap();
+        let u = Tensor::unitary(&rt, Dtype::F64, [&v], [&v]).unwrap();
         let utu = u.adjoint().unwrap().compose(&u).unwrap();
         assert_close(utu.data(), id.data(), 1e-12);
-        let w = Tensor::isometry(&rt, [&v, &v], [&v]).unwrap();
+        let w = Tensor::isometry(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
         let wtw = w.adjoint().unwrap().compose(&w).unwrap();
         assert_close(wtw.data(), id.data(), 1e-12);
         let _ = name;
@@ -274,13 +275,15 @@ fn contraction_order_independence() {
     let rt = Runtime::builder().build().unwrap();
     for (name, v, _) in spaces() {
         // Closed ring of four matrices: tr(x1 x2 x3 x4).
-        let x1 = Tensor::rand_with_seed(&rt, [&v], [&v], 81).unwrap();
-        let x2 = Tensor::rand_with_seed(&rt, [&v], [&v], 82).unwrap();
-        let x3 = Tensor::rand_with_seed(&rt, [&v], [&v], 83).unwrap();
-        let x4 = Tensor::rand_with_seed(&rt, [&v], [&v], 84).unwrap();
+        let x1 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 81).unwrap();
+        let x2 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 82).unwrap();
+        let x3 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 83).unwrap();
+        let x4 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 84).unwrap();
         let ring = tensor!([] = x1[a; b] * x2[b; c] * x3[c; d] * x4[d; a])
             .unwrap()
             .scalar()
+            .unwrap()
+            .try_f64()
             .unwrap();
         let left = x1
             .compose(&x2)
@@ -291,7 +294,7 @@ fn contraction_order_independence() {
             .unwrap()
             .tr()
             .unwrap()
-            .re;
+            .re();
         let inner = x2.compose(&x3).unwrap();
         let middle = x1
             .compose(&inner)
@@ -300,7 +303,7 @@ fn contraction_order_independence() {
             .unwrap()
             .tr()
             .unwrap()
-            .re;
+            .re();
         assert_scalar_close(ring, left, 1e-12);
         assert_scalar_close(ring, middle, 1e-12);
 
@@ -313,8 +316,8 @@ fn contraction_order_independence() {
 
         // Rank-4 pair with crossed contracted legs: forces tree transforms
         // and output permutes on every route (incl. the dynamic engine).
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 85).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 86).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 85).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 86).unwrap();
         let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
         let ab = a
             .contract(&b, &[1, 2], &[2, 1])
@@ -348,8 +351,8 @@ fn contraction_order_independence() {
 fn su2_nonuniform_degeneracy_crossed_contract() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::su2([(0, 2), (1, 2), (2, 1)]);
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 85).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 86).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 85).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 86).unwrap();
     let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
     let ab = a
         .contract(&b, &[1, 2], &[2, 1])
@@ -374,8 +377,8 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
 fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::fz2([(0, 2), (1, 1)]);
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 5).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 6).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 5).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 6).unwrap();
     // Open legs cross the split: a's domain axis 3 stays open, b's axes
     // 1..3 stay open. Default output order matches the permuted compose.
     let direct = a.contract(&b, &[2], &[0]).unwrap();
@@ -394,8 +397,8 @@ fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
 fn triple_product_nonuniform_degeneracy_crossed_contract() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 1, 1), 2), ((0, 2, 0), 1)]).unwrap();
-    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 87).unwrap();
-    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 88).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 87).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 88).unwrap();
     let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
     let ab = a
         .contract(&b, &[1, 2], &[2, 1])
@@ -464,7 +467,8 @@ fn svd_qr_reconstruction_random_spaces() {
         for draw in 0..3u64 {
             let va = random_space(name, &mut state);
             let vb = random_space(name, &mut state);
-            let t = Tensor::rand_with_seed(&rt, [&va, &vb], [&vb, &va], 90 + draw).unwrap();
+            let t =
+                Tensor::rand_with_seed(&rt, Dtype::F64, [&va, &vb], [&vb, &va], 90 + draw).unwrap();
             if t.norm().unwrap() == 0.0 {
                 continue;
             }
@@ -478,7 +482,7 @@ fn svd_qr_reconstruction_random_spaces() {
             );
             let mid = u.domain_spaces();
             let mid_refs: Vec<&Space> = mid.iter().collect();
-            let id = Tensor::id(&rt, mid_refs).unwrap();
+            let id = Tensor::id(&rt, Dtype::F64, mid_refs).unwrap();
             let utu = u.adjoint().unwrap().compose(&u).unwrap();
             let iso_err = utu.add(&id, 1.0, -1.0).unwrap().norm().unwrap();
             assert!(
@@ -495,7 +499,7 @@ fn svd_qr_reconstruction_random_spaces() {
             );
             let mid = q.domain_spaces();
             let mid_refs: Vec<&Space> = mid.iter().collect();
-            let id = Tensor::id(&rt, mid_refs).unwrap();
+            let id = Tensor::id(&rt, Dtype::F64, mid_refs).unwrap();
             let qtq = q.adjoint().unwrap().compose(&q).unwrap();
             let iso_err = qtq.add(&id, 1.0, -1.0).unwrap().norm().unwrap();
             assert!(
@@ -570,16 +574,16 @@ fn invariant_stream_case(
     let e = d.compose(&c).unwrap();
     let g = a.adjoint().unwrap().compose(&a).unwrap();
     let h = e.add(&a, 1.0, 0.5).unwrap();
-    let hh_tr = h.compose(&h).unwrap().tr().unwrap().re;
+    let hh_tr = h.compose(&h).unwrap().tr().unwrap().re();
 
     let steps: Vec<(&str, f64, f64)> = vec![
-        ("s1a", a.norm().unwrap(), a.tr().unwrap().re),
-        ("s1b", b.norm().unwrap(), b.tr().unwrap().re),
-        ("s2", c.norm().unwrap(), c.tr().unwrap().re),
-        ("s3", d.norm().unwrap(), d.tr().unwrap().re),
-        ("s4", e.norm().unwrap(), e.tr().unwrap().re),
-        ("s5", g.norm().unwrap(), g.tr().unwrap().re),
-        ("s7", h.norm().unwrap(), h.tr().unwrap().re),
+        ("s1a", a.norm().unwrap(), a.tr().unwrap().re()),
+        ("s1b", b.norm().unwrap(), b.tr().unwrap().re()),
+        ("s2", c.norm().unwrap(), c.tr().unwrap().re()),
+        ("s3", d.norm().unwrap(), d.tr().unwrap().re()),
+        ("s4", e.norm().unwrap(), e.tr().unwrap().re()),
+        ("s5", g.norm().unwrap(), g.tr().unwrap().re()),
+        ("s7", h.norm().unwrap(), h.tr().unwrap().re()),
         ("s8", hh_tr, hh_tr),
     ];
     for ((step, norm, tr), &(exp_step, exp_norm, exp_tr)) in steps.iter().zip(expected) {

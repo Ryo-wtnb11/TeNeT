@@ -60,7 +60,7 @@ fn partial_trace_matches_trace_pairs_elementwise() {
     for v in [u1_space(), su2_space(), fz2_space()] {
         let w = v.clone();
         let vd = v.dual();
-        let a = Tensor::rand_with_seed(&rt, [&v, &vd], [&w], 201).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &vd], [&w], 201).unwrap();
 
         let traced = tensor!([; j] = a[i, i; j]).unwrap();
         let expected = a.trace_pairs(&[(0, 1)]).unwrap();
@@ -68,7 +68,7 @@ fn partial_trace_matches_trace_pairs_elementwise() {
         assert_eq!(traced.codomain_rank(), 0);
         assert_eq!(traced.domain_rank(), 1);
 
-        let a_c = Tensor::rand_with_seed_c64(&rt, [&v, &vd], [&w], 202).unwrap();
+        let a_c = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &vd], [&w], 202).unwrap();
         let traced_c = tensor!([; j] = a_c[i, i; j]).unwrap();
         let expected_c = a_c.trace_pairs(&[(0, 1)]).unwrap();
         let diff: f64 = traced_c
@@ -89,7 +89,7 @@ fn partial_trace_matches_identity_contraction_for_twist_free_rules() {
     for v in [u1_space(), su2_space()] {
         let w = v.clone();
         let vd = v.dual();
-        let a = Tensor::rand_with_seed(&rt, [&v, &vd], [&w], 211).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &vd], [&w], 211).unwrap();
         let id = eye(&rt, &v);
 
         let traced = tensor!([; j] = a[i, i; j]).unwrap();
@@ -106,14 +106,19 @@ fn full_trace_of_identity_is_quantum_dimension() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
         let id = eye(&rt, &v);
-        let trace = tensor!([] = id[i; i]).unwrap().scalar().unwrap();
+        let trace = tensor!([] = id[i; i])
+            .unwrap()
+            .scalar()
+            .unwrap()
+            .try_f64()
+            .unwrap();
         assert!(
             (trace - v.dim() as f64).abs() <= 1e-12,
             "tr(id) = {trace}, dim = {}",
             v.dim()
         );
         // TensorKit-named tr() agrees.
-        let tr = id.tr().unwrap();
+        let tr = id.tr().unwrap().to_c64();
         assert!((tr - Complex64::new(trace, 0.0)).norm() <= 1e-12);
     }
 }
@@ -140,9 +145,14 @@ fn fz2_full_trace_is_supertrace() {
     })
     .unwrap();
 
-    let trace = tensor!([] = t[i; i]).unwrap().scalar().unwrap();
+    let trace = tensor!([] = t[i; i])
+        .unwrap()
+        .scalar()
+        .unwrap()
+        .try_f64()
+        .unwrap();
     assert!((trace - (-13.0)).abs() <= 1e-12, "supertrace = {trace}");
-    let tr = t.tr().unwrap();
+    let tr = t.tr().unwrap().to_c64();
     assert!((tr - Complex64::new(-13.0, 0.0)).norm() <= 1e-12);
 }
 
@@ -154,8 +164,8 @@ fn trace_and_contract_combined_matches_manual_two_step() {
     for v in [u1_space(), su2_space(), fz2_space()] {
         let w = v.clone();
         let vd = v.dual();
-        let a = Tensor::rand_with_seed(&rt, [&v, &vd], [&w], 221).unwrap();
-        let b = Tensor::rand_with_seed(&rt, [&w], [&w], 222).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &vd], [&w], 221).unwrap();
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&w], [&w], 222).unwrap();
 
         let combined = tensor!([; m] = a[i, i; j] * b[j; m]).unwrap();
         let manual = a
@@ -173,16 +183,20 @@ fn trace_and_contract_combined_matches_manual_two_step() {
 fn conj_operand_partial_trace_matches_adjoint_trace() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand_with_seed_c64(&rt, [&v], [&v], 231).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 231).unwrap();
 
-    let traced = tensor!([] = conj(a)[i; i]).unwrap().scalar_c64().unwrap();
-    let expected = a.adjoint().unwrap().tr().unwrap();
+    let traced = tensor!([] = conj(a)[i; i])
+        .unwrap()
+        .scalar()
+        .unwrap()
+        .to_c64();
+    let expected = a.adjoint().unwrap().tr().unwrap().to_c64();
     assert!(
         (traced - expected).norm() <= 1e-12,
         "conj trace {traced} vs adjoint trace {expected}"
     );
     // And it is the conjugate of the plain trace.
-    let plain = a.tr().unwrap();
+    let plain = a.tr().unwrap().to_c64();
     assert!((traced - plain.conj()).norm() <= 1e-12);
 }
 
@@ -192,11 +206,22 @@ fn two_trace_pairs_reduce_to_scalar() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), fz2_space()] {
         let vd = v.dual();
-        let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 241).unwrap();
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 241).unwrap();
         // Legs: (v, v; v, v): flat outward spaces (v, v, v*, v*);
         // pairs (0, 2) and (1, 3) are mutually dual.
-        let via_macro = tensor!([] = a[i, j; i, j]).unwrap().scalar().unwrap();
-        let via_pairs = a.trace_pairs(&[(0, 2), (1, 3)]).unwrap().scalar().unwrap();
+        let via_macro = tensor!([] = a[i, j; i, j])
+            .unwrap()
+            .scalar()
+            .unwrap()
+            .try_f64()
+            .unwrap();
+        let via_pairs = a
+            .trace_pairs(&[(0, 2), (1, 3)])
+            .unwrap()
+            .scalar()
+            .unwrap()
+            .try_f64()
+            .unwrap();
         assert!(
             (via_macro - via_pairs).abs() <= 1e-12 * (1.0 + via_pairs.abs()),
             "{via_macro} vs {via_pairs}"
@@ -211,10 +236,10 @@ fn trace_error_paths() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
     let w = Space::u1([(0, 4)]);
-    let t = Tensor::rand_with_seed(&rt, [&v], [&w], 251).unwrap();
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&w], 251).unwrap();
     assert!(matches!(t.tr(), Err(Error::InvalidArgument(_))));
 
-    let e = Tensor::rand_with_seed(&rt, [&v], [&v], 252).unwrap();
+    let e = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 252).unwrap();
     assert!(matches!(
         e.trace_pairs(&[(0, 0)]),
         Err(Error::InvalidArgument(_))
