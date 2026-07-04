@@ -1625,3 +1625,153 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     }
     let _: &TensorMap<Complex32, 2, 1> = &eig.v;
 }
+
+#[test]
+fn positive_diagonal_gauge_matches_tensorkit_qr_reference() {
+    // TensorKit 0.17.0 / MatrixAlgebraKit 0.6.8 crosscheck:
+    //   A = [-1 2; 3 4; 5 -6]; Q, R = MatrixAlgebraKit.qr_compact(A)
+    // (default `positive = true` since MAK 0.6.8). Column-major reference:
+    let q_ref = [
+        -0.16903085094570325,
+        0.50709255283711,
+        0.8451542547285166,
+        0.21398024625545642,
+        0.8559209850218259,
+        -0.4707565417620042,
+    ];
+    let r_ref = [
+        5.916079783099615,
+        0.0,
+        -3.380617018914066,
+        6.676183683170241,
+    ];
+    // Start from the equally valid un-gauged QR with both diagonal signs
+    // flipped (Q -> -Q, R -> -R); the gauge must restore the reference.
+    let mut q: Vec<f64> = q_ref.iter().map(|v| -v).collect();
+    let mut r: Vec<f64> = r_ref.iter().map(|v| -v).collect();
+    crate::factorize::positive_diagonal_gauge(&mut q, 3, &mut r, 2, 2);
+    for (value, reference) in q.iter().zip(&q_ref) {
+        assert!(
+            (value - reference).abs() < 1e-14,
+            "Q {value} != {reference}"
+        );
+    }
+    for (value, reference) in r.iter().zip(&r_ref) {
+        assert!(
+            (value - reference).abs() < 1e-14,
+            "R {value} != {reference}"
+        );
+    }
+}
+
+#[test]
+fn positive_diagonal_gauge_complex_phase_and_zero_diagonal() {
+    use num_complex::Complex64;
+    let c = Complex64::new;
+    // q: 3 x 3, r: 3 x 3 upper triangular with complex diagonal phases and a
+    // zero diagonal entry (row 1), column-major.
+    let q: Vec<Complex64> = (0..9)
+        .map(|i| c((i as f64 * 0.7 - 2.0).sin(), (i as f64 * 1.3 + 0.5).cos()))
+        .collect();
+    let r = vec![
+        c(-3.0, 4.0),
+        c(0.0, 0.0),
+        c(0.0, 0.0),
+        c(1.0, -2.0),
+        c(0.0, 0.0),
+        c(0.0, 0.0),
+        c(0.5, 0.25),
+        c(2.0, 1.0),
+        c(0.0, -7.0),
+    ];
+    let product = |q: &[Complex64], r: &[Complex64]| -> Vec<Complex64> {
+        let mut out = vec![c(0.0, 0.0); 9];
+        for col in 0..3 {
+            for row in 0..3 {
+                for k in 0..3 {
+                    out[row + 3 * col] += q[row + 3 * k] * r[k + 3 * col];
+                }
+            }
+        }
+        out
+    };
+    let before = product(&q, &r);
+    let mut q_gauged = q.clone();
+    let mut r_gauged = r.clone();
+    crate::factorize::positive_diagonal_gauge(&mut q_gauged, 3, &mut r_gauged, 3, 3);
+    // Diagonal of R is real non-negative; the zero entry keeps phase 1.
+    for j in 0..3 {
+        let diagonal = r_gauged[j + 3 * j];
+        assert!(
+            diagonal.im.abs() < 1e-14,
+            "R[{j},{j}] = {diagonal} not real"
+        );
+        assert!(diagonal.re >= 0.0, "R[{j},{j}] = {diagonal} negative");
+    }
+    assert_eq!(r_gauged[1 + 3 * 1], c(0.0, 0.0));
+    assert_eq!(q_gauged[3], q[3], "zero diagonal must not rescale Q column");
+    // Q * R is unchanged.
+    let after = product(&q_gauged, &r_gauged);
+    for (lhs, rhs) in after.iter().zip(&before) {
+        assert!(
+            (lhs - rhs).norm() < 1e-13,
+            "product changed: {lhs} vs {rhs}"
+        );
+    }
+}
+
+#[test]
+fn qr_compact_positive_gauge_idempotent_on_isometry() {
+    for rule_case in [0usize, 1usize] {
+        if rule_case == 0 {
+            let rule = Z2FusionRule;
+            let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+            let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+            let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
+            let (q2, r2) = qr_compact(&mut dense_executor, &rule, &q).unwrap();
+            assert_svd_blocks_match(&q, &q2);
+            assert_identity_sector_matrices(&dense_sector_matrices(1, &r2));
+        } else {
+            let rule = SU2FusionRule;
+            let tensor = tsvd_test_tensor(
+                &rule,
+                &[
+                    SU2Irrep::from_twice_spin(0).sector_id(),
+                    SU2Irrep::from_twice_spin(1).sector_id(),
+                ],
+            );
+            let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+            let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
+            let (q2, r2) = qr_compact(&mut dense_executor, &rule, &q).unwrap();
+            assert_svd_blocks_match(&q, &q2);
+            assert_identity_sector_matrices(&dense_sector_matrices(1, &r2));
+        }
+    }
+}
+
+#[test]
+fn lq_compact_positive_gauge_idempotent_on_isometry() {
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    let (_, q) = lq_compact(&mut dense_executor, &rule, &tensor).unwrap();
+    let (l2, q2) = lq_compact(&mut dense_executor, &rule, &q).unwrap();
+    assert_svd_blocks_match(&q, &q2);
+    assert_identity_sector_matrices(&dense_sector_matrices(1, &l2));
+}
+
+fn assert_identity_sector_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
+    for (sector, rows, cols, matrix) in matrices {
+        assert_eq!(rows, cols, "sector {sector:?}: expected square factor");
+        for col in 0..*cols {
+            for row in 0..*rows {
+                let expected = if row == col { 1.0 } else { 0.0 };
+                let value = matrix[row + rows * col];
+                assert!(
+                    (value - expected).abs() < 1e-9,
+                    "sector {sector:?}: entry ({row},{col}) = {value}"
+                );
+            }
+        }
+    }
+}

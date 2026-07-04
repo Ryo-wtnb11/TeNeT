@@ -1439,9 +1439,43 @@ where
     Ok((space, data))
 }
 
+/// Positive-diagonal gauge (MatrixAlgebraKit `positive = true`, the default
+/// of the Householder QR/LQ algorithms since MAK 0.6.8 / TensorKit 0.17):
+/// absorbs the unitary phase `D = diag(phase(R_jj))` into `Q`, i.e.
+/// `Q -> Q * D`, `R -> D^H * R`, leaving `Q * R` unchanged with real
+/// non-negative `R_jj`. Zero diagonal entries keep phase `1`, exactly like
+/// MAK `sign_safe` (no epsilon threshold).
+///
+/// `q` is column-major `q_rows x nq` (`nq >= min(r_rows, r_cols)`), `r` is
+/// column-major `r_rows x r_cols`.
+pub(crate) fn positive_diagonal_gauge<D: FactorScalar>(
+    q: &mut [D],
+    q_rows: usize,
+    r: &mut [D],
+    r_rows: usize,
+    r_cols: usize,
+) {
+    for j in 0..r_rows.min(r_cols) {
+        let z = r[j + r_rows * j].widen_complex();
+        let norm = z.norm();
+        if norm == 0.0 {
+            continue; // phase 1: nothing to scale
+        }
+        let phase = D::from_complex64(z / norm);
+        let conj_phase = FactorScalar::adjoint(phase);
+        for value in &mut q[q_rows * j..q_rows * (j + 1)] {
+            *value = *value * phase;
+        }
+        for col in 0..r_cols {
+            r[j + r_rows * col] = conj_phase * r[j + r_rows * col];
+        }
+    }
+}
+
 /// Full QR `t = Q * R` (MatrixAlgebraKit `qr_full`): per sector `Q` is the
 /// square `m x m` unitary and `R` the upper-trapezoidal `m x n`, obtained
 /// from one economy QR of the augmented `[A | I]` on the dense boundary.
+/// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
 pub fn qr_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
@@ -1493,14 +1527,18 @@ where
         }
         validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
         validate_dense_shape(outputs[1].shape(), &[rows, cols + rows])?;
-        let q = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
-        let r_augmented = D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
+        let mut q = D::dense_slice(&outputs[0])
+            .map_err(OperationError::Dense)?
+            .to_vec();
+        let mut r =
+            D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?[..rows * cols].to_vec();
+        positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rows,
-            left: q.to_vec(),
+            left: q,
             left_rows: rows,
-            right: r_augmented[..rows * cols].to_vec(),
+            right: r,
             right_leading: rows,
         });
     }
@@ -1511,6 +1549,7 @@ where
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
 /// lower-trapezoidal `m x n` and `Q` the square `n x n` unitary, via the full
 /// QR of the transposed sector matrices.
+/// The positive-diagonal gauge is applied (MAK / TensorKit 0.17 default).
 pub fn lq_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
@@ -1563,16 +1602,21 @@ where
         }
         validate_dense_shape(outputs[0].shape(), &[cols, cols])?;
         validate_dense_shape(outputs[1].shape(), &[cols, rows + cols])?;
-        let q_prime = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
-        let r_prime = D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
+        let mut q_prime = D::dense_slice(&outputs[0])
+            .map_err(OperationError::Dense)?
+            .to_vec();
+        let mut r_prime =
+            D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?[..cols * rows].to_vec();
+        // Gauge the QR of t^H; L = R'^H then has a real non-negative diagonal.
+        positive_diagonal_gauge(&mut q_prime, cols, &mut r_prime, cols, rows);
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: cols,
             // L = R'^H : rows x cols (lower trapezoidal).
-            left: adjoint_col_major(&r_prime[..cols * rows], cols, rows),
+            left: adjoint_col_major(&r_prime, cols, rows),
             left_rows: rows,
             // Q = Q'^H : cols x cols.
-            right: adjoint_col_major(q_prime, cols, cols),
+            right: adjoint_col_major(&q_prime, cols, cols),
             right_leading: cols,
         });
     }
@@ -2131,7 +2175,9 @@ where
 
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
 /// `Q : codomain <- W` has orthonormal columns per coupled sector and
-/// `R : W <- domain` with per-sector bond `min(rows, cols)`.
+/// `R : W <- domain` with per-sector bond `min(rows, cols)`. The
+/// positive-diagonal gauge is applied (MAK / TensorKit 0.17 default
+/// `positive = true`): `R`'s diagonal is real non-negative per sector.
 pub fn qr_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
@@ -2177,16 +2223,19 @@ where
         let rank = matrix.rows.min(matrix.cols);
         validate_dense_shape(outputs[0].shape(), &[matrix.rows, rank])?;
         validate_dense_shape(outputs[1].shape(), &[rank, matrix.cols])?;
+        let mut q = D::dense_slice(&outputs[0])
+            .map_err(OperationError::Dense)?
+            .to_vec();
+        let mut r = D::dense_slice(&outputs[1])
+            .map_err(OperationError::Dense)?
+            .to_vec();
+        positive_diagonal_gauge(&mut q, matrix.rows, &mut r, rank, matrix.cols);
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
-            left: D::dense_slice(&outputs[0])
-                .map_err(OperationError::Dense)?
-                .to_vec(),
+            left: q,
             left_rows: matrix.rows,
-            right: D::dense_slice(&outputs[1])
-                .map_err(OperationError::Dense)?
-                .to_vec(),
+            right: r,
             right_leading: rank,
         });
     }
@@ -2196,7 +2245,9 @@ where
 
 /// Compact LQ `t = L * Q` (MatrixAlgebraKit `lq_compact`, via the QR of the
 /// transposed sector matrices): `Q : W <- domain` has orthonormal rows per
-/// coupled sector and `L : codomain <- W`.
+/// coupled sector and `L : codomain <- W`. The positive-diagonal gauge is
+/// applied (MAK / TensorKit 0.17 default `positive = true`): `L`'s diagonal
+/// is real non-negative per sector.
 pub fn lq_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
@@ -2244,16 +2295,22 @@ where
         let rank = matrix.rows.min(matrix.cols);
         validate_dense_shape(outputs[0].shape(), &[matrix.cols, rank])?;
         validate_dense_shape(outputs[1].shape(), &[rank, matrix.rows])?;
-        let q_prime = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
-        let r_prime = D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
+        let mut q_prime = D::dense_slice(&outputs[0])
+            .map_err(OperationError::Dense)?
+            .to_vec();
+        let mut r_prime = D::dense_slice(&outputs[1])
+            .map_err(OperationError::Dense)?
+            .to_vec();
+        // Gauge the QR of t^H; L = R'^H then has a real non-negative diagonal.
+        positive_diagonal_gauge(&mut q_prime, matrix.cols, &mut r_prime, rank, matrix.rows);
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
             // L = R'^H : rows x rank.
-            left: adjoint_col_major(r_prime, rank, matrix.rows),
+            left: adjoint_col_major(&r_prime, rank, matrix.rows),
             left_rows: matrix.rows,
             // Q = Q'^H : rank x cols.
-            right: adjoint_col_major(q_prime, matrix.cols, rank),
+            right: adjoint_col_major(&q_prime, matrix.cols, rank),
             right_leading: rank,
         });
     }
@@ -2264,8 +2321,8 @@ where
 /// Left isometry factorization `t = V * C` (TensorKit 0.17 / MatrixAlgebraKit
 /// `left_orth`): `V : codomain <- W` isometric, `C : W <- domain`.
 ///
-/// TensorKit's default `kind = :qr` maps to [`qr_compact`]; the
-/// positive-diagonal QR gauge (`positive = true`) is not applied.
+/// TensorKit's default `kind = :qr` maps to [`qr_compact`], which applies the
+/// positive-diagonal QR gauge (`positive = true`, the MAK default).
 pub fn left_orth<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
@@ -2298,8 +2355,8 @@ where
 /// MatrixAlgebraKit `right_orth`): `C : codomain <- W`, `Vh : W <- domain`
 /// with orthonormal rows.
 ///
-/// TensorKit's default `kind = :lq` maps to [`lq_compact`]; the
-/// positive-diagonal LQ gauge (`positive = true`) is not applied.
+/// TensorKit's default `kind = :lq` maps to [`lq_compact`], which applies the
+/// positive-diagonal LQ gauge (`positive = true`, the MAK default).
 pub fn right_orth<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     rule: &R,
