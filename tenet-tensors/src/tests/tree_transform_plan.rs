@@ -910,16 +910,16 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
 
-    all_codomain_tree_transform_into_with_context(
-        &mut context,
-        &SU2FusionRule,
-        operation.clone(),
-        &mut dst,
-        &src,
-        1.0,
-        0.0,
-    )
-    .unwrap();
+    context
+        .all_codomain_tree_transform_into(
+            &SU2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
 
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);

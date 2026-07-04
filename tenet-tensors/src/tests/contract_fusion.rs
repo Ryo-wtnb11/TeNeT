@@ -2967,7 +2967,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
         Complex64::new(-3.0, -0.25),
     ];
 
-    for (case_index, (lhs_hom, rhs_hom, lhs_conjugate, rhs_conjugate)) in [
+    for (lhs_hom, rhs_hom, lhs_conjugate, rhs_conjugate) in [
         (
             su2_three_to_one_homspace(false, false),
             su2_one_to_three_homspace(false, false),
@@ -2980,10 +2980,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
             true,
             false,
         ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ] {
         let axes = TensorContractSpec::with_default_output_order_and_conjugation(
             &[0, 1, 2],
             &[1, 2, 3],

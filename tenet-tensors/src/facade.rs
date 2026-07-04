@@ -4,7 +4,7 @@ use std::hash::Hash;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockView, BlockViewMut, CoreError, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
+    MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
@@ -857,40 +857,6 @@ where
     DSrc: HostReadableStorage<D>,
 {
     context.tree_transform_into(rule, operation, dst, src, alpha, beta)
-}
-
-pub(crate) fn all_codomain_tree_transform_into_with_context<
-    B,
-    R,
-    D,
-    RuleKey,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const SRC_NOUT: usize,
-    const SRC_NIN: usize,
-    SDst,
-    SSrc,
-    DDst,
-    DSrc,
->(
-    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
-    rule: &R,
-    operation: TreeTransformOperation,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    B: TreeTransformBackend<D, R::Scalar>,
-    R: MultiplicityFreeFusionSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
-    RuleKey: Clone + Eq + Hash,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-    D: TreeTransformScalar,
-    DDst: HostWritableStorage<D>,
-    DSrc: HostReadableStorage<D>,
-{
-    context.all_codomain_tree_transform_into(rule, operation, dst, src, alpha, beta)
 }
 
 /// TensorKit `permute!`: symmetric-braiding permutation of tensor legs, written into `dst`.
