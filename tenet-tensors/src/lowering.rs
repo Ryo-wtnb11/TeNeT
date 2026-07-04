@@ -8,7 +8,7 @@ use tenet_core::{
 
 use crate::{OperationError, TreeTransformOperationKey};
 use tenet_operations::{
-    permutation_axes, AxisPermutation, TensorContractAxisSpec, TensorTraceAxisSpec,
+    permutation_axes, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,7 +234,7 @@ pub(crate) fn lower_tensortrace_source_adjoint_axes<const SRC_NOUT: usize, const
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LoweredTensorContractAxisSpec {
+pub(crate) struct LoweredTensorContractSpec {
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,
     output_axes: Vec<usize>,
@@ -242,13 +242,13 @@ pub(crate) struct LoweredTensorContractAxisSpec {
     rhs_storage_conjugate: bool,
 }
 
-impl LoweredTensorContractAxisSpec {
+impl LoweredTensorContractSpec {
     #[inline]
-    pub(crate) fn as_spec(&self) -> TensorContractAxisSpec<'_> {
-        TensorContractAxisSpec::new_with_conjugation(
+    pub(crate) fn as_spec(&self) -> TensorContractSpec<'_> {
+        TensorContractSpec::new_with_conjugation(
             &self.lhs_contracting_axes,
             &self.rhs_contracting_axes,
-            AxisPermutation::from_axes(&self.output_axes),
+            OutputAxisOrder::from_axes(&self.output_axes),
             self.lhs_storage_conjugate,
             self.rhs_storage_conjugate,
         )
@@ -271,8 +271,8 @@ pub(crate) fn lower_tensorcontract_adjoint_axes<
     const RHS_NOUT: usize,
     const RHS_NIN: usize,
 >(
-    axes: TensorContractAxisSpec<'_>,
-) -> Result<LoweredTensorContractAxisSpec, OperationError> {
+    axes: TensorContractSpec<'_>,
+) -> Result<LoweredTensorContractSpec, OperationError> {
     if axes.lhs_contracting_axes().len() != axes.rhs_contracting_axes().len() {
         return Err(OperationError::ContractAxisCountMismatch {
             lhs: axes.lhs_contracting_axes().len(),
@@ -294,7 +294,7 @@ pub(crate) fn lower_tensorcontract_adjoint_axes<
                 .and_then(|rhs_open| lhs_open.checked_add(rhs_open))
         })
         .ok_or(OperationError::ElementCountOverflow)?;
-    Ok(LoweredTensorContractAxisSpec {
+    Ok(LoweredTensorContractSpec {
         lhs_contracting_axes: if axes.lhs_conjugate() {
             adjoint_tensor_axes(LHS_NOUT, LHS_NIN, axes.lhs_contracting_axes())?
         } else {

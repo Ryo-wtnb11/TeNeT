@@ -737,7 +737,7 @@ where
     let src = TensorMap::<T, 2, 0>::from_vec(values, space.clone()).unwrap();
     let mut dst = TensorMap::<T, 2, 0>::filled(fill, space).unwrap();
 
-    tensoradd_into(&mut dst, &src, AxisPermutation::identity(), alpha, beta).unwrap();
+    tensoradd_into(&mut dst, &src, OutputAxisOrder::identity(), alpha, beta).unwrap();
 
     assert_eq!(dst.data(), expected.as_slice());
 }
@@ -768,7 +768,7 @@ fn assert_tensoradd_permuted_general_dtype<T>(
     tensoradd_into(
         &mut dst,
         &src,
-        AxisPermutation::from_axes(&[1, 0]),
+        OutputAxisOrder::from_axes(&[1, 0]),
         alpha,
         beta,
     )
@@ -1167,7 +1167,7 @@ where
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         D::one() + D::one(),
         D::one() + D::one() + D::one(),
     )
@@ -1190,7 +1190,7 @@ where
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         &[TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5)],
     )
     .unwrap();

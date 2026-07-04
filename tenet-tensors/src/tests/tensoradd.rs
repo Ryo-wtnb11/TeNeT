@@ -5,7 +5,7 @@ fn tensoradd_structure_replays_custom_host_storage_without_vec_fixing() {
     let space = TensorMapSpace::<1, 0>::from_dims([4], []).unwrap();
     let src = test_host_read_tensor_map(vec![1.0_f64, 2.0, 3.0, 4.0], space.clone());
     let mut dst = test_host_tensor_map(vec![10.0_f64; 4], space);
-    let structure = TensorAddStructure::compile(&dst, &src, AxisPermutation::identity()).unwrap();
+    let structure = TensorAddStructure::compile(&dst, &src, OutputAxisOrder::identity()).unwrap();
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
 
@@ -22,7 +22,7 @@ fn tensoradd_default_host_api_accepts_custom_host_storage() {
     let src = test_host_read_tensor_map(vec![1.0_f64, 2.0, 3.0, 4.0], space.clone());
     let mut dst = test_host_tensor_map(vec![10.0_f64; 4], space);
 
-    tensoradd_into(&mut dst, &src, AxisPermutation::identity(), 2.0, 3.0).unwrap();
+    tensoradd_into(&mut dst, &src, OutputAxisOrder::identity(), 2.0, 3.0).unwrap();
 
     assert_eq!(dst.data(), &[32.0, 34.0, 36.0, 38.0]);
 }
@@ -401,7 +401,7 @@ fn tensoradd_with_backend_allocator_applies_axis_permutation() {
         &mut allocator,
         &mut dst,
         &src,
-        AxisPermutation::from_axes(&[1, 0]),
+        OutputAxisOrder::from_axes(&[1, 0]),
         2.0,
         3.0,
     )
@@ -432,7 +432,7 @@ fn tensoradd_with_conjugation_applies_dense_source_conj_and_permutation() {
     tensoradd_into_with_conjugation(
         &mut dst,
         &src,
-        AxisPermutation::from_axes(&[1, 0]),
+        OutputAxisOrder::from_axes(&[1, 0]),
         true,
         Complex64::new(2.0, 0.0),
         Complex64::new(3.0, 0.0),
@@ -460,7 +460,7 @@ fn tensoradd_structure_precomputes_permutation_pairing_and_descriptor() {
     let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
 
     let structure =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[1, 0])).unwrap();
 
     assert_eq!(structure.rank(), 2);
     assert_eq!(structure.axes(), &[1, 0]);
@@ -478,7 +478,7 @@ fn tensoradd_structure_replays_without_recompiling() {
         TensorMap::<f64, 2, 0>::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], src_space).unwrap();
     let mut dst = TensorMap::<f64, 2, 0>::filled(10.0, dst_space).unwrap();
     let structure =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[1, 0])).unwrap();
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
 
@@ -514,7 +514,7 @@ fn tensoradd_structure_compiles_concrete_shape_and_replays_it() {
         TensorMap::<f64, 2, 0>::from_vec((1..=20).map(|x| x as f64).collect(), src_space).unwrap();
     let mut dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
     let structure =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[1, 0])).unwrap();
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
 
@@ -554,7 +554,7 @@ fn tensoradd_structure_replays_multiple_packed_blocks() {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 10], dst_space, dst_structure)
             .unwrap();
     let structure =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[1, 0])).unwrap();
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
 
@@ -605,7 +605,7 @@ fn tensoradd_structure_pairs_blocks_by_key_not_index() {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 10], dst_space, dst_structure)
             .unwrap();
     let structure =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[1, 0])).unwrap();
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
 
@@ -640,7 +640,7 @@ fn tensoradd_structure_rejects_invalid_permutation_at_compile_time() {
     let dst = TensorMap::<f64, 2, 0>::filled(0.0, space).unwrap();
 
     let err =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[0, 0])).unwrap_err();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[0, 0])).unwrap_err();
 
     assert_eq!(
         err,
@@ -676,7 +676,7 @@ fn plain_tensoradd_rejects_fusion_tree_permutation_without_rule() {
     let err = tensoradd_into(
         &mut dst,
         &src,
-        AxisPermutation::from_axes(&[1, 0]),
+        OutputAxisOrder::from_axes(&[1, 0]),
         1.0,
         0.0,
     )
@@ -717,7 +717,7 @@ fn plain_tensoradd_rejects_fusion_tree_conjugation_without_categorical_adjoint()
     let err = tensoradd_into_with_conjugation(
         &mut dst,
         &src,
-        AxisPermutation::identity(),
+        OutputAxisOrder::identity(),
         true,
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
@@ -1277,7 +1277,7 @@ fn tensoradd_structure_rejects_incompatible_shape_at_compile_time() {
     let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
 
     let err =
-        TensorAddStructure::compile(&dst, &src, AxisPermutation::from_axes(&[1, 0])).unwrap_err();
+        TensorAddStructure::compile(&dst, &src, OutputAxisOrder::from_axes(&[1, 0])).unwrap_err();
 
     assert_eq!(
         err,
@@ -1297,7 +1297,7 @@ fn tensoradd_structure_rejects_incompatible_replay_structure() {
     let structure = TensorAddStructure::compile(
         &compile_dst,
         &compile_src,
-        AxisPermutation::from_axes(&[1, 0]),
+        OutputAxisOrder::from_axes(&[1, 0]),
     )
     .unwrap();
 

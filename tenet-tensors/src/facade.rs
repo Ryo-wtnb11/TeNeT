@@ -22,7 +22,6 @@ use tenet_operations::{tensoradd_block_with_strided_kernel, TreeTransformWorkspa
 use tenet_operations::{
     tensoradd_structure, tensoradd_structure_with_conjugation, TensorAddStructure,
 };
-use tenet_operations::{AxisPermutation, TensorTraceAxisSpec};
 use tenet_operations::{
     ConjugateValue, DenseRecouplingScalar, RealStructuralCoefficient, RecouplingCoefficientAction,
     TreeTransformScalar,
@@ -31,6 +30,7 @@ use tenet_operations::{
     DenseTreeTransformOperations, HostAllocator, HostTensorOperations, TensorOperationsBackend,
     TreeTransformBackend,
 };
+use tenet_operations::{OutputAxisOrder, TensorTraceAxisSpec};
 
 pub fn tensorcopy_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
     dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
@@ -64,7 +64,7 @@ where
 pub fn tensoradd_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
     dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
     src: &TensorMap<T, NOUT, NIN, S, DSrc>,
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -96,7 +96,7 @@ where
 pub fn tensoradd_into_with_conjugation<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
     dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
     src: &TensorMap<T, NOUT, NIN, S, DSrc>,
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
     source_conjugate: bool,
     alpha: T,
     beta: T,
@@ -132,7 +132,7 @@ pub fn tensoradd_into_with<B, T, const NOUT: usize, const NIN: usize, S, DDst, D
     allocator: &mut B::Allocator,
     dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
     src: &TensorMap<T, NOUT, NIN, S, DSrc>,
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
     alpha: T,
     beta: T,
 ) -> Result<(), OperationError>
@@ -167,7 +167,7 @@ pub fn tensoradd_into_with_backend_and_conjugation<
     allocator: &mut B::Allocator,
     dst: &mut TensorMap<T, NOUT, NIN, S, DDst>,
     src: &TensorMap<T, NOUT, NIN, S, DSrc>,
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
     source_conjugate: bool,
     alpha: T,
     beta: T,
@@ -910,7 +910,7 @@ where
     DDst: HostWritableStorage<T>,
     DSrc: HostReadableStorage<T>,
 {
-    tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::zero())
+    tensoradd_into(dst, src, OutputAxisOrder::identity(), alpha, T::zero())
 }
 
 pub fn tensoradd_add_into<T, const NOUT: usize, const NIN: usize, S, DDst, DSrc>(
@@ -930,7 +930,7 @@ where
     DDst: HostWritableStorage<T>,
     DSrc: HostReadableStorage<T>,
 {
-    tensoradd_into(dst, src, AxisPermutation::identity(), alpha, T::one())
+    tensoradd_into(dst, src, OutputAxisOrder::identity(), alpha, T::one())
 }
 
 pub fn copy_into<T>(dst: BlockViewMut<'_, T>, src: BlockView<'_, T>) -> Result<(), OperationError>

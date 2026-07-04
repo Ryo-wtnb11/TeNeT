@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use tenet_core::{BlockKey, BlockStructure, TensorMap, TensorMapSpace};
 use tenet_tensors::{
-    tensoradd_execute_with, tree_transform_execute_with, AxisPermutation, HostAllocator,
-    HostTensorOperations, TensorAddStructure, TreeTransformBlockSpec, TreeTransformKeyBlockSpec,
+    tensoradd_execute_with, tree_transform_execute_with, HostAllocator, HostTensorOperations,
+    OutputAxisOrder, TensorAddStructure, TreeTransformBlockSpec, TreeTransformKeyBlockSpec,
     TreeTransformStructure, TreeTransformWorkspace,
 };
 
@@ -67,11 +67,11 @@ fn run_case(block_count: usize, key_order: KeyOrder) {
     let compile_iters = iterations(block_count, 200_000);
     let compile_elapsed = elapsed_per_iter(compile_iters, || {
         let structure =
-            TensorAddStructure::compile(&dst, &src, AxisPermutation::identity()).unwrap();
+            TensorAddStructure::compile(&dst, &src, OutputAxisOrder::identity()).unwrap();
         black_box(structure.terms().len());
     });
 
-    let structure = TensorAddStructure::compile(&dst, &src, AxisPermutation::identity()).unwrap();
+    let structure = TensorAddStructure::compile(&dst, &src, OutputAxisOrder::identity()).unwrap();
     let replay_iters = iterations(block_count, 50_000);
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();

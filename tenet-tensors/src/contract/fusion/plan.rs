@@ -2,7 +2,7 @@ use tenet_core::{FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigid
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::{OperationError, TreeTransformOperationKey};
-use tenet_operations::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::structure::TensorContractAxisPlan;
 
@@ -11,7 +11,7 @@ pub struct TensorContractFusionExplicitPlan {
     lhs_transform: TreeTransformOperationKey,
     rhs_transform: TreeTransformOperationKey,
     output_transform: TreeTransformOperationKey,
-    canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
     lhs_canonical_nout: usize,
@@ -39,7 +39,7 @@ impl TensorContractFusionExplicitPlan {
     }
 
     #[inline]
-    pub fn canonical_axes(&self) -> &OwnedTensorContractAxisSpec {
+    pub fn canonical_axes(&self) -> &TensorContractSpecOwned {
         &self.canonical_axes
     }
 
@@ -117,7 +117,7 @@ pub fn tensorcontract_fusion_explicit_plan<
     dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<TensorContractFusionExplicitPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -185,7 +185,7 @@ fn tensorcontract_fusion_explicit_plan_from_spaces<
     dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
 ) -> Result<TensorContractFusionExplicitPlan, OperationError>
@@ -232,7 +232,7 @@ where
             axis_plan.rhs_contracting_axes,
             axis_plan.rhs_open_axes,
         ),
-        canonical_axes: OwnedTensorContractAxisSpec::new(
+        canonical_axes: TensorContractSpecOwned::new(
             (lhs_canonical_nout..lhs_canonical_nout + lhs_canonical_nin).collect(),
             (0..rhs_canonical_nout).collect(),
             (0..canonical_output_rank).collect(),

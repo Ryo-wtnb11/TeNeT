@@ -16,7 +16,7 @@ use crate::{
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperationKey,
     TreeTransformRuleCacheKey, TreeTransformStructure, TreeTransformWorkspace,
 };
-use tenet_operations::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
@@ -54,7 +54,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -273,7 +273,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
@@ -347,7 +347,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
     fusion_block_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
@@ -1113,7 +1113,7 @@ struct DynamicFusionCanonicalDstLastEntry<RuleKey> {
     rule: RuleKey,
     lhs: DynamicFusionLastSpaceKey,
     rhs: DynamicFusionLastSpaceKey,
-    canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
     output_transform: TreeTransformOperationKey,
@@ -1735,7 +1735,7 @@ struct DynamicFusionCanonicalDstFastKey<RuleKey> {
     rule: RuleKey,
     lhs: DynamicFusionFastSpaceKey,
     rhs: DynamicFusionFastSpaceKey,
-    canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
     output_transform: TreeTransformOperationKey,
@@ -1747,7 +1747,7 @@ struct DynamicFusionCanonicalDstSpaceKey<RuleKey> {
     rule: RuleKey,
     lhs: DynamicFusionSpaceKey,
     rhs: DynamicFusionSpaceKey,
-    canonical_axes: OwnedTensorContractAxisSpec,
+    canonical_axes: TensorContractSpecOwned,
     canonical_dst_nout: usize,
     canonical_dst_nin: usize,
     output_transform: TreeTransformOperationKey,
@@ -1965,7 +1965,7 @@ fn tensorcontract_dynamic_canonical_into_raw<B, R, D>(
     dst_data: &mut [D],
     lhs: &DynamicFusionScratch<D>,
     rhs: &DynamicFusionScratch<D>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -2005,7 +2005,7 @@ mod tests {
     use crate::storage_scratch::StorageFusionBlockContractWorkspace;
     use crate::tree_context::TreeTransformExecutionContext;
     use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
-    use tenet_operations::AxisPermutation;
+    use tenet_operations::OutputAxisOrder;
 
     use super::super::fusion_block::CanonicalFusionBlockContractWorkspace;
     use super::super::scratch::StorageDynamicFusionScratchWorkspace;
@@ -2153,7 +2153,7 @@ mod tests {
             dst.fusion_space().unwrap(),
             lhs.fusion_space().unwrap(),
             rhs.fusion_space().unwrap(),
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
         assert!(plan.output_transform_is_identity());
@@ -2305,7 +2305,7 @@ mod tests {
                 dst_space(),
             )
             .unwrap();
-        let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3]));
+        let axes = TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 2, 1, 3]));
         let plan = tensorcontract_fusion_explicit_plan(
             &rule,
             dst.fusion_space().unwrap(),

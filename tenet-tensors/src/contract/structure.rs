@@ -9,7 +9,7 @@ use tenet_dense::DenseDotConfig;
 use crate::strided::{column_major_strides_usize, element_count, offset_to_isize};
 use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 use tenet_operations::structure_identity::validate_structure_identity;
-use tenet_operations::{permutation_axes, TensorContractAxisSpec};
+use tenet_operations::{permutation_axes, TensorContractSpec};
 
 use super::backend::TensorContractBackend;
 
@@ -52,7 +52,7 @@ pub fn tensorcontract_structure<
     dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<TensorContractStructure, OperationError>
 where
     DDst: TensorStorage<TDst>,
@@ -88,7 +88,7 @@ impl TensorContractStructure {
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError>
     where
         DDst: TensorStorage<TDst>,
@@ -115,7 +115,7 @@ impl TensorContractStructure {
         dst_structure: &BlockStructure,
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures(
             Arc::new(dst_structure.clone()),
@@ -145,7 +145,7 @@ impl TensorContractStructure {
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError>
     where
@@ -168,7 +168,7 @@ impl TensorContractStructure {
         dst_structure: &BlockStructure,
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures_with_block_specs(
@@ -188,7 +188,7 @@ impl TensorContractStructure {
         rhs_structure: Arc<BlockStructure>,
         lhs_storage_structure: Arc<BlockStructure>,
         rhs_storage_structure: Arc<BlockStructure>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures_with_block_specs(
@@ -206,7 +206,7 @@ impl TensorContractStructure {
         dst_structure: Arc<BlockStructure>,
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
         if dst_structure.block_count() != 1
             || lhs_structure.block_count() != 1
@@ -235,7 +235,7 @@ impl TensorContractStructure {
         rhs_structure: Arc<BlockStructure>,
         lhs_storage_structure: Arc<BlockStructure>,
         rhs_storage_structure: Arc<BlockStructure>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures_with_block_specs_inner(
@@ -255,7 +255,7 @@ impl TensorContractStructure {
         rhs_structure: Arc<BlockStructure>,
         lhs_storage_structure: Arc<BlockStructure>,
         rhs_storage_structure: Arc<BlockStructure>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError> {
         let dst_rank = dst_structure.rank();
@@ -531,7 +531,7 @@ impl TensorContractAxisPlan {
         lhs_rank: usize,
         rhs_rank: usize,
         dst_rank: usize,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
         if axes.lhs_contracting_axes().len() != axes.rhs_contracting_axes().len() {
             return Err(OperationError::ContractAxisCountMismatch {

@@ -162,7 +162,7 @@ The example below computes `C = A * B`. In TeNeT axis notation, this contracts
 
 ```
 use tenet::core::{TensorMap, TensorMapSpace};
-use tenet::operations::{tensorcontract_into, TensorContractAxisSpec};
+use tenet::operations::{tensorcontract_into, TensorContractSpec};
 
 let space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
 
@@ -185,7 +185,7 @@ tensorcontract_into(
     &mut c,
     &a,
     &b,
-    TensorContractAxisSpec::canonical(&[1], &[0]),
+    TensorContractSpec::with_default_output_order(&[1], &[0]),
     1.0,
     0.0,
 )
@@ -214,7 +214,7 @@ binary contractions.
 
 ```
 use tenet::core::{TensorMap, TensorMapSpace};
-use tenet::operations::{tensorcontract_into, TensorContractAxisSpec};
+use tenet::operations::{tensorcontract_into, TensorContractSpec};
 
 let matrix = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
 
@@ -250,7 +250,7 @@ tensorcontract_into(
     &mut ab,
     &a,
     &b,
-    TensorContractAxisSpec::canonical(&[1], &[0]),
+    TensorContractSpec::with_default_output_order(&[1], &[0]),
     1.0,
     0.0,
 )
@@ -268,7 +268,7 @@ tensorcontract_into(
     &mut scalar,
     &ab,
     &c,
-    TensorContractAxisSpec::canonical(&[0, 1], &[1, 0]),
+    TensorContractSpec::with_default_output_order(&[0, 1], &[1, 0]),
     1.0,
     0.0,
 )
@@ -307,7 +307,7 @@ use tenet::core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg,
     TensorMap, TensorMapSpace, Z2FusionRule, Z2Irrep,
 };
-use tenet::operations::{tensorcontract_fusion_into, TensorContractAxisSpec};
+use tenet::operations::{tensorcontract_fusion_into, TensorContractSpec};
 
 let rule = Z2FusionRule;
 let leg = || SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false);
@@ -345,7 +345,7 @@ tensorcontract_fusion_into(
     &mut dst,
     &lhs,
     &rhs,
-    TensorContractAxisSpec::canonical(&[1], &[0]),
+    TensorContractSpec::with_default_output_order(&[1], &[0]),
     1.0,
     0.0,
 )

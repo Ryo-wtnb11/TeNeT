@@ -74,9 +74,6 @@ pub(crate) use tenet_operations::{
     tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
 };
 pub use tenet_operations::{
-    AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec, TensorTraceAxisSpec,
-};
-pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
 };
@@ -87,6 +84,7 @@ pub use tenet_operations::{
 };
 pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use tenet_operations::{HostTreeTransformWorkspace, TreeTransformWorkspace};
+pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
 pub use tensortrace::{
     tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,

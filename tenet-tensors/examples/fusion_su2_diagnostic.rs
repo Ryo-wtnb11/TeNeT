@@ -4,7 +4,7 @@ use tenet_core::{
 use tenet_tensors::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tree_pair_transform_into_with_context,
-    AxisPermutation, TensorContractAxisSpec, TreeTransformBuiltinRuleCacheKey,
+    OutputAxisOrder, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
     TreeTransformExecutionContext,
 };
 
@@ -12,9 +12,9 @@ fn main() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
-    let axes = TensorContractAxisSpec::canonical(&[0, 1, 2], &[1, 2, 3]);
+    let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
     let tensorkit_axes =
-        TensorContractAxisSpec::new(&[0, 1, 2], &[1, 2, 3], AxisPermutation::from_axes(&[1, 0]));
+        TensorContractSpec::new(&[0, 1, 2], &[1, 2, 3], OutputAxisOrder::from_axes(&[1, 0]));
     let lhs_canonical_hom = lhs_hom
         .permute(&rule, &[3], &[0, 1, 2])
         .expect("valid lhs canonical tree-pair transform");

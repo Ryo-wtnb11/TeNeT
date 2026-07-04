@@ -17,7 +17,7 @@ use tenet_core::{
     SectorLeg, TensorKitProductCodec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    AxisPermutation, TensorContractAxisSpec, TensorContractFusionExecutionContext,
+    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
     TreeTransformRuleCacheKey,
 };
 
@@ -173,10 +173,10 @@ where
 
         let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         let axes = || {
-            TensorContractAxisSpec::new(
+            TensorContractSpec::new(
                 &workload.lhs_axes,
                 &workload.rhs_axes,
-                AxisPermutation::from_axes(&workload.output_axes),
+                OutputAxisOrder::from_axes(&workload.output_axes),
             )
         };
 

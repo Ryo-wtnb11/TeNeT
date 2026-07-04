@@ -10,10 +10,10 @@ use tenet_core::{
 use tenet_tensors::{
     tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
     tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
-    tree_pair_transform_into_with_context, AxisPermutation, HostTensorOperations,
-    HostTreeFusionExecutionContext, TensorContractAxisSpec, TensorContractFusionExecutionContext,
-    TensorContractFusionExplicitPlan, TensorContractFusionProfile,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext, TreeTransformRuleCacheKey,
+    tree_pair_transform_into_with_context, HostTensorOperations, HostTreeFusionExecutionContext,
+    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
+    TensorContractFusionProfile, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
+    TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
 
 static LHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
@@ -1460,23 +1460,23 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
     (rule, src_space, dst_space)
 }
 
-fn axes() -> TensorContractAxisSpec<'static> {
-    TensorContractAxisSpec::canonical(&LHS_CONTRACTING_AXES, &RHS_CONTRACTING_AXES)
+fn axes() -> TensorContractSpec<'static> {
+    TensorContractSpec::with_default_output_order(&LHS_CONTRACTING_AXES, &RHS_CONTRACTING_AXES)
 }
 
-fn canonical_axes() -> TensorContractAxisSpec<'static> {
-    TensorContractAxisSpec::canonical(
+fn canonical_axes() -> TensorContractSpec<'static> {
+    TensorContractSpec::with_default_output_order(
         &CANONICAL_LHS_CONTRACTING_AXES,
         &CANONICAL_RHS_CONTRACTING_AXES,
     )
 }
 
-fn output_axes() -> TensorContractAxisSpec<'static> {
-    TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3]))
+fn output_axes() -> TensorContractSpec<'static> {
+    TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 2, 1, 3]))
 }
 
-fn product_axes() -> TensorContractAxisSpec<'static> {
-    TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[1, 0, 2]))
+fn product_axes() -> TensorContractSpec<'static> {
+    TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[1, 0, 2]))
 }
 
 fn time_loop<F>(iterations: usize, mut f: F) -> Duration

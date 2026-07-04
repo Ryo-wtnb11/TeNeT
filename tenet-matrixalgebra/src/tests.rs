@@ -4,7 +4,7 @@ use tenet_core::{
     TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_tensors::{
-    AxisPermutation, TensorContractAxisSpec, TensorContractFusionExecutionContext,
+    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
     TreeTransformBuiltinRuleCacheKey, TreeTransformRuleCacheKey,
 };
 
@@ -159,7 +159,7 @@ where
             &mut reconstructed,
             &svd.u,
             &scaled_vt,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
             1.0,
             0.0,
         )
@@ -310,7 +310,7 @@ where
             &mut reconstructed,
             &svd.u,
             &scaled_vt,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
             1.0,
             0.0,
         )
@@ -526,7 +526,7 @@ where
             &mut reconstructed,
             left,
             right,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
             1.0,
             0.0,
         )
@@ -561,7 +561,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
             &mut u_s,
             &svd.u,
             &s_tensor,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
             1.0,
             0.0,
         )
@@ -578,7 +578,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
             &mut reconstructed,
             &u_s,
             &svd.vh,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
             1.0,
             0.0,
         )
@@ -683,7 +683,7 @@ fn assert_eigen_equation<R>(
             &mut tv,
             tensor,
             v,
-            TensorContractAxisSpec::new(&[2, 3], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2])),
+            TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
             1.0,
             0.0,
         )
@@ -700,7 +700,7 @@ fn assert_eigen_equation<R>(
             &mut vd,
             v,
             d,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
             1.0,
             0.0,
         )
@@ -1023,7 +1023,7 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
             &mut us,
             &full.u,
             &full.s,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
             1.0,
             0.0,
         )
@@ -1133,7 +1133,7 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
             &mut reconstructed,
             &svd.u,
             &scaled_vh,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
             Complex64::new(1.0, 0.0),
             Complex64::new(0.0, 0.0),
         )
@@ -1196,7 +1196,7 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
             &mut tv,
             &tensor_c,
             &eig.v,
-            TensorContractAxisSpec::new(&[2, 3], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2])),
+            TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2])),
             Complex64::new(1.0, 0.0),
             Complex64::new(0.0, 0.0),
         )
@@ -1212,7 +1212,7 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
             &mut vd,
             &eig.v,
             &eig.d,
-            TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 1, 2])),
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
             Complex64::new(1.0, 0.0),
             Complex64::new(0.0, 0.0),
         )

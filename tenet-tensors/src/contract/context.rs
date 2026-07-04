@@ -18,7 +18,7 @@ use crate::{
     DenseBlockScalar, DenseRecouplingScalar, DenseTreeTransformOperations, HostTensorOperations,
     OperationError, RecouplingCoefficientAction, ReportsPlacement, TreeTransformBackend,
 };
-use tenet_operations::{OwnedTensorContractAxisSpec, TensorContractAxisSpec};
+use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::{
     tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,
@@ -41,7 +41,7 @@ use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractPlanKey {
-    axes: OwnedTensorContractAxisSpec,
+    axes: TensorContractSpecOwned,
 }
 
 impl TensorContractPlanKey {
@@ -49,11 +49,11 @@ impl TensorContractPlanKey {
         lhs_rank: usize,
         rhs_rank: usize,
         dst_rank: usize,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<Self, OperationError> {
         let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
         Ok(Self {
-            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
+            axes: TensorContractSpecOwned::new_with_conjugation(
                 axis_plan.lhs_contracting_axes,
                 axis_plan.rhs_contracting_axes,
                 axis_plan.output_axes,
@@ -64,14 +64,14 @@ impl TensorContractPlanKey {
     }
 
     #[inline]
-    pub fn axes(&self) -> &OwnedTensorContractAxisSpec {
+    pub fn axes(&self) -> &TensorContractSpecOwned {
         &self.axes
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractBlockPlanKey {
-    axes: OwnedTensorContractAxisSpec,
+    axes: TensorContractSpecOwned,
     block_specs: Vec<TensorContractBlockPlanTerm>,
 }
 
@@ -80,12 +80,12 @@ impl TensorContractBlockPlanKey {
         lhs_rank: usize,
         rhs_rank: usize,
         dst_rank: usize,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<Self, OperationError> {
         let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
         Ok(Self {
-            axes: OwnedTensorContractAxisSpec::new_with_conjugation(
+            axes: TensorContractSpecOwned::new_with_conjugation(
                 axis_plan.lhs_contracting_axes,
                 axis_plan.rhs_contracting_axes,
                 axis_plan.output_axes,
@@ -100,7 +100,7 @@ impl TensorContractBlockPlanKey {
     }
 
     #[inline]
-    pub fn axes(&self) -> &OwnedTensorContractAxisSpec {
+    pub fn axes(&self) -> &TensorContractSpecOwned {
         &self.axes
     }
 
@@ -255,7 +255,7 @@ impl TensorContractCache<TensorContractPlanKey> {
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<&TensorContractStructure, OperationError>
     where
         DDst: TensorStorage<TDst>,
@@ -323,7 +323,7 @@ impl TensorContractCache<TensorContractBlockPlanKey> {
         dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         block_specs: &[TensorContractBlockSpec],
     ) -> Result<&TensorContractStructure, OperationError>
     where
@@ -508,7 +508,7 @@ where
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
@@ -547,7 +547,7 @@ where
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
@@ -588,7 +588,7 @@ pub fn tensorcontract_into_with_context<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -870,7 +870,7 @@ where
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
@@ -1043,7 +1043,7 @@ where
         dst: &TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<PreparedTensorContractFusion<RuleKey>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1161,7 +1161,7 @@ where
         dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
         lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
         rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
         profile: &mut TensorContractFusionProfile,

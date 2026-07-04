@@ -11,7 +11,7 @@ use crate::strided::{
     strides_to_isize,
 };
 use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction};
-use tenet_operations::TensorContractAxisSpec;
+use tenet_operations::TensorContractSpec;
 
 use tenet_operations::fusion_replay::{
     direct_group_matrix_offset, fusion_scale_block_layouts_excluding,
@@ -76,7 +76,7 @@ pub(crate) fn tensorcontract_canonical_fusion_blocks_into_raw<A, B, R, D>(
     lhs_data: &[D],
     rhs_space: &DynamicFusionMapSpace,
     rhs_data: &[D],
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -109,7 +109,7 @@ pub(crate) fn is_canonical_fusion_block_contract<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<bool, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -147,7 +147,7 @@ fn validate_canonical_compose<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -372,7 +372,7 @@ mod tests {
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
 
@@ -417,7 +417,7 @@ mod tests {
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
 
@@ -488,7 +488,7 @@ mod tests {
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
 
@@ -566,7 +566,7 @@ mod tests {
             &DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
             &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
             &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
         let mut backend = DenseTreeTransformOperations::default();
@@ -604,7 +604,7 @@ pub(crate) fn compile_canonical_fusion_block_contract_plan<R>(
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<CanonicalFusionBlockContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

@@ -8,7 +8,7 @@ use tenet_core::{
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
 use crate::OperationError;
-use tenet_operations::TensorContractAxisSpec;
+use tenet_operations::TensorContractSpec;
 
 use super::super::structure::{
     TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,
@@ -36,7 +36,7 @@ pub fn tensorcontract_fusion_structure<
     dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<TensorContractStructure, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -117,7 +117,7 @@ fn tensorcontract_fusion_structure_from_spaces<
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
     lhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
     rhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<TensorContractStructure, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -147,7 +147,7 @@ pub fn tensorcontract_fusion_block_specs<
     dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<Vec<TensorContractBlockSpec>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -169,7 +169,7 @@ fn tensorcontract_fusion_block_specs_lowered<
     dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<Vec<TensorContractBlockSpec>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -405,7 +405,7 @@ pub(crate) const SOURCE_TRANSFORM_REQUIRES_EXPLICIT: &str =
     "fusion contraction requiring source tree-pair transforms is not implemented; pre-transform operands explicitly";
 
 pub(crate) fn reject_fusion_contract_conjugation(
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<(), OperationError> {
     if axes.lhs_conjugate() || axes.rhs_conjugate() {
         return Err(OperationError::UnsupportedTensorContractScope {

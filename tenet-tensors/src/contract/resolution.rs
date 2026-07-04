@@ -20,9 +20,7 @@ use tenet_core::{BlockStructure, FusionTreeHomSpace, MultiplicityFreeRigidSymbol
 use super::structure::TensorContractStructure;
 use crate::cache::{BlockStructureCacheKey, OperationCachePolicy};
 use crate::OperationError;
-use tenet_operations::axis::{
-    AxisPermutation, OwnedTensorContractAxisSpec, TensorContractAxisSpec,
-};
+use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 use tenet_operations::fusion_replay::CanonicalFusionBlockContractPlan;
 
 use super::dynamic_space::DynamicFusionMapSpace;
@@ -60,7 +58,7 @@ struct FullKey<RuleKey> {
     dst: FullSpaceKey,
     lhs: FullSpaceKey,
     rhs: FullSpaceKey,
-    axes: OwnedTensorContractAxisSpec,
+    axes: TensorContractSpecOwned,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -89,7 +87,7 @@ struct FastKey<RuleKey> {
     dst: FastSpaceKey,
     lhs: FastSpaceKey,
     rhs: FastSpaceKey,
-    axes: OwnedTensorContractAxisSpec,
+    axes: TensorContractSpecOwned,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -156,10 +154,10 @@ struct RawAxes {
 }
 
 impl RawAxes {
-    fn from_axes(axes: TensorContractAxisSpec<'_>) -> Self {
+    fn from_axes(axes: TensorContractSpec<'_>) -> Self {
         let (output_identity, output_axes) = match axes.output_permutation() {
-            AxisPermutation::Identity => (true, Vec::new()),
-            AxisPermutation::Axes(list) => (false, list.to_vec()),
+            OutputAxisOrder::Identity => (true, Vec::new()),
+            OutputAxisOrder::Axes(list) => (false, list.to_vec()),
         };
         Self {
             lhs_contracting: axes.lhs_contracting_axes().to_vec(),
@@ -171,10 +169,10 @@ impl RawAxes {
         }
     }
 
-    fn matches(&self, axes: TensorContractAxisSpec<'_>) -> bool {
+    fn matches(&self, axes: TensorContractSpec<'_>) -> bool {
         let output_matches = match axes.output_permutation() {
-            AxisPermutation::Identity => self.output_identity,
-            AxisPermutation::Axes(list) => !self.output_identity && self.output_axes == list,
+            OutputAxisOrder::Identity => self.output_identity,
+            OutputAxisOrder::Axes(list) => !self.output_identity && self.output_axes == list,
         };
         output_matches
             && self.lhs_contracting == axes.lhs_contracting_axes()
@@ -270,7 +268,7 @@ where
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         compile_structure: impl FnOnce() -> Result<
             Option<Arc<TensorContractStructure<f64>>>,
             OperationError,
@@ -303,7 +301,7 @@ where
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
     ) -> Result<Arc<CanonicalFusionBlockContractPlan>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -328,7 +326,7 @@ where
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         resolve_cold: impl FnOnce() -> Result<Resolution, OperationError>,
     ) -> Result<Resolution, OperationError>
     where
@@ -368,7 +366,7 @@ where
         }
 
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-        let axes_key = OwnedTensorContractAxisSpec::new_with_conjugation(
+        let axes_key = TensorContractSpecOwned::new_with_conjugation(
             axis_plan.lhs_contracting_axes,
             axis_plan.rhs_contracting_axes,
             axis_plan.output_axes,
@@ -431,7 +429,7 @@ where
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
-        axes: TensorContractAxisSpec<'_>,
+        axes: TensorContractSpec<'_>,
         full_key: Option<FullKey<RuleKey>>,
         resolution: &Resolution,
     ) {
@@ -457,7 +455,7 @@ fn resolve<R>(
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     compile_structure: impl FnOnce()
         -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
     compile_dynamic: impl FnOnce() -> Result<Arc<TensorContractFusionExplicitPlan>, OperationError>,
@@ -493,7 +491,7 @@ where
 pub(crate) fn rhs_contract_requires_twist<R>(
     rule: &R,
     rhs: &DynamicFusionMapSpace,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
 ) -> Result<bool, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

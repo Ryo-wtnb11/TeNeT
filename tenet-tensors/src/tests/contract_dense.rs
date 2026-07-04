@@ -33,7 +33,7 @@ fn tensorcontract_structure_replays_custom_host_storage_without_vec_fixing() {
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
@@ -195,7 +195,7 @@ fn tensorcontract_storage_workspace_allocates_output_scratch_from_destination_st
             &mut dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
             2.0,
             3.0,
         )
@@ -225,7 +225,7 @@ fn tensorcontract_default_host_api_accepts_custom_host_storage() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
     )
@@ -247,7 +247,7 @@ fn tensorcontract_structure_precomputes_canonical_dense_descriptor() {
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
 
@@ -279,7 +279,7 @@ fn tensorcontract_into_uses_dense_backend_for_matmul_and_alpha_beta() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
     )
@@ -303,7 +303,7 @@ fn tensorcontract_dense_route_uses_tensorkit_forward_tie_order() {
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[2, 0], &[1, 3]),
+        TensorContractSpec::with_default_output_order(&[2, 0], &[1, 3]),
     )
     .unwrap();
 
@@ -352,8 +352,7 @@ fn tensorcontract_dense_route_sorted_by_rhs_matches_independent_oracle() {
         dst_structure,
     )
     .unwrap();
-    let axes =
-        TensorContractAxisSpec::new(&[2, 0], &[1, 3], AxisPermutation::from_axes(&[2, 0, 3, 1]));
+    let axes = TensorContractSpec::new(&[2, 0], &[1, 3], OutputAxisOrder::from_axes(&[2, 0, 3, 1]));
     let alpha = -1.25;
     let beta = 0.5;
 
@@ -423,8 +422,7 @@ fn tensorcontract_dense_route_reverse_ba_matches_independent_oracle() {
         dst_structure,
     )
     .unwrap();
-    let axes =
-        TensorContractAxisSpec::new(&[1, 2], &[0, 2], AxisPermutation::from_axes(&[0, 1, 2]));
+    let axes = TensorContractSpec::new(&[1, 2], &[0, 2], OutputAxisOrder::from_axes(&[0, 1, 2]));
     let alpha = 0.75;
     let beta = -0.25;
 
@@ -671,7 +669,7 @@ fn tensorcontract_execution_context_replays_without_recompiling() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
     )
@@ -688,7 +686,7 @@ fn tensorcontract_execution_context_replays_without_recompiling() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
     )
@@ -721,7 +719,7 @@ fn tensorcontract_execution_context_no_cache_recompiles_without_retaining_struct
             &mut dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
             1.0,
             0.0,
         )
@@ -752,7 +750,7 @@ fn tensorcontract_execution_context_task_local_lru_evicts_old_structure() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         1.0,
         0.0,
     )
@@ -765,7 +763,7 @@ fn tensorcontract_execution_context_task_local_lru_evicts_old_structure() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::new(&[1], &[0], AxisPermutation::from_axes(&[1, 0])),
+        TensorContractSpec::new(&[1], &[0], OutputAxisOrder::from_axes(&[1, 0])),
         1.0,
         0.0,
     )
@@ -778,7 +776,7 @@ fn tensorcontract_execution_context_task_local_lru_evicts_old_structure() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         1.0,
         0.0,
     )
@@ -806,7 +804,7 @@ fn tensorcontract_execution_context_keys_conjugation_flags() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
     )
@@ -818,7 +816,7 @@ fn tensorcontract_execution_context_keys_conjugation_flags() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[0], true, false),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[0], true, false),
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
     )
@@ -845,7 +843,7 @@ fn tensorcontract_structure_honors_output_permutation_with_workspace_scatter() {
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::new(&[1], &[1], AxisPermutation::from_axes(&[1, 0])),
+        TensorContractSpec::new(&[1], &[1], OutputAxisOrder::from_axes(&[1, 0])),
     )
     .unwrap();
     let mut backend =
@@ -904,10 +902,10 @@ fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutati
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::new_with_conjugation(
+        TensorContractSpec::new_with_conjugation(
             &[1],
             &[0],
-            AxisPermutation::from_axes(&[1, 0]),
+            OutputAxisOrder::from_axes(&[1, 0]),
             true,
             false,
         ),
@@ -930,10 +928,10 @@ fn tensorcontract_with_conjugation_matches_dense_reference_with_output_permutati
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::new_with_conjugation(
+        TensorContractSpec::new_with_conjugation(
             &[1],
             &[0],
-            AxisPermutation::from_axes(&[1, 0]),
+            OutputAxisOrder::from_axes(&[1, 0]),
             false,
             true,
         ),
@@ -969,7 +967,7 @@ fn tensorcontract_workspace_reuse_overwrites_dense_route_output() {
         &dst,
         &lhs_a,
         &rhs_a,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
@@ -1018,7 +1016,7 @@ fn tensorcontract_workspace_reuse_clears_conjugating_route_output() {
         &dst,
         &lhs_a,
         &rhs_a,
-        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[0], true, false),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[0], true, false),
     )
     .unwrap();
     let mut backend = DenseTreeTransformOperations::default();
@@ -1078,7 +1076,7 @@ fn tensorproduct_into_is_checked_no_contraction_wrapper() {
     let rhs = TensorMap::<f64, 1, 0>::from_vec(vec![5.0, 7.0, 11.0], rhs_space).unwrap();
     let mut dst = TensorMap::<f64, 2, 0>::filled(1.0, dst_space).unwrap();
 
-    tensorproduct_into(&mut dst, &lhs, &rhs, AxisPermutation::identity(), 2.0, 3.0).unwrap();
+    tensorproduct_into(&mut dst, &lhs, &rhs, OutputAxisOrder::identity(), 2.0, 3.0).unwrap();
 
     assert_eq!(dst.data(), &[23.0, 33.0, 31.0, 45.0, 47.0, 69.0]);
 }
@@ -1105,7 +1103,7 @@ fn tensorproduct_with_conjugation_is_empty_contract_wrapper() {
         &mut dst,
         &lhs,
         &rhs,
-        AxisPermutation::identity(),
+        OutputAxisOrder::identity(),
         true,
         false,
         Complex64::new(1.0, 0.0),
@@ -1155,7 +1153,7 @@ fn tensorcontract_structure_rejects_invalid_axes_at_compile_time() {
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1, 1], &[0, 1]),
+        TensorContractSpec::with_default_output_order(&[1, 1], &[0, 1]),
     )
     .unwrap_err();
     assert_eq!(
@@ -1171,7 +1169,7 @@ fn tensorcontract_structure_rejects_invalid_axes_at_compile_time() {
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0, 1]),
+        TensorContractSpec::with_default_output_order(&[1], &[0, 1]),
     )
     .unwrap_err();
     assert_eq!(
@@ -1193,7 +1191,7 @@ fn tensorcontract_structure_rejects_dimension_and_output_mismatch_at_compile_tim
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[1]),
+        TensorContractSpec::with_default_output_order(&[1], &[1]),
     )
     .unwrap_err();
     assert_eq!(
@@ -1212,7 +1210,7 @@ fn tensorcontract_structure_rejects_dimension_and_output_mismatch_at_compile_tim
         &wrong_dst,
         &lhs,
         &valid_rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap_err();
     assert_eq!(
@@ -1236,7 +1234,7 @@ fn tensorcontract_structure_rejects_incompatible_replay_structure_before_dense_e
         &compile_dst,
         &compile_lhs,
         &compile_rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
 
@@ -1273,7 +1271,7 @@ fn tensorcontract_structure_rejects_multiblock_until_block_sparse_enumeration_ex
         &dense,
         &multiblock,
         &dense,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap_err();
 
@@ -1315,7 +1313,7 @@ fn plain_tensorcontract_rejects_one_block_fusion_tensor_instead_of_dense_contrac
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         1.0,
         0.0,
     )
@@ -1373,7 +1371,7 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
         &dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         &[
             TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5),
             TensorContractBlockSpec::with_coefficient(0, 1, 1, 2.0),
@@ -1405,7 +1403,7 @@ fn tensorcontract_structure_rejects_invalid_explicit_block_term_at_compile_time(
         &dense,
         &dense,
         &dense,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         &[TensorContractBlockSpec::new(0, 1, 0)],
     )
     .unwrap_err();

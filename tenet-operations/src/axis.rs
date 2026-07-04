@@ -1,12 +1,12 @@
 use crate::OperationError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AxisPermutation<'a> {
+pub enum OutputAxisOrder<'a> {
     Identity,
     Axes(&'a [usize]),
 }
 
-impl<'a> AxisPermutation<'a> {
+impl<'a> OutputAxisOrder<'a> {
     #[inline]
     pub fn identity() -> Self {
         Self::Identity
@@ -18,20 +18,27 @@ impl<'a> AxisPermutation<'a> {
     }
 }
 
+/// Full index lowering for a pairwise tensor contraction.
+///
+/// TensorKit / TensorOperations.jl correspondence:
+/// `pA = (open axes of lhs, contracted axes of lhs)`,
+/// `pB = (contracted axes of rhs, open axes of rhs)`,
+/// `pAB = output axis order` (here [`OutputAxisOrder`]), plus the
+/// `conjA` / `conjB` conjugation flags (`lhs_conjugate` / `rhs_conjugate`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TensorContractAxisSpec<'a> {
+pub struct TensorContractSpec<'a> {
     lhs_contracting_axes: &'a [usize],
     rhs_contracting_axes: &'a [usize],
-    output_permutation: AxisPermutation<'a>,
+    output_permutation: OutputAxisOrder<'a>,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
 }
 
-impl<'a> TensorContractAxisSpec<'a> {
+impl<'a> TensorContractSpec<'a> {
     pub fn new(
         lhs_contracting_axes: &'a [usize],
         rhs_contracting_axes: &'a [usize],
-        output_permutation: AxisPermutation<'a>,
+        output_permutation: OutputAxisOrder<'a>,
     ) -> Self {
         Self::new_with_conjugation(
             lhs_contracting_axes,
@@ -45,7 +52,7 @@ impl<'a> TensorContractAxisSpec<'a> {
     pub fn new_with_conjugation(
         lhs_contracting_axes: &'a [usize],
         rhs_contracting_axes: &'a [usize],
-        output_permutation: AxisPermutation<'a>,
+        output_permutation: OutputAxisOrder<'a>,
         lhs_conjugate: bool,
         rhs_conjugate: bool,
     ) -> Self {
@@ -58,15 +65,20 @@ impl<'a> TensorContractAxisSpec<'a> {
         }
     }
 
-    pub fn canonical(lhs_contracting_axes: &'a [usize], rhs_contracting_axes: &'a [usize]) -> Self {
+    /// Contract the given axes with the default output order (`pAB` omitted):
+    /// lhs open axes in original order, then rhs open axes in original order.
+    pub fn with_default_output_order(
+        lhs_contracting_axes: &'a [usize],
+        rhs_contracting_axes: &'a [usize],
+    ) -> Self {
         Self::new(
             lhs_contracting_axes,
             rhs_contracting_axes,
-            AxisPermutation::identity(),
+            OutputAxisOrder::identity(),
         )
     }
 
-    pub fn canonical_with_conjugation(
+    pub fn with_default_output_order_and_conjugation(
         lhs_contracting_axes: &'a [usize],
         rhs_contracting_axes: &'a [usize],
         lhs_conjugate: bool,
@@ -75,7 +87,7 @@ impl<'a> TensorContractAxisSpec<'a> {
         Self::new_with_conjugation(
             lhs_contracting_axes,
             rhs_contracting_axes,
-            AxisPermutation::identity(),
+            OutputAxisOrder::identity(),
             lhs_conjugate,
             rhs_conjugate,
         )
@@ -92,7 +104,7 @@ impl<'a> TensorContractAxisSpec<'a> {
     }
 
     #[inline]
-    pub fn output_permutation(&self) -> AxisPermutation<'a> {
+    pub fn output_permutation(&self) -> OutputAxisOrder<'a> {
         self.output_permutation
     }
 
@@ -108,7 +120,7 @@ impl<'a> TensorContractAxisSpec<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct OwnedTensorContractAxisSpec {
+pub struct TensorContractSpecOwned {
     lhs_contracting_axes: Vec<usize>,
     rhs_contracting_axes: Vec<usize>,
     output_axes: Vec<usize>,
@@ -116,7 +128,7 @@ pub struct OwnedTensorContractAxisSpec {
     rhs_conjugate: bool,
 }
 
-impl OwnedTensorContractAxisSpec {
+impl TensorContractSpecOwned {
     pub fn new(
         lhs_contracting_axes: Vec<usize>,
         rhs_contracting_axes: Vec<usize>,
@@ -148,11 +160,11 @@ impl OwnedTensorContractAxisSpec {
     }
 
     #[inline]
-    pub fn as_spec(&self) -> TensorContractAxisSpec<'_> {
-        TensorContractAxisSpec::new_with_conjugation(
+    pub fn as_spec(&self) -> TensorContractSpec<'_> {
+        TensorContractSpec::new_with_conjugation(
             self.lhs_contracting_axes.as_slice(),
             self.rhs_contracting_axes.as_slice(),
-            AxisPermutation::from_axes(self.output_axes.as_slice()),
+            OutputAxisOrder::from_axes(self.output_axes.as_slice()),
             self.lhs_conjugate,
             self.rhs_conjugate,
         )
@@ -185,12 +197,12 @@ impl OwnedTensorContractAxisSpec {
 }
 
 pub fn permutation_axes(
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
     rank: usize,
 ) -> Result<Vec<usize>, OperationError> {
     match permutation {
-        AxisPermutation::Identity => Ok((0..rank).collect()),
-        AxisPermutation::Axes(axes) => {
+        OutputAxisOrder::Identity => Ok((0..rank).collect()),
+        OutputAxisOrder::Axes(axes) => {
             if axes.len() != rank {
                 return Err(OperationError::InvalidPermutation {
                     axes: axes.to_vec(),

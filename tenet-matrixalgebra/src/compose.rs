@@ -7,7 +7,7 @@ use tenet_core::{
     TensorMap, TensorMapSpace,
 };
 use tenet_tensors::{
-    AxisPermutation, OperationError, TensorContractAxisSpec, TensorContractFusionExecutionContext,
+    OperationError, OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
     TreeTransformRuleCacheKey,
 };
 
@@ -124,7 +124,7 @@ where
         &mut dst,
         lhs,
         rhs,
-        TensorContractAxisSpec::new(&lhs_axes, &rhs_axes, AxisPermutation::from_axes(&perm)),
+        TensorContractSpec::new(&lhs_axes, &rhs_axes, OutputAxisOrder::from_axes(&perm)),
         D::one(),
         D::zero(),
     )?;

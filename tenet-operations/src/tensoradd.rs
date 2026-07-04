@@ -6,7 +6,7 @@ use tenet_core::{
     BlockKey, BlockStructure, HostReadableStorage, HostWritableStorage, TensorMap, TensorStorage,
 };
 
-use crate::axis::{permutation_axes, AxisPermutation};
+use crate::axis::{permutation_axes, OutputAxisOrder};
 use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
 use crate::OperationError;
@@ -34,7 +34,7 @@ pub fn tensoradd_structure<
 >(
     dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
     src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
 ) -> Result<TensorAddStructure, OperationError>
 where
     DDst: TensorStorage<TDst>,
@@ -55,7 +55,7 @@ pub fn tensoradd_structure_with_conjugation<
 >(
     dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
     src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
-    permutation: AxisPermutation<'_>,
+    permutation: OutputAxisOrder<'_>,
     source_conjugate: bool,
 ) -> Result<TensorAddStructure, OperationError>
 where
@@ -74,7 +74,7 @@ impl TensorAddStructure {
     pub fn compile<TDst, TSrc, const NOUT: usize, const NIN: usize, SDst, SSrc, DDst, DSrc>(
         dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
         src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
-        permutation: AxisPermutation<'_>,
+        permutation: OutputAxisOrder<'_>,
     ) -> Result<Self, OperationError>
     where
         DDst: TensorStorage<TDst>,
@@ -95,7 +95,7 @@ impl TensorAddStructure {
     >(
         dst: &TensorMap<TDst, NOUT, NIN, SDst, DDst>,
         src: &TensorMap<TSrc, NOUT, NIN, SSrc, DSrc>,
-        permutation: AxisPermutation<'_>,
+        permutation: OutputAxisOrder<'_>,
         source_conjugate: bool,
     ) -> Result<Self, OperationError>
     where
@@ -125,7 +125,7 @@ impl TensorAddStructure {
     pub fn compile_structures(
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
-        permutation: AxisPermutation<'_>,
+        permutation: OutputAxisOrder<'_>,
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures(
             Arc::new(dst_structure.clone()),
@@ -138,7 +138,7 @@ impl TensorAddStructure {
     fn compile_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
-        permutation: AxisPermutation<'_>,
+        permutation: OutputAxisOrder<'_>,
         source_conjugate: bool,
     ) -> Result<Self, OperationError> {
         if dst_structure.block_count() != src_structure.block_count() {

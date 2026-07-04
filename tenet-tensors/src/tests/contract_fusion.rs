@@ -63,7 +63,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
         rhs.fusion_space().unwrap(),
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
     assert_eq!(
@@ -79,7 +79,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
     )
@@ -100,7 +100,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
             &mut context_dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
             2.0,
             3.0,
         )
@@ -117,7 +117,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
             &mut context_dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
             2.0,
             3.0,
         )
@@ -135,7 +135,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
             &mut context_dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
             2.0,
             3.0,
             &mut profile,
@@ -187,7 +187,7 @@ fn tensorcontract_fusion_default_host_api_accepts_custom_host_storage() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         2.0,
         3.0,
     )
@@ -224,7 +224,7 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
             &mut dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::canonical(&[1], &[0]),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
             2.0,
             3.0,
         )
@@ -285,7 +285,7 @@ fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
         &mut dst_swap,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::new(&[3, 2], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2, 3])),
+        TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
         1.0,
         0.0,
     )
@@ -312,7 +312,7 @@ fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
         &mut dst_compose,
         &lhs,
         &rhs_permuted,
-        TensorContractAxisSpec::canonical(&[2, 3], &[0, 1]),
+        TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]),
         1.0,
         0.0,
     )
@@ -350,7 +350,7 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
     let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], space.clone());
     let mut dst_facade = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], space.clone());
     let mut dst_prepared = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], space.clone());
-    let axes = TensorContractAxisSpec::canonical(&[1], &[0]);
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
     let mut context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
 
@@ -438,7 +438,7 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
     let mut dst =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], dst_space).unwrap();
-    let axes = TensorContractAxisSpec::canonical(&[1], &[0]);
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
     let alpha = 2.0;
     let beta = 3.0;
 
@@ -539,7 +539,7 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         alpha,
         beta,
     )
@@ -585,7 +585,8 @@ fn tensorcontract_fusion_lowers_lhs_categorical_adjoint_lazily() {
         space(),
     )
     .unwrap();
-    let axes = TensorContractAxisSpec::canonical_with_conjugation(&[0], &[0], true, false);
+    let axes =
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false);
 
     tensorcontract_fusion_into(
         &rule,
@@ -660,7 +661,7 @@ fn tensorcontract_fusion_lowers_rhs_categorical_adjoint_lazily() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[1], false, true),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[1], false, true),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -724,7 +725,8 @@ fn tensorcontract_fusion_lowers_both_categorical_adjoint_inputs_lazily() {
         dst_space,
     )
     .unwrap();
-    let axes = TensorContractAxisSpec::canonical_with_conjugation(&[0], &[1], true, true);
+    let axes =
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[1], true, true);
 
     tensorcontract_fusion_into(
         &rule,
@@ -842,7 +844,7 @@ fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         &lhs,
         &rhs,
         // TensorKit 1-based pA=((2,), (1,)), pB=((1,), (2,)).
-        TensorContractAxisSpec::canonical_with_conjugation(&[0], &[0], true, false),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -922,7 +924,7 @@ fn tensorcontract_fusion_fermion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         &lhs,
         &rhs,
         // TensorKit 1-based pA=((2,), (1,)), pB=((1,), (2,)).
-        TensorContractAxisSpec::canonical_with_conjugation(&[0], &[0], true, false),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -999,7 +1001,7 @@ fn tensorcontract_fusion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[1], false, true),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[1], false, true),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -1079,7 +1081,7 @@ fn tensorcontract_fusion_fermion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         &lhs,
         &rhs,
         // TensorKit 1-based pA=((1,), (2,)), pB=((2,), (1,)).
-        TensorContractAxisSpec::canonical_with_conjugation(&[1], &[1], false, true),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[1], false, true),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -1157,7 +1159,7 @@ fn tensorcontract_fusion_both_adjoint_uses_degeneracy_matrix_contract() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical_with_conjugation(&[0], &[1], true, true),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[1], true, true),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -1238,7 +1240,7 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
         &lhs,
         &rhs,
         // TensorKit 1-based pA=((2,), (1,)), pB=((2,), (1,)).
-        TensorContractAxisSpec::canonical_with_conjugation(&[0], &[1], true, true),
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[1], true, true),
         Complex64::one(),
         Complex64::zero(),
     )
@@ -1305,7 +1307,7 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
         &mut dst,
         &lhs,
         &rhs,
-        AxisPermutation::identity(),
+        OutputAxisOrder::identity(),
         true,
         false,
         Complex64::one(),
@@ -1323,10 +1325,10 @@ fn tensorproduct_fusion_lowers_lhs_adjoint_through_source_transform() {
             &mut dst,
             &lhs,
             &rhs,
-            TensorContractAxisSpec::new_with_conjugation(
+            TensorContractSpec::new_with_conjugation(
                 &[],
                 &[],
-                AxisPermutation::identity(),
+                OutputAxisOrder::identity(),
                 true,
                 false,
             ),
@@ -1381,7 +1383,7 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
         rhs.fusion_space().unwrap(),
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap();
     assert_eq!(
@@ -1394,7 +1396,7 @@ fn tensorcontract_fusion_fermion_rhs_dual_codomain_twists_like_tensorkit() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         1.0,
         0.0,
     )
@@ -1445,7 +1447,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
         1.0,
         0.0,
     )
@@ -1491,7 +1493,7 @@ fn tensorcontract_fusion_block_specs_enumerates_su2_innerline_blocks_from_homspa
         &dst_space,
         &lhs_space,
         &rhs_space,
-        TensorContractAxisSpec::canonical(&[3], &[0]),
+        TensorContractSpec::with_default_output_order(&[3], &[0]),
     )
     .unwrap();
 
@@ -1554,7 +1556,7 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
         &dst_space,
         &lhs_space,
         &rhs_space,
-        TensorContractAxisSpec::canonical(&[1], &[0]),
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
     )
     .unwrap_err();
 
@@ -1596,7 +1598,7 @@ fn tensorcontract_fusion_block_specs_rejects_source_tree_transform_terms() {
         &transformed_dst_space,
         &fusion_space,
         &fusion_space,
-        TensorContractAxisSpec::canonical(&[0], &[1]),
+        TensorContractSpec::with_default_output_order(&[0], &[1]),
     )
     .unwrap_err();
 
@@ -1612,7 +1614,7 @@ fn tensorcontract_fusion_block_specs_rejects_source_tree_transform_terms() {
         &transformed_dst_space,
         &fusion_space,
         &fusion_space,
-        TensorContractAxisSpec::new(&[1], &[0], AxisPermutation::from_axes(&[1, 0])),
+        TensorContractSpec::new(&[1], &[0], OutputAxisOrder::from_axes(&[1, 0])),
     )
     .unwrap();
 
@@ -1656,7 +1658,7 @@ fn tensorcontract_fusion_into_absorbs_source_tree_transform_terms() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::canonical(&[0], &[1]),
+        TensorContractSpec::with_default_output_order(&[0], &[1]),
         3.0,
         11.0,
     )
@@ -1719,7 +1721,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
         rhs.fusion_space().unwrap(),
-        TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3])),
+        TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 2, 1, 3])),
     )
     .unwrap();
     assert_eq!(specs.len(), 2);
@@ -1733,7 +1735,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
         &mut dst,
         &lhs,
         &rhs,
-        TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3])),
+        TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 2, 1, 3])),
         2.0,
         3.0,
     )
@@ -1822,7 +1824,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![0.0], lhs_canonical_space).unwrap();
     let mut expected_rhs_canonical =
         TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], rhs_canonical_space).unwrap();
-    let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[0, 2, 1, 3]));
+    let axes = TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 2, 1, 3]));
     let plan = tensorcontract_fusion_explicit_plan(
         &rule,
         explicit_dst.fusion_space().unwrap(),
@@ -1833,8 +1835,14 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     .unwrap();
     assert_eq!(plan.canonical_dst_nout(), 4);
     assert_eq!(plan.canonical_dst_nin(), 0);
-    assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[] as &[usize]);
-    assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[] as &[usize]);
+    assert_eq!(
+        plan.canonical_axes().lhs_contracting_axes(),
+        &[] as &[usize]
+    );
+    assert_eq!(
+        plan.canonical_axes().rhs_contracting_axes(),
+        &[] as &[usize]
+    );
     assert_eq!(plan.canonical_axes().output_axes(), &[0, 1, 2, 3]);
     assert_eq!(
         plan.output_transform(),
@@ -2107,7 +2115,7 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
     let rhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
     let mut dst =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space).unwrap();
-    let axes = TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]);
+    let axes = TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]);
     let specs = tensorcontract_fusion_block_specs(
         &rule,
         dst.fusion_space().unwrap(),
@@ -2227,7 +2235,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
-    let axes = TensorContractAxisSpec::canonical(&[0, 1, 2], &[1, 2, 3]);
+    let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
     let output_axes = [0, 1];
     let lhs_canonical_hom = lhs_hom
         .permute(&rule, &[3], &[0, 1, 2])
@@ -2372,7 +2380,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         expected_dst.fusion_space().unwrap(),
         lhs_canonical.fusion_space().unwrap(),
         rhs_canonical.fusion_space().unwrap(),
-        TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]),
+        TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]),
     )
     .unwrap();
     assert_eq!(canonical_specs.len(), 2);
@@ -2385,7 +2393,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         &mut expected_dst,
         &lhs_canonical,
         &rhs_canonical,
-        TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]),
+        TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]),
         alpha,
         beta,
     )
@@ -2770,7 +2778,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
-    let axes = TensorContractAxisSpec::canonical(&[0, 1, 2], &[1, 2, 3]);
+    let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         &lhs_hom,
@@ -2920,10 +2928,10 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
 
     for output_axes in [[0usize, 1usize], [1usize, 0usize]] {
-        let axes = TensorContractAxisSpec::new(
+        let axes = TensorContractSpec::new(
             &[0, 1, 2],
             &[1, 2, 3],
-            AxisPermutation::from_axes(&output_axes),
+            OutputAxisOrder::from_axes(&output_axes),
         );
         let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
             &rule,
@@ -3002,7 +3010,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
     .into_iter()
     .enumerate()
     {
-        let axes = TensorContractAxisSpec::canonical_with_conjugation(
+        let axes = TensorContractSpec::with_default_output_order_and_conjugation(
             &[0, 1, 2],
             &[1, 2, 3],
             lhs_conjugate,
@@ -3130,7 +3138,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
     let rule = SU2FusionRule;
     let source_lhs_contracting_axes = [0, 1, 2];
     let source_rhs_contracting_axes = [1, 2, 3];
-    let axes = TensorContractAxisSpec::canonical_with_conjugation(
+    let axes = TensorContractSpec::with_default_output_order_and_conjugation(
         &source_lhs_contracting_axes,
         &source_rhs_contracting_axes,
         lhs_conjugate,
@@ -3272,7 +3280,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         &mut expected_dst,
         &lhs_canonical,
         &rhs_canonical,
-        TensorContractAxisSpec::canonical(&[1, 2, 3], &[0, 1, 2]),
+        TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]),
         alpha,
         beta,
     )
@@ -3461,7 +3469,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     .unwrap();
     let mut expected_dst =
         TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
-    let axes = TensorContractAxisSpec::new(&[], &[], AxisPermutation::from_axes(&[1, 0, 2]));
+    let axes = TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[1, 0, 2]));
     let err = tensorcontract_fusion_block_specs(
         &rule,
         dst.fusion_space().unwrap(),
@@ -3662,7 +3670,7 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     .unwrap();
     let alpha = Complex64::new(2.0, -0.25);
     let beta = Complex64::new(-1.0, 0.5);
-    let axes = TensorContractAxisSpec::new(&[2], &[0], AxisPermutation::from_axes(&[0, 2, 1, 3]));
+    let axes = TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 2, 1, 3]));
 
     tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
 
@@ -3858,9 +3866,8 @@ where
         )
         .unwrap();
 
-        let axes = || {
-            TensorContractAxisSpec::new(lhs_axes, rhs_axes, AxisPermutation::from_axes(output_axes))
-        };
+        let axes =
+            || TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes));
         let mut packed_context =
             TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
             );
@@ -3947,7 +3954,7 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
     let mut context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     let axes =
-        || TensorContractAxisSpec::new(&[2, 3], &[0, 1], AxisPermutation::from_axes(&[0, 1, 2, 3]));
+        || TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
     let mut profile = TensorContractFusionProfile::default();
     context
         .tensorcontract_fusion_into_profiled(

@@ -9,7 +9,7 @@ use crate::{
     DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformWorkspace,
 };
-use tenet_operations::{AxisPermutation, TensorContractAxisSpec};
+use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 use super::backend::{TensorContractBackend, TensorContractWorkspace};
 use super::dynamic::{
@@ -46,7 +46,7 @@ pub fn tensorcontract_into<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -88,7 +88,7 @@ pub fn tensorproduct_into<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    output_permutation: AxisPermutation<'_>,
+    output_permutation: OutputAxisOrder<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -102,7 +102,7 @@ where
         dst,
         lhs,
         rhs,
-        TensorContractAxisSpec::new(&[], &[], output_permutation),
+        TensorContractSpec::new(&[], &[], output_permutation),
         alpha,
         beta,
     )
@@ -126,7 +126,7 @@ pub fn tensorproduct_into_with_conjugation<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    output_permutation: AxisPermutation<'_>,
+    output_permutation: OutputAxisOrder<'_>,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
     alpha: D,
@@ -142,7 +142,7 @@ where
         dst,
         lhs,
         rhs,
-        TensorContractAxisSpec::new_with_conjugation(
+        TensorContractSpec::new_with_conjugation(
             &[],
             &[],
             output_permutation,
@@ -175,7 +175,7 @@ pub fn tensorcontract_into_with<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -210,7 +210,7 @@ pub fn tensorcontract_fusion_into<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -256,7 +256,7 @@ pub fn tensorproduct_fusion_into<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    output_permutation: AxisPermutation<'_>,
+    output_permutation: OutputAxisOrder<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -272,7 +272,7 @@ where
         dst,
         lhs,
         rhs,
-        TensorContractAxisSpec::new(&[], &[], output_permutation),
+        TensorContractSpec::new(&[], &[], output_permutation),
         alpha,
         beta,
     )
@@ -298,7 +298,7 @@ pub fn tensorproduct_fusion_into_with_conjugation<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    output_permutation: AxisPermutation<'_>,
+    output_permutation: OutputAxisOrder<'_>,
     lhs_conjugate: bool,
     rhs_conjugate: bool,
     alpha: D,
@@ -316,7 +316,7 @@ where
         dst,
         lhs,
         rhs,
-        TensorContractAxisSpec::new_with_conjugation(
+        TensorContractSpec::new_with_conjugation(
             &[],
             &[],
             output_permutation,
@@ -376,7 +376,7 @@ pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
     rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -867,7 +867,7 @@ pub fn tensorcontract_fusion_into_with<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
@@ -961,7 +961,7 @@ pub fn tensorcontract_fusion_into_with_backends<
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractAxisSpec<'_>,
+    axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), OperationError>
