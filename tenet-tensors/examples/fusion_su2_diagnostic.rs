@@ -2,8 +2,8 @@ use tenet_core::{
     BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMap, TensorMapSpace,
 };
 use tenet_tensors::{
-    tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
-    tensorcontract_fusion_explicit_plan_into_canonical_dst, tree_transform_into_with_context,
+    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_prepared_into,
+    tensorcontract_fusion_prepared_into_core_dst, tree_transform_into_with_context,
     OutputAxisOrder, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
     TreeTransformExecutionContext,
 };
@@ -15,12 +15,12 @@ fn main() {
     let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
     let tensorkit_axes =
         TensorContractSpec::new(&[0, 1, 2], &[1, 2, 3], OutputAxisOrder::from_axes(&[1, 0]));
-    let lhs_canonical_hom = lhs_hom
+    let lhs_core_hom = lhs_hom
         .permute(&rule, &[3], &[0, 1, 2])
-        .expect("valid lhs canonical tree-pair transform");
-    let rhs_canonical_hom = rhs_hom
+        .expect("valid lhs core tree-pair transform");
+    let rhs_core_hom = rhs_hom
         .permute(&rule, &[1, 2, 3], &[0])
-        .expect("valid rhs canonical tree-pair transform");
+        .expect("valid rhs core tree-pair transform");
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         &lhs_hom,
@@ -40,12 +40,12 @@ fn main() {
     for (i, key) in rhs_hom.fusion_tree_keys(&rule).iter().enumerate() {
         println!("{i}: {key:?}");
     }
-    println!("lhs_canonical_keys");
-    for (i, key) in lhs_canonical_hom.fusion_tree_keys(&rule).iter().enumerate() {
+    println!("lhs_core_keys");
+    for (i, key) in lhs_core_hom.fusion_tree_keys(&rule).iter().enumerate() {
         println!("{i}: {key:?}");
     }
-    println!("rhs_canonical_keys");
-    for (i, key) in rhs_canonical_hom.fusion_tree_keys(&rule).iter().enumerate() {
+    println!("rhs_core_keys");
+    for (i, key) in rhs_core_hom.fusion_tree_keys(&rule).iter().enumerate() {
         println!("{i}: {key:?}");
     }
 
@@ -63,16 +63,16 @@ fn main() {
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
-        lhs_canonical_hom,
+        lhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
-        rhs_canonical_hom,
+        rhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
@@ -86,14 +86,8 @@ fn main() {
     .unwrap();
     print_structure("lhs_structure", lhs_space.subblock_structure());
     print_structure("rhs_structure", rhs_space.subblock_structure());
-    print_structure(
-        "lhs_canonical_structure",
-        lhs_canonical_space.subblock_structure(),
-    );
-    print_structure(
-        "rhs_canonical_structure",
-        rhs_canonical_space.subblock_structure(),
-    );
+    print_structure("lhs_core_structure", lhs_core_space.subblock_structure());
+    print_structure("rhs_core_structure", rhs_core_space.subblock_structure());
     print_structure("dst_structure", dst_space.subblock_structure());
 
     let lhs_data = (0..32)
@@ -104,20 +98,20 @@ fn main() {
         .collect::<Vec<_>>();
     let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
     let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
-    let mut lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-        vec![0.0; lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space.clone(),
+    let mut lhs_core = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        vec![0.0; lhs_core_space.required_len().unwrap()],
+        lhs_core_space.clone(),
     )
     .unwrap();
-    let mut rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-        vec![0.0; rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space.clone(),
+    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_core_space.required_len().unwrap()],
+        rhs_core_space.clone(),
     )
     .unwrap();
     let mut dst =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0, -1.0, 4.0, -3.0], dst_space)
             .unwrap();
-    let plan = tensorcontract_fusion_explicit_plan(
+    let plan = prepare_tensorcontract_fusion_plan(
         &rule,
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -131,7 +125,7 @@ fn main() {
         &mut tree_context,
         &rule,
         plan.lhs_transform().clone(),
-        &mut lhs_canonical,
+        &mut lhs_core,
         &lhs,
         1.0,
         0.0,
@@ -141,20 +135,20 @@ fn main() {
         &mut tree_context,
         &rule,
         plan.rhs_transform().clone(),
-        &mut rhs_canonical,
+        &mut rhs_core,
         &rhs,
         1.0,
         0.0,
     )
     .unwrap();
-    println!("lhs_canonical_data {:?}", lhs_canonical.data());
-    println!("rhs_canonical_data {:?}", rhs_canonical.data());
-    tensorcontract_fusion_explicit_plan_into(
+    println!("lhs_core_data {:?}", lhs_core.data());
+    println!("rhs_core_data {:?}", rhs_core.data());
+    tensorcontract_fusion_prepared_into(
         &rule,
         &plan,
         &mut dst,
-        &mut lhs_canonical,
-        &mut rhs_canonical,
+        &mut lhs_core,
+        &mut rhs_core,
         &lhs,
         &rhs,
         -1.5,
@@ -193,7 +187,7 @@ fn main() {
         tensorkit_dst_space,
     )
     .unwrap();
-    let tensorkit_order_plan = tensorcontract_fusion_explicit_plan(
+    let tensorkit_order_plan = prepare_tensorcontract_fusion_plan(
         &rule,
         tensorkit_order_dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -201,17 +195,17 @@ fn main() {
         tensorkit_axes,
     )
     .unwrap();
-    let mut lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-        vec![0.0; lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space,
+    let mut lhs_core = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        vec![0.0; lhs_core_space.required_len().unwrap()],
+        lhs_core_space,
     )
     .unwrap();
-    let mut rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-        vec![0.0; rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space,
+    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_core_space.required_len().unwrap()],
+        rhs_core_space,
     )
     .unwrap();
-    let canonical_dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+    let core_dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs.fusion_space().unwrap().homspace(),
         rhs.fusion_space().unwrap().homspace(),
@@ -221,25 +215,25 @@ fn main() {
         1,
     )
     .unwrap();
-    let canonical_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let core_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
-        canonical_dst_hom,
+        core_dst_hom,
         &rule,
         [vec![2, 2]],
     )
     .unwrap();
-    let mut canonical_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
-        vec![0.0; canonical_dst_space.required_len().unwrap()],
-        canonical_dst_space,
+    let mut core_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        vec![0.0; core_dst_space.required_len().unwrap()],
+        core_dst_space,
     )
     .unwrap();
-    tensorcontract_fusion_explicit_plan_into_canonical_dst(
+    tensorcontract_fusion_prepared_into_core_dst(
         &rule,
         &tensorkit_order_plan,
         &mut tensorkit_order_dst,
-        &mut canonical_dst,
-        &mut lhs_canonical,
-        &mut rhs_canonical,
+        &mut core_dst,
+        &mut lhs_core,
+        &mut rhs_core,
         &lhs,
         &rhs,
         -1.5,

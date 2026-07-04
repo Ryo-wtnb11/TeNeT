@@ -37,7 +37,7 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
-use super::fusion::{contracted_fusion_tree_basis_matches, TensorContractFusionExplicitPlan};
+use super::fusion::{contracted_fusion_tree_basis_matches, FusionContractPlan};
 use super::structure::TensorContractAxisPlan;
 
 /// Internal dynamic-rank fusion space used for TensorKit-style temporary
@@ -113,19 +113,19 @@ impl DynamicFusionMapSpace {
         })
     }
 
-    pub(crate) fn canonical_dst<R>(
+    pub(crate) fn core_dst<R>(
         rule: &R,
         lhs: &Self,
         rhs: &Self,
-        plan: &TensorContractFusionExplicitPlan,
+        plan: &FusionContractPlan,
         output_dst: Option<&Self>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        let nout = plan.canonical_dst_nout();
-        let nin = plan.canonical_dst_nin();
-        let axes = plan.canonical_axes().as_spec();
+        let nout = plan.core_dst_open_lhs_rank();
+        let nin = plan.core_dst_open_rhs_rank();
+        let axes = plan.core_axes().as_spec();
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
         let output_axes = (0..nout + nin).collect::<Vec<_>>();
         let homspace = FusionTreeHomSpace::tensorcontract_homspace(
@@ -139,9 +139,9 @@ impl DynamicFusionMapSpace {
         )
         .map_err(OperationError::from_core_preserving_context)?;
 
-        let mut inferred_shapes = infer_canonical_dst_shapes(rule, lhs, rhs, &axis_plan)?;
+        let mut inferred_shapes = infer_core_dst_shapes(rule, lhs, rhs, &axis_plan)?;
         if let Some(output_dst) = output_dst {
-            infer_canonical_dst_shapes_from_output(
+            infer_core_dst_shapes_from_output(
                 rule,
                 &homspace,
                 plan,
@@ -172,7 +172,7 @@ impl DynamicFusionMapSpace {
                                 .copied()
                         };
                         shape.push(dim.ok_or(OperationError::StructureMismatch {
-                            tensor: "canonical contraction scratch",
+                            tensor: "core contraction scratch",
                         })?);
                     }
                     shape
@@ -222,7 +222,7 @@ impl DynamicFusionMapSpace {
     }
 }
 
-fn infer_canonical_dst_shapes<R>(
+fn infer_core_dst_shapes<R>(
     rule: &R,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
@@ -289,26 +289,26 @@ where
     Ok(shapes)
 }
 
-fn infer_canonical_dst_shapes_from_output<R>(
+fn infer_core_dst_shapes_from_output<R>(
     rule: &R,
-    canonical_homspace: &FusionTreeHomSpace,
-    plan: &TensorContractFusionExplicitPlan,
+    core_homspace: &FusionTreeHomSpace,
+    plan: &FusionContractPlan,
     output_dst: &DynamicFusionMapSpace,
     shapes: &mut HashMap<FusionTreeBlockKey, Vec<usize>>,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let canonical_rank = plan.canonical_dst_nout() + plan.canonical_dst_nin();
-    let dummy_blocks = canonical_homspace
+    let core_rank = plan.core_dst_open_lhs_rank() + plan.core_dst_open_rhs_rank();
+    let dummy_blocks = core_homspace
         .fusion_tree_keys(rule)
         .into_iter()
-        .map(|key| (key, vec![1; canonical_rank]))
+        .map(|key| (key, vec![1; core_rank]))
         .collect::<Vec<_>>();
     let dummy_structure = BlockStructure::coupled_sector_matrix_with_keys(
         rule,
-        plan.canonical_dst_nout(),
-        canonical_rank,
+        plan.core_dst_open_lhs_rank(),
+        core_rank,
         dummy_blocks,
     )
     .map_err(OperationError::from_core_preserving_context)?;
@@ -337,12 +337,8 @@ where
                 let Ok(dst_block) = output_dst.structure().block_by_key(dst_key) else {
                     continue;
                 };
-                let candidate = invert_selected_shape(
-                    dst_block.shape(),
-                    &output_axes,
-                    canonical_rank,
-                    "output",
-                )?;
+                let candidate =
+                    invert_selected_shape(dst_block.shape(), &output_axes, core_rank, "output")?;
                 if shapes.contains_key(src_tree_key) {
                     merge_inferred_shape(shapes, src_tree_key.clone(), candidate)?;
                 }

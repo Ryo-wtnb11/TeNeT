@@ -286,7 +286,7 @@ pub(crate) fn lower_tensorcontract_adjoint_axes<
         .checked_add(RHS_NIN)
         .ok_or(OperationError::ElementCountOverflow)?;
     let contract_count = axes.lhs_contracting_axes().len();
-    let canonical_output_rank = lhs_rank
+    let core_output_rank = lhs_rank
         .checked_sub(contract_count)
         .and_then(|lhs_open| {
             rhs_rank
@@ -305,7 +305,7 @@ pub(crate) fn lower_tensorcontract_adjoint_axes<
         } else {
             axes.rhs_contracting_axes().to_vec()
         },
-        output_axes: permutation_axes(axes.output_permutation(), canonical_output_rank)?,
+        output_axes: permutation_axes(axes.output_permutation(), core_output_rank)?,
         lhs_storage_conjugate: axes.lhs_conjugate(),
         rhs_storage_conjugate: axes.rhs_conjugate(),
     })

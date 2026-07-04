@@ -193,7 +193,7 @@ where
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
-    if !is_canonical_fusion_source_contract(
+    if !is_core_form_fusion_source_contract(
         lhs.homspace(),
         rhs.homspace(),
         axis_plan.lhs_contracting_axes.as_slice(),
@@ -203,7 +203,7 @@ where
             message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
         });
     }
-    if is_canonical_fusion_compose_contract(
+    if is_core_form_fusion_compose_contract(
         lhs.homspace(),
         rhs.homspace(),
         axis_plan.lhs_contracting_axes.as_slice(),
@@ -211,13 +211,13 @@ where
         axis_plan.output_axes.as_slice(),
         DST_NOUT,
     ) {
-        return tensorcontract_canonical_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan);
+        return tensorcontract_core_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan);
     }
 
     tensorcontract_transformed_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan, DST_NOUT)
 }
 
-fn tensorcontract_canonical_fusion_block_specs<
+fn tensorcontract_core_fusion_block_specs<
     R,
     const DST_NOUT: usize,
     const DST_NIN: usize,
@@ -351,28 +351,28 @@ where
             )
             .map_err(OperationError::from_core_preserving_context)?;
 
-            for (lhs_canonical, lhs_coeff) in &lhs_terms {
-                for (rhs_canonical, rhs_coeff) in &rhs_terms {
+            for (lhs_core, lhs_coeff) in &lhs_terms {
+                for (rhs_core, rhs_coeff) in &rhs_terms {
                     if !contracted_fusion_tree_basis_matches(
                         rule,
-                        lhs_canonical.domain_tree(),
-                        rhs_canonical.codomain_tree(),
+                        lhs_core.domain_tree(),
+                        rhs_core.codomain_tree(),
                     ) {
                         continue;
                     }
-                    let canonical_dst_key = FusionTreeBlockKey::pair(
-                        lhs_canonical.codomain_tree().clone(),
-                        rhs_canonical.domain_tree().clone(),
+                    let core_dst_key = FusionTreeBlockKey::pair(
+                        lhs_core.codomain_tree().clone(),
+                        rhs_core.domain_tree().clone(),
                     );
                     let rhs_twist = rhs_contract_twist_factor(
                         rule,
                         rhs.homspace(),
                         axis_plan.rhs_contracting_axes.as_slice(),
-                        rhs_canonical.codomain_tree(),
+                        rhs_core.codomain_tree(),
                     )?;
                     let dst_terms = multiplicity_free_permute_tree_pair(
                         rule,
-                        &canonical_dst_key,
+                        &core_dst_key,
                         output_codomain_axes,
                         output_domain_axes,
                     )
@@ -397,8 +397,8 @@ where
     Ok(specs)
 }
 
-pub(crate) const EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST: &str =
-    "explicit fusion contraction with output tree-pair transform requires caller-owned canonical_dst";
+pub(crate) const EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST: &str =
+    "explicit fusion contraction with output tree-pair transform requires caller-owned core_dst";
 pub(crate) const FUSION_TENSORCONTRACT_CONJUGATION_REQUIRES_CATEGORICAL_ADJOINT: &str =
     "fusion tensorcontract with conjugation requires categorical adjoint lowering";
 pub(crate) const SOURCE_TRANSFORM_REQUIRES_EXPLICIT: &str =
@@ -419,7 +419,7 @@ pub(crate) fn rhs_contract_twist_factor<R>(
     rule: &R,
     rhs: &FusionTreeHomSpace,
     rhs_contracting_axes: &[usize],
-    rhs_canonical_codomain: &FusionTreeKey,
+    rhs_core_codomain: &FusionTreeKey,
 ) -> Result<f64, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -427,16 +427,16 @@ where
     if rule.braiding_style() != BraidingStyleKind::Fermionic {
         return Ok(rule.scalar_one());
     }
-    if rhs_contracting_axes.len() != rhs_canonical_codomain.uncoupled().len() {
+    if rhs_contracting_axes.len() != rhs_core_codomain.uncoupled().len() {
         return Err(OperationError::StructureRankMismatch {
             expected: rhs_contracting_axes.len(),
-            actual: rhs_canonical_codomain.uncoupled().len(),
+            actual: rhs_core_codomain.uncoupled().len(),
         });
     }
     let mut factor = rule.scalar_one();
     for (position, &axis) in rhs_contracting_axes.iter().enumerate() {
         if external_axis_is_dual(rhs, axis)? {
-            factor *= rule.twist_scalar(rhs_canonical_codomain.uncoupled()[position]);
+            factor *= rule.twist_scalar(rhs_core_codomain.uncoupled()[position]);
         }
     }
     Ok(factor)
@@ -504,12 +504,12 @@ fn contracted_output_external_sectors(
     rhs_external: &[SectorId],
     axis_plan: &TensorContractAxisPlan,
 ) -> Vec<SectorId> {
-    let mut canonical = axis_plan
+    let mut core = axis_plan
         .lhs_open_axes
         .iter()
         .map(|&axis| lhs_external[axis])
         .collect::<Vec<_>>();
-    canonical.extend(
+    core.extend(
         axis_plan
             .rhs_open_axes
             .iter()
@@ -518,11 +518,11 @@ fn contracted_output_external_sectors(
     axis_plan
         .output_axes
         .iter()
-        .map(|&axis| canonical[axis])
+        .map(|&axis| core[axis])
         .collect()
 }
 
-fn is_canonical_fusion_compose_contract(
+fn is_core_form_fusion_compose_contract(
     lhs: &FusionTreeHomSpace,
     rhs: &FusionTreeHomSpace,
     lhs_contracting_axes: &[usize],
@@ -530,14 +530,14 @@ fn is_canonical_fusion_compose_contract(
     output_axes: &[usize],
     dst_codomain_rank: usize,
 ) -> bool {
-    let canonical_output_rank = lhs.codomain().len() + rhs.domain().len();
-    let canonical_output_axes = (0..canonical_output_rank).collect::<Vec<_>>();
-    is_canonical_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
-        && output_axes == canonical_output_axes.as_slice()
+    let core_output_rank = lhs.codomain().len() + rhs.domain().len();
+    let core_output_axes = (0..core_output_rank).collect::<Vec<_>>();
+    is_core_form_fusion_source_contract(lhs, rhs, lhs_contracting_axes, rhs_contracting_axes)
+        && output_axes == core_output_axes.as_slice()
         && dst_codomain_rank == lhs.codomain().len()
 }
 
-fn is_canonical_fusion_source_contract(
+fn is_core_form_fusion_source_contract(
     lhs: &FusionTreeHomSpace,
     rhs: &FusionTreeHomSpace,
     lhs_contracting_axes: &[usize],

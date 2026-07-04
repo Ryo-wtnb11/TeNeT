@@ -235,7 +235,7 @@ fn tensorcontract_default_host_api_accepts_custom_host_storage() {
 }
 
 #[test]
-fn tensorcontract_structure_precomputes_canonical_dense_descriptor() {
+fn tensorcontract_structure_precomputes_core_dense_descriptor() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
@@ -480,15 +480,15 @@ fn rank3_by_rank4_contract_oracle(
         for d1 in 0..dst_shape[1] {
             for d0 in 0..dst_shape[0] {
                 let dst_coords = [d0, d1, d2];
-                let mut canonical = [0usize; 3];
-                for (dst_axis, &canonical_axis) in output_axes.iter().enumerate() {
-                    canonical[canonical_axis] = dst_coords[dst_axis];
+                let mut core = [0usize; 3];
+                for (dst_axis, &core_axis) in output_axes.iter().enumerate() {
+                    core[core_axis] = dst_coords[dst_axis];
                 }
                 let mut sum = 0.0;
                 for k1 in 0..lhs_shape[2] {
                     for k0 in 0..lhs_shape[1] {
-                        let lhs_coords = [canonical[0], k0, k1];
-                        let rhs_coords = [k0, canonical[1], k1, canonical[2]];
+                        let lhs_coords = [core[0], k0, k1];
+                        let rhs_coords = [k0, core[1], k1, core[2]];
                         sum += lhs_data[strided_offset3(&lhs_coords, lhs_strides)]
                             * rhs_data[strided_offset(&rhs_coords, rhs_strides)];
                     }
@@ -541,15 +541,15 @@ fn rank4_contract_oracle(
             for d1 in 0..dst_shape[1] {
                 for d0 in 0..dst_shape[0] {
                     let dst_coords = [d0, d1, d2, d3];
-                    let mut canonical = [0usize; 4];
-                    for (dst_axis, &canonical_axis) in output_axes.iter().enumerate() {
-                        canonical[canonical_axis] = dst_coords[dst_axis];
+                    let mut core = [0usize; 4];
+                    for (dst_axis, &core_axis) in output_axes.iter().enumerate() {
+                        core[core_axis] = dst_coords[dst_axis];
                     }
                     let mut sum = 0.0;
                     for c1 in 0..lhs_shape[0] {
                         for c0 in 0..lhs_shape[2] {
-                            let lhs_coords = [c1, canonical[0], c0, canonical[1]];
-                            let rhs_coords = [canonical[2], c0, canonical[3], c1];
+                            let lhs_coords = [c1, core[0], c0, core[1]];
+                            let rhs_coords = [core[2], c0, core[3], c1];
                             sum += lhs_data[strided_offset(&lhs_coords, lhs_strides)]
                                 * rhs_data[strided_offset(&rhs_coords, rhs_strides)];
                         }
@@ -619,7 +619,7 @@ impl DenseExecutor for MatmulOnlyDenseExecutor {
             (DenseWrite::F64(output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
                 (output, lhs, rhs)
             }
-            _ => panic!("test only covers f64 canonical fusion block matmul"),
+            _ => panic!("test only covers f64 core fusion block matmul"),
         };
         assert_eq!(lhs.shape(), &[2, 3]);
         assert_eq!(lhs.strides(), &[1, 2]);

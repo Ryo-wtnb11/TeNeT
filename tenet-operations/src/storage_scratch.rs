@@ -203,7 +203,7 @@ impl<OutputScratch> StorageTensorContractWorkspace<OutputScratch> {
     }
 }
 
-/// LHS/RHS/destination scratch shape for canonical fusion-block contraction.
+/// LHS/RHS/destination scratch shape for core fusion-block contraction.
 ///
 /// This mirrors the TensorKit pack-GEMM-scatter slots: `lhs` and `rhs` hold
 /// packed source blocks, while `destination` holds the dense matmul result
@@ -276,7 +276,7 @@ impl<Lhs, Rhs, Destination> FusionBlockContractScratchBuffers<Lhs, Rhs, Destinat
     }
 }
 
-/// Storage-aware canonical fusion-block contraction workspace.
+/// Storage-aware core fusion-block contraction workspace.
 ///
 /// Allocation origins are explicit: LHS pack scratch from LHS storage, RHS pack
 /// scratch from RHS storage, and matmul output scratch from destination storage.

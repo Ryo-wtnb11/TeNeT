@@ -9,7 +9,7 @@ implementations is misleading on Apple silicon — Accelerate's AMX GEMM is
 5–15x faster than OpenBLAS at these sizes, which initially masqueraded as a
 TeNeT win at d=16.
 
-- `compose`:  `C[a b; g h] = A[a b; c d] * B[c d; g h]` (canonical route, no tree transforms)
+- `compose`:  `C[a b; g h] = A[a b; c d] * B[c d; g h]` (core-form route, no tree transforms)
 - `swap`:     `C[a b; g h] = A[a b; c d] * B[d c; g h]` (source tree transforms)
 - `swap+out`: `C[b a; g h] = A[a b; c d] * B[d c; g h]` (plus output transform)
 
@@ -80,7 +80,7 @@ overhead worth a look once packing is gone.
 
 ## Coupled-sector layout results (same date, after `from_degeneracy_shapes_coupled` + direct GEMM)
 
-With tensors and dynamic-route canonical scratch in the coupled-sector matrix
+With tensors and dynamic-route core-form scratch in the coupled-sector matrix
 layout (now the default; `MICROBENCH_LAYOUT=packed` opts out), the fusion-block plan detects that each
 group matrix already exists in storage and hands it to GEMM directly — no
 pack, no scatter (locked by `coupled_layout_compose_uses_direct_gemm_groups`).
@@ -185,16 +185,16 @@ validating the fusion-space structure and the blockwise SVD end to end.
   and transforms materialize into temporaries that are again GEMM-ready.
   TeNeT's per-fusion-tree subblock layout re-packs the coupled matrix on
   every contraction.
-- The `swap+out` < `compose` anomaly for U1 is real: the canonical
+- The `swap+out` < `compose` anomaly for U1 is real: the core-form
   destination has 1 matrix group instead of 5, so less pack/scatter.
 - Missing pieces for TensorKit-parity, in dependency order:
   1. Coupled-sector contiguous block layout in `BlockStructure` (subblock
      offsets/strides embedded in the per-sector matrix) plus a `block(c)`
      matrix view accessor.
-  2. Canonical fusion-block plan emitting per-sector GEMM calls on block
+  2. Core-form fusion-block plan emitting per-sector GEMM calls on block
      views (alpha/beta into destination blocks) instead of pack/GEMM/scatter;
      keep packing only as a fallback for non-contiguous cases.
-  3. Dynamic-route canonical scratch tensors laid out in the same
+  3. Dynamic-route core-form scratch tensors laid out in the same
      sector-matrix form so transformed sources feed GEMM directly.
   4. Per-GEMM call overhead audit (TeNeT's matmul leg is ~1.8x TensorKit's
      `mul!` for identical block shapes).
@@ -279,14 +279,14 @@ handle resolving route + plan once (FFTW-style plan-once/execute-many);
 `execute_prepared_tensorcontract_fusion` validates tensors by
 subblock-structure Arc identity and replays with zero cache lookups.
 The facade warm path now probes the fusion-block last entry first — a
-hit implies the canonical route, so the route cache is skipped (one
+hit implies the core-form route, so the route cache is skipped (one
 compare instead of two). d=4 compose: U1 4.3, fZ2 1.7 (TensorKit 4.1 /
 1.9), SU2 7.5 (TK 7.1). The handle is also the execution unit for
 sector-level threading.
 
 ### Scratch tree-set completion (2026-07-03) — correctness fix
 
-Dynamic-route scratch spaces (transformed sources, canonical
+Dynamic-route scratch spaces (transformed sources, core-form
 destination) now enumerate the FULL fusion-tree set of their hom spaces
 with structural zeros, TensorKit-style, instead of only
 coefficient-reachable trees. This fixed a real bug: the swap workload
@@ -301,19 +301,19 @@ U1 swap 2 771/4 033, U1 swap+out 3 526/4 709, SU2 swap+out
 ### alpha/beta absorbed into the GEMM seam (2026-07-04)
 
 `Rank2Gemm` and the dense seam now carry BLAS-native `C = αAB + βC`
-(tenferro#1286: `dot_general_read_into_accum`). The canonical replay
+(tenferro#1286: `dot_general_read_into_accum`). The core-form replay
 writes the destination coupled matrix directly for ANY α/β — the
 trivial-scale restriction on the direct path is gone, and a profiled
-regression test pins `canonical_scatter == 0` with α=2, β=3. The
+regression test pins `core_scatter == 0` with α=2, β=3. The
 overwrite case keeps the kernel fast path (compose d=4 unchanged at
 4.4 µs). The microbench itself runs α=1/β=0, so its numbers are
 unchanged by design; the win applies to accumulate-form workloads
 (energy sums, environment updates).
 
-### Canonical contraction is pure GEMM (2026-07-04) — T16 complete
+### Core-form contraction is pure GEMM (2026-07-04) — T16 complete
 
 pack_group / scatter_group and their workspaces are deleted from the
-canonical replay (tenet-operations/fusion_replay.rs). The canonical
+core-form replay (tenet-operations/fusion_replay.rs). The core-form
 route now matches TensorKit's mul! exactly: per-coupled-sector direct
 GEMM with alpha/beta, plus a beta-scale of untouched sectors. Fermionic
 supertrace twists moved to rhs scratch materialization on the dynamic

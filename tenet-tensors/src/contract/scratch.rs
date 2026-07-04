@@ -200,8 +200,8 @@ impl<Buf> StorageDynamicFusionScratch<Buf> {
 /// Storage-origin scratch workspace for dynamic fusion-space lowering.
 ///
 /// Each slot is allocated from the storage of the operand it lowers: LHS
-/// canonical scratch from LHS storage, RHS canonical scratch from RHS storage,
-/// and canonical destination scratch from destination storage. The dynamic
+/// core scratch from LHS storage, RHS core scratch from RHS storage,
+/// and core destination scratch from destination storage. The dynamic
 /// fusion-space cache stays placement-neutral; these buffers are execution-time
 /// allocations.
 #[derive(Clone, Debug)]

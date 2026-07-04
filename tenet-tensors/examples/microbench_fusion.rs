@@ -3,7 +3,7 @@
 //! Mirrors `benchmarks/tensorkit_microbench.jl`: rank-4 tensors `A, B` in
 //! `V ⊗ V ← V ⊗ V` with a uniform degeneracy per sector, three workloads:
 //!
-//! - `compose`:  C[a b; g h] = A[a b; c d] * B[c d; g h]  (canonical route)
+//! - `compose`:  C[a b; g h] = A[a b; c d] * B[c d; g h]  (core route)
 //! - `swap`:     C[a b; g h] = A[a b; c d] * B[d c; g h]  (source transforms)
 //! - `swap+out`: C[b a; g h] = A[a b; c d] * B[d c; g h]  (plus output transform)
 //!
@@ -249,23 +249,23 @@ where
                  scale+validate={scale:.1} out_transform={out:.1} groups={groups}",
                 route = profile.route,
                 total = us(profile.total),
-                lookups = us(profile.explicit_plan
+                lookups = us(profile.prepared_plan
                     + profile.source_space_lookup
-                    + profile.canonical_dst_space_lookup
+                    + profile.core_dst_space_lookup
                     + profile.fusion_block_plan_lookup
-                    + profile.canonical_route_check
+                    + profile.core_route_check
                     + profile.typed_space_setup),
                 src = us(profile.lhs_transform + profile.rhs_transform),
                 scratch = us(profile.lhs_scratch_prepare
                     + profile.rhs_scratch_prepare
                     + profile.dst_scratch_prepare
-                    + profile.canonical_workspace_prepare),
-                pack = us(profile.canonical_pack_lhs + profile.canonical_pack_rhs),
-                matmul = us(profile.canonical_matmul),
-                scatter = us(profile.canonical_scatter),
-                scale = us(profile.canonical_scale + profile.canonical_validate),
+                    + profile.core_workspace_prepare),
+                pack = us(profile.core_pack_lhs + profile.core_pack_rhs),
+                matmul = us(profile.core_matmul),
+                scatter = us(profile.core_scatter),
+                scale = us(profile.core_scale + profile.core_validate),
                 out = us(profile.output_transform),
-                groups = profile.canonical_contract_groups / profile_iters as usize,
+                groups = profile.core_contract_groups / profile_iters as usize,
             );
             let tree = &profile.tree_replay;
             println!(

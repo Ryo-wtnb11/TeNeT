@@ -8,18 +8,18 @@ use tenet_core::{
     TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
-    tensorcontract_fusion_explicit_plan, tensorcontract_fusion_explicit_plan_into,
-    tensorcontract_fusion_explicit_plan_into_canonical_dst, tensorcontract_fusion_into,
-    tree_transform_into_with_context, HostTensorOperations, HostTreeFusionExecutionContext,
-    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractFusionExplicitPlan,
+    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_into,
+    tensorcontract_fusion_prepared_into, tensorcontract_fusion_prepared_into_core_dst,
+    tree_transform_into_with_context, FusionContractPlan, HostTensorOperations,
+    HostTreeFusionExecutionContext, OutputAxisOrder, TensorContractFusionExecutionContext,
     TensorContractFusionProfile, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
     TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
 
 static LHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
 static RHS_CONTRACTING_AXES: [usize; 3] = [1, 2, 3];
-static CANONICAL_LHS_CONTRACTING_AXES: [usize; 3] = [1, 2, 3];
-static CANONICAL_RHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
+static CORE_LHS_CONTRACTING_AXES: [usize; 3] = [1, 2, 3];
+static CORE_RHS_CONTRACTING_AXES: [usize; 3] = [0, 1, 2];
 
 const MANUAL_ITERS: usize = 20_000;
 const ONESHOT_ITERS: usize = 5_000;
@@ -31,13 +31,13 @@ type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
 type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
 
 fn main() {
-    bench_su2_noncanonical_source();
+    bench_su2_non_core_form_source();
     bench_su2_output_scratch();
     bench_product_complex();
 }
 
-fn bench_su2_noncanonical_source() {
-    let fixture = Su2NoncanonicalFixture::new();
+fn bench_su2_non_core_form_source() {
+    let fixture = Su2NoncoreFixture::new();
     let expected = fixture.manual_once();
     let (manual, manual_data) = fixture.time_manual(MANUAL_ITERS);
     assert_close(&manual_data, &expected);
@@ -57,13 +57,13 @@ fn bench_su2_noncanonical_source() {
     let (warm_host_tree, warm_host_tree_data) =
         fixture.time_context_warm_host_tree(WARM_CONTEXT_ITERS);
     assert_close(&warm_host_tree_data, &expected);
-    let (canonical_contract, contract_data) = fixture.time_canonical_contract(WARM_CONTEXT_ITERS);
+    let (core_contract, contract_data) = fixture.time_core_contract(WARM_CONTEXT_ITERS);
     assert_close(&contract_data, &expected);
     let (profile, profiled_data) = fixture.time_context_warm_profiled(PROFILE_ITERS);
     assert_close(&profiled_data, &expected);
 
     println!("fusion contraction timing (release)");
-    println!("fixture,su2_noncanonical_source_degeneracy");
+    println!("fixture,su2_non_core_form_source_degeneracy");
     println!("manual_explicit_ns,{:.3}", nanos_per(manual, MANUAL_ITERS));
     println!("one_shot_ns,{:.3}", nanos_per(oneshot, ONESHOT_ITERS));
     println!(
@@ -92,8 +92,8 @@ fn bench_su2_noncanonical_source() {
         nanos_per(warm_host_tree, WARM_CONTEXT_ITERS)
     );
     println!(
-        "canonical_contract_warm_ns,{:.3}",
-        nanos_per(canonical_contract, WARM_CONTEXT_ITERS)
+        "core_contract_warm_ns,{:.3}",
+        nanos_per(core_contract, WARM_CONTEXT_ITERS)
     );
     print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum(&warm_data));
@@ -150,7 +150,7 @@ fn bench_su2_output_scratch() {
     assert_close(&profiled_data, &expected);
 
     println!();
-    println!("fixture,su2_output_transform_canonical_dst_scratch");
+    println!("fixture,su2_output_transform_core_dst_scratch");
     println!("manual_explicit_ns,{:.3}", nanos_per(manual, MANUAL_ITERS));
     println!(
         "context_cold_ns,{:.3}",
@@ -261,29 +261,29 @@ fn bench_product_complex() {
     );
 }
 
-struct Su2NoncanonicalFixture {
+struct Su2NoncoreFixture {
     lhs: TensorMap<f64, 3, 1>,
     rhs: TensorMap<f64, 1, 3>,
     dst_space: FusionTensorMapSpace<1, 1>,
-    lhs_canonical_space: FusionTensorMapSpace<1, 3>,
-    rhs_canonical_space: FusionTensorMapSpace<3, 1>,
-    plan: TensorContractFusionExplicitPlan,
+    lhs_core_space: FusionTensorMapSpace<1, 3>,
+    rhs_core_space: FusionTensorMapSpace<3, 1>,
+    plan: FusionContractPlan,
     initial_dst: Vec<f64>,
     alpha: f64,
     beta: f64,
 }
 
-impl Su2NoncanonicalFixture {
+impl Su2NoncoreFixture {
     fn new() -> Self {
         let rule = SU2FusionRule;
         let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
         let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
-        let lhs_canonical_hom = lhs_hom
+        let lhs_core_hom = lhs_hom
             .permute(&rule, &[3], &[0, 1, 2])
-            .expect("valid lhs canonical tree-pair transform");
-        let rhs_canonical_hom = rhs_hom
+            .expect("valid lhs core tree-pair transform");
+        let rhs_core_hom = rhs_hom
             .permute(&rule, &[1, 2, 3], &[0])
-            .expect("valid rhs canonical tree-pair transform");
+            .expect("valid rhs core tree-pair transform");
         let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
             &rule,
             &lhs_hom,
@@ -309,16 +309,16 @@ impl Su2NoncanonicalFixture {
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
             TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
-            lhs_canonical_hom,
+            lhs_core_hom,
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let rhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
             TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
-            rhs_canonical_hom,
+            rhs_core_hom,
             &rule,
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
@@ -338,7 +338,7 @@ impl Su2NoncanonicalFixture {
             .collect::<Vec<_>>();
         let lhs = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
         let rhs = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
-        let plan = tensorcontract_fusion_explicit_plan(
+        let plan = prepare_tensorcontract_fusion_plan(
             &rule,
             &dst_space,
             lhs.fusion_space().unwrap(),
@@ -350,8 +350,8 @@ impl Su2NoncanonicalFixture {
             lhs,
             rhs,
             dst_space,
-            lhs_canonical_space,
-            rhs_canonical_space,
+            lhs_core_space,
+            rhs_core_space,
             plan,
             initial_dst: vec![2.0, -1.0, 4.0, -3.0],
             alpha: -1.5,
@@ -361,19 +361,19 @@ impl Su2NoncanonicalFixture {
 
     fn manual_once(&self) -> Vec<f64> {
         let mut dst = self.dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
-        self.manual_into(&mut dst, &mut lhs_canonical, &mut rhs_canonical);
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
+        self.manual_into(&mut dst, &mut lhs_core, &mut rhs_core);
         dst.data().to_vec()
     }
 
     fn time_manual(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let mut dst = self.dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            self.manual_into(&mut dst, &mut lhs_canonical, &mut rhs_canonical);
+            self.manual_into(&mut dst, &mut lhs_core, &mut rhs_core);
             black_box(checksum(dst.data()));
         });
         (elapsed, dst.data().to_vec())
@@ -527,15 +527,15 @@ impl Su2NoncanonicalFixture {
 
     fn time_source_transforms(&self, iterations: usize) -> (Duration, f64) {
         let rule = SU2FusionRule;
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
         tree_transform_into_with_context(
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
-            &mut lhs_canonical,
+            &mut lhs_core,
             &self.lhs,
             1.0,
             0.0,
@@ -545,7 +545,7 @@ impl Su2NoncanonicalFixture {
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
-            &mut rhs_canonical,
+            &mut rhs_core,
             &self.rhs,
             1.0,
             0.0,
@@ -556,7 +556,7 @@ impl Su2NoncanonicalFixture {
                 &mut context,
                 &rule,
                 self.plan.lhs_transform().clone(),
-                &mut lhs_canonical,
+                &mut lhs_core,
                 &self.lhs,
                 1.0,
                 0.0,
@@ -566,24 +566,24 @@ impl Su2NoncanonicalFixture {
                 &mut context,
                 &rule,
                 self.plan.rhs_transform().clone(),
-                &mut rhs_canonical,
+                &mut rhs_core,
                 &self.rhs,
                 1.0,
                 0.0,
             )
             .unwrap();
-            black_box(checksum(lhs_canonical.data()) + checksum(rhs_canonical.data()));
+            black_box(checksum(lhs_core.data()) + checksum(rhs_core.data()));
         });
         (
             elapsed,
-            checksum(lhs_canonical.data()) + checksum(rhs_canonical.data()),
+            checksum(lhs_core.data()) + checksum(rhs_core.data()),
         )
     }
 
     fn time_source_transforms_host_tree(&self, iterations: usize) -> (Duration, f64) {
         let rule = SU2FusionRule;
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
         let mut context = TreeTransformExecutionContext::<
             f64,
             TreeTransformBuiltinRuleCacheKey,
@@ -594,7 +594,7 @@ impl Su2NoncanonicalFixture {
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
-            &mut lhs_canonical,
+            &mut lhs_core,
             &self.lhs,
             1.0,
             0.0,
@@ -604,7 +604,7 @@ impl Su2NoncanonicalFixture {
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
-            &mut rhs_canonical,
+            &mut rhs_core,
             &self.rhs,
             1.0,
             0.0,
@@ -615,7 +615,7 @@ impl Su2NoncanonicalFixture {
                 &mut context,
                 &rule,
                 self.plan.lhs_transform().clone(),
-                &mut lhs_canonical,
+                &mut lhs_core,
                 &self.lhs,
                 1.0,
                 0.0,
@@ -625,26 +625,26 @@ impl Su2NoncanonicalFixture {
                 &mut context,
                 &rule,
                 self.plan.rhs_transform().clone(),
-                &mut rhs_canonical,
+                &mut rhs_core,
                 &self.rhs,
                 1.0,
                 0.0,
             )
             .unwrap();
-            black_box(checksum(lhs_canonical.data()) + checksum(rhs_canonical.data()));
+            black_box(checksum(lhs_core.data()) + checksum(rhs_core.data()));
         });
         (
             elapsed,
-            checksum(lhs_canonical.data()) + checksum(rhs_canonical.data()),
+            checksum(lhs_core.data()) + checksum(rhs_core.data()),
         )
     }
 
-    fn time_canonical_contract(&self, iterations: usize) -> (Duration, Vec<f64>) {
+    fn time_core_contract(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let rule = SU2FusionRule;
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
         let mut dst = self.dst();
-        self.transform_sources_into(&mut lhs_canonical, &mut rhs_canonical);
+        self.transform_sources_into(&mut lhs_core, &mut rhs_core);
         let mut context =
             TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
             );
@@ -652,9 +652,9 @@ impl Su2NoncanonicalFixture {
             .tensorcontract_fusion_into(
                 &rule,
                 &mut dst,
-                &lhs_canonical,
-                &rhs_canonical,
-                canonical_axes(),
+                &lhs_core,
+                &rhs_core,
+                core_axes(),
                 self.alpha,
                 self.beta,
             )
@@ -665,9 +665,9 @@ impl Su2NoncanonicalFixture {
                 .tensorcontract_fusion_into(
                     &rule,
                     &mut dst,
-                    &lhs_canonical,
-                    &rhs_canonical,
-                    canonical_axes(),
+                    &lhs_core,
+                    &rhs_core,
+                    core_axes(),
                     self.alpha,
                     self.beta,
                 )
@@ -680,28 +680,20 @@ impl Su2NoncanonicalFixture {
     fn manual_into(
         &self,
         dst: &mut TensorMap<f64, 1, 1>,
-        lhs_canonical: &mut TensorMap<f64, 1, 3>,
-        rhs_canonical: &mut TensorMap<f64, 3, 1>,
+        lhs_core: &mut TensorMap<f64, 1, 3>,
+        rhs_core: &mut TensorMap<f64, 3, 1>,
     ) {
         let rule = SU2FusionRule;
-        tensorcontract_fusion_explicit_plan_into(
-            &rule,
-            &self.plan,
-            dst,
-            lhs_canonical,
-            rhs_canonical,
-            &self.lhs,
-            &self.rhs,
-            self.alpha,
-            self.beta,
+        tensorcontract_fusion_prepared_into(
+            &rule, &self.plan, dst, lhs_core, rhs_core, &self.lhs, &self.rhs, self.alpha, self.beta,
         )
         .unwrap();
     }
 
     fn transform_sources_into(
         &self,
-        lhs_canonical: &mut TensorMap<f64, 1, 3>,
-        rhs_canonical: &mut TensorMap<f64, 3, 1>,
+        lhs_core: &mut TensorMap<f64, 1, 3>,
+        rhs_core: &mut TensorMap<f64, 3, 1>,
     ) {
         let rule = SU2FusionRule;
         let mut context =
@@ -710,7 +702,7 @@ impl Su2NoncanonicalFixture {
             &mut context,
             &rule,
             self.plan.lhs_transform().clone(),
-            lhs_canonical,
+            lhs_core,
             &self.lhs,
             1.0,
             0.0,
@@ -720,7 +712,7 @@ impl Su2NoncanonicalFixture {
             &mut context,
             &rule,
             self.plan.rhs_transform().clone(),
-            rhs_canonical,
+            rhs_core,
             &self.rhs,
             1.0,
             0.0,
@@ -756,18 +748,18 @@ impl Su2NoncanonicalFixture {
         .unwrap()
     }
 
-    fn lhs_canonical(&self) -> TensorMap<f64, 1, 3> {
+    fn lhs_core(&self) -> TensorMap<f64, 1, 3> {
         TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-            vec![0.0; self.lhs_canonical_space.required_len().unwrap()],
-            self.lhs_canonical_space.clone(),
+            vec![0.0; self.lhs_core_space.required_len().unwrap()],
+            self.lhs_core_space.clone(),
         )
         .unwrap()
     }
 
-    fn rhs_canonical(&self) -> TensorMap<f64, 3, 1> {
+    fn rhs_core(&self) -> TensorMap<f64, 3, 1> {
         TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-            vec![0.0; self.rhs_canonical_space.required_len().unwrap()],
-            self.rhs_canonical_space.clone(),
+            vec![0.0; self.rhs_core_space.required_len().unwrap()],
+            self.rhs_core_space.clone(),
         )
         .unwrap()
     }
@@ -777,10 +769,10 @@ struct Su2OutputScratchFixture {
     lhs: TensorMap<f64, 2, 2>,
     rhs: TensorMap<f64, 0, 0>,
     dst_space: FusionTensorMapSpace<4, 0>,
-    canonical_dst_space: FusionTensorMapSpace<4, 0>,
-    lhs_canonical_space: FusionTensorMapSpace<4, 0>,
-    rhs_canonical_space: FusionTensorMapSpace<0, 0>,
-    plan: TensorContractFusionExplicitPlan,
+    core_dst_space: FusionTensorMapSpace<4, 0>,
+    lhs_core_space: FusionTensorMapSpace<4, 0>,
+    rhs_core_space: FusionTensorMapSpace<0, 0>,
+    plan: FusionContractPlan,
     initial_dst: Vec<f64>,
     alpha: f64,
     beta: f64,
@@ -790,9 +782,9 @@ impl Su2OutputScratchFixture {
     fn new() -> Self {
         let rule = SU2FusionRule;
         let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1], [1, 1]);
-        let lhs_canonical_hom = lhs_hom
+        let lhs_core_hom = lhs_hom
             .permute(&rule, &[0, 1, 2, 3], &[])
-            .expect("valid all-open canonical transform");
+            .expect("valid all-open core transform");
         let dst_hom = lhs_hom
             .permute(&rule, &[0, 2, 1, 3], &[])
             .expect("valid nonidentity output transform");
@@ -803,20 +795,20 @@ impl Su2OutputScratchFixture {
             &rule,
             1,
         );
-        let lhs_canonical_space = fusion_space_from_hom::<4, 0>(
+        let lhs_core_space = fusion_space_from_hom::<4, 0>(
             TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
-            lhs_canonical_hom.clone(),
+            lhs_core_hom.clone(),
             &rule,
             1,
         );
-        let canonical_dst_space = lhs_canonical_space.clone();
+        let core_dst_space = lhs_core_space.clone();
         let dst_space = fusion_space_from_hom::<4, 0>(
             TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
             dst_hom,
             &rule,
             1,
         );
-        let rhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
             TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
             rhs_hom,
             &rule,
@@ -829,15 +821,13 @@ impl Su2OutputScratchFixture {
             .map(|index| 1.0 + 0.25 * index as f64)
             .collect::<Vec<_>>();
         let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
-        let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-            vec![2.0],
-            rhs_canonical_space.clone(),
-        )
-        .unwrap();
+        let rhs =
+            TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], rhs_core_space.clone())
+                .unwrap();
         let initial_dst = (0..dst_len)
             .map(|index| 0.5 + index as f64)
             .collect::<Vec<_>>();
-        let plan = tensorcontract_fusion_explicit_plan(
+        let plan = prepare_tensorcontract_fusion_plan(
             &rule,
             &dst_space,
             lhs.fusion_space().unwrap(),
@@ -849,9 +839,9 @@ impl Su2OutputScratchFixture {
             lhs,
             rhs,
             dst_space,
-            canonical_dst_space,
-            lhs_canonical_space,
-            rhs_canonical_space,
+            core_dst_space,
+            lhs_core_space,
+            rhs_core_space,
             plan,
             initial_dst,
             alpha: -0.75,
@@ -861,31 +851,21 @@ impl Su2OutputScratchFixture {
 
     fn manual_once(&self) -> Vec<f64> {
         let mut dst = self.dst();
-        let mut canonical_dst = self.canonical_dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
-        self.manual_into(
-            &mut dst,
-            &mut canonical_dst,
-            &mut lhs_canonical,
-            &mut rhs_canonical,
-        );
+        let mut core_dst = self.core_dst();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
+        self.manual_into(&mut dst, &mut core_dst, &mut lhs_core, &mut rhs_core);
         dst.data().to_vec()
     }
 
     fn time_manual(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let mut dst = self.dst();
-        let mut canonical_dst = self.canonical_dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
+        let mut core_dst = self.core_dst();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            self.manual_into(
-                &mut dst,
-                &mut canonical_dst,
-                &mut lhs_canonical,
-                &mut rhs_canonical,
-            );
+            self.manual_into(&mut dst, &mut core_dst, &mut lhs_core, &mut rhs_core);
             black_box(checksum(dst.data()));
         });
         (elapsed, dst.data().to_vec())
@@ -985,10 +965,10 @@ impl Su2OutputScratchFixture {
 
     fn time_output_transform(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let mut dst = self.dst();
-        let mut canonical_dst = self.canonical_dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
-        self.materialize_canonical_dst(&mut canonical_dst, &mut lhs_canonical, &mut rhs_canonical);
+        let mut core_dst = self.core_dst();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
+        self.materialize_core_dst(&mut core_dst, &mut lhs_core, &mut rhs_core);
         let rule = SU2FusionRule;
         let mut context =
             TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
@@ -997,7 +977,7 @@ impl Su2OutputScratchFixture {
             &rule,
             self.plan.output_transform().clone(),
             &mut dst,
-            &canonical_dst,
+            &core_dst,
             1.0,
             self.beta,
         )
@@ -1009,7 +989,7 @@ impl Su2OutputScratchFixture {
                 &rule,
                 self.plan.output_transform().clone(),
                 &mut dst,
-                &canonical_dst,
+                &core_dst,
                 1.0,
                 self.beta,
             )
@@ -1042,34 +1022,26 @@ impl Su2OutputScratchFixture {
     fn manual_into(
         &self,
         dst: &mut TensorMap<f64, 4, 0>,
-        canonical_dst: &mut TensorMap<f64, 4, 0>,
-        lhs_canonical: &mut TensorMap<f64, 4, 0>,
-        rhs_canonical: &mut TensorMap<f64, 0, 0>,
+        core_dst: &mut TensorMap<f64, 4, 0>,
+        lhs_core: &mut TensorMap<f64, 4, 0>,
+        rhs_core: &mut TensorMap<f64, 0, 0>,
     ) {
         let rule = SU2FusionRule;
-        tensorcontract_fusion_explicit_plan_into_canonical_dst(
-            &rule,
-            &self.plan,
-            dst,
-            canonical_dst,
-            lhs_canonical,
-            rhs_canonical,
-            &self.lhs,
-            &self.rhs,
-            self.alpha,
+        tensorcontract_fusion_prepared_into_core_dst(
+            &rule, &self.plan, dst, core_dst, lhs_core, rhs_core, &self.lhs, &self.rhs, self.alpha,
             self.beta,
         )
         .unwrap();
     }
 
-    fn materialize_canonical_dst(
+    fn materialize_core_dst(
         &self,
-        canonical_dst: &mut TensorMap<f64, 4, 0>,
-        lhs_canonical: &mut TensorMap<f64, 4, 0>,
-        rhs_canonical: &mut TensorMap<f64, 0, 0>,
+        core_dst: &mut TensorMap<f64, 4, 0>,
+        lhs_core: &mut TensorMap<f64, 4, 0>,
+        rhs_core: &mut TensorMap<f64, 0, 0>,
     ) {
         let mut dst = self.dst();
-        self.manual_into(&mut dst, canonical_dst, lhs_canonical, rhs_canonical);
+        self.manual_into(&mut dst, core_dst, lhs_core, rhs_core);
     }
 
     fn dst(&self) -> TensorMap<f64, 4, 0> {
@@ -1080,26 +1052,26 @@ impl Su2OutputScratchFixture {
         .unwrap()
     }
 
-    fn canonical_dst(&self) -> TensorMap<f64, 4, 0> {
+    fn core_dst(&self) -> TensorMap<f64, 4, 0> {
         TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
-            vec![0.0; self.canonical_dst_space.required_len().unwrap()],
-            self.canonical_dst_space.clone(),
+            vec![0.0; self.core_dst_space.required_len().unwrap()],
+            self.core_dst_space.clone(),
         )
         .unwrap()
     }
 
-    fn lhs_canonical(&self) -> TensorMap<f64, 4, 0> {
+    fn lhs_core(&self) -> TensorMap<f64, 4, 0> {
         TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
-            vec![0.0; self.lhs_canonical_space.required_len().unwrap()],
-            self.lhs_canonical_space.clone(),
+            vec![0.0; self.lhs_core_space.required_len().unwrap()],
+            self.lhs_core_space.clone(),
         )
         .unwrap()
     }
 
-    fn rhs_canonical(&self) -> TensorMap<f64, 0, 0> {
+    fn rhs_core(&self) -> TensorMap<f64, 0, 0> {
         TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-            vec![0.0; self.rhs_canonical_space.required_len().unwrap()],
-            self.rhs_canonical_space.clone(),
+            vec![0.0; self.rhs_core_space.required_len().unwrap()],
+            self.rhs_core_space.clone(),
         )
         .unwrap()
     }
@@ -1110,10 +1082,10 @@ struct ProductComplexFixture {
     lhs: TensorMap<Complex64, 2, 1>,
     rhs: TensorMap<Complex64, 0, 0>,
     dst_space: FusionTensorMapSpace<2, 1>,
-    lhs_canonical_space: FusionTensorMapSpace<3, 0>,
-    rhs_canonical_space: FusionTensorMapSpace<0, 0>,
-    canonical_dst_space: FusionTensorMapSpace<3, 0>,
-    plan: TensorContractFusionExplicitPlan,
+    lhs_core_space: FusionTensorMapSpace<3, 0>,
+    rhs_core_space: FusionTensorMapSpace<0, 0>,
+    core_dst_space: FusionTensorMapSpace<3, 0>,
+    plan: FusionContractPlan,
     initial_dst: Vec<Complex64>,
     alpha: Complex64,
     beta: Complex64,
@@ -1130,19 +1102,19 @@ impl ProductComplexFixture {
             packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
         )
         .unwrap();
-        let lhs_canonical_hom = src_space
+        let lhs_core_hom = src_space
             .homspace()
             .permute(&rule, &[0, 1, 2], &[])
             .unwrap();
-        let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
             TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
-            lhs_canonical_hom,
+            lhs_core_hom,
             &rule,
             [vec![1, 1, 1], vec![1, 1, 1]],
         )
         .unwrap();
-        let rhs_canonical_space = rhs_space.clone();
-        let canonical_dst_space = lhs_canonical_space.clone();
+        let rhs_core_space = rhs_space.clone();
+        let core_dst_space = lhs_core_space.clone();
         let lhs = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
             vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)],
             src_space,
@@ -1153,7 +1125,7 @@ impl ProductComplexFixture {
             rhs_space,
         )
         .unwrap();
-        let plan = tensorcontract_fusion_explicit_plan(
+        let plan = prepare_tensorcontract_fusion_plan(
             &rule,
             &dst_space,
             lhs.fusion_space().unwrap(),
@@ -1166,9 +1138,9 @@ impl ProductComplexFixture {
             lhs,
             rhs,
             dst_space,
-            lhs_canonical_space,
-            rhs_canonical_space,
-            canonical_dst_space,
+            lhs_core_space,
+            rhs_core_space,
+            core_dst_space,
             plan,
             initial_dst: vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)],
             alpha: Complex64::new(2.0, 0.0),
@@ -1178,31 +1150,21 @@ impl ProductComplexFixture {
 
     fn manual_once(&self) -> Vec<Complex64> {
         let mut dst = self.dst();
-        let mut canonical_dst = self.canonical_dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
-        self.manual_into(
-            &mut dst,
-            &mut canonical_dst,
-            &mut lhs_canonical,
-            &mut rhs_canonical,
-        );
+        let mut core_dst = self.core_dst();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
+        self.manual_into(&mut dst, &mut core_dst, &mut lhs_core, &mut rhs_core);
         dst.data().to_vec()
     }
 
     fn time_manual(&self, iterations: usize) -> (Duration, Vec<Complex64>) {
         let mut dst = self.dst();
-        let mut canonical_dst = self.canonical_dst();
-        let mut lhs_canonical = self.lhs_canonical();
-        let mut rhs_canonical = self.rhs_canonical();
+        let mut core_dst = self.core_dst();
+        let mut lhs_core = self.lhs_core();
+        let mut rhs_core = self.rhs_core();
         let elapsed = time_loop(iterations, || {
             dst.data_mut().copy_from_slice(&self.initial_dst);
-            self.manual_into(
-                &mut dst,
-                &mut canonical_dst,
-                &mut lhs_canonical,
-                &mut rhs_canonical,
-            );
+            self.manual_into(&mut dst, &mut core_dst, &mut lhs_core, &mut rhs_core);
             black_box(checksum_complex(dst.data()));
         });
         (elapsed, dst.data().to_vec())
@@ -1345,21 +1307,13 @@ impl ProductComplexFixture {
     fn manual_into(
         &self,
         dst: &mut TensorMap<Complex64, 2, 1>,
-        canonical_dst: &mut TensorMap<Complex64, 3, 0>,
-        lhs_canonical: &mut TensorMap<Complex64, 3, 0>,
-        rhs_canonical: &mut TensorMap<Complex64, 0, 0>,
+        core_dst: &mut TensorMap<Complex64, 3, 0>,
+        lhs_core: &mut TensorMap<Complex64, 3, 0>,
+        rhs_core: &mut TensorMap<Complex64, 0, 0>,
     ) {
-        tensorcontract_fusion_explicit_plan_into_canonical_dst(
-            &self.rule,
-            &self.plan,
-            dst,
-            canonical_dst,
-            lhs_canonical,
-            rhs_canonical,
-            &self.lhs,
-            &self.rhs,
-            self.alpha,
-            self.beta,
+        tensorcontract_fusion_prepared_into_core_dst(
+            &self.rule, &self.plan, dst, core_dst, lhs_core, rhs_core, &self.lhs, &self.rhs,
+            self.alpha, self.beta,
         )
         .unwrap();
     }
@@ -1372,26 +1326,26 @@ impl ProductComplexFixture {
         .unwrap()
     }
 
-    fn canonical_dst(&self) -> TensorMap<Complex64, 3, 0> {
+    fn core_dst(&self) -> TensorMap<Complex64, 3, 0> {
         TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
-            vec![Complex64::new(0.0, 0.0); self.canonical_dst_space.required_len().unwrap()],
-            self.canonical_dst_space.clone(),
+            vec![Complex64::new(0.0, 0.0); self.core_dst_space.required_len().unwrap()],
+            self.core_dst_space.clone(),
         )
         .unwrap()
     }
 
-    fn lhs_canonical(&self) -> TensorMap<Complex64, 3, 0> {
+    fn lhs_core(&self) -> TensorMap<Complex64, 3, 0> {
         TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
-            vec![Complex64::new(0.0, 0.0); self.lhs_canonical_space.required_len().unwrap()],
-            self.lhs_canonical_space.clone(),
+            vec![Complex64::new(0.0, 0.0); self.lhs_core_space.required_len().unwrap()],
+            self.lhs_core_space.clone(),
         )
         .unwrap()
     }
 
-    fn rhs_canonical(&self) -> TensorMap<Complex64, 0, 0> {
+    fn rhs_core(&self) -> TensorMap<Complex64, 0, 0> {
         TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(
-            vec![Complex64::new(0.0, 0.0); self.rhs_canonical_space.required_len().unwrap()],
-            self.rhs_canonical_space.clone(),
+            vec![Complex64::new(0.0, 0.0); self.rhs_core_space.required_len().unwrap()],
+            self.rhs_core_space.clone(),
         )
         .unwrap()
     }
@@ -1464,10 +1418,10 @@ fn axes() -> TensorContractSpec<'static> {
     TensorContractSpec::with_default_output_order(&LHS_CONTRACTING_AXES, &RHS_CONTRACTING_AXES)
 }
 
-fn canonical_axes() -> TensorContractSpec<'static> {
+fn core_axes() -> TensorContractSpec<'static> {
     TensorContractSpec::with_default_output_order(
-        &CANONICAL_LHS_CONTRACTING_AXES,
-        &CANONICAL_RHS_CONTRACTING_AXES,
+        &CORE_LHS_CONTRACTING_AXES,
+        &CORE_RHS_CONTRACTING_AXES,
     )
 }
 
@@ -1505,8 +1459,8 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.typed_space_setup, iterations)
     );
     println!(
-        "profile_canonical_route_check_ns,{:.3}",
-        nanos_per(profile.canonical_route_check, iterations)
+        "profile_core_route_check_ns,{:.3}",
+        nanos_per(profile.core_route_check, iterations)
     );
     println!(
         "profile_dense_block_specs_ns,{:.3}",
@@ -1521,8 +1475,8 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.dense_contract, iterations)
     );
     println!(
-        "profile_explicit_plan_ns,{:.3}",
-        nanos_per(profile.explicit_plan, iterations)
+        "profile_prepared_plan_ns,{:.3}",
+        nanos_per(profile.prepared_plan, iterations)
     );
     println!(
         "profile_source_space_lookup_ns,{:.3}",
@@ -1545,8 +1499,8 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.rhs_transform, iterations)
     );
     println!(
-        "profile_canonical_dst_space_lookup_ns,{:.3}",
-        nanos_per(profile.canonical_dst_space_lookup, iterations)
+        "profile_core_dst_space_lookup_ns,{:.3}",
+        nanos_per(profile.core_dst_space_lookup, iterations)
     );
     println!(
         "profile_dst_scratch_prepare_ns,{:.3}",
@@ -1557,36 +1511,36 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.fusion_block_plan_lookup, iterations)
     );
     println!(
-        "profile_canonical_contract_total_ns,{:.3}",
-        nanos_per(profile.canonical_contract_total, iterations)
+        "profile_core_contract_total_ns,{:.3}",
+        nanos_per(profile.core_contract_total, iterations)
     );
     println!(
-        "profile_canonical_validate_ns,{:.3}",
-        nanos_per(profile.canonical_validate, iterations)
+        "profile_core_validate_ns,{:.3}",
+        nanos_per(profile.core_validate, iterations)
     );
     println!(
-        "profile_canonical_scale_ns,{:.3}",
-        nanos_per(profile.canonical_scale, iterations)
+        "profile_core_scale_ns,{:.3}",
+        nanos_per(profile.core_scale, iterations)
     );
     println!(
-        "profile_canonical_workspace_prepare_ns,{:.3}",
-        nanos_per(profile.canonical_workspace_prepare, iterations)
+        "profile_core_workspace_prepare_ns,{:.3}",
+        nanos_per(profile.core_workspace_prepare, iterations)
     );
     println!(
-        "profile_canonical_pack_lhs_ns,{:.3}",
-        nanos_per(profile.canonical_pack_lhs, iterations)
+        "profile_core_pack_lhs_ns,{:.3}",
+        nanos_per(profile.core_pack_lhs, iterations)
     );
     println!(
-        "profile_canonical_pack_rhs_ns,{:.3}",
-        nanos_per(profile.canonical_pack_rhs, iterations)
+        "profile_core_pack_rhs_ns,{:.3}",
+        nanos_per(profile.core_pack_rhs, iterations)
     );
     println!(
-        "profile_canonical_matmul_ns,{:.3}",
-        nanos_per(profile.canonical_matmul, iterations)
+        "profile_core_matmul_ns,{:.3}",
+        nanos_per(profile.core_matmul, iterations)
     );
     println!(
-        "profile_canonical_scatter_ns,{:.3}",
-        nanos_per(profile.canonical_scatter, iterations)
+        "profile_core_scatter_ns,{:.3}",
+        nanos_per(profile.core_scatter, iterations)
     );
     println!(
         "profile_output_transform_ns,{:.3}",
@@ -1684,8 +1638,8 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         profile.output_transform_calls
     );
     println!(
-        "profile_canonical_contract_groups,{}",
-        profile.canonical_contract_groups
+        "profile_core_contract_groups,{}",
+        profile.core_contract_groups
     );
 }
 

@@ -333,7 +333,7 @@ where
         &self.rhs_contracting_axes
     }
 
-    /// Destination-axis to canonical-output-axis mapping. The canonical output
+    /// Destination-axis to core-output-axis mapping. The core output
     /// order is TensorOperations' `(lhs open axes..., rhs open axes...)`.
     #[inline]
     pub fn output_axes(&self) -> &[usize] {
@@ -548,9 +548,9 @@ impl TensorContractAxisPlan {
         let rhs_open_axes = (0..rhs_rank)
             .filter(|&axis| !rhs_seen[axis])
             .collect::<Vec<_>>();
-        let canonical_output_rank = lhs_open_axes.len() + rhs_open_axes.len();
+        let core_output_rank = lhs_open_axes.len() + rhs_open_axes.len();
 
-        let output_axes = permutation_axes(axes.output_permutation(), canonical_output_rank)?;
+        let output_axes = permutation_axes(axes.output_permutation(), core_output_rank)?;
         if output_axes.len() != dst_rank {
             return Err(OperationError::StructureRankMismatch {
                 expected: output_axes.len(),

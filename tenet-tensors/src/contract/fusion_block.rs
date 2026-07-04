@@ -14,12 +14,11 @@ use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoeff
 use tenet_operations::TensorContractSpec;
 
 use tenet_operations::fusion_replay::{
-    direct_group_matrix_offset, fusion_scale_block_layouts_excluding,
-    CanonicalFusionBlockContractGroupPlan, FusionBlockMatrixGroup, FusionStridedBlockLayout,
-    FusionSubblockMatrixLayout,
+    direct_group_matrix_offset, fusion_scale_block_layouts_excluding, FusionBlockContractGroupPlan,
+    FusionBlockMatrixGroup, FusionStridedBlockLayout, FusionSubblockMatrixLayout,
 };
 pub(crate) use tenet_operations::fusion_replay::{
-    CanonicalFusionBlockContractPlan, CanonicalFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
+    FusionBlockContractPlan, FusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
 };
 
 use super::backend::TensorContractBackend;
@@ -65,7 +64,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_canonical_fusion_blocks_into_raw<A, B, R, D>(
+pub(crate) fn tensorcontract_core_fusion_blocks_into_raw<A, B, R, D>(
     kernels: &mut A,
     backend: &mut B,
     workspace: &mut B::Workspace,
@@ -86,9 +85,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
-    let plan =
-        compile_canonical_fusion_block_contract_plan(rule, dst_space, lhs_space, rhs_space, axes)?;
-    let mut fusion_workspace = CanonicalFusionBlockContractWorkspace::<D>::default();
+    let plan = compile_fusion_block_contract_plan(rule, dst_space, lhs_space, rhs_space, axes)?;
+    let mut fusion_workspace = FusionBlockContractWorkspace::<D>::default();
     plan.execute_raw(
         kernels,
         &mut BackendRank2Gemm { backend, workspace },
@@ -104,7 +102,7 @@ where
     )
 }
 
-pub(crate) fn is_canonical_fusion_block_contract<R>(
+pub(crate) fn is_core_form_fusion_block_contract<R>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
@@ -121,8 +119,8 @@ where
         dst_space.rank(),
         axes,
     )?;
-    if !is_canonical_source(lhs_space, rhs_space, &axis_plan)
-        || !is_canonical_output(dst_space, lhs_space, rhs_space, &axis_plan)
+    if !is_core_form_source(lhs_space, rhs_space, &axis_plan)
+        || !is_core_form_output(dst_space, lhs_space, rhs_space, &axis_plan)
     {
         return Ok(false);
     }
@@ -142,7 +140,7 @@ where
     Ok(true)
 }
 
-fn validate_canonical_compose<R>(
+fn validate_core_compose<R>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
@@ -152,16 +150,16 @@ fn validate_canonical_compose<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    if is_canonical_fusion_block_contract(rule, dst_space, lhs_space, rhs_space, axes)? {
+    if is_core_form_fusion_block_contract(rule, dst_space, lhs_space, rhs_space, axes)? {
         Ok(())
     } else {
         Err(OperationError::UnsupportedTensorContractScope {
-            message: "canonical fusion-block contraction requires canonical source and output axes",
+            message: "core fusion-block contraction requires core source and output axes",
         })
     }
 }
 
-fn is_canonical_source(
+fn is_core_form_source(
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
     axis_plan: &TensorContractAxisPlan,
@@ -172,15 +170,15 @@ fn is_canonical_source(
         && axis_plan.rhs_contracting_axes == rhs_codomain_axes
 }
 
-fn is_canonical_output(
+fn is_core_form_output(
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
     axis_plan: &TensorContractAxisPlan,
 ) -> bool {
     let output_rank = lhs_space.nout() + (rhs_space.rank() - rhs_space.nout());
-    let canonical_output_axes = (0..output_rank).collect::<Vec<_>>();
-    dst_space.nout() == lhs_space.nout() && axis_plan.output_axes == canonical_output_axes
+    let core_output_axes = (0..output_rank).collect::<Vec<_>>();
+    dst_space.nout() == lhs_space.nout() && axis_plan.output_axes == core_output_axes
 }
 
 #[cfg(test)]
@@ -193,7 +191,7 @@ mod tests {
         SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, Z2FusionRule,
     };
     use tenet_core::{Placement, SimilarStorage};
-    use tenet_operations::fusion_replay::HostCanonicalFusionBlockContractWorkspace;
+    use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
     use tenet_operations::storage_scratch::StorageFusionBlockContractWorkspace;
     use tenet_operations::ReportsPlacement;
 
@@ -367,7 +365,7 @@ mod tests {
             .unwrap()
         };
         let space = fusion_space();
-        let plan = compile_canonical_fusion_block_contract_plan(
+        let plan = compile_fusion_block_contract_plan(
             &rule,
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
@@ -412,7 +410,7 @@ mod tests {
         let len = space.required_len().unwrap();
         let lhs_data: Vec<f64> = (0..len).map(|i| 0.5 * i as f64 - 1.0).collect();
         let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
-        let plan = compile_canonical_fusion_block_contract_plan(
+        let plan = compile_fusion_block_contract_plan(
             &rule,
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
@@ -425,7 +423,7 @@ mod tests {
         let mut workspace = TensorContractWorkspace::default();
         let mut expected = vec![0.0; len];
         let structure = std::sync::Arc::clone(space.subblock_structure());
-        let mut fusion_workspace = CanonicalFusionBlockContractWorkspace::<f64>::default();
+        let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
         plan.execute_raw(
             &mut crate::StridedHostKernelAdapter,
             &mut BackendRank2Gemm {
@@ -457,7 +455,7 @@ mod tests {
         assert_eq!(direct, expected);
     }
 
-    /// GPU vertical: the same canonical direct replay executed on CUDA
+    /// GPU vertical: the same core direct replay executed on CUDA
     /// storage must reproduce the host result bit-for-bit (same GEMM
     /// ordering, overwrite semantics). Requires a CUDA device; run with
     /// `cargo test --features cuda -- --ignored`.
@@ -483,7 +481,7 @@ mod tests {
         let len = space.required_len().unwrap();
         let lhs_data: Vec<f64> = (0..len).map(|i| 0.5 * i as f64 - 1.0).collect();
         let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
-        let plan = compile_canonical_fusion_block_contract_plan(
+        let plan = compile_fusion_block_contract_plan(
             &rule,
             &DynamicFusionMapSpace::from_typed(&space),
             &DynamicFusionMapSpace::from_typed(&space),
@@ -516,9 +514,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_fusion_block_workspace_is_explicit_host_workspace() {
-        let workspace = HostCanonicalFusionBlockContractWorkspace::<f64>::default();
-        let alias = CanonicalFusionBlockContractWorkspace::<f64>::default();
+    fn core_fusion_block_workspace_is_explicit_host_workspace() {
+        let workspace = HostFusionBlockContractWorkspace::<f64>::default();
+        let alias = FusionBlockContractWorkspace::<f64>::default();
 
         assert_eq!(workspace.placement(), Placement::Host);
         assert!(workspace.is_host_placement());
@@ -526,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_fusion_block_storage_workspace_allocates_pack_scratch_from_operands_and_output_from_destination(
+    fn core_fusion_block_storage_workspace_allocates_pack_scratch_from_operands_and_output_from_destination(
     ) {
         let rule = Z2FusionRule;
         let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
@@ -561,7 +559,7 @@ mod tests {
                 fusion_space(),
             )
             .unwrap();
-        let plan = compile_canonical_fusion_block_contract_plan(
+        let plan = compile_fusion_block_contract_plan(
             &rule,
             &DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
             &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
@@ -593,25 +591,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(dst.data(), &[50.0, 102.0]);
-        // Pack/scatter scratch is gone from the canonical route: replay is
+        // Pack/scatter scratch is gone from the core route: replay is
         // direct GEMM on storage, so no workspace allocations occur.
         assert_eq!(allocations.borrow().as_slice(), &[]);
     }
 }
 
-pub(crate) fn compile_canonical_fusion_block_contract_plan<R>(
+pub(crate) fn compile_fusion_block_contract_plan<R>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
     rhs_space: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-) -> Result<CanonicalFusionBlockContractPlan, OperationError>
+) -> Result<FusionBlockContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     reject_fusion_contract_conjugation(axes)?;
-    // Axis validation happens inside validate_canonical_compose.
-    validate_canonical_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
+    // Axis validation happens inside validate_core_compose.
+    validate_core_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
 
     let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space)?;
     let rhs_layout = FusionBlockMatrixLayout::compile(rule, rhs_space)?;
@@ -629,17 +627,17 @@ where
         for block_index in &dst_group.block_indices {
             debug_assert!(
                 !active_dst_blocks.contains(block_index),
-                "canonical fusion-block dst subblock must be scattered exactly once"
+                "core fusion-block dst subblock must be scattered exactly once"
             );
         }
         active_dst_blocks.extend(dst_group.block_indices.iter().copied());
-        groups.push(CanonicalFusionBlockContractGroupPlan::new(
+        groups.push(FusionBlockContractGroupPlan::new(
             lhs_group,
             rhs_group.clone(),
             dst_group.clone(),
         )?);
     }
-    CanonicalFusionBlockContractPlan::from_parts(
+    FusionBlockContractPlan::from_parts(
         Arc::clone(dst_space.structure()),
         Arc::clone(lhs_space.structure()),
         Arc::clone(rhs_space.structure()),

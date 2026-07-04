@@ -18,12 +18,11 @@ use super::dynamic::{
 };
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
-    tensorcontract_fusion_explicit_plan, tensorcontract_fusion_structure,
-    TensorContractFusionExplicitPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
-    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_structure, FusionContractPlan,
+    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
-    is_canonical_fusion_block_contract, tensorcontract_canonical_fusion_blocks_into_raw,
+    is_core_form_fusion_block_contract, tensorcontract_core_fusion_blocks_into_raw,
 };
 use super::resolution::rhs_contract_requires_twist;
 use super::structure::{tensorcontract_structure, TensorContractStructure};
@@ -332,7 +331,7 @@ where
 /// tree-pair transforms.
 ///
 /// This is the reference-safe path for contractions whose source operands are
-/// not already in canonical compose form. The caller provides the canonical
+/// not already in core compose form. The caller provides the core
 /// temporary tensors because their ranks are determined by the chosen
 /// contraction axes and therefore cannot be constructed generically from the
 /// original const-generic tensor ranks.
@@ -341,10 +340,10 @@ where
 ///
 /// 1. transform `lhs` to `(lhs open) <- (lhs contracted)`;
 /// 2. transform `rhs` to `(rhs contracted) <- (rhs open)`;
-/// 3. run the fusion contraction from those canonical operands into `dst`,
-///    which must already be the canonical output tree-pair shape.
+/// 3. run the fusion contraction from those core operands into `dst`,
+///    which must already be the core output tree-pair shape.
 ///
-/// Use [`tensorcontract_fusion_explicit_plan_into_canonical_dst`] when the
+/// Use [`tensorcontract_fusion_prepared_into_core_dst`] when the
 /// requested output permutation needs a final tree-pair transform.
 pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
     R,
@@ -372,8 +371,8 @@ pub fn tensorcontract_fusion_via_tree_pair_transforms_into<
 >(
     rule: &R,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
-    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
+    lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
+    rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     axes: TensorContractSpec<'_>,
@@ -389,7 +388,7 @@ where
     DLhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
     DRhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
 {
-    let plan = tensorcontract_fusion_explicit_plan(
+    let plan = prepare_tensorcontract_fusion_plan(
         rule,
         dst.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
@@ -399,20 +398,10 @@ where
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         axes,
     )?;
-    tensorcontract_fusion_explicit_plan_into(
-        rule,
-        &plan,
-        dst,
-        lhs_canonical,
-        rhs_canonical,
-        lhs,
-        rhs,
-        alpha,
-        beta,
-    )
+    tensorcontract_fusion_prepared_into(rule, &plan, dst, lhs_core, rhs_core, lhs, rhs, alpha, beta)
 }
 
-pub fn tensorcontract_fusion_explicit_plan_into<
+pub fn tensorcontract_fusion_prepared_into<
     R,
     D,
     const DST_NOUT: usize,
@@ -437,10 +426,10 @@ pub fn tensorcontract_fusion_explicit_plan_into<
     DRhsCan,
 >(
     rule: &R,
-    plan: &TensorContractFusionExplicitPlan,
+    plan: &FusionContractPlan,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
-    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
+    lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
+    rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
@@ -459,7 +448,7 @@ where
     let mut contract_backend = DenseTreeTransformOperations::default_executor();
     let mut tree_workspace = TreeTransformWorkspace::default();
     let mut contract_workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_explicit_plan_into_with(
+    tensorcontract_fusion_prepared_into_with(
         &mut tree_backend,
         &mut tree_workspace,
         &mut contract_backend,
@@ -467,8 +456,8 @@ where
         rule,
         plan,
         dst,
-        lhs_canonical,
-        rhs_canonical,
+        lhs_core,
+        rhs_core,
         lhs,
         rhs,
         alpha,
@@ -476,7 +465,7 @@ where
     )
 }
 
-pub fn tensorcontract_fusion_explicit_plan_into_canonical_dst<
+pub fn tensorcontract_fusion_prepared_into_core_dst<
     R,
     D,
     const DST_NOUT: usize,
@@ -505,11 +494,11 @@ pub fn tensorcontract_fusion_explicit_plan_into_canonical_dst<
     DRhsCan,
 >(
     rule: &R,
-    plan: &TensorContractFusionExplicitPlan,
+    plan: &FusionContractPlan,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    canonical_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan, DDstCan>,
-    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
-    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
+    core_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan, DDstCan>,
+    lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
+    rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
@@ -529,7 +518,7 @@ where
     let mut contract_backend = DenseTreeTransformOperations::default_executor();
     let mut tree_workspace = TreeTransformWorkspace::default();
     let mut contract_workspace = TensorContractWorkspace::default();
-    tensorcontract_fusion_explicit_plan_into_canonical_dst_with(
+    tensorcontract_fusion_prepared_into_core_dst_with(
         &mut tree_backend,
         &mut tree_workspace,
         &mut contract_backend,
@@ -537,9 +526,9 @@ where
         rule,
         plan,
         dst,
-        canonical_dst,
-        lhs_canonical,
-        rhs_canonical,
+        core_dst,
+        lhs_core,
+        rhs_core,
         lhs,
         rhs,
         alpha,
@@ -547,7 +536,7 @@ where
     )
 }
 
-pub fn tensorcontract_fusion_explicit_plan_into_with<
+pub fn tensorcontract_fusion_prepared_into_with<
     BT,
     BC,
     R,
@@ -578,10 +567,10 @@ pub fn tensorcontract_fusion_explicit_plan_into_with<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     rule: &R,
-    plan: &TensorContractFusionExplicitPlan,
+    plan: &FusionContractPlan,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
-    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
+    lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
+    rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
@@ -599,34 +588,34 @@ where
     DRhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
 {
     if !plan.output_transform_is_identity()
-        || DST_NOUT != plan.canonical_dst_nout()
-        || DST_NIN != plan.canonical_dst_nin()
+        || DST_NOUT != plan.core_dst_open_lhs_rank()
+        || DST_NIN != plan.core_dst_open_rhs_rank()
     {
         return Err(OperationError::UnsupportedTensorContractScope {
-            message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+            message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
         });
     }
-    if LHS_CAN_NOUT != plan.lhs_canonical_nout() || LHS_CAN_NIN != plan.lhs_canonical_nin() {
+    if LHS_CAN_NOUT != plan.lhs_open_rank() || LHS_CAN_NIN != plan.lhs_contract_rank() {
         return Err(OperationError::StructureRankMismatch {
-            expected: plan.lhs_canonical_nout() + plan.lhs_canonical_nin(),
+            expected: plan.lhs_open_rank() + plan.lhs_contract_rank(),
             actual: LHS_CAN_NOUT + LHS_CAN_NIN,
         });
     }
-    if RHS_CAN_NOUT != plan.rhs_canonical_nout() || RHS_CAN_NIN != plan.rhs_canonical_nin() {
+    if RHS_CAN_NOUT != plan.rhs_contract_rank() || RHS_CAN_NIN != plan.rhs_open_rank() {
         return Err(OperationError::StructureRankMismatch {
-            expected: plan.rhs_canonical_nout() + plan.rhs_canonical_nin(),
+            expected: plan.rhs_contract_rank() + plan.rhs_open_rank(),
             actual: RHS_CAN_NOUT + RHS_CAN_NIN,
         });
     }
 
-    lhs_canonical.data_mut().fill(D::zero());
-    rhs_canonical.data_mut().fill(D::zero());
+    lhs_core.data_mut().fill(D::zero());
+    rhs_core.data_mut().fill(D::zero());
     tree_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
         plan.lhs_transform().clone(),
-        lhs_canonical,
+        lhs_core,
         lhs,
         plan.lhs_source_conjugate(),
         D::one(),
@@ -637,7 +626,7 @@ where
         tree_workspace,
         rule,
         plan.rhs_transform().clone(),
-        rhs_canonical,
+        rhs_core,
         rhs,
         plan.rhs_source_conjugate(),
         D::one(),
@@ -649,15 +638,15 @@ where
         contract_workspace,
         rule,
         dst,
-        lhs_canonical,
-        rhs_canonical,
-        plan.canonical_axes().as_spec(),
+        lhs_core,
+        rhs_core,
+        plan.core_axes().as_spec(),
         alpha,
         beta,
     )
 }
 
-pub fn tensorcontract_fusion_explicit_plan_into_canonical_dst_with<
+pub fn tensorcontract_fusion_prepared_into_core_dst_with<
     BT,
     BC,
     R,
@@ -692,11 +681,11 @@ pub fn tensorcontract_fusion_explicit_plan_into_canonical_dst_with<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     rule: &R,
-    plan: &TensorContractFusionExplicitPlan,
+    plan: &FusionContractPlan,
     dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    canonical_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan, DDstCan>,
-    lhs_canonical: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
-    rhs_canonical: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
+    core_dst: &mut TensorMap<D, DST_CAN_NOUT, DST_CAN_NIN, SDstCan, DDstCan>,
+    lhs_core: &mut TensorMap<D, LHS_CAN_NOUT, LHS_CAN_NIN, SLhsCan, DLhsCan>,
+    rhs_core: &mut TensorMap<D, RHS_CAN_NOUT, RHS_CAN_NIN, SRhsCan, DRhsCan>,
     lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
     rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
     alpha: D,
@@ -714,34 +703,35 @@ where
     DLhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
     DRhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
 {
-    if DST_CAN_NOUT != plan.canonical_dst_nout() || DST_CAN_NIN != plan.canonical_dst_nin() {
+    if DST_CAN_NOUT != plan.core_dst_open_lhs_rank() || DST_CAN_NIN != plan.core_dst_open_rhs_rank()
+    {
         return Err(OperationError::StructureRankMismatch {
-            expected: plan.canonical_dst_nout() + plan.canonical_dst_nin(),
+            expected: plan.core_dst_open_lhs_rank() + plan.core_dst_open_rhs_rank(),
             actual: DST_CAN_NOUT + DST_CAN_NIN,
         });
     }
-    if LHS_CAN_NOUT != plan.lhs_canonical_nout() || LHS_CAN_NIN != plan.lhs_canonical_nin() {
+    if LHS_CAN_NOUT != plan.lhs_open_rank() || LHS_CAN_NIN != plan.lhs_contract_rank() {
         return Err(OperationError::StructureRankMismatch {
-            expected: plan.lhs_canonical_nout() + plan.lhs_canonical_nin(),
+            expected: plan.lhs_open_rank() + plan.lhs_contract_rank(),
             actual: LHS_CAN_NOUT + LHS_CAN_NIN,
         });
     }
-    if RHS_CAN_NOUT != plan.rhs_canonical_nout() || RHS_CAN_NIN != plan.rhs_canonical_nin() {
+    if RHS_CAN_NOUT != plan.rhs_contract_rank() || RHS_CAN_NIN != plan.rhs_open_rank() {
         return Err(OperationError::StructureRankMismatch {
-            expected: plan.rhs_canonical_nout() + plan.rhs_canonical_nin(),
+            expected: plan.rhs_contract_rank() + plan.rhs_open_rank(),
             actual: RHS_CAN_NOUT + RHS_CAN_NIN,
         });
     }
 
-    lhs_canonical.data_mut().fill(D::zero());
-    rhs_canonical.data_mut().fill(D::zero());
-    canonical_dst.data_mut().fill(D::zero());
+    lhs_core.data_mut().fill(D::zero());
+    rhs_core.data_mut().fill(D::zero());
+    core_dst.data_mut().fill(D::zero());
     tree_transform_into_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
         plan.lhs_transform().clone(),
-        lhs_canonical,
+        lhs_core,
         lhs,
         plan.lhs_source_conjugate(),
         D::one(),
@@ -752,7 +742,7 @@ where
         tree_workspace,
         rule,
         plan.rhs_transform().clone(),
-        rhs_canonical,
+        rhs_core,
         rhs,
         plan.rhs_source_conjugate(),
         D::one(),
@@ -763,10 +753,10 @@ where
         contract_backend,
         contract_workspace,
         rule,
-        canonical_dst,
-        lhs_canonical,
-        rhs_canonical,
-        plan.canonical_axes().as_spec(),
+        core_dst,
+        lhs_core,
+        rhs_core,
+        plan.core_axes().as_spec(),
         alpha,
         D::zero(),
     )?;
@@ -777,7 +767,7 @@ where
         rule,
         plan.output_transform().clone(),
         dst,
-        canonical_dst,
+        core_dst,
         D::one(),
         beta,
     )
@@ -893,9 +883,9 @@ where
     let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
     if !axes.lhs_conjugate()
         && !axes.rhs_conjugate()
-        && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
+        && is_core_form_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
         && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
-        && super::fusion_block::compile_canonical_fusion_block_contract_plan(
+        && super::fusion_block::compile_fusion_block_contract_plan(
             rule,
             &dst_dynamic,
             &lhs_dynamic,
@@ -904,7 +894,7 @@ where
         )?
         .is_fully_direct()
     {
-        return tensorcontract_canonical_fusion_blocks_into_raw(
+        return tensorcontract_core_fusion_blocks_into_raw(
             &mut crate::StridedHostKernelAdapter,
             backend,
             workspace,
@@ -988,9 +978,9 @@ where
     let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
     if !axes.lhs_conjugate()
         && !axes.rhs_conjugate()
-        && is_canonical_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
+        && is_core_form_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
         && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
-        && super::fusion_block::compile_canonical_fusion_block_contract_plan(
+        && super::fusion_block::compile_fusion_block_contract_plan(
             rule,
             &dst_dynamic,
             &lhs_dynamic,
@@ -999,7 +989,7 @@ where
         )?
         .is_fully_direct()
     {
-        return tensorcontract_canonical_fusion_blocks_into_raw(
+        return tensorcontract_core_fusion_blocks_into_raw(
             &mut crate::StridedHostKernelAdapter,
             contract_backend,
             contract_workspace,
@@ -1030,9 +1020,8 @@ where
         Err(OperationError::UnsupportedTensorContractScope {
             message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
         }) => {
-            let plan = tensorcontract_fusion_explicit_plan(
-                rule, dst_fusion, lhs_fusion, rhs_fusion, axes,
-            )?;
+            let plan =
+                prepare_tensorcontract_fusion_plan(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
             tensorcontract_fusion_dynamic_plan_into_with(
                 tree_backend,
                 tree_workspace,

@@ -5,7 +5,7 @@
 //! TensorKit keeps exactly one cache entry per (spaces, permutation)
 //! (`treepermuter` and friends); its route decision is compile-time dispatch
 //! plus a cheap uncached cost heuristic and is never memoized. The previous
-//! three TeNeT caches (route / canonical fusion-block plan / explicit plan)
+//! three TeNeT caches (route / core fusion-block plan / explicit plan)
 //! all shared this key with different payloads — this module restores the
 //! one-entry granularity. Prepared contraction handles wrap the same
 //! [`Resolution`] value, so the facade and the plan-once API share one
@@ -21,13 +21,11 @@ use super::structure::TensorContractStructure;
 use crate::cache::{BlockStructureCacheKey, OperationCachePolicy};
 use crate::OperationError;
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
-use tenet_operations::fusion_replay::CanonicalFusionBlockContractPlan;
+use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
 use super::dynamic_space::DynamicFusionMapSpace;
-use super::fusion::{external_axis_is_dual, TensorContractFusionExplicitPlan};
-use super::fusion_block::{
-    compile_canonical_fusion_block_contract_plan, is_canonical_fusion_block_contract,
-};
+use super::fusion::{external_axis_is_dual, FusionContractPlan};
+use super::fusion_block::{compile_fusion_block_contract_plan, is_core_form_fusion_block_contract};
 use super::structure::TensorContractAxisPlan;
 
 /// Resolved execution artifact for one contraction key: the route decision
@@ -35,10 +33,10 @@ use super::structure::TensorContractAxisPlan;
 #[derive(Clone, Debug)]
 pub(crate) enum Resolution {
     /// Coupled-sector direct GEMM (TensorKit `mul!` shape).
-    Canonical(Arc<CanonicalFusionBlockContractPlan>),
-    /// Source/output tree transforms around a canonical core
+    Core(Arc<FusionBlockContractPlan>),
+    /// Source/output tree transforms around a core core
     /// (TensorKit `@tensor` shape).
-    DynamicTree(Arc<TensorContractFusionExplicitPlan>),
+    DynamicTree(Arc<FusionContractPlan>),
     /// Dense one-shot structure for conjugated operands (TeNeT optimization
     /// over the faithful transform-then-contract path).
     Structure(Arc<TensorContractStructure<f64>>),
@@ -257,9 +255,9 @@ where
         }
     }
 
-    /// Resolve route and plan in one lookup. On a cold key the canonical
+    /// Resolve route and plan in one lookup. On a cold key the core
     /// plan compiled during the route test is stored, never discarded;
-    /// non-canonical keys resolve through `compile_dynamic` (which has the
+    /// non-core keys resolve through `compile_dynamic` (which has the
     /// caller's typed context) or, for conjugated axes, `compile_structure`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_or_resolve<R>(
@@ -273,7 +271,7 @@ where
             Option<Arc<TensorContractStructure<f64>>>,
             OperationError,
         >,
-        compile_dynamic: impl FnOnce() -> Result<Arc<TensorContractFusionExplicitPlan>, OperationError>,
+        compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
     ) -> Result<Resolution, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -292,29 +290,29 @@ where
         })
     }
 
-    /// Canonical-only entry for the dynamic route's internal scratch
+    /// Core-only entry for the dynamic route's internal scratch
     /// contractions: operands are already materialized in coupled scratch
     /// (twists applied), so the route test and twist gate do not apply.
-    pub(crate) fn get_or_compile_canonical<R>(
+    pub(crate) fn get_or_compile_core_plan<R>(
         &mut self,
         rule: &R,
         dst: &DynamicFusionMapSpace,
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
-    ) -> Result<Arc<CanonicalFusionBlockContractPlan>, OperationError>
+    ) -> Result<Arc<FusionBlockContractPlan>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         let resolution = self.get_or_resolve_with(rule, dst, lhs, rhs, axes, || {
-            compile_canonical_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)
-                .map(|plan| Resolution::Canonical(Arc::new(plan)))
+            compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)
+                .map(|plan| Resolution::Core(Arc::new(plan)))
         })?;
         match resolution {
-            Resolution::Canonical(plan) => Ok(plan),
+            Resolution::Core(plan) => Ok(plan),
             _ => Err(OperationError::UnsupportedTensorContractScope {
-                message: "internal scratch contraction resolved to a non-canonical plan",
+                message: "internal scratch contraction resolved to a non-core plan",
             }),
         }
     }
@@ -458,22 +456,22 @@ fn resolve<R>(
     axes: TensorContractSpec<'_>,
     compile_structure: impl FnOnce()
         -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
-    compile_dynamic: impl FnOnce() -> Result<Arc<TensorContractFusionExplicitPlan>, OperationError>,
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
 ) -> Result<Resolution, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
-        if is_canonical_fusion_block_contract(rule, dst, lhs, rhs, axes)?
+        if is_core_form_fusion_block_contract(rule, dst, lhs, rhs, axes)?
             && !rhs_contract_requires_twist(rule, rhs, axes)?
         {
-            let plan = compile_canonical_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)?;
+            let plan = compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)?;
             if plan.is_fully_direct() {
-                return Ok(Resolution::Canonical(Arc::new(plan)));
+                return Ok(Resolution::Core(Arc::new(plan)));
             }
-            // Valid canonical form on a non-direct layout: materialize via
-            // the dynamic route instead (TensorKit: copy into canonical
-            // storage, then mul!). The canonical plan is discarded here —
+            // Valid core form on a non-direct layout: materialize via
+            // the dynamic route instead (TensorKit: copy into core
+            // storage, then mul!). The core plan is discarded here —
             // flagged follow-up: a structural is_fully_direct predicate.
         }
         return Ok(Resolution::DynamicTree(compile_dynamic()?));
@@ -486,7 +484,7 @@ where
 
 /// True when the fermionic supertrace twist can be nontrivial: such
 /// contractions take the dynamic route, where the twist is applied during
-/// rhs materialization; the canonical direct-GEMM route stays
+/// rhs materialization; the core direct-GEMM route stays
 /// coefficient-free (TensorKit mul! parity).
 pub(crate) fn rhs_contract_requires_twist<R>(
     rule: &R,

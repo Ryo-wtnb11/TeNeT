@@ -7,22 +7,22 @@ use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 use super::super::structure::TensorContractAxisPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TensorContractFusionExplicitPlan {
+pub struct FusionContractPlan {
     lhs_transform: TreeTransformOperation,
     rhs_transform: TreeTransformOperation,
     output_transform: TreeTransformOperation,
-    canonical_axes: TensorContractSpecOwned,
-    canonical_dst_nout: usize,
-    canonical_dst_nin: usize,
-    lhs_canonical_nout: usize,
-    lhs_canonical_nin: usize,
-    rhs_canonical_nout: usize,
-    rhs_canonical_nin: usize,
+    core_axes: TensorContractSpecOwned,
+    core_dst_open_lhs_rank: usize,
+    core_dst_open_rhs_rank: usize,
+    lhs_open_rank: usize,
+    lhs_contract_rank: usize,
+    rhs_contract_rank: usize,
+    rhs_open_rank: usize,
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
 }
 
-impl TensorContractFusionExplicitPlan {
+impl FusionContractPlan {
     #[inline]
     pub fn lhs_transform(&self) -> &TreeTransformOperation {
         &self.lhs_transform
@@ -39,22 +39,22 @@ impl TensorContractFusionExplicitPlan {
     }
 
     #[inline]
-    pub fn canonical_axes(&self) -> &TensorContractSpecOwned {
-        &self.canonical_axes
+    pub fn core_axes(&self) -> &TensorContractSpecOwned {
+        &self.core_axes
     }
 
     #[inline]
-    pub fn canonical_dst_nout(&self) -> usize {
-        self.canonical_dst_nout
+    pub fn core_dst_open_lhs_rank(&self) -> usize {
+        self.core_dst_open_lhs_rank
     }
 
     #[inline]
-    pub fn canonical_dst_nin(&self) -> usize {
-        self.canonical_dst_nin
+    pub fn core_dst_open_rhs_rank(&self) -> usize {
+        self.core_dst_open_rhs_rank
     }
 
     pub(crate) fn output_transform_is_identity(&self) -> bool {
-        let canonical_rank = self.canonical_dst_nout + self.canonical_dst_nin;
+        let core_rank = self.core_dst_open_lhs_rank + self.core_dst_open_rhs_rank;
         match &self.output_transform {
             TreeTransformOperation::Permute {
                 codomain_permutation,
@@ -63,34 +63,34 @@ impl TensorContractFusionExplicitPlan {
                 codomain_permutation
                     .iter()
                     .copied()
-                    .eq(0..self.canonical_dst_nout)
+                    .eq(0..self.core_dst_open_lhs_rank)
                     && domain_permutation
                         .iter()
                         .copied()
-                        .eq(self.canonical_dst_nout..canonical_rank)
+                        .eq(self.core_dst_open_lhs_rank..core_rank)
             }
             _ => false,
         }
     }
 
     #[inline]
-    pub fn lhs_canonical_nout(&self) -> usize {
-        self.lhs_canonical_nout
+    pub fn lhs_open_rank(&self) -> usize {
+        self.lhs_open_rank
     }
 
     #[inline]
-    pub fn lhs_canonical_nin(&self) -> usize {
-        self.lhs_canonical_nin
+    pub fn lhs_contract_rank(&self) -> usize {
+        self.lhs_contract_rank
     }
 
     #[inline]
-    pub fn rhs_canonical_nout(&self) -> usize {
-        self.rhs_canonical_nout
+    pub fn rhs_contract_rank(&self) -> usize {
+        self.rhs_contract_rank
     }
 
     #[inline]
-    pub fn rhs_canonical_nin(&self) -> usize {
-        self.rhs_canonical_nin
+    pub fn rhs_open_rank(&self) -> usize {
+        self.rhs_open_rank
     }
 
     #[inline]
@@ -104,7 +104,7 @@ impl TensorContractFusionExplicitPlan {
     }
 }
 
-pub fn tensorcontract_fusion_explicit_plan<
+pub fn prepare_tensorcontract_fusion_plan<
     R,
     const DST_NOUT: usize,
     const DST_NIN: usize,
@@ -118,7 +118,7 @@ pub fn tensorcontract_fusion_explicit_plan<
     lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
     rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
     axes: TensorContractSpec<'_>,
-) -> Result<TensorContractFusionExplicitPlan, OperationError>
+) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -127,7 +127,7 @@ where
     if axes.lhs_conjugate() && axes.rhs_conjugate() {
         let lhs_adjoint = adjoint_fusion_space_view(lhs)?;
         let rhs_adjoint = adjoint_fusion_space_view(rhs)?;
-        return tensorcontract_fusion_explicit_plan_from_spaces(
+        return prepare_tensorcontract_fusion_plan_from_spaces(
             rule,
             dst,
             &lhs_adjoint,
@@ -139,7 +139,7 @@ where
     }
     if axes.lhs_conjugate() {
         let lhs_adjoint = adjoint_fusion_space_view(lhs)?;
-        return tensorcontract_fusion_explicit_plan_from_spaces(
+        return prepare_tensorcontract_fusion_plan_from_spaces(
             rule,
             dst,
             &lhs_adjoint,
@@ -151,7 +151,7 @@ where
     }
     if axes.rhs_conjugate() {
         let rhs_adjoint = adjoint_fusion_space_view(rhs)?;
-        return tensorcontract_fusion_explicit_plan_from_spaces(
+        return prepare_tensorcontract_fusion_plan_from_spaces(
             rule,
             dst,
             lhs,
@@ -161,7 +161,7 @@ where
             lowered_axes.rhs_storage_conjugate(),
         );
     }
-    tensorcontract_fusion_explicit_plan_from_spaces(
+    prepare_tensorcontract_fusion_plan_from_spaces(
         rule,
         dst,
         lhs,
@@ -172,7 +172,7 @@ where
     )
 }
 
-fn tensorcontract_fusion_explicit_plan_from_spaces<
+fn prepare_tensorcontract_fusion_plan_from_spaces<
     R,
     const DST_NOUT: usize,
     const DST_NIN: usize,
@@ -188,7 +188,7 @@ fn tensorcontract_fusion_explicit_plan_from_spaces<
     axes: TensorContractSpec<'_>,
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
-) -> Result<TensorContractFusionExplicitPlan, OperationError>
+) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -212,18 +212,18 @@ where
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
 
-    let lhs_canonical_nout = axis_plan.lhs_open_axes.len();
-    let lhs_canonical_nin = axis_plan.lhs_contracting_axes.len();
-    let rhs_canonical_nout = axis_plan.rhs_contracting_axes.len();
-    let rhs_canonical_nin = axis_plan.rhs_open_axes.len();
-    let canonical_dst_nout = lhs_canonical_nout;
-    let canonical_dst_nin = rhs_canonical_nin;
-    let canonical_output_rank = canonical_dst_nout + canonical_dst_nin;
+    let lhs_open_rank = axis_plan.lhs_open_axes.len();
+    let lhs_contract_rank = axis_plan.lhs_contracting_axes.len();
+    let rhs_contract_rank = axis_plan.rhs_contracting_axes.len();
+    let rhs_open_rank = axis_plan.rhs_open_axes.len();
+    let core_dst_open_lhs_rank = lhs_open_rank;
+    let core_dst_open_rhs_rank = rhs_open_rank;
+    let core_output_rank = core_dst_open_lhs_rank + core_dst_open_rhs_rank;
     let output_transform = TreeTransformOperation::permute(
         axis_plan.output_axes[..DST_NOUT].to_vec(),
         axis_plan.output_axes[DST_NOUT..].to_vec(),
     );
-    Ok(TensorContractFusionExplicitPlan {
+    Ok(FusionContractPlan {
         lhs_transform: TreeTransformOperation::permute(
             axis_plan.lhs_open_axes,
             axis_plan.lhs_contracting_axes,
@@ -232,18 +232,18 @@ where
             axis_plan.rhs_contracting_axes,
             axis_plan.rhs_open_axes,
         ),
-        canonical_axes: TensorContractSpecOwned::new(
-            (lhs_canonical_nout..lhs_canonical_nout + lhs_canonical_nin).collect(),
-            (0..rhs_canonical_nout).collect(),
-            (0..canonical_output_rank).collect(),
+        core_axes: TensorContractSpecOwned::new(
+            (lhs_open_rank..lhs_open_rank + lhs_contract_rank).collect(),
+            (0..rhs_contract_rank).collect(),
+            (0..core_output_rank).collect(),
         ),
         output_transform,
-        canonical_dst_nout,
-        canonical_dst_nin,
-        lhs_canonical_nout,
-        lhs_canonical_nin,
-        rhs_canonical_nout,
-        rhs_canonical_nin,
+        core_dst_open_lhs_rank,
+        core_dst_open_rhs_rank,
+        lhs_open_rank,
+        lhs_contract_rank,
+        rhs_contract_rank,
+        rhs_open_rank,
         lhs_source_conjugate,
         rhs_source_conjugate,
     })

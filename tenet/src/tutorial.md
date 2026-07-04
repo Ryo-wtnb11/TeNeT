@@ -244,7 +244,7 @@ let mut ab = TensorMap::<f64, 2, 0>::from_vec(
 .unwrap();
 
 // Contract A's j leg (axis 1) with B's j leg (axis 0).
-// The canonical output order is A's open legs followed by B's open legs:
+// The default output order is A's open legs followed by B's open legs:
 // AB has axes [i, k].
 tensorcontract_into(
     &mut ab,
@@ -283,7 +283,7 @@ A symmetric tensor additionally carries a fusion-tree hom space and a block
 structure. The default constructor
 [`core::FusionTensorMapSpace::from_degeneracy_shapes`] uses the
 TensorKit-equivalent coupled-sector matrix layout. That is the normal
-hot-path layout: canonical matrix views can go to contraction and
+hot-path layout: coupled-sector matrix views can go to contraction and
 decomposition routines without first packing every subblock.
 
 The example uses `Z2`, whose sectors are even and odd. The tensor has dense
@@ -366,7 +366,7 @@ TeNeT separates three layers:
    needs it, and dense backend calls.
 
 The default symmetric layout is coupled-sector matrix layout. Pack/scatter
-still exists, but it is a temporary replay mechanism for noncanonical
+still exists, but it is a temporary replay mechanism for non-core-form
 tree-transform paths, not the default storage layout for ordinary tensors.
 
 For repeated operations, use the explicit context/cache APIs in

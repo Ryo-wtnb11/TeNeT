@@ -143,21 +143,18 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
     assert!(context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(
-        profile.route,
-        TensorContractFusionRoute::CanonicalFusionBlocks
-    );
+    assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
     assert_eq!(profile.lhs_transform_calls, 0);
     assert_eq!(profile.rhs_transform_calls, 0);
-    assert!(profile.canonical_contract_groups > 0);
+    assert!(profile.core_contract_groups > 0);
     // alpha = 2, beta = 3 and every group still runs the direct GEMM: the
     // accumulate factors ride on the GEMM itself (TensorKit mul! semantics),
     // never on a scatter pass.
     assert_eq!(
-        profile.canonical_direct_gemm_groups,
-        profile.canonical_contract_groups
+        profile.core_direct_gemm_groups,
+        profile.core_contract_groups
     );
-    assert_eq!(profile.canonical_scatter, std::time::Duration::ZERO);
+    assert_eq!(profile.core_scatter, std::time::Duration::ZERO);
     assert_eq!(profile.tree_replay.single_blocks, 0);
     assert_eq!(profile.tree_replay.multi_blocks, 0);
 }
@@ -238,7 +235,7 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
 fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
     // Regression probe for the dynamic-route scratch enumeration: the swap
     // contraction C[a b; g h] = A[a b; c d] * B[d c; g h] must equal the
-    // canonical compose of A with an explicitly permuted B. Before scratch
+    // core compose of A with an explicitly permuted B. Before scratch
     // spaces enumerated the full tree set of their hom spaces, the dynamic
     // route dropped contributions for trees missing from the reachable set.
     let rule = U1FusionRule;
@@ -291,7 +288,7 @@ fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
     )
     .unwrap();
 
-    // Reference: explicitly permute rhs codomain legs, then canonical compose.
+    // Reference: explicitly permute rhs codomain legs, then core compose.
     let permuted_space = space(&homspace);
     let mut rhs_permuted =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], permuted_space).unwrap();
@@ -1746,7 +1743,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
 }
 
 #[test]
-fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() {
+fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []);
     let lhs_keys = lhs_hom.fusion_tree_keys(&rule);
@@ -1787,13 +1784,13 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         .unwrap(),
     )
     .unwrap();
-    let lhs_canonical_space = lhs_space.clone();
-    let canonical_dst_space = lhs_space.clone();
-    let rhs_canonical_space = rhs_space.clone();
+    let lhs_core_space = lhs_space.clone();
+    let core_dst_space = lhs_space.clone();
+    let rhs_core_space = rhs_space.clone();
     let context_dst_space = dst_space.clone();
-    let context_canonical_dst_space = canonical_dst_space.clone();
-    let context_lhs_canonical_space = lhs_canonical_space.clone();
-    let context_rhs_canonical_space = rhs_canonical_space.clone();
+    let context_core_dst_space = core_dst_space.clone();
+    let context_lhs_core_space = lhs_core_space.clone();
+    let context_rhs_core_space = rhs_core_space.clone();
     let lhs = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![10.0], lhs_space).unwrap();
     let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
     let mut expected_dst =
@@ -1802,30 +1799,23 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     let mut explicit_dst =
         TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space.clone())
             .unwrap();
-    let mut canonical_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
-        vec![999.0],
-        canonical_dst_space.clone(),
-    )
-    .unwrap();
-    let mut expected_canonical_dst =
-        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![-77.0], canonical_dst_space)
+    let mut core_dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![999.0], core_dst_space.clone())
             .unwrap();
-    let mut lhs_canonical = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
-        vec![123.0],
-        lhs_canonical_space.clone(),
-    )
-    .unwrap();
-    let mut rhs_canonical = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-        vec![456.0],
-        rhs_canonical_space.clone(),
-    )
-    .unwrap();
-    let mut expected_lhs_canonical =
-        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![0.0], lhs_canonical_space).unwrap();
-    let mut expected_rhs_canonical =
-        TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], rhs_canonical_space).unwrap();
+    let mut expected_core_dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![-77.0], core_dst_space).unwrap();
+    let mut lhs_core =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![123.0], lhs_core_space.clone())
+            .unwrap();
+    let mut rhs_core =
+        TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![456.0], rhs_core_space.clone())
+            .unwrap();
+    let mut expected_lhs_core =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![0.0], lhs_core_space).unwrap();
+    let mut expected_rhs_core =
+        TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], rhs_core_space).unwrap();
     let axes = TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 2, 1, 3]));
-    let plan = tensorcontract_fusion_explicit_plan(
+    let plan = prepare_tensorcontract_fusion_plan(
         &rule,
         explicit_dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -1833,17 +1823,11 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         axes,
     )
     .unwrap();
-    assert_eq!(plan.canonical_dst_nout(), 4);
-    assert_eq!(plan.canonical_dst_nin(), 0);
-    assert_eq!(
-        plan.canonical_axes().lhs_contracting_axes(),
-        &[] as &[usize]
-    );
-    assert_eq!(
-        plan.canonical_axes().rhs_contracting_axes(),
-        &[] as &[usize]
-    );
-    assert_eq!(plan.canonical_axes().output_axes(), &[0, 1, 2, 3]);
+    assert_eq!(plan.core_dst_open_lhs_rank(), 4);
+    assert_eq!(plan.core_dst_open_rhs_rank(), 0);
+    assert_eq!(plan.core_axes().lhs_contracting_axes(), &[] as &[usize]);
+    assert_eq!(plan.core_axes().rhs_contracting_axes(), &[] as &[usize]);
+    assert_eq!(plan.core_axes().output_axes(), &[0, 1, 2, 3]);
     assert_eq!(
         plan.output_transform(),
         &TreeTransformOperation::permute([0, 2, 1, 3], Vec::<usize>::new())
@@ -1851,12 +1835,12 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
 
     let alpha = 2.0;
     let beta = 3.0;
-    let err = tensorcontract_fusion_explicit_plan_into(
+    let err = tensorcontract_fusion_prepared_into(
         &rule,
         &plan,
         &mut expected_dst,
-        &mut expected_lhs_canonical,
-        &mut expected_rhs_canonical,
+        &mut expected_lhs_core,
+        &mut expected_rhs_core,
         &lhs,
         &rhs,
         alpha,
@@ -1866,14 +1850,14 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     assert_eq!(
         err,
         OperationError::UnsupportedTensorContractScope {
-            message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CANONICAL_DST,
+            message: EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
         }
     );
 
     tree_transform_into(
         &rule,
         plan.lhs_transform().clone(),
-        &mut expected_lhs_canonical,
+        &mut expected_lhs_core,
         &lhs,
         1.0,
         0.0,
@@ -1882,7 +1866,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     tree_transform_into(
         &rule,
         plan.rhs_transform().clone(),
-        &mut expected_rhs_canonical,
+        &mut expected_rhs_core,
         &rhs,
         1.0,
         0.0,
@@ -1890,10 +1874,10 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     .unwrap();
     tensorcontract_fusion_into(
         &rule,
-        &mut expected_canonical_dst,
-        &expected_lhs_canonical,
-        &expected_rhs_canonical,
-        plan.canonical_axes().as_spec(),
+        &mut expected_core_dst,
+        &expected_lhs_core,
+        &expected_rhs_core,
+        plan.core_axes().as_spec(),
         alpha,
         0.0,
     )
@@ -1902,19 +1886,19 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         &rule,
         plan.output_transform().clone(),
         &mut expected_dst,
-        &expected_canonical_dst,
+        &expected_core_dst,
         1.0,
         beta,
     )
     .unwrap();
 
-    tensorcontract_fusion_explicit_plan_into_canonical_dst(
+    tensorcontract_fusion_prepared_into_core_dst(
         &rule,
         &plan,
         &mut explicit_dst,
-        &mut canonical_dst,
-        &mut lhs_canonical,
-        &mut rhs_canonical,
+        &mut core_dst,
+        &mut lhs_core,
+        &mut rhs_core,
         &lhs,
         &rhs,
         alpha,
@@ -1922,8 +1906,8 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     )
     .unwrap();
 
-    assert_eq!(canonical_dst.data(), expected_canonical_dst.data());
-    assert_eq!(canonical_dst.data(), &[100.0]);
+    assert_eq!(core_dst.data(), expected_core_dst.data());
+    assert_eq!(core_dst.data(), &[100.0]);
     for (&actual, &expected) in explicit_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1947,31 +1931,25 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
     let mut context_dst =
         TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![1.0, 2.0], context_dst_space)
             .unwrap();
-    let mut context_canonical_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
-        vec![999.0],
-        context_canonical_dst_space,
-    )
-    .unwrap();
-    let mut context_lhs_canonical = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
-        vec![123.0],
-        context_lhs_canonical_space,
-    )
-    .unwrap();
-    let mut context_rhs_canonical = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
-        vec![456.0],
-        context_rhs_canonical_space,
-    )
-    .unwrap();
+    let mut context_core_dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![999.0], context_core_dst_space)
+            .unwrap();
+    let mut context_lhs_core =
+        TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![123.0], context_lhs_core_space)
+            .unwrap();
+    let mut context_rhs_core =
+        TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![456.0], context_rhs_core_space)
+            .unwrap();
     let mut context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     context
-        .tensorcontract_fusion_explicit_plan_into_canonical_dst(
+        .tensorcontract_fusion_prepared_into_core_dst(
             &rule,
             &plan,
             &mut context_dst,
-            &mut context_canonical_dst,
-            &mut context_lhs_canonical,
-            &mut context_rhs_canonical,
+            &mut context_core_dst,
+            &mut context_lhs_core,
+            &mut context_rhs_core,
             &lhs,
             &rhs,
             alpha,
@@ -1979,7 +1957,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_canonical_dst() 
         )
         .unwrap();
 
-    assert_eq!(context_canonical_dst.data(), expected_canonical_dst.data());
+    assert_eq!(context_core_dst.data(), expected_core_dst.data());
     for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -2231,18 +2209,18 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
 }
 
 #[test]
-fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() {
+fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence() {
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
     let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
     let output_axes = [0, 1];
-    let lhs_canonical_hom = lhs_hom
+    let lhs_core_hom = lhs_hom
         .permute(&rule, &[3], &[0, 1, 2])
-        .expect("valid lhs canonical tree-pair transform");
-    let rhs_canonical_hom = rhs_hom
+        .expect("valid lhs core tree-pair transform");
+    let rhs_core_hom = rhs_hom
         .permute(&rule, &[1, 2, 3], &[0])
-        .expect("valid rhs canonical tree-pair transform");
+        .expect("valid rhs core tree-pair transform");
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         &lhs_hom,
@@ -2268,16 +2246,16 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
-        lhs_canonical_hom,
+        lhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
-        rhs_canonical_hom,
+        rhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
@@ -2306,17 +2284,17 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             .unwrap();
     let mut expected_dst =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space.clone()).unwrap();
-    let mut lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-        vec![0.0; lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space.clone(),
+    let mut lhs_core = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        vec![0.0; lhs_core_space.required_len().unwrap()],
+        lhs_core_space.clone(),
     )
     .unwrap();
-    let mut rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-        vec![0.0; rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space.clone(),
+    let mut rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_core_space.required_len().unwrap()],
+        rhs_core_space.clone(),
     )
     .unwrap();
-    let plan = tensorcontract_fusion_explicit_plan(
+    let plan = prepare_tensorcontract_fusion_plan(
         &rule,
         direct_dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -2332,11 +2310,11 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         plan.rhs_transform(),
         &TreeTransformOperation::permute([1, 2, 3], [0])
     );
-    assert_eq!(plan.canonical_dst_nout(), 1);
-    assert_eq!(plan.canonical_dst_nin(), 1);
-    assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[1, 2, 3]);
-    assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[0, 1, 2]);
-    assert_eq!(plan.canonical_axes().output_axes(), &[0, 1]);
+    assert_eq!(plan.core_dst_open_lhs_rank(), 1);
+    assert_eq!(plan.core_dst_open_rhs_rank(), 1);
+    assert_eq!(plan.core_axes().lhs_contracting_axes(), &[1, 2, 3]);
+    assert_eq!(plan.core_axes().rhs_contracting_axes(), &[0, 1, 2]);
+    assert_eq!(plan.core_axes().output_axes(), &[0, 1]);
     assert_eq!(
         plan.output_transform(),
         &TreeTransformOperation::permute([0], [1])
@@ -2360,7 +2338,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     tree_transform_into(
         &rule,
         TreeTransformOperation::permute([3], [0, 1, 2]),
-        &mut lhs_canonical,
+        &mut lhs_core,
         &lhs,
         1.0,
         0.0,
@@ -2369,21 +2347,21 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     tree_transform_into(
         &rule,
         TreeTransformOperation::permute([1, 2, 3], [0]),
-        &mut rhs_canonical,
+        &mut rhs_core,
         &rhs,
         1.0,
         0.0,
     )
     .unwrap();
-    let canonical_specs = tensorcontract_fusion_block_specs(
+    let core_specs = tensorcontract_fusion_block_specs(
         &rule,
         expected_dst.fusion_space().unwrap(),
-        lhs_canonical.fusion_space().unwrap(),
-        rhs_canonical.fusion_space().unwrap(),
+        lhs_core.fusion_space().unwrap(),
+        rhs_core.fusion_space().unwrap(),
         TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]),
     )
     .unwrap();
-    assert_eq!(canonical_specs.len(), 2);
+    assert_eq!(core_specs.len(), 2);
 
     let alpha = -1.5;
     let beta = 0.25;
@@ -2391,8 +2369,8 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     tensorcontract_fusion_into(
         &rule,
         &mut expected_dst,
-        &lhs_canonical,
-        &rhs_canonical,
+        &lhs_core,
+        &rhs_core,
         TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]),
         alpha,
         beta,
@@ -2411,12 +2389,12 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         dst_space.clone(),
     )
     .unwrap();
-    tensorcontract_fusion_explicit_plan_into(
+    tensorcontract_fusion_prepared_into(
         &rule,
         &plan,
         &mut explicit_dst,
-        &mut lhs_canonical,
-        &mut rhs_canonical,
+        &mut lhs_core,
+        &mut rhs_core,
         &lhs,
         &rhs,
         alpha,
@@ -2433,25 +2411,25 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
     let mut context_dst =
         TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial_dst_for_context, dst_space)
             .unwrap();
-    let mut context_lhs_canonical = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
-        vec![0.0; lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space,
+    let mut context_lhs_core = TensorMap::<f64, 1, 3>::from_vec_with_fusion_space(
+        vec![0.0; lhs_core_space.required_len().unwrap()],
+        lhs_core_space,
     )
     .unwrap();
-    let mut context_rhs_canonical = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
-        vec![0.0; rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space,
+    let mut context_rhs_core = TensorMap::<f64, 3, 1>::from_vec_with_fusion_space(
+        vec![0.0; rhs_core_space.required_len().unwrap()],
+        rhs_core_space,
     )
     .unwrap();
     let mut context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     context
-        .tensorcontract_fusion_explicit_plan_into(
+        .tensorcontract_fusion_prepared_into(
             &rule,
             &plan,
             &mut context_dst,
-            &mut context_lhs_canonical,
-            &mut context_rhs_canonical,
+            &mut context_lhs_core,
+            &mut context_rhs_core,
             &lhs,
             &rhs,
             alpha,
@@ -2477,12 +2455,12 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
     context
-        .tensorcontract_fusion_explicit_plan_into(
+        .tensorcontract_fusion_prepared_into(
             &rule,
             &plan,
             &mut context_dst,
-            &mut context_lhs_canonical,
-            &mut context_rhs_canonical,
+            &mut context_lhs_core,
+            &mut context_rhs_core,
             &lhs,
             &rhs,
             alpha,
@@ -2552,7 +2530,7 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             .structure_misses()
             > 0
     );
-    // The automatic fusion contraction uses the TensorKit-style canonical
+    // The automatic fusion contraction uses the TensorKit-style core
     // fusion-block pack/GEMM/scatter replay shape, not the generic dense
     // TensorContractStructure cache.
     assert_eq!(automatic_context.contract_cache().structure_len(), 0);
@@ -2748,14 +2726,11 @@ fn tensorcontract_fusion_noncanonical_su2_absorbs_explicit_transform_sequence() 
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(
-        profile.route,
-        TensorContractFusionRoute::DynamicTreeCanonical
-    );
+    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
     assert_eq!(profile.lhs_transform_calls, 1);
     assert_eq!(profile.rhs_transform_calls, 1);
     assert_eq!(profile.output_transform_calls, 0);
-    assert!(profile.canonical_contract_groups > 0);
+    assert!(profile.core_contract_groups > 0);
     assert_eq!(profile.tree_replay.cache_lookup.as_nanos(), 0);
     assert_eq!(profile.tree_replay.strided_view_setup.as_nanos(), 0);
     assert_eq!(profile.tree_replay.multi_coefficient_prepare.as_nanos(), 0);
@@ -3100,8 +3075,8 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
 }
 
 #[test]
-fn tensorcontract_fusion_noncanonical_su2_lhs_adjoint_explicit_plan_matches_reference_sequence() {
-    assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+fn tensorcontract_fusion_non_core_form_su2_lhs_adjoint_prepared_plan_matches_reference_sequence() {
+    assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         su2_three_to_one_homspace(false, false),
         su2_one_to_three_homspace(true, true),
         true,
@@ -3110,8 +3085,8 @@ fn tensorcontract_fusion_noncanonical_su2_lhs_adjoint_explicit_plan_matches_refe
 }
 
 #[test]
-fn tensorcontract_fusion_noncanonical_su2_rhs_adjoint_explicit_plan_matches_reference_sequence() {
-    assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+fn tensorcontract_fusion_non_core_form_su2_rhs_adjoint_prepared_plan_matches_reference_sequence() {
+    assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         su2_three_to_one_homspace(false, true),
         su2_one_to_three_homspace(false, true),
         false,
@@ -3120,8 +3095,8 @@ fn tensorcontract_fusion_noncanonical_su2_rhs_adjoint_explicit_plan_matches_refe
 }
 
 #[test]
-fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_reference_sequence() {
-    assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+fn tensorcontract_fusion_non_core_form_su2_both_adjoint_prepared_plan_matches_reference_sequence() {
+    assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         su2_three_to_one_homspace(false, false),
         su2_one_to_three_homspace(false, false),
         true,
@@ -3129,7 +3104,7 @@ fn tensorcontract_fusion_noncanonical_su2_both_adjoint_explicit_plan_matches_ref
     );
 }
 
-fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
+fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     lhs_hom: FusionTreeHomSpace,
     rhs_hom: FusionTreeHomSpace,
     lhs_conjugate: bool,
@@ -3185,14 +3160,14 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         1,
     )
     .unwrap();
-    let lhs_canonical_hom = effective_lhs_hom
+    let lhs_core_hom = effective_lhs_hom
         .permute(
             &rule,
             lowered_lhs_open_axes.as_slice(),
             lowered_lhs_axes.as_slice(),
         )
         .unwrap();
-    let rhs_canonical_hom = effective_rhs_hom
+    let rhs_core_hom = effective_rhs_hom
         .permute(
             &rule,
             lowered_rhs_axes.as_slice(),
@@ -3206,16 +3181,16 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         [vec![2, 2]],
     )
     .unwrap();
-    let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
-        lhs_canonical_hom,
+        lhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let rhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let rhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
-        rhs_canonical_hom,
+        rhs_core_hom,
         &rule,
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
@@ -3244,20 +3219,20 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
         dst_space.clone(),
     )
     .unwrap();
-    let mut lhs_canonical = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space.clone(),
+    let mut lhs_core = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); lhs_core_space.required_len().unwrap()],
+        lhs_core_space.clone(),
     )
     .unwrap();
-    let mut rhs_canonical = TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space.clone(),
+    let mut rhs_core = TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); rhs_core_space.required_len().unwrap()],
+        rhs_core_space.clone(),
     )
     .unwrap();
 
     tensoradd_fusion_into(
         &rule,
-        &mut lhs_canonical,
+        &mut lhs_core,
         &lhs,
         TreeTransformOperation::permute([3], [0, 1, 2]),
         lhs_conjugate,
@@ -3267,7 +3242,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
     .unwrap();
     tensoradd_fusion_into(
         &rule,
-        &mut rhs_canonical,
+        &mut rhs_core,
         &rhs,
         TreeTransformOperation::permute([1, 2, 3], [0]),
         rhs_conjugate,
@@ -3278,8 +3253,8 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
     tensorcontract_fusion_into(
         &rule,
         &mut expected_dst,
-        &lhs_canonical,
-        &rhs_canonical,
+        &lhs_core,
+        &rhs_core,
         TensorContractSpec::with_default_output_order(&[1, 2, 3], &[0, 1, 2]),
         alpha,
         beta,
@@ -3288,7 +3263,7 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
 
     let mut explicit_dst =
         TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(initial_dst, dst_space).unwrap();
-    let plan = tensorcontract_fusion_explicit_plan(
+    let plan = prepare_tensorcontract_fusion_plan(
         &rule,
         explicit_dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -3298,25 +3273,25 @@ fn assert_noncanonical_su2_adjoint_explicit_plan_matches_reference_sequence(
     .unwrap();
     assert_eq!(plan.lhs_source_conjugate(), lhs_conjugate);
     assert_eq!(plan.rhs_source_conjugate(), rhs_conjugate);
-    assert_eq!(plan.canonical_axes().lhs_contracting_axes(), &[1, 2, 3]);
-    assert_eq!(plan.canonical_axes().rhs_contracting_axes(), &[0, 1, 2]);
+    assert_eq!(plan.core_axes().lhs_contracting_axes(), &[1, 2, 3]);
+    assert_eq!(plan.core_axes().rhs_contracting_axes(), &[0, 1, 2]);
 
-    let mut explicit_lhs_canonical = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space,
+    let mut explicit_lhs_core = TensorMap::<Complex64, 1, 3>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); lhs_core_space.required_len().unwrap()],
+        lhs_core_space,
     )
     .unwrap();
-    let mut explicit_rhs_canonical = TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(
-        vec![Complex64::zero(); rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space,
+    let mut explicit_rhs_core = TensorMap::<Complex64, 3, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); rhs_core_space.required_len().unwrap()],
+        rhs_core_space,
     )
     .unwrap();
-    tensorcontract_fusion_explicit_plan_into(
+    tensorcontract_fusion_prepared_into(
         &rule,
         &plan,
         &mut explicit_dst,
-        &mut explicit_lhs_canonical,
-        &mut explicit_rhs_canonical,
+        &mut explicit_lhs_core,
+        &mut explicit_rhs_core,
         &lhs,
         &rhs,
         alpha,
@@ -3432,7 +3407,7 @@ fn su2_one_to_three_homspace(codomain_dual: bool, domain_dual: bool) -> FusionTr
 }
 
 #[test]
-fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
+fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([], []);
     let scalar_key = BlockKey::from(rhs_hom.fusion_tree_keys(&rule)[0].clone());
@@ -3442,19 +3417,19 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
     .unwrap();
-    let lhs_canonical_hom = src_space
+    let lhs_core_hom = src_space
         .homspace()
         .permute(&rule, &[0, 1, 2], &[])
         .unwrap();
-    let lhs_canonical_space = FusionTensorMapSpace::from_degeneracy_shapes(
+    let lhs_core_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
-        lhs_canonical_hom,
+        lhs_core_hom,
         &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
-    let canonical_dst_space = lhs_canonical_space.clone();
-    let rhs_canonical_space = rhs_space.clone();
+    let core_dst_space = lhs_core_space.clone();
+    let rhs_core_space = rhs_space.clone();
     let lhs_data = vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)];
     let rhs_data = vec![Complex64::new(2.0, 0.5)];
     let initial_dst = vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)];
@@ -3485,7 +3460,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
             }
         );
 
-    let plan = tensorcontract_fusion_explicit_plan(
+    let plan = prepare_tensorcontract_fusion_plan(
         &rule,
         dst.fusion_space().unwrap(),
         lhs.fusion_space().unwrap(),
@@ -3493,19 +3468,19 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         axes,
     )
     .unwrap();
-    let mut lhs_canonical = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
-        vec![Complex64::new(0.0, 0.0); lhs_canonical_space.required_len().unwrap()],
-        lhs_canonical_space,
+    let mut lhs_core = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0); lhs_core_space.required_len().unwrap()],
+        lhs_core_space,
     )
     .unwrap();
-    let mut rhs_canonical = TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(
-        vec![Complex64::new(0.0, 0.0); rhs_canonical_space.required_len().unwrap()],
-        rhs_canonical_space,
+    let mut rhs_core = TensorMap::<Complex64, 0, 0>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0); rhs_core_space.required_len().unwrap()],
+        rhs_core_space,
     )
     .unwrap();
-    let mut canonical_dst = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
-        vec![Complex64::new(0.0, 0.0); canonical_dst_space.required_len().unwrap()],
-        canonical_dst_space,
+    let mut core_dst = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
+        vec![Complex64::new(0.0, 0.0); core_dst_space.required_len().unwrap()],
+        core_dst_space,
     )
     .unwrap();
     let alpha = Complex64::new(2.0, 0.0);
@@ -3513,7 +3488,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     tree_transform_into(
         &rule,
         plan.lhs_transform().clone(),
-        &mut lhs_canonical,
+        &mut lhs_core,
         &lhs,
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
@@ -3522,7 +3497,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     tree_transform_into(
         &rule,
         plan.rhs_transform().clone(),
-        &mut rhs_canonical,
+        &mut rhs_core,
         &rhs,
         Complex64::new(1.0, 0.0),
         Complex64::new(0.0, 0.0),
@@ -3530,10 +3505,10 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
     .unwrap();
     tensorcontract_fusion_into(
         &rule,
-        &mut canonical_dst,
-        &lhs_canonical,
-        &rhs_canonical,
-        plan.canonical_axes().as_spec(),
+        &mut core_dst,
+        &lhs_core,
+        &rhs_core,
+        plan.core_axes().as_spec(),
         alpha,
         Complex64::new(0.0, 0.0),
     )
@@ -3542,7 +3517,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
         &rule,
         plan.output_transform().clone(),
         &mut expected_dst,
-        &canonical_dst,
+        &core_dst,
         Complex64::new(1.0, 0.0),
         beta,
     )
@@ -3572,7 +3547,7 @@ fn tensorcontract_fusion_product_noncanonical_absorbs_explicit_transform() {
             "actual {actual} expected {expected}"
         );
     }
-    // This path uses canonical fusion-block pack/GEMM/scatter directly; the
+    // This path uses core fusion-block pack/GEMM/scatter directly; the
     // generic TensorContractStructure cache is only used by dense/block-spec
     // contraction paths.
     assert_eq!(context.contract_cache().structure_len(), 0);
@@ -3969,14 +3944,14 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
         )
         .unwrap();
 
-    assert!(profile.canonical_contract_groups > 0);
+    assert!(profile.core_contract_groups > 0);
     assert_eq!(
-        profile.canonical_direct_gemm_groups, profile.canonical_contract_groups,
+        profile.core_direct_gemm_groups, profile.core_contract_groups,
         "coupled layout compose must GEMM directly into destination blocks"
     );
-    // Pack/scatter no longer exist on the canonical route: replay is
+    // Pack/scatter no longer exist on the core route: replay is
     // direct-GEMM only, so the pack counters stay at their zero defaults.
-    assert_eq!(profile.canonical_direct_pack_skips, 0);
-    assert_eq!(profile.canonical_pack_lhs, std::time::Duration::ZERO);
-    assert_eq!(profile.canonical_scatter, std::time::Duration::ZERO);
+    assert_eq!(profile.core_direct_pack_skips, 0);
+    assert_eq!(profile.core_pack_lhs, std::time::Duration::ZERO);
+    assert_eq!(profile.core_scatter, std::time::Duration::ZERO);
 }

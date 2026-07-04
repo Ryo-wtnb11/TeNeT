@@ -2,6 +2,10 @@
 
 作成日: 2026-07-03
 
+> **実施済み (2026-07-04)**: P0 / P1 の改名は完了。現行名との対応は
+> [`tensorkit_compatibility_table.md`](tensorkit_compatibility_table.md) が正本。
+> 本メモ中の「現在の名前」は改名前のものを指す。
+
 ## 目的
 
 TeNeT の API 名を、TensorKit / TensorOperations.jl の意味論に照らして見直す。

@@ -33,11 +33,10 @@ mod tree_profile;
 pub use axis::*;
 pub use error::OperationError;
 pub use fusion_replay::{
-    direct_group_matrix_offset, fusion_scale_block_layouts_excluding,
-    CanonicalFusionBlockContractGroupPlan, CanonicalFusionBlockContractPlan,
-    CanonicalFusionBlockContractWorkspace, FusionBlockMatrixGroup, FusionScaleBlockLayout,
-    FusionStridedBlockLayout, FusionSubblockMatrixLayout,
-    HostCanonicalFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
+    direct_group_matrix_offset, fusion_scale_block_layouts_excluding, FusionBlockContractGroupPlan,
+    FusionBlockContractPlan, FusionBlockContractWorkspace, FusionBlockMatrixGroup,
+    FusionScaleBlockLayout, FusionStridedBlockLayout, FusionSubblockMatrixLayout,
+    HostFusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
 };
 pub use host_scalar_kernels::{
     axpby_raw_strided_kernel, axpby_raw_strided_kernel_trusted, copy_block_with_strided_kernel,

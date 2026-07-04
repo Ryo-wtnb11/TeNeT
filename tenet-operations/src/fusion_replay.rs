@@ -1,4 +1,4 @@
-//! Symmetry-free replay half of the canonical fusion-block contraction:
+//! Symmetry-free replay half of the core fusion-block contraction:
 //! plan data (offsets, strides, coefficients), pack/GEMM/scatter execution,
 //! workspaces, and the storage-direct device seam. The symmetric compile
 //! layer builds these plans; nothing here consumes fusion rules.
@@ -19,11 +19,11 @@ use crate::strided::{offset_to_isize, strides_to_isize};
 use crate::structure_identity::validate_structure_identity;
 use crate::{DenseBlockScalar, HostKernelAdapter, OperationError, RecouplingCoefficientAction};
 
-/// Canonical contraction replay accepts only operands whose coupled-sector
+/// Core contraction replay accepts only operands whose coupled-sector
 /// matrices sit directly in storage (the one product layout). Anything else
 /// is a plan-construction bug, not a runtime fallback.
 const NON_COUPLED_OPERAND_MESSAGE: &str =
-    "canonical fusion-block replay requires the coupled sector matrix layout";
+    "core fusion-block replay requires the coupled sector matrix layout";
 
 /// Rank-2 column-major GEMM over host slices: the only capability the replay
 /// half needs from a contraction backend. The symmetric layer adapts its
@@ -81,7 +81,7 @@ pub trait Rank2Gemm<D> {
     }
 }
 
-/// One GEMM of a fully-direct canonical batch. Offsets address coupled-sector
+/// One GEMM of a fully-direct core batch. Offsets address coupled-sector
 /// matrices inside the operands' storage buffers; a batch's destination
 /// ranges never overlap (validated when the plan is assembled).
 #[derive(Clone, Copy, Debug)]
@@ -94,13 +94,13 @@ pub struct Rank2GemmBatchJob {
     pub cols: usize,
 }
 
-pub struct HostCanonicalFusionBlockContractWorkspace<T> {
+pub struct HostFusionBlockContractWorkspace<T> {
     _scalar: std::marker::PhantomData<T>,
 }
 
-pub type CanonicalFusionBlockContractWorkspace<T> = HostCanonicalFusionBlockContractWorkspace<T>;
+pub type FusionBlockContractWorkspace<T> = HostFusionBlockContractWorkspace<T>;
 
-impl<T> Default for HostCanonicalFusionBlockContractWorkspace<T> {
+impl<T> Default for HostFusionBlockContractWorkspace<T> {
     fn default() -> Self {
         Self {
             _scalar: std::marker::PhantomData,
@@ -108,7 +108,7 @@ impl<T> Default for HostCanonicalFusionBlockContractWorkspace<T> {
     }
 }
 
-impl<T> ReportsPlacement for HostCanonicalFusionBlockContractWorkspace<T> {
+impl<T> ReportsPlacement for HostFusionBlockContractWorkspace<T> {
     #[inline]
     fn placement(&self) -> Placement {
         Placement::Host
@@ -116,12 +116,12 @@ impl<T> ReportsPlacement for HostCanonicalFusionBlockContractWorkspace<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct CanonicalFusionBlockContractPlan {
+pub struct FusionBlockContractPlan {
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
     inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
-    groups: Vec<CanonicalFusionBlockContractGroupPlan>,
+    groups: Vec<FusionBlockContractGroupPlan>,
     // Precompiled batch over the groups when every operand is a direct
     // coupled-sector matrix; replay hands it to the backend in a single
     // `matmul_rank2_batch` call. `None` marks a non-direct plan — a valid
@@ -129,7 +129,7 @@ pub struct CanonicalFusionBlockContractPlan {
     direct_batch: Option<Vec<Rank2GemmBatchJob>>,
 }
 
-impl CanonicalFusionBlockContractPlan {
+impl FusionBlockContractPlan {
     /// True when every group reads and writes coupled-sector matrices
     /// directly in storage — the only layouts the replay executes. The
     /// symmetric route layer sends anything else through dynamic
@@ -147,7 +147,7 @@ impl CanonicalFusionBlockContractPlan {
         lhs_structure: Arc<BlockStructure>,
         rhs_structure: Arc<BlockStructure>,
         inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
-        groups: Vec<CanonicalFusionBlockContractGroupPlan>,
+        groups: Vec<FusionBlockContractGroupPlan>,
     ) -> Result<Self, OperationError> {
         let direct_batch = compile_direct_batch(&groups)?;
         Ok(Self {
@@ -165,7 +165,7 @@ impl CanonicalFusionBlockContractPlan {
         &self,
         kernels: &mut A,
         gemm: &mut G,
-        fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
         lhs_structure: &Arc<BlockStructure>,
@@ -207,7 +207,7 @@ impl CanonicalFusionBlockContractPlan {
         &self,
         kernels: &mut A,
         gemm: &mut G,
-        fusion_workspace: &mut CanonicalFusionBlockContractWorkspace<D>,
+        fusion_workspace: &mut FusionBlockContractWorkspace<D>,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
         lhs_structure: &Arc<BlockStructure>,
@@ -234,22 +234,22 @@ impl CanonicalFusionBlockContractPlan {
             rhs_structure,
             rhs_data.len(),
         )?;
-        profile.canonical_validate += start.elapsed();
+        profile.core_validate += start.elapsed();
 
         let start = std::time::Instant::now();
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
-        profile.canonical_scale += start.elapsed();
+        profile.core_scale += start.elapsed();
 
         let _ = fusion_workspace;
         for group in &self.groups {
-            profile.canonical_contract_groups += 1;
+            profile.core_contract_groups += 1;
             let start = std::time::Instant::now();
             execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
-            profile.canonical_direct_gemm_groups += 1;
-            profile.canonical_matmul += start.elapsed();
+            profile.core_direct_gemm_groups += 1;
+            profile.core_matmul += start.elapsed();
         }
 
-        profile.canonical_contract_total += total_start.elapsed();
+        profile.core_contract_total += total_start.elapsed();
         Ok(())
     }
 
@@ -338,7 +338,7 @@ impl CanonicalFusionBlockContractPlan {
     }
 
     /// Storage-aware raw replay for callers whose operands are scratch buffers
-    /// rather than `TensorMap`s (the dynamic canonical route).
+    /// rather than `TensorMap`s (the dynamic core route).
     ///
     /// Pack scratch allocation origins are passed explicitly: LHS pack scratch
     /// from `lhs_alloc`, RHS pack scratch from `rhs_alloc`, and matmul output
@@ -400,7 +400,7 @@ impl CanonicalFusionBlockContractPlan {
     }
 
     /// Storage-aware replay writing into a destination `TensorMap` while the
-    /// LHS/RHS operands are raw canonical scratch slices (the dynamic route
+    /// LHS/RHS operands are raw core scratch slices (the dynamic route
     /// with an identity output transform).
     ///
     /// Pack scratch allocation origins: LHS pack from `lhs_alloc`, RHS pack
@@ -560,7 +560,7 @@ impl CanonicalFusionBlockContractPlan {
 
 /// Placement-aware block GEMM over storage ranges.
 ///
-/// The device-side replay seam for canonical fusion-block contraction:
+/// The device-side replay seam for core fusion-block contraction:
 /// `dst[dst_offset..][rows x cols] = lhs[lhs_offset..][rows x contracted] *
 /// rhs[rhs_offset..][contracted x cols]` as column-major matrices, with no
 /// host-slice contract in the trait. The host implementation wraps a
@@ -620,13 +620,13 @@ fn validate_storage_len(
 }
 
 #[derive(Clone, Debug)]
-pub struct CanonicalFusionBlockContractGroupPlan {
+pub struct FusionBlockContractGroupPlan {
     pub lhs: FusionBlockMatrixGroup,
     pub rhs: FusionBlockMatrixGroup,
     pub dst: FusionBlockMatrixGroup,
 }
 
-impl CanonicalFusionBlockContractGroupPlan {
+impl FusionBlockContractGroupPlan {
     /// Validates and packages a group triple; called by the compile layer.
     pub fn new(
         lhs: FusionBlockMatrixGroup,
@@ -794,7 +794,7 @@ where
 /// (route-decision-only plan); a direct batch additionally enforces pairwise
 /// disjoint destination ranges so backends may execute jobs in any order.
 fn compile_direct_batch(
-    groups: &[CanonicalFusionBlockContractGroupPlan],
+    groups: &[FusionBlockContractGroupPlan],
 ) -> Result<Option<Vec<Rank2GemmBatchJob>>, OperationError> {
     let mut jobs = Vec::with_capacity(groups.len());
     for group in groups {
@@ -826,7 +826,7 @@ fn compile_direct_batch(
             .ok_or(OperationError::ElementCountOverflow)?;
         if end > pair[1].0 {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "canonical contraction groups must write disjoint destination ranges",
+                message: "core contraction groups must write disjoint destination ranges",
             });
         }
     }
@@ -839,7 +839,7 @@ fn compile_direct_batch(
 /// only produces coupled operands), reported as an explicit error.
 fn execute_group_direct<G, D>(
     gemm: &mut G,
-    group: &CanonicalFusionBlockContractGroupPlan,
+    group: &FusionBlockContractGroupPlan,
     dst_data: &mut [D],
     lhs_data: &[D],
     rhs_data: &[D],
@@ -884,7 +884,7 @@ fn direct_slice<T>(
 
 fn matmul_group_plan<G, D>(
     gemm: &mut G,
-    group: &CanonicalFusionBlockContractGroupPlan,
+    group: &FusionBlockContractGroupPlan,
     lhs: &[D],
     rhs: &[D],
     dst: &mut [D],
@@ -926,10 +926,10 @@ mod tests {
     fn group_plan(
         dims: (usize, usize, usize),
         offsets: (usize, usize, usize),
-    ) -> CanonicalFusionBlockContractGroupPlan {
+    ) -> FusionBlockContractGroupPlan {
         let (rows, contracted, cols) = dims;
         let (lhs_offset, rhs_offset, dst_offset) = offsets;
-        CanonicalFusionBlockContractGroupPlan::new(
+        FusionBlockContractGroupPlan::new(
             direct_group(rows, contracted, Some(lhs_offset)),
             direct_group(contracted, cols, Some(rhs_offset)),
             direct_group(rows, cols, Some(dst_offset)),
@@ -967,7 +967,7 @@ mod tests {
 
     #[test]
     fn non_direct_group_yields_route_decision_only_plan() {
-        let plan = CanonicalFusionBlockContractGroupPlan::new(
+        let plan = FusionBlockContractGroupPlan::new(
             direct_group(2, 3, None),
             direct_group(3, 4, Some(0)),
             direct_group(2, 4, Some(0)),
