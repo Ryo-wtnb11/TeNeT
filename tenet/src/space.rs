@@ -7,6 +7,31 @@ use tenet_core::{
 
 use crate::error::Error;
 
+/// A user-facing sector label: the rule-specific charge content of one
+/// sector, mirroring the [`Space`] constructors (one variant per
+/// constructor). Returned by [`Space::sectors`] and accepted by
+/// [`Space::degeneracy`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SectorLabel {
+    /// U(1) charge, as passed to [`Space::u1`].
+    U1(i32),
+    /// Z2 parity (`0` even, `1` odd), as passed to [`Space::z2`].
+    Z2(u8),
+    /// Fermion parity (`0` even, `1` odd), as passed to [`Space::fz2`].
+    FZ2(u8),
+    /// SU(2) spin as `twice_spin = 2j`, as passed to [`Space::su2`].
+    SU2 { twice_spin: usize },
+    /// U(1) x fermion-parity product sector, as passed to [`Space::product`].
+    U1FZ2 { charge: i32, parity: u8 },
+    /// fZ2 x U(1) x SU(2) triple-product sector, as passed to
+    /// [`Space::fz2_u1_su2`].
+    FZ2U1SU2 {
+        parity: u8,
+        charge: i32,
+        twice_spin: usize,
+    },
+}
+
 /// The fusion rule a [`Space`] (and every [`crate::prelude::Tensor`] built
 /// from it) is tagged with. The user layer erases the concrete rule types of
 /// the expert layer behind this tag.
@@ -276,6 +301,191 @@ impl Space {
                 .map(|&(sector, deg)| deg * (rule.dim_scalar(sector).round() as usize))
                 .sum()
         })
+    }
+
+    /// Whether this is a dual space, mirroring TensorKit's `isdual(V)`.
+    pub fn is_dual(&self) -> bool {
+        self.dual
+    }
+
+    /// `true` when `other` carries the same fusion rule, i.e. the two spaces
+    /// can appear on the same tensor / be fused.
+    pub fn same_rule(&self, other: &Space) -> bool {
+        self.rule == other.rule
+    }
+
+    /// Decodes an internal sector id into the user-facing label for this
+    /// space's rule. Inverse of the encoding done by the constructors.
+    fn decode_sector(&self, sector: SectorId) -> SectorLabel {
+        match self.rule {
+            RuleKind::U1 => SectorLabel::U1(
+                U1Irrep::from_sector_id(sector)
+                    .expect("invalid U1 sector id")
+                    .charge(),
+            ),
+            RuleKind::Z2 => SectorLabel::Z2(
+                Z2Irrep::from_sector_id(sector)
+                    .expect("invalid Z2 sector id")
+                    .parity(),
+            ),
+            RuleKind::FZ2 => SectorLabel::FZ2(sector.id() as u8),
+            RuleKind::SU2 => SectorLabel::SU2 {
+                twice_spin: SU2Irrep::from_sector_id(sector).twice_spin(),
+            },
+            RuleKind::U1FZ2 => {
+                let (u1, fz2) =
+                    TensorKitProductCodec::decode(sector).expect("invalid product sector id");
+                SectorLabel::U1FZ2 {
+                    charge: U1Irrep::from_sector_id(u1)
+                        .expect("invalid U1 sector id")
+                        .charge(),
+                    parity: fz2.id() as u8,
+                }
+            }
+            RuleKind::FZ2U1SU2 => {
+                let (inner, su2) =
+                    TensorKitProductCodec::decode(sector).expect("invalid product sector id");
+                let (fz2, u1) =
+                    TensorKitProductCodec::decode(inner).expect("invalid product sector id");
+                SectorLabel::FZ2U1SU2 {
+                    parity: fz2.id() as u8,
+                    charge: U1Irrep::from_sector_id(u1)
+                        .expect("invalid U1 sector id")
+                        .charge(),
+                    twice_spin: SU2Irrep::from_sector_id(su2).twice_spin(),
+                }
+            }
+        }
+    }
+
+    /// Encodes a user-facing label into the internal sector id, `None` when
+    /// the label's variant does not match this space's rule or the label
+    /// does not fit the sector-id encoding.
+    fn encode_sector(&self, label: SectorLabel) -> Option<SectorId> {
+        match (self.rule, label) {
+            (RuleKind::U1, SectorLabel::U1(charge)) => Some(U1Irrep::new(charge).sector_id()),
+            (RuleKind::Z2, SectorLabel::Z2(parity)) => Some(Z2Irrep::new(parity).sector_id()),
+            (RuleKind::FZ2, SectorLabel::FZ2(parity)) => {
+                Some(SectorId::new(usize::from(parity & 1)))
+            }
+            (RuleKind::SU2, SectorLabel::SU2 { twice_spin }) => {
+                Some(SU2Irrep::from_twice_spin(twice_spin).sector_id())
+            }
+            (RuleKind::U1FZ2, SectorLabel::U1FZ2 { charge, parity }) => {
+                TensorKitProductCodec::try_encode(
+                    U1Irrep::new(charge).sector_id(),
+                    SectorId::new(usize::from(parity & 1)),
+                )
+            }
+            (
+                RuleKind::FZ2U1SU2,
+                SectorLabel::FZ2U1SU2 {
+                    parity,
+                    charge,
+                    twice_spin,
+                },
+            ) => TensorKitProductCodec::try_encode(
+                SectorId::new(usize::from(parity & 1)),
+                U1Irrep::new(charge).sector_id(),
+            )
+            .and_then(|inner| {
+                TensorKitProductCodec::try_encode(
+                    inner,
+                    SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+                )
+            }),
+            _ => None,
+        }
+    }
+
+    /// The `(sector, degeneracy)` content of this space in the user-facing
+    /// representation, sorted by internal sector id.
+    ///
+    /// Labels are the *external* (outward-facing) sectors, matching
+    /// TensorKit's `sectors(V)`: for a dual space they are the duals of the
+    /// sectors the space was constructed with, exactly as [`Self::dual`]
+    /// stores them.
+    pub fn sectors(&self) -> Vec<(SectorLabel, usize)> {
+        self.sectors
+            .iter()
+            .map(|&(sector, deg)| (self.decode_sector(sector), deg))
+            .collect()
+    }
+
+    /// Degeneracy of the sector with the given (external) label, `None` when
+    /// the sector is absent or the label does not match this space's rule.
+    ///
+    /// TensorKit equivalent: `dim(V, c)` (named `degeneracy` here because
+    /// [`Self::dim`] is the quantum-dimension-weighted total).
+    pub fn degeneracy(&self, label: SectorLabel) -> Option<usize> {
+        let sector = self.encode_sector(label)?;
+        self.sectors
+            .iter()
+            .find(|&&(s, _)| s == sector)
+            .map(|&(_, deg)| deg)
+    }
+
+    /// The fused space `V1 ⊗ V2` collapsed to a single leg: every fusion
+    /// product of a sector of `self` with a sector of `other`, with the
+    /// degeneracy of an outcome `c` given by
+    /// `sum over (a, b) with c in a ⊗ b of deg_a * deg_b * N^c_ab`.
+    ///
+    /// Follows TensorKit's `fuse(V₁, V₂)`
+    /// (`spaces/gradedspace.jl:150-158`): inputs enter through their
+    /// *external* sector content (dual spaces are not re-dualized — their
+    /// stored sectors are already external, see [`Self::dual`]) and the
+    /// result is always a non-dual space.
+    ///
+    /// Errors with [`Error::RuleMismatch`] when the rules differ.
+    pub fn fuse(&self, other: &Space) -> Result<Space, Error> {
+        if self.rule != other.rule {
+            return Err(Error::RuleMismatch);
+        }
+        let fused = with_rule!(self.rule, rule, {
+            fn fuse_sectors<R: FusionRule>(
+                rule: &R,
+                left: &[(SectorId, usize)],
+                right: &[(SectorId, usize)],
+            ) -> Vec<(SectorId, usize)> {
+                let mut out = std::collections::BTreeMap::<SectorId, usize>::new();
+                for &(a, deg_a) in left {
+                    for &(b, deg_b) in right {
+                        for c in rule.fusion_channels(a, b) {
+                            *out.entry(c).or_insert(0) += rule.nsymbol(a, b, c) * deg_a * deg_b;
+                        }
+                    }
+                }
+                out.into_iter().collect()
+            }
+            fuse_sectors(rule, &self.sectors, &other.sectors)
+        });
+        Ok(Self {
+            rule: self.rule,
+            sectors: fused,
+            dual: false,
+        })
+    }
+
+    /// N-ary [`Self::fuse`], mirroring TensorKit's variadic
+    /// `fuse(V₁, V₂, V₃...)` (`spaces/vectorspaces.jl:269-274`): a single
+    /// space folds to its non-dual isomorph (TensorKit's `fuse(V) =
+    /// isdual(V) ? flip(V) : V`), more fold pairwise.
+    ///
+    /// Errors on an empty slice or mismatched rules.
+    pub fn fuse_all(spaces: &[&Space]) -> Result<Space, Error> {
+        let (first, rest) = spaces
+            .split_first()
+            .ok_or_else(|| Error::InvalidArgument("fuse_all needs at least one space".into()))?;
+        // flip: stored sectors are already external, so dropping the dual
+        // flag yields the isomorphic non-dual space.
+        let mut fused = Space {
+            dual: false,
+            ..(*first).clone()
+        };
+        for space in rest {
+            fused = fused.fuse(space)?;
+        }
+        Ok(fused)
     }
 
     /// Lowers this space to the expert-layer [`SectorLeg`] (sector,

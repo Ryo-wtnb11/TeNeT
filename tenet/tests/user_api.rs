@@ -756,3 +756,257 @@ fn fz2_u1_su2_contraction_svd_and_rank5_smoke() {
     let h = p.adjoint().unwrap().adjoint().unwrap();
     assert_close(h.data(), p.data(), 1e-12);
 }
+
+// ---------------------------------------------------------------------------
+// Space sector introspection and fusion (TensorKit `sectors` / `dim(V,c)` /
+// `fuse` analogs). Expected values cross-checked against TensorKit
+// (spaces/gradedspace.jl fuse, and a live Julia run for the dual-input and
+// triple-product cases).
+// ---------------------------------------------------------------------------
+
+fn sector_set(space: &Space) -> std::collections::HashSet<(SectorLabel, usize)> {
+    space.sectors().into_iter().collect()
+}
+
+fn set_of<const N: usize>(
+    pairs: [(SectorLabel, usize); N],
+) -> std::collections::HashSet<(SectorLabel, usize)> {
+    pairs.into_iter().collect()
+}
+
+#[test]
+fn space_sectors_round_trip_all_constructors() {
+    let u1 = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+    assert_eq!(
+        sector_set(&u1),
+        set_of([
+            (SectorLabel::U1(-1), 2),
+            (SectorLabel::U1(0), 3),
+            (SectorLabel::U1(1), 2),
+        ])
+    );
+
+    let z2 = Space::z2([(0, 2), (1, 3)]);
+    assert_eq!(
+        sector_set(&z2),
+        set_of([(SectorLabel::Z2(0), 2), (SectorLabel::Z2(1), 3)])
+    );
+
+    let fz2 = Space::fz2([(0, 1), (1, 4)]);
+    assert_eq!(
+        sector_set(&fz2),
+        set_of([(SectorLabel::FZ2(0), 1), (SectorLabel::FZ2(1), 4)])
+    );
+
+    let su2 = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    assert_eq!(
+        sector_set(&su2),
+        set_of([
+            (SectorLabel::SU2 { twice_spin: 0 }, 2),
+            (SectorLabel::SU2 { twice_spin: 1 }, 3),
+            (SectorLabel::SU2 { twice_spin: 2 }, 1),
+        ])
+    );
+
+    let product = Space::product([((0, 0), 2), ((-1, 1), 3)]).unwrap();
+    assert_eq!(
+        sector_set(&product),
+        set_of([
+            (
+                SectorLabel::U1FZ2 {
+                    charge: 0,
+                    parity: 0
+                },
+                2
+            ),
+            (
+                SectorLabel::U1FZ2 {
+                    charge: -1,
+                    parity: 1
+                },
+                3
+            ),
+        ])
+    );
+
+    let triple = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, -1, 1), 2)]).unwrap();
+    assert_eq!(
+        sector_set(&triple),
+        set_of([
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 0,
+                    charge: 0,
+                    twice_spin: 0
+                },
+                1
+            ),
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 1,
+                    charge: -1,
+                    twice_spin: 1
+                },
+                2
+            ),
+        ])
+    );
+}
+
+#[test]
+fn space_degeneracy_and_is_dual() {
+    let v = Space::u1([(-1, 2), (0, 3)]);
+    assert_eq!(v.degeneracy(SectorLabel::U1(-1)), Some(2));
+    assert_eq!(v.degeneracy(SectorLabel::U1(0)), Some(3));
+    assert_eq!(v.degeneracy(SectorLabel::U1(5)), None);
+    // Rule-mismatched label is None, not a panic.
+    assert_eq!(v.degeneracy(SectorLabel::Z2(0)), None);
+
+    assert!(!v.is_dual());
+    let w = v.dual();
+    assert!(w.is_dual());
+    // dual() stores external sectors: the dual space reports negated charges.
+    assert_eq!(w.degeneracy(SectorLabel::U1(1)), Some(2));
+    assert_eq!(w.degeneracy(SectorLabel::U1(-1)), None);
+
+    assert!(v.same_rule(&w));
+    assert!(!v.same_rule(&Space::z2([(0, 1)])));
+}
+
+#[test]
+fn space_fuse_u1_is_charge_convolution() {
+    // TensorKit: fuse(U1Space(0=>1,1=>1), same) == Rep[U1](0=>1, 1=>2, 2=>1).
+    let v = Space::u1([(0, 1), (1, 1)]);
+    let fused = v.fuse(&v).unwrap();
+    assert_eq!(
+        sector_set(&fused),
+        set_of([
+            (SectorLabel::U1(0), 1),
+            (SectorLabel::U1(1), 2),
+            (SectorLabel::U1(2), 1),
+        ])
+    );
+    assert!(!fused.is_dual());
+    assert_eq!(fused.dim(), v.dim() * v.dim());
+
+    // TensorKit: fuse(dual(V), V) == Rep[U1](-1=>1, 0=>2, 1=>1) — the dual
+    // input enters through its external (negated) charges, result non-dual.
+    let mixed = v.dual().fuse(&v).unwrap();
+    assert_eq!(
+        sector_set(&mixed),
+        set_of([
+            (SectorLabel::U1(-1), 1),
+            (SectorLabel::U1(0), 2),
+            (SectorLabel::U1(1), 1),
+        ])
+    );
+    assert!(!mixed.is_dual());
+
+    // Mixing rules is an error.
+    assert_eq!(
+        v.fuse(&Space::z2([(0, 1)])).unwrap_err(),
+        Error::RuleMismatch
+    );
+}
+
+#[test]
+fn space_fuse_su2_half_times_half() {
+    // TensorKit: fuse(SU2Space(1/2=>1), same) == Rep[SU2](0=>1, 1=>1).
+    let half = Space::su2([(1, 1)]);
+    let fused = half.fuse(&half).unwrap();
+    assert_eq!(
+        sector_set(&fused),
+        set_of([
+            (SectorLabel::SU2 { twice_spin: 0 }, 1),
+            (SectorLabel::SU2 { twice_spin: 2 }, 1),
+        ])
+    );
+    // Quantum-dimension-weighted multiplicativity: dim 2 * 2 = 1 + 3.
+    assert_eq!(fused.dim(), half.dim() * half.dim());
+
+    // A degenerate multi-spin case: (j=0 x2, j=1/2 x1) squared.
+    let a = Space::su2([(0, 2), (1, 1)]);
+    let fused = a.fuse(&a).unwrap();
+    // 0x0 (x4), 1/2x1/2 -> 0: total 5; 0x1/2 + 1/2x0: 4; 1/2x1/2 -> 1: 1.
+    assert_eq!(
+        sector_set(&fused),
+        set_of([
+            (SectorLabel::SU2 { twice_spin: 0 }, 5),
+            (SectorLabel::SU2 { twice_spin: 1 }, 4),
+            (SectorLabel::SU2 { twice_spin: 2 }, 1),
+        ])
+    );
+    assert_eq!(fused.dim(), a.dim() * a.dim());
+}
+
+#[test]
+fn space_fuse_triple_product_dual_pair() {
+    // The finite-torus fuser shape: fuse(dual(l), l). Cross-checked against
+    // TensorKit: L = Vect[FermionParity x Irrep[U1] x Irrep[SU2]](
+    //   (0,0,0)=>1, (1,1,1/2)=>1);
+    // fuse(dual(L), L) == ((0,0,0)=>2, (0,0,1)=>1, (1,1,1/2)=>1,
+    //   (1,-1,1/2)=>1), dim 3 -> 9.
+    let l = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 1)]).unwrap();
+    assert_eq!(l.dim(), 3);
+    let fused = l.dual().fuse(&l).unwrap();
+    assert_eq!(
+        sector_set(&fused),
+        set_of([
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 0,
+                    charge: 0,
+                    twice_spin: 0
+                },
+                2
+            ),
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 0,
+                    charge: 0,
+                    twice_spin: 2
+                },
+                1
+            ),
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 1,
+                    charge: 1,
+                    twice_spin: 1
+                },
+                1
+            ),
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 1,
+                    charge: -1,
+                    twice_spin: 1
+                },
+                1
+            ),
+        ])
+    );
+    assert_eq!(fused.dim(), l.dim() * l.dim());
+    assert!(!fused.is_dual());
+}
+
+#[test]
+fn space_fuse_all_matches_pairwise_fold() {
+    let v = Space::u1([(0, 1), (1, 1)]);
+    let w = Space::u1([(-1, 1), (0, 2)]);
+    let folded = v.fuse(&w).unwrap().fuse(&v).unwrap();
+    let nary = Space::fuse_all(&[&v, &w, &v]).unwrap();
+    assert_eq!(sector_set(&nary), sector_set(&folded));
+    assert_eq!(nary.dim(), v.dim() * w.dim() * v.dim());
+
+    // Unary fuse of a dual space flips it to the isomorphic non-dual space
+    // (TensorKit `fuse(V) = isdual(V) ? flip(V) : V`).
+    let flipped = Space::fuse_all(&[&v.dual()]).unwrap();
+    assert!(!flipped.is_dual());
+    assert_eq!(
+        sector_set(&flipped),
+        set_of([(SectorLabel::U1(0), 1), (SectorLabel::U1(-1), 1)])
+    );
+
+    assert!(Space::fuse_all(&[]).is_err());
+}
