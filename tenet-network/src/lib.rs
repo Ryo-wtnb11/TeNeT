@@ -80,3 +80,5 @@ pub use slice::{
 };
 pub use tree::ContractionTree;
 
+/// The `tensor!` @tensor-style contraction macro (from `tenet-macros`).
+pub use tenet_macros::tensor;

@@ -23,4 +23,5 @@ opt-path = ["dep:opt-einsum-path"]
 
 [dependencies]
 tenet = { path = "../tenet", default-features = false }
+tenet-macros = { path = "../tenet-macros" }
 opt-einsum-path = { version = "0.2", optional = true }

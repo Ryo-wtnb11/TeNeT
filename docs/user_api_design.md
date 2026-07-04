@@ -118,4 +118,12 @@ expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
 5. legacy planner (tenet-legacy/tenet-contract の構造半分 + tenet-cotengrust)
    を移植し、`tensor!` proc-macro(@tensor 記法)を NetworkIR 直結で実装。
    execution 半分のみ新ユーザー層 Tensor に再結線
+   → 実施済み(2026-07-04): `tenet-network`(planner 移植 + Tensor executor)
+   + `tenet-macros`(`tensor!`)。構文は式形式
+   `let c = tensor!([a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])?;`
+   (出力シグネチャ先頭、`conj(x)[...]` で adjoint、`[]` で rank-0)。
+   フォローアップ: (i) tenet-cotengrust 移植(DenseContractionOptimizer
+   実装をそのまま差し込む)、(ii) shape-keyed plan cache(現状は毎回
+   greedy で再プラン; legacy EinsumPlanCache 相当)、(iii) Tensor 層
+   select_index が入り次第 sliced executor。
 6. (後日)c64、GPU runtime
