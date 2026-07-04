@@ -24,7 +24,6 @@ use super::backend::{
     tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,
 };
 use super::dynamic::{
-    tensorcontract_fusion_dynamic_plan_into_context,
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
 use super::dynamic_space::DynamicFusionMapSpace;
@@ -968,11 +967,14 @@ where
         self.execute_resolution_dyn(
             &resolution,
             rule,
-            dst_space,
+            Some(dst_space),
+            dst_space.structure(),
             dst_data,
-            lhs_space,
+            Some(lhs_space),
+            lhs_space.structure(),
             lhs_data,
-            rhs_space,
+            Some(rhs_space),
+            rhs_space.structure(),
             rhs_data,
             alpha,
             beta,
@@ -1051,17 +1053,30 @@ where
         }
     }
 
-    /// Executes a resolved contraction on dynamic spaces and raw slices.
+    /// Executes a resolved contraction on raw slices; shared by the
+    /// dynamic-rank entry point and the typed facade / prepared-handle path.
+    ///
+    /// The structures are passed separately from the spaces because the two
+    /// callers replay on different structures: the dynamic entry replays on
+    /// the space's canonical structure, while the typed wrapper replays on
+    /// each tensor's own *storage* structure (which
+    /// `from_storage_with_structure` lets differ from the space's). The
+    /// spaces themselves are consumed only by the dynamic-tree route, so
+    /// they are optional: a typed tensor without a fusion space errors
+    /// there and only there (as before the merge).
     #[allow(clippy::too_many_arguments)]
     fn execute_resolution_dyn<R>(
         &mut self,
         resolution: &Resolution,
         rule: &R,
-        dst_space: &DynamicFusionMapSpace,
+        dst_space: Option<&DynamicFusionMapSpace>,
+        dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
-        lhs_space: &DynamicFusionMapSpace,
+        lhs_space: Option<&DynamicFusionMapSpace>,
+        lhs_structure: &Arc<BlockStructure>,
         lhs_data: &[D],
-        rhs_space: &DynamicFusionMapSpace,
+        rhs_space: Option<&DynamicFusionMapSpace>,
+        rhs_structure: &Arc<BlockStructure>,
         rhs_data: &[D],
         alpha: D,
         beta: D,
@@ -1085,17 +1100,21 @@ where
                         workspace: contract_workspace,
                     },
                     fusion_block_workspace,
-                    dst_space.structure(),
+                    dst_structure,
                     dst_data,
-                    lhs_space.structure(),
+                    lhs_structure,
                     lhs_data,
-                    rhs_space.structure(),
+                    rhs_structure,
                     rhs_data,
                     alpha,
                     beta,
                 )
             }
             Resolution::DynamicTree(plan) => {
+                let missing = || OperationError::Core(CoreError::MissingFusionSpace);
+                let dst_space = dst_space.ok_or_else(missing)?;
+                let lhs_space = lhs_space.ok_or_else(missing)?;
+                let rhs_space = rhs_space.ok_or_else(missing)?;
                 let Self {
                     tree_context,
                     dynamic_space_cache,
@@ -1117,13 +1136,13 @@ where
                     rule,
                     plan.as_ref(),
                     dst_space,
-                    &Arc::clone(dst_space.structure()),
+                    dst_structure,
                     dst_data,
                     lhs_space,
-                    &Arc::clone(lhs_space.structure()),
+                    lhs_structure,
                     lhs_data,
                     rhs_space,
-                    &Arc::clone(rhs_space.structure()),
+                    rhs_structure,
                     rhs_data,
                     alpha,
                     beta,
@@ -1133,9 +1152,9 @@ where
                 self.contract_backend.tensorcontract_structure_into_raw(
                     &mut self.contract_workspace,
                     structure,
-                    dst_space.structure(),
-                    lhs_space.structure(),
-                    rhs_space.structure(),
+                    dst_structure,
+                    lhs_structure,
+                    rhs_structure,
                     dst_data,
                     lhs_data,
                     rhs_data,
@@ -1180,74 +1199,33 @@ where
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
     {
-        match resolution {
-            Resolution::Core(block_plan) => {
-                let Self {
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    ..
-                } = self;
-                let dst_structure = std::sync::Arc::clone(dst.structure());
-                let lhs_structure = std::sync::Arc::clone(lhs.structure());
-                let rhs_structure = std::sync::Arc::clone(rhs.structure());
-                block_plan.execute_raw(
-                    &mut crate::StridedHostKernelAdapter,
-                    &mut super::fusion_block::BackendRank2Gemm {
-                        backend: contract_backend,
-                        workspace: contract_workspace,
-                    },
-                    fusion_block_workspace,
-                    &dst_structure,
-                    dst.data_mut(),
-                    &lhs_structure,
-                    lhs.data(),
-                    &rhs_structure,
-                    rhs.data(),
-                    alpha,
-                    beta,
-                )
-            }
-            Resolution::DynamicTree(plan) => {
-                let Self {
-                    tree_context,
-                    dynamic_space_cache,
-                    resolution_cache,
-                    contract_backend,
-                    contract_workspace,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    ..
-                } = self;
-                tensorcontract_fusion_dynamic_plan_into_context(
-                    tree_context,
-                    contract_backend,
-                    contract_workspace,
-                    dynamic_space_cache,
-                    resolution_cache,
-                    fusion_block_workspace,
-                    fusion_scratch,
-                    rule,
-                    plan.as_ref(),
-                    dst,
-                    lhs,
-                    rhs,
-                    alpha,
-                    beta,
-                )
-            }
-            Resolution::Structure(structure) => {
-                self.contract_backend.tensorcontract_structure_into(
-                    &mut self.contract_workspace,
-                    structure,
-                    dst,
-                    lhs,
-                    rhs,
-                    alpha,
-                    beta,
-                )
-            }
-        }
+        let dst_space = dst
+            .fusion_space()
+            .map(|s| DynamicFusionMapSpace::from_typed(s));
+        let lhs_space = lhs
+            .fusion_space()
+            .map(|s| DynamicFusionMapSpace::from_typed(s));
+        let rhs_space = rhs
+            .fusion_space()
+            .map(|s| DynamicFusionMapSpace::from_typed(s));
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        self.execute_resolution_dyn(
+            resolution,
+            rule,
+            dst_space.as_ref(),
+            &dst_structure,
+            dst.data_mut(),
+            lhs_space.as_ref(),
+            &lhs_structure,
+            lhs.data(),
+            rhs_space.as_ref(),
+            &rhs_structure,
+            rhs.data(),
+            alpha,
+            beta,
+        )
     }
 
     /// Resolves the contraction route and plan once, returning a handle that
