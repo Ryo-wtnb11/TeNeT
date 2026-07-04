@@ -309,3 +309,54 @@ fn svd_compact_cross_checks_against_typed_expert_layer() {
     assert_close(s.data(), expert.s.data(), 1e-12);
     assert_close(vh.data(), expert.vh.data(), 1e-12);
 }
+
+/// SVD on a U(1) map whose charge set `{0, 1, 2}` is not closed under
+/// dualization, cross-checked against TensorKit v0.16: `svd_compact` on
+/// `W ← W` with `W = U1Space(0=>2, 1=>1, 2=>1)` recomposes exactly, and
+/// a rank-3 truncation keeps the asymmetric bond `Rep[U₁](0 => 2, 2 => 1)`
+/// whose factors still recompose.
+#[test]
+fn svd_recomposes_on_non_dualization_closed_charges() {
+    let rt = Runtime::builder().build().unwrap();
+    let w = Space::u1([(0, 2), (1, 1), (2, 1)]);
+    let charge = |c: i32| U1Irrep::new(c).sector_id();
+
+    let t = Tensor::rand_with_seed(&rt, [&w], [&w], 103).unwrap();
+    let (u, s, vh) = t.svd_compact().unwrap();
+    let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(relative_distance(&recon, &t) < 1e-10);
+
+    // Deterministic spectra: sector 0 -> {4, 3}, sector 1 -> {1},
+    // sector 2 -> {2}; rank(3) keeps {0 => 2, 2 => 1} and drops sector 1.
+    let d = Tensor::from_block_fn(&rt, [&w], [&w], |key, indices| match key {
+        BlockKey::FusionTree(key) if key.codomain_uncoupled()[0] == charge(0) => match indices {
+            [0, 0] => 4.0,
+            [1, 1] => 3.0,
+            _ => 0.0,
+        },
+        BlockKey::FusionTree(key) if key.codomain_uncoupled()[0] == charge(1) => 1.0,
+        _ => 2.0,
+    })
+    .unwrap();
+    let trunc = d.svd_trunc(&Truncation::rank(3)).unwrap();
+    let kept: Vec<_> = trunc
+        .singular_values
+        .iter()
+        .map(|spectrum| (spectrum.sector, spectrum.values.len()))
+        .collect();
+    assert_eq!(kept, vec![(charge(0), 2), (charge(2), 1)]);
+    assert!((trunc.error - 1.0).abs() < 1e-12);
+
+    // The kept factors recompose; the coupled sector the truncation dropped
+    // entirely is absent from the result (TensorKit keeps a zero block
+    // there), so the check is the exact norm identity rather than `add`.
+    let recon = trunc
+        .u
+        .compose(&trunc.s)
+        .unwrap()
+        .compose(&trunc.vh)
+        .unwrap();
+    let identity = recon.norm().unwrap().powi(2) + trunc.error.powi(2) - d.norm().unwrap().powi(2);
+    assert!(identity.abs() < 1e-12);
+    assert_eq!(recon.data(), &[4.0, 0.0, 0.0, 3.0, 2.0]);
+}

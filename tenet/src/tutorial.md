@@ -82,7 +82,9 @@ labels) are **compile-time** errors.
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+// Works for any charge set, including ones that are not symmetric under
+// negation (a hardcore boson).
+let v = Space::u1([(0, 2), (1, 1)]);
 
 // Codomain-vs-domain legs of the same Space contract directly...
 let a = Tensor::rand(&rt, [&v], [&v])?;
@@ -102,11 +104,6 @@ let c = Tensor::rand(&rt2, [&v], [&v])?;
 assert!(matches!(a.compose(&c), Err(Error::RuntimeMismatch)));
 # Ok::<(), Error>(())
 ```
-
-Caveat: today this contract is only honored for spaces whose sector
-content is closed under dualization (any Z2/fZ2/SU2 space, and U(1)
-spaces with charge sets symmetric under negation, like the `{-1, 0, 1}`
-above). See the limitations section.
 
 ## 2. Contraction
 
@@ -308,11 +305,11 @@ let weights = svd.s; // [bond] <- [bond]   kept for the inverse-weight trick
 assert_eq!((left.codomain_rank(), left.domain_rank()), (2, 1));
 assert_eq!((right.codomain_rank(), right.domain_rank()), (1, 2));
 
-// u and vh are isometries, so the weighted norms satisfy
-// |theta|^2 = |s_kept|^2 + error^2 exactly.
-let total = theta.norm()?.powi(2);
-let kept = weights.norm()?.powi(2);
-assert!((total - (kept + svd.error.powi(2))).abs() <= 1e-8 * (1.0 + total));
+// The truncated factors recompose to the rank-limited theta, and the
+// reported error is exactly the reconstruction distance.
+let recon = left.compose(&weights)?.compose(&right)?;
+let diff = recon.add(&theta, 1.0, -1.0)?.norm()?;
+assert!((diff - svd.error).abs() <= 1e-8 * (1.0 + svd.error));
 println!("truncation error: {:.3e}", svd.error);
 # Ok::<(), Error>(())
 ```
@@ -428,13 +425,10 @@ Honest list, as of this writing:
   one tensor is a compile error), and no hyperedge/batch labels.
 - **`left_orth` / `right_orth` do not apply the positive-diagonal gauge**
   (TensorKit's `positive = true`).
-- **Dual pairing requires dualization-closed sector content.** For a U(1)
-  space with an asymmetric charge set (e.g. `{0, 1}`, a hardcore boson),
-  contracting against the same `Space` (codomain-vs-domain) or its
-  `.dual()` (same-side) currently fails with a `SectorMismatch`: the
-  user-layer lowering does not yet reconcile the stored-dual convention of
-  the expert layer with `Space::dual`. Symmetric charge sets and all
-  Z2/fZ2/SU2 spaces (self-dual sectors) are unaffected. The same pairing
-  check can reject re-composing truncated SVD factors when the *kept*
-  coupled-sector set comes out asymmetric (which is why the example above
-  verifies the truncation through norms instead of `u * s * vh`).
+- **Truncation can forget a coupled sector's zero block.** When a
+  truncation discards a coupled sector entirely and a leg sector of the
+  kept factors vanishes from every remaining block, recomposing the
+  factors omits that (exactly zero) block — TensorKit keeps it, because
+  its spaces carry per-sector degeneracies independently of the blocks.
+  In that case `add` against the untruncated tensor is rejected as a
+  layout mismatch; compare through norms instead.

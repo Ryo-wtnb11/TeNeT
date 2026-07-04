@@ -471,3 +471,52 @@ fn rank_five_contract_cross_checks_against_expert_layer() {
     let user = a.contract(&b, &lhs_axes, &rhs_axes).unwrap();
     assert_close(user.data(), dst.data(), 1e-12);
 }
+
+/// Composition on a U(1) charge set that is NOT closed under dualization
+/// (`{0, 1}`, a hardcore boson). TensorKit v0.16 ground truth:
+/// `A * B` for `A, B : V ← V` with `V = U1Space(0=>1, 1=>1)` is plain
+/// block-by-block composition — with `block(A,0)=2, block(A,1)=3` and
+/// `block(B,0)=5, block(B,1)=7` the product has blocks `10` and `21`.
+#[test]
+fn compose_works_on_non_dualization_closed_charge_sets() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::u1([(0, 1), (1, 1)]);
+    let charge = |c: i32| U1Irrep::new(c).sector_id();
+
+    let a = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
+        BlockKey::FusionTree(key) if key.codomain_uncoupled()[0] == charge(0) => 2.0,
+        _ => 3.0,
+    })
+    .unwrap();
+    let b = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
+        BlockKey::FusionTree(key) if key.codomain_uncoupled()[0] == charge(0) => 5.0,
+        _ => 7.0,
+    })
+    .unwrap();
+    assert_eq!(a.compose(&b).unwrap().data(), &[10.0, 21.0]);
+
+    // The original repro: a random endomorphism composes with itself.
+    let r = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    assert!(r.compose(&r).is_ok());
+}
+
+/// Pairing follows Space identity (TensorKit: `domain(A) == codomain(B)`),
+/// independent of dualization closure of the sector content.
+#[test]
+fn leg_pairing_rules_on_asymmetric_charges() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::u1([(0, 1), (1, 1)]);
+    let a = Tensor::rand(&rt, [&v], [&v]).unwrap();
+
+    // Domain V does NOT pair with codomain V' (TensorKit SpaceMismatch).
+    let bad = Tensor::rand(&rt, [&v.dual()], [&v]).unwrap();
+    assert!(a.compose(&bad).is_err());
+
+    // Domain-vs-domain legs contract when exactly one side is the dual.
+    let b = Tensor::rand(&rt, [&v], [&v.dual()]).unwrap();
+    assert!(a.contract(&b, &[1], &[1]).is_ok());
+
+    // ...and are rejected when both sides carry the same Space.
+    let c = Tensor::rand(&rt, [&v], [&v]).unwrap();
+    assert!(a.contract(&c, &[1], &[1]).is_err());
+}

@@ -363,6 +363,10 @@ impl Tensor {
     /// every element of every symmetry-allowed block, with `indices` local
     /// to the block (degeneracy coordinates, codomain axes first). Mirrors
     /// [`tenet_core::TensorMap::from_block_fn_with_fusion_space`].
+    ///
+    /// The fusion-tree `key` labels domain legs with the domain `Space`'s
+    /// own sectors (TensorKit's `f2.uncoupled`), not their duals; on both
+    /// sides the uncoupled sectors fuse to the tree's coupled sector.
     pub fn from_block_fn<'a, C, D, F>(
         rt: &Runtime,
         codomain: C,

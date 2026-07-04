@@ -277,7 +277,7 @@ impl DynamicFusionMapSpace {
         let rhs_open = axis_plan.rhs_open_axes.clone();
         let keys = homspace.fusion_tree_keys(rule);
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
-        for key in keys {
+        'keys: for key in keys {
             let shape = match inferred_shapes.get(&key) {
                 Some(shape) => shape.clone(),
                 None => {
@@ -291,9 +291,20 @@ impl DynamicFusionMapSpace {
                                 .get(&sector)
                                 .copied()
                         };
-                        shape.push(dim.ok_or(OperationError::StructureMismatch {
-                            tensor: "core contraction scratch",
-                        })?);
+                        // A sector that never occurs on the operand axis has
+                        // no recoverable degeneracy (legs carry sector sets
+                        // only, degeneracies live in block shapes), so the
+                        // structural-zero block is omitted entirely. This
+                        // happens e.g. when a truncated SVD dropped a whole
+                        // coupled sector and the factors are recomposed:
+                        // TensorKit keeps a zero block there because its
+                        // spaces carry degeneracies. The skip is uniform per
+                        // codomain/domain tree, so each coupled grid stays
+                        // rectangular.
+                        match dim {
+                            Some(dim) => shape.push(dim),
+                            None => continue 'keys,
+                        }
                     }
                     shape
                 }

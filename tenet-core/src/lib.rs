@@ -552,7 +552,7 @@ impl FusionTreeHomSpace {
         self.select(rule, codomain_axes, domain_axes)
     }
 
-    pub fn compose<R>(rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
+    pub fn compose<R>(_rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
     where
         R: FusionRule,
     {
@@ -563,7 +563,7 @@ impl FusionTreeHomSpace {
             });
         }
         for (lhs_domain, rhs_codomain) in lhs.domain.legs().iter().zip(rhs.codomain.legs()) {
-            validate_composed_leg(rule, lhs_domain, rhs_codomain)?;
+            validate_composed_leg(lhs_domain, rhs_codomain)?;
         }
         Ok(Self::new(lhs.codomain.clone(), rhs.domain.clone()))
     }
@@ -801,34 +801,28 @@ fn validate_axis_selection(
     Ok(())
 }
 
-fn validate_composed_leg<R>(
-    rule: &R,
+fn validate_composed_leg(
     lhs_domain: &SectorLeg,
     rhs_codomain: &SectorLeg,
-) -> Result<(), CoreError>
-where
-    R: FusionRule,
-{
+) -> Result<(), CoreError> {
     if lhs_domain.is_dual() != rhs_codomain.is_dual() {
         return Err(CoreError::MalformedFusionTree {
             message: "contracted fusion leg duality flags do not match",
         });
     }
-    let mut lhs_external = lhs_domain
-        .sectors()
-        .iter()
-        .copied()
-        .map(|sector| rule.dual(sector))
-        .collect::<Vec<_>>();
-    lhs_external.sort_unstable();
-    lhs_external.dedup();
-    if lhs_external.len() != rhs_codomain.sectors().len() {
+    // TensorKit parity: `A * B` requires `domain(A) == codomain(B)` as
+    // spaces, so the stored legs must match verbatim (domain legs store the
+    // domain space's own sectors; verified against TensorKit v0.16:
+    // `rand(V ← V) * rand(V ← V)` works for V = U1Space(0=>1, 1=>1), a
+    // sector set that is not dualization-closed, while `(V ← V) * (? ← V')`
+    // is a SpaceMismatch).
+    if lhs_domain.sectors().len() != rhs_codomain.sectors().len() {
         return Err(CoreError::DimensionMismatch {
-            expected: lhs_external.len(),
+            expected: lhs_domain.sectors().len(),
             actual: rhs_codomain.sectors().len(),
         });
     }
-    for (&expected, &actual) in lhs_external.iter().zip(rhs_codomain.sectors()) {
+    for (&expected, &actual) in lhs_domain.sectors().iter().zip(rhs_codomain.sectors()) {
         if expected != actual {
             return Err(CoreError::SectorMismatch { expected, actual });
         }
@@ -8773,11 +8767,14 @@ mod tests {
 
     #[test]
     fn fusion_tree_homspace_compose_matches_nonselfdual_domain_convention() {
+        // TensorKit: `A * B` needs `domain(A) == codomain(B)` as spaces, so
+        // the stored legs pair verbatim even for non-self-dual sectors
+        // (Julia check: `rand(U1Space(0=>1,1=>1) ← same) * itself` works).
         let rule = U1FusionRule;
         let physical = u1(1);
         let lhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
-            FusionProductSpace::new([SectorLeg::new([rule.dual(physical)], false)]),
+            FusionProductSpace::new([SectorLeg::new([physical], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([physical], false)]),
@@ -8845,7 +8842,7 @@ mod tests {
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(-1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
@@ -8869,7 +8866,7 @@ mod tests {
         );
         let rhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(7)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(-1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
         );
 
         let lhs_permuted = lhs.permute(&rule, &[1], &[0]).unwrap();
@@ -8894,7 +8891,7 @@ mod tests {
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(-1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
@@ -8914,13 +8911,15 @@ mod tests {
 
     #[test]
     fn fusion_tree_homspace_compose_rejects_unmatched_contracted_sector() {
+        // Pairing a domain leg with the *dual* codomain leg is a
+        // SpaceMismatch in TensorKit (`(X ← V) * (V' ← Y)` fails).
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([u1(0)], false)]),
             FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([rule.dual(u1(1))], false)]),
             FusionProductSpace::new([SectorLeg::new([u1(0)], false)]),
         );
 
@@ -8929,8 +8928,8 @@ mod tests {
         assert_eq!(
             err,
             CoreError::SectorMismatch {
-                expected: rule.dual(u1(1)),
-                actual: u1(1),
+                expected: u1(1),
+                actual: rule.dual(u1(1)),
             }
         );
     }
