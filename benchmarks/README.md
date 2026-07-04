@@ -1,5 +1,9 @@
 # TeNeT vs TensorKit contraction microbench
 
+This file is chronological. Early sections record the packed-layout baseline;
+use the latest dated sections near the bottom for the current performance
+status.
+
 Same workload on both sides: rank-4 tensors `A, B` in `V ⊗ V ← V ⊗ V`,
 uniform degeneracy `d` per sector, warm structure caches, single-threaded.
 **Both sides use the same BLAS (Apple Accelerate)**: TeNeT built with
@@ -163,22 +167,25 @@ caches, not to this pipeline; re-evaluate compile cost on a realistic
 apply-gate workload (rank-5/6, larger sector sets) when the network
 contraction bench lands.
 
-## tsvd cross-check against TensorKit
+## SVD cross-check against TensorKit
 
-`tenet-matrixalgebra/examples/tsvd_crosscheck.rs` and
-`benchmarks/tensorkit_tsvd_crosscheck.jl` fill every fusion-tree pair block of
-a `V x V <- V x V` tensor with the same integer-hash function of the sector
+The Rust and Julia cross-check scripts fill every fusion-tree pair block of a
+`V x V <- V x V` tensor with the same integer-hash function of the sector
 labels and degeneracy indices, then print per-coupled-sector singular values
 (invariant under tree ordering and per-tree basis conventions). U(1)
 `{-1,0,1}` and SU(2) `{0,1/2}` at degeneracy 2: all 8 sector spectra agree
-with TensorKit 0.16 `svd_compact` to 10 printed digits (max deviation 0.0) —
+with TensorKit's `svd_compact` to 10 printed digits (max deviation 0.0) —
 validating the fusion-space structure and the blockwise SVD end to end.
 
-## Conclusions
+## Historical packed-layout conclusion
 
-- **With identical BLAS, TeNeT is 3.6–42x slower**; the gap is the per-call
-  pack/GEMM/scatter replay. Plan/cache lookup (<0.1 %), scratch allocation,
-  strided kernel speed, and threading are all non-causes.
+These were the conclusions for the initial packed-layout baseline above, not
+for the current code:
+
+- With identical BLAS, the packed layout was 3.6–42x slower; the gap was the
+  per-call pack/GEMM/scatter replay. Plan/cache lookup (<0.1 %), scratch
+  allocation, strided kernel speed, and threading were non-causes for that
+  baseline.
 - TensorKit stores each coupled-sector block as one contiguous column-major
   matrix (rows = codomain trees × degeneracy, cols = domain trees ×
   degeneracy), so `compose` is a direct per-sector GEMM with zero packing,
@@ -198,6 +205,10 @@ validating the fusion-space structure and the blockwise SVD end to end.
      sector-matrix form so transformed sources feed GEMM directly.
   4. Per-GEMM call overhead audit (TeNeT's matmul leg is ~1.8x TensorKit's
      `mul!` for identical block shapes).
+
+Current status is recorded in the later dated sections: coupled-sector layout
+is now the default, core-form contraction is pure GEMM with BLAS-native
+alpha/beta, and warm tree-transform replay uses the optimized replay paths.
 
 ## Post-restructure verification (2026-07-03, after tenet-operations extraction)
 

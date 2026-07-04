@@ -24,6 +24,12 @@ pub mod prelude {
     pub use tenet_matrixalgebra::{SectorSpectrum, Truncation};
 }
 
+/// Formula-first explanation of TeNeT's tensor-map convention, duals,
+/// contractions, block layout, and weighted norms.
+pub mod mathematics {
+    #![doc = include_str!("mathematics.md")]
+}
+
 pub mod core {
     pub use tenet_core::*;
 }

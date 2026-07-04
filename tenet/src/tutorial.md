@@ -65,13 +65,61 @@ assert_eq!(a.compose(&b)?.data(), &[10.0, 21.0]);
 # Ok::<(), Error>(())
 ```
 
+### Scalar dtype
+
+User-layer tensors store either `f64` or `c64`, fixed at construction.
+Real constructors are [`prelude::Tensor::zeros`], [`prelude::Tensor::rand`],
+and [`prelude::Tensor::from_block_fn`]; complex constructors are
+[`prelude::Tensor::zeros_c64`], [`prelude::Tensor::rand_c64`], and
+[`prelude::Tensor::from_block_fn_c64`]. TeNeT does not promote mixed dtypes
+implicitly: widen explicitly with [`prelude::Tensor::to_c64`].
+
+The weighted inner product always returns [`prelude::Complex64`]. For real
+tensors the imaginary part is exactly zero up to floating-point roundoff.
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+
+let re = Tensor::rand(&rt, [&v], [&v])?;
+let cx = Tensor::from_block_fn_c64(&rt, [&v], [&v], |_, indices| {
+    Complex64::new(indices[0] as f64, -(indices[1] as f64))
+})?;
+assert_eq!(re.dtype(), Dtype::F64);
+assert_eq!(cx.dtype(), Dtype::C64);
+
+let inner = re.inner(&re)?;
+assert!(inner.im.abs() <= 1e-14);
+assert!((inner.re - re.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + inner.re));
+
+assert!(matches!(re.compose(&cx), Err(Error::DtypeMismatch)));
+assert!(re.to_c64().compose(&cx).is_ok());
+# Ok::<(), Error>(())
+```
+
 ### Which legs may contract?
 
-Contraction compatibility is decided by **Space identity** (the TensorKit
-contract): two legs contract when they carry the same `Space` and exactly
-one of the two sits on a domain side. A codomain leg built from `v`
-contracts a domain leg built from the same `v`; to contract two same-side
-legs (e.g. domain against domain), build one of them from `v.dual()`.
+Contraction compatibility follows TensorKit's dual-pairing convention:
+the two selected legs must represent dual vector spaces in the current
+codomain/domain orientation. A codomain leg built from `v` contracts a
+domain leg built from the same `v`. To contract two same-side legs
+(e.g. domain against domain), build exactly one of them from `v.dual()`.
+
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <msub><mi>obj</mi><mi>A</mi></msub><mo stretchy="false">(</mo><mi>i</mi><mo stretchy="false">)</mo>
+  <mo>≅</mo>
+  <msup>
+    <mrow><msub><mi>obj</mi><mi>B</mi></msub><mo stretchy="false">(</mo><mi>j</mi><mo stretchy="false">)</mo></mrow>
+    <mo>*</mo>
+  </msup>
+</math>
+</div>
+
+See [`mathematics`] for the full tensor-map convention, dual, same-side
+contraction, and TensorKit-style `flip` conventions.
 
 Space or rule mismatches are **runtime** typed errors ([`prelude::Error`]:
 `RuleMismatch`, `RuntimeMismatch`, `InvalidArgument`, or a bubbled-up
@@ -118,6 +166,45 @@ appearing once must be listed in the output — violations are compile
 errors. With three or more operands the pairwise order is chosen
 automatically by a greedy planner. There are no einsum strings anywhere.
 
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <mtable columnalign="left" rowspacing="0.35em">
+    <mtr>
+      <mtd>
+        <msub><mi>C</mi><mrow><mi>i</mi><mi>j</mi><mo>;</mo><mi>m</mi><mi>n</mi></mrow></msub>
+        <mo>=</mo>
+        <munder><mo>∑</mo><mrow><mi>k</mi><mo>,</mo><mi>l</mi></mrow></munder>
+        <msub><mi>A</mi><mrow><mi>i</mi><mi>j</mi><mo>;</mo><mi>k</mi><mi>l</mi></mrow></msub>
+        <mspace width="0.35em"/>
+        <msub><mi>B</mi><mrow><mi>k</mi><mi>l</mi><mo>;</mo><mi>m</mi><mi>n</mi></mrow></msub>
+      </mtd>
+    </mtr>
+  </mtable>
+</math>
+</div>
+
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <mtable columnalign="left" rowspacing="0.35em">
+    <mtr>
+      <mtd>
+        <mi>E</mi>
+        <mo>=</mo>
+        <munder><mo>∑</mo><mrow><mi>p</mi><mo>,</mo><mi>q</mi><mo>,</mo><mi>l</mi><mo>,</mo><mi>r</mi></mrow></munder>
+        <mover>
+          <msub><mi>ψ</mi><mrow><mi>p</mi><mo>;</mo><mi>l</mi><mi>r</mi></mrow></msub>
+          <mo>¯</mo>
+        </mover>
+        <mspace width="0.35em"/>
+        <msub><mi>H</mi><mrow><mi>p</mi><mo>;</mo><mi>q</mi></mrow></msub>
+        <mspace width="0.35em"/>
+        <msub><mi>ψ</mi><mrow><mi>q</mi><mo>;</mo><mi>l</mi><mi>r</mi></mrow></msub>
+      </mtd>
+    </mtr>
+  </mtable>
+</math>
+</div>
+
 ```rust
 use tenet::prelude::*;
 use tenet_network::tensor;
@@ -131,7 +218,7 @@ let b = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
 let c = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n])?;
 assert_eq!((c.codomain_rank(), c.domain_rank()), (2, 2));
 
-// conj() + rank-0 output: <a, a> equals the weighted norm squared.
+// conj() + rank-0 output computes the weighted self inner product.
 let n2 = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l])?.scalar()?;
 let norm = a.norm()?;
 assert!((n2 - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
@@ -140,7 +227,7 @@ assert!((n2 - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 let p = tensor!([j, i; m, n] = c[i, j; m, n])?;
 assert_eq!(p.rank(), 4);
 
-// N-ary: the psi-H-psi energy shape; greedy planning picks the order.
+// N-ary: an energy contraction; greedy planning picks the order.
 let psi = Tensor::rand(&rt, [&v], [&v, &v])?;
 let h = Tensor::rand(&rt, [&v], [&v])?;
 let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])?.scalar()?;
@@ -215,14 +302,21 @@ per coupled sector across the codomain | domain split:
 - [`prelude::Tensor::qr_compact`] / [`prelude::Tensor::qr_full`],
   [`prelude::Tensor::lq_compact`] / [`prelude::Tensor::lq_full`].
 - [`prelude::Tensor::left_orth`] / [`prelude::Tensor::right_orth`] —
-  TensorKit's default kinds (QR / LQ). **Deviation:** the
-  positive-diagonal gauge (`positive = true`) is *not* applied.
+  TensorKit's default kinds (QR / LQ), including the positive-diagonal
+  gauge (`positive = true`, MatrixAlgebraKit's default).
 - [`prelude::Tensor::left_null`] / [`prelude::Tensor::right_null`],
   [`prelude::Tensor::left_polar`] / [`prelude::Tensor::right_polar`].
 - [`prelude::Tensor::eigh_full`] / [`prelude::Tensor::eigh_trunc`] /
   [`prelude::Tensor::eigh_vals`] — Hermitian eigendecomposition.
+- [`prelude::Tensor::eig_full`] / [`prelude::Tensor::eig_trunc`] /
+  [`prelude::Tensor::eig_vals`] — general eigendecomposition; outputs are
+  `c64` even for real input.
 - [`prelude::Tensor::exp`] / [`prelude::Tensor::inv`] /
   [`prelude::Tensor::pinv`] — matrix functions of endomorphisms.
+
+Hermitian `eigh_*` keeps the input dtype and reports real eigenvalues.
+General `eig_*` is complex-valued by construction, so the returned
+diagonal/eigenvector tensors are always `c64`.
 
 Truncation is controlled by [`prelude::Truncation`]: `Full`,
 `Rank(n)` (`Truncation::rank(n)`), `Tolerance { atol, rtol }`
@@ -231,10 +325,35 @@ Truncation is controlled by [`prelude::Truncation`]: `Full`,
 **quantum-dimension weighted**: `Rank(n)` bounds the weighted kept bond
 dimension, and the `error` field of [`prelude::SvdTrunc`] /
 [`prelude::EighTrunc`] is the weighted 2-norm of everything discarded, so
-`|t - u s vh| == error` in the weighted Frobenius norm.
+the reconstruction distance equals the reported error in the weighted
+Frobenius norm.
 
-A worked mini-example — split a rank-4 tensor 2 | 2, truncate the bond,
-and check the reported error against the actual reconstruction distance:
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <mtable columnalign="left" rowspacing="0.45em">
+    <mtr>
+      <mtd>
+        <mi>T</mi>
+        <mo>≈</mo>
+        <mi>U</mi><mspace width="0.2em"/><mi>S</mi><mspace width="0.2em"/><msup><mi>V</mi><mi>†</mi></msup>
+      </mtd>
+    </mtr>
+    <mtr>
+      <mtd>
+        <msub>
+          <mrow><mo>∥</mo><mi>T</mi><mo>−</mo><mi>U</mi><mspace width="0.2em"/><mi>S</mi><mspace width="0.2em"/><msup><mi>V</mi><mi>†</mi></msup><mo>∥</mo></mrow>
+          <mrow><mi>F</mi><mo>,</mo><mi>w</mi></mrow>
+        </msub>
+        <mo>=</mo><mi>ε</mi>
+      </mtd>
+    </mtr>
+  </mtable>
+</math>
+</div>
+
+A worked mini-example — split a rank-4 tensor across the current
+codomain/domain boundary, truncate the bond, and check the reported error
+against the actual reconstruction distance:
 
 ```rust
 use tenet::prelude::*;
@@ -243,7 +362,7 @@ let rt = Runtime::builder().build()?;
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
 let t = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
 
-// Truncated SVD across the codomain | domain split (weighted bond <= 6).
+// Truncated SVD across the codomain | domain split.
 let svd = t.svd_trunc(&Truncation::rank(6))?;
 assert_eq!((svd.u.codomain_rank(), svd.u.domain_rank()), (2, 1));
 assert_eq!((svd.vh.codomain_rank(), svd.vh.domain_rank()), (1, 2));
@@ -256,12 +375,22 @@ let recon = svd.u.compose(&svd.s)?.compose(&svd.vh)?;
 let diff = recon.add(&t, 1.0, -1.0)?.norm()?;
 assert!((diff - svd.error).abs() <= 1e-8 * (1.0 + svd.error));
 
-// Orthogonality: q from QR is an isometry (q^H q = id), so q q^H t' = t'
-// for t' = q r.
+// Orthogonality: q from QR is an isometry, so q r reconstructs t.
 let (q, r) = t.qr_compact()?;
 let qr = q.compose(&r)?;
 let diff = qr.add(&t, 1.0, -1.0)?.norm()?;
 assert!(diff <= 1e-10 * (1.0 + t.norm()?));
+
+// General eigendecomposition is c64 even for real input.
+let (d, w) = t.eig_full()?;
+assert_eq!(d.dtype(), Dtype::C64);
+assert_eq!(w.dtype(), Dtype::C64);
+
+// Hermitian eigendecomposition keeps the real dtype.
+let h = t.add(&t.adjoint()?, 0.5, 0.5)?;
+let (evals, vecs) = h.eigh_full()?;
+assert_eq!(evals.dtype(), Dtype::F64);
+assert_eq!(vecs.dtype(), Dtype::F64);
 # Ok::<(), Error>(())
 ```
 
@@ -269,11 +398,65 @@ To split a tensor along a different bipartition than its current
 codomain | domain split, `permute` (or a single-operand `tensor!`) first —
 that is exactly what the next section does.
 
+For the QR path, the compact factor obeys the usual isometry relation:
+
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <msup><mi>Q</mi><mi>†</mi></msup><mi>Q</mi><mo>=</mo><mi>I</mi>
+  <mo>,</mo>
+  <mi>T</mi><mo>=</mo><mi>Q</mi><mi>R</mi>
+</math>
+</div>
+
 ## 4. Worked Example: a U(1) Two-Site Imaginary-Time Step
 
-The simple-update kernel: apply a two-site gate `exp(-tau h)` to a
+The simple-update kernel: apply the two-site imaginary-time gate to a
 two-site wavefunction, regroup the legs around the bond, and truncate the
 bond back with `svd_trunc`.
+
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <mi>G</mi><mo stretchy="false">(</mo><mi>τ</mi><mo stretchy="false">)</mo>
+  <mo>=</mo>
+  <mi mathvariant="normal">exp</mi><mo stretchy="false">(</mo><mo>−</mo><mi>τ</mi><mspace width="0.2em"/><mi>H</mi><mo stretchy="false">)</mo>
+</math>
+</div>
+
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <mtable columnalign="left" rowspacing="0.35em">
+    <mtr>
+      <mtd>
+        <msub><mi>θ</mi><mrow><mi>a</mi><mi>l</mi><mo>;</mo><mi>b</mi><mi>r</mi></mrow></msub>
+        <mo>=</mo>
+        <munder><mo>∑</mo><mrow><mi>p</mi><mo>,</mo><mi>q</mi></mrow></munder>
+        <msub><mi>G</mi><mrow><mi>a</mi><mi>b</mi><mo>;</mo><mi>p</mi><mi>q</mi></mrow></msub>
+        <mspace width="0.35em"/>
+        <msub><mi>ψ</mi><mrow><mi>p</mi><mi>q</mi><mo>;</mo><mi>l</mi><mi>r</mi></mrow></msub>
+      </mtd>
+    </mtr>
+  </mtable>
+</math>
+</div>
+
+<div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
+<math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
+  <mtable columnalign="left" rowspacing="0.35em">
+    <mtr>
+      <mtd>
+        <msub><mi>θ</mi><mrow><mi>a</mi><mi>l</mi><mo>;</mo><mi>b</mi><mi>r</mi></mrow></msub>
+        <mo>≈</mo>
+        <munder><mo>∑</mo><mi>α</mi></munder>
+        <msub><mi>U</mi><mrow><mi>a</mi><mi>l</mi><mo>;</mo><mi>α</mi></mrow></msub>
+        <mspace width="0.35em"/>
+        <msub><mi>S</mi><mrow><mi>α</mi><mo>;</mo><mi>α</mi></mrow></msub>
+        <mspace width="0.35em"/>
+        <msub><msup><mi>V</mi><mi>†</mi></msup><mrow><mi>α</mi><mo>;</mo><mi>b</mi><mi>r</mi></mrow></msub>
+      </mtd>
+    </mtr>
+  </mtable>
+</math>
+</div>
 
 ```rust
 use tenet::prelude::*;
@@ -285,10 +468,10 @@ let rt = Runtime::builder().build()?;
 let p = Space::u1([(-1, 1), (1, 1)]);
 let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
 
-// Two-site wavefunction  psi : p (x) p <- l (x) r.
+// Two-site wavefunction with two physical and two virtual legs.
 let psi = Tensor::rand(&rt, [&p, &p], [&v, &v])?;
 
-// Hermitian two-site Hamiltonian and the imaginary-time gate exp(-tau h).
+// Hermitian two-site Hamiltonian and the imaginary-time gate.
 let h0 = Tensor::rand(&rt, [&p, &p], [&p, &p])?;
 let h = h0.add(&h0.adjoint()?, 0.5, 0.5)?;
 let tau = 0.05;
@@ -339,7 +522,7 @@ The user layer is a thin, rule-erased face over four expert modules:
   `Tensor` decomposition methods pass through to the `*_dyn` entry points
   here.
 - `tenet-network` (separate crate) — the `tensor!` macro, the label
-  planner ([`NetworkIR`], greedy and optional `opt-einsum-path`
+  planner (`NetworkIR`, greedy and optional `opt-einsum-path`
   optimizers, slicing types), and the pairwise executor over `Tensor`.
 
 Storage is column-major inside each dense block; symmetric tensors use the
@@ -393,7 +576,7 @@ runtime/rule erasure (e.g. your own context management or scalar types).
 | `V'` (dual space) | [`prelude::Space::dual`] | dual flag + dualized sectors on [`core::SectorLeg`] |
 | `@tensor` | `tensor!` (crate `tenet-network`) | planner IR -> pairwise [`operations::tensorcontract_fusion_into`] |
 | `permute` / `braid` / `transpose` | [`prelude::Tensor`] methods of the same names | [`operations::permute_into`] / `braid_into` / `transpose_into` |
-| `tsvd` (0.17: `svd_trunc`), `leftorth` (0.17: `left_orth`), ... | [`prelude::Tensor`] methods with the 0.17 names | [`matrixalgebra`] typed + `_dyn` functions |
+| SVD / QR / LQ / orthogonalization / eigensolvers | [`prelude::Tensor`] methods with the TensorKit 0.17 names | [`matrixalgebra`] typed + `_dyn` functions |
 | `dot` / `norm` / `axpby` | [`prelude::Tensor::inner`] / `norm` / `add` / `scale` | weighted block inner products |
 | implicit global caches | [`prelude::Runtime`] | [`operations::TensorContractFusionExecutionContext`], tree-transform caches, dense executor |
 | hom space / fusion-tree basis | (implicit in `Tensor` construction) | [`core::FusionTreeHomSpace`], [`core::FusionTensorMapSpace`] |
@@ -411,24 +594,20 @@ index objects), see `docs/user_api_design.md`.
 
 Honest list, as of this writing:
 
-- **Scalars are `f64` only.** `c64` is planned; the expert layers are
-  generic, the user layer pins `f64`.
-- **`eig_full` / `eig_trunc` / `eig_vals` are pending `c64`**: the general
-  eigendecomposition is complex-valued. The expert layer
-  (`matrixalgebra::eig_*_dyn`) already supports them.
-- **CPU only.** [`prelude::Runtime::builder`] exists so a GPU backend can
-  land without an API break, but today the default CPU backend is the
-  only choice.
-- **`tensor!` re-plans on every call.** Greedy planning is cheap, but a
-  shape-keyed plan cache for iterative sweeps is still planned.
-- **No trace/diagonal inside one `tensor!` operand** (a repeated label on
-  one tensor is a compile error), and no hyperedge/batch labels.
-- **`left_orth` / `right_orth` do not apply the positive-diagonal gauge**
-  (TensorKit's `positive = true`).
-- **Truncation can forget a coupled sector's zero block.** When a
-  truncation discards a coupled sector entirely and a leg sector of the
-  kept factors vanishes from every remaining block, recomposing the
-  factors omits that (exactly zero) block — TensorKit keeps it, because
-  its spaces carry per-sector degeneracies independently of the blocks.
-  In that case `add` against the untruncated tensor is rejected as a
-  layout mismatch; compare through norms instead.
+- **CUDA support is phase 1.** `Runtime::builder().cuda(device)` +
+  `to_cuda()`/`to_host()` run fully-direct contractions on device
+  (verified on A100 against the host results). Everything else on a
+  device tensor — index manipulations, decompositions, norms, `c64` —
+  returns an explicit `UnsupportedOnDevice`-style error; nothing falls
+  back to the CPU silently.
+- **No hyperedge/batch labels in `tensor!`** (a label appearing three or
+  more times is a compile error). Partial traces (`a[i, i; j]`) and full
+  traces are supported.
+- **Plan-cache eviction is a full clear** at the (configurable) capacity
+  bound rather than LRU; see `tenet-network`'s plan-cache docs for the
+  policy knobs (topology-keyed reuse, drift-factor replanning).
+- **No automatic dtype promotion**: mixing `f64` and `c64` operands is a
+  typed error; widen explicitly with `to_c64()`.
+- **Memory-bounded slicing is planned but not executable yet**: the
+  slicing planner IR is ported, the sliced executor over symmetric legs
+  is future work (sector-granular slicing).

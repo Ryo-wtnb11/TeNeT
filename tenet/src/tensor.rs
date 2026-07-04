@@ -545,7 +545,7 @@ impl Tensor {
 
     /// Where this tensor's data lives: [`Placement::Host`] or
     /// [`Placement::Cuda`] with the device ordinal. Transfers are always
-    /// explicit ([`Self::to_cuda`] / `to_host`).
+    /// explicit (`to_cuda()` / `to_host()`).
     pub fn placement(&self) -> Placement {
         match &self.data {
             Data::F64(_) | Data::C64(_) => Placement::Host,

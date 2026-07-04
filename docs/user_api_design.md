@@ -22,10 +22,11 @@
 
 ```rust
 use tenet::prelude::*;
+use tenet_network::tensor;
 
 // Runtime: backend / device / cache 方針をここで一度だけ決める
 let rt = Runtime::builder().build()?;            // 既定 CPU バックエンド
-// let rt = Runtime::builder().cuda(0).build()?; // GPU (T19 系が繋がり次第)
+// let rt = Runtime::builder().cuda(0).build()?; // CUDA feature 有効時
 
 // 空間: TensorKit の V = U1Space(-1 => 2, 0 => 3, 1 => 2) 相当
 let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
@@ -33,14 +34,16 @@ let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
 // V ⊗ V ← V ⊗ V のランダムテンソル
 let a = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
 let b = Tensor::rand(&rt, [&v, &v], [&v, &v])?;
+let z = Tensor::rand_c64(&rt, [&v, &v], [&v, &v])?; // c64 は明示構築
 
 // 縮約
 let c = a.compose(&b)?;                          // 圏論的合成 (A * B)
-let d = a.contract(&b, [2, 3], [1, 0])?;         // 任意軸(pAB は既定順)
-let e = a.contract_ordered(&b, [2, 3], [1, 0], [1, 0, 2, 3])?; // pAB 指定
+let d = a.contract(&b, &[2, 3], &[1, 0])?;       // 任意軸(pAB は既定順)
+let e = a.contract_ordered(&b, &[2, 3], &[1, 0], &[1, 0, 2, 3])?; // pAB 指定
+let f = tensor!([i, j; g, h] = a[i, j; k, l] * b[k, l; g, h])?;
 
 // インデックス操作(TensorKit permute/braid/transpose)
-let p = c.permute([0, 2], [1, 3])?;
+let p = c.permute(&[0, 2], &[1, 3])?;
 let t = c.transpose()?;
 let h = c.adjoint()?;
 
@@ -48,15 +51,17 @@ let h = c.adjoint()?;
 let svd = c.svd_trunc(&Truncation::rank(64))?;   // svd.u, svd.s, svd.vh, svd.error
 let (u, s, vh) = c.svd_compact()?;
 let (q, r) = c.qr_compact()?;
-let (v, _) = c.left_orth()?;
+let (iso, _) = c.left_orth()?;
 let n0 = c.left_null()?;
+let (d_eig, w_eig) = c.eig_full()?;              // d_eig/w_eig は常に c64
 let x = c.exp()?;                                // eigh 経由の行列関数
 
 // スカラー演算・ノルム(VectorInterface 相当)
 let n = c.norm()?;
 let s = c.scale(0.5)?;
 let w = c.add(&d, 1.0, -1.0)?;                   // w = c - d
-let z = c.inner(&d)?;
+let ip: Complex64 = c.inner(&d)?;                // f64 入力でも Complex64
+let c_c64 = c.to_c64();                          // c64 には明示 widening
 ```
 
 ## 命名規則(2026-07-04 追記)
@@ -64,21 +69,23 @@ let z = c.inner(&d)?;
 分解・行列関数の名前は **TensorKit 0.17 の export 一覧 = MatrixAlgebraKit 系に
 一致させる**(`svd_trunc`/`svd_compact`/`svd_full`/`svd_vals`、`qr_compact`/
 `qr_full`/`qr_null`、`lq_*`、`left_orth`/`right_orth`、`left_null`/`right_null`、
-`left_polar`/`right_polar`、`eigh_full`/`eigh_trunc`/`eigh_vals`、`eig_*`、
-`exp`、`pinv`)。`tsvd`/`leftorth` 等の旧名は 0.17 の export に存在しないため
-**採用しない**(alias も作らない)。tenet-matrixalgebra は既にこの命名なので、
-ユーザー層は同名メソッドの透過のみ。インデックス操作も同様に export 一覧
-基準: `permute`/`braid`/`transpose`/`twist`/`repartition`、構築系は
+`left_polar`/`right_polar`、`eigh_full`/`eigh_trunc`/`eigh_vals`、`eig_full`/
+`eig_trunc`/`eig_vals`、`exp`、`pinv`)。tenet-matrixalgebra は既にこの命名なので、
+ユーザー層は同名メソッドの透過のみ。0.17 の export にない legacy alias は
+作らない。インデックス操作も同様に export 一覧基準:
+`permute`/`braid`/`transpose`/`twist`/`repartition`、構築系は
 `id`/`isomorphism`/`unitary`/`isometry`。
 
 ## 縮約適合性の契約(2026-07-04 合意)
 
 - **index object は作らない**(ITensor 方式は採らない)。脚は位置で指定し、
   ラベルは `tensor!` 式内の一時的な束縛。
-- **適合性は Space の同一性で担保する**(TensorKit 方式):
-  縮約でつながる脚は Space が構造的に等しく(sector 内容 + 縮退次元)、
-  かつ片側が dual であること。違反は実行時の型付きエラー
-  (leg duality / space mismatch)。
+- **適合性は oriented object の双対対で担保する**(TensorKit 方式):
+  codomain 脚はその Space、domain 脚はその双対として解釈し、縮約で
+  つながる 2 脚の oriented object が互いに双対であること。通常の
+  codomain-vs-domain 合成では同じ `Space` 同士が縮約できる。同じ側の
+  2 脚を縮約する場合は、実際の `Space` の片方だけを `dual()` にする。
+  違反は実行時の型付きエラー(leg duality / space mismatch)。
 - `tensor!` マクロはラベルの整合(片側にしか現れない添字、重複等)を
   コンパイル時に検査できる。Space の一致は実行時検査(低レイヤの既存
   ゲートがそのまま担う)。
@@ -89,8 +96,9 @@ let z = c.inner(&d)?;
   rule ごとのコンストラクタ(`Space::u1`, `Space::z2`, `Space::su2`,
   `Space::fz2`, 積は `Space::product`)。
 - `Tensor`: `{ inner: FusionTensorMap 系(rule 型消去), rt: Arc<Runtime> }`。
-  **rank は動的**(const generics はユーザー層に出さない)。scalar は当面
-  f64、c64 は FactorScalar generic を内包 enum で吸収。
+  **rank は動的**(const generics はユーザー層に出さない)。storage dtype は
+  `f64`/`c64` の enum。混在演算は昇格せず `DtypeMismatch`、必要なら
+  `to_c64()` で明示 widening。
 - `Runtime`: `{ TensorContractFusionExecutionContext + DenseExecutor +
   TreeTransformExecutionContext }` を rule ごとに保持(内部は `Mutex` または
   single-thread 前提の `RefCell`;T12 の並列は backend 内なので粗い lock で
@@ -113,7 +121,8 @@ expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
 
 1. `Space` + `Tensor` 構築(rand/zeros/from_blocks)+ `Runtime`
 2. 縮約・インデックス操作メソッド(compose/contract/permute/adjoint)
-3. 分解・行列関数 wrapper(tsvd/leftorth/rightorth/exp/inv/pinv/norm)
+3. 分解・行列関数 wrapper(`svd_trunc`/`left_orth`/`right_orth`/`exp`/`inv`/
+   `pinv`/`norm`/`eig_*`)
 4. tutorial.md をユーザー層ベースに書き直し
 5. legacy planner (tenet-legacy/tenet-contract の構造半分 + tenet-cotengrust)
    を移植し、`tensor!` proc-macro(@tensor 記法)を NetworkIR 直結で実装。
@@ -123,7 +132,7 @@ expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
    `let c = tensor!([a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])?;`
    (出力シグネチャ先頭、`conj(x)[...]` で adjoint、`[]` で rank-0)。
    フォローアップ: (i) tenet-cotengrust 移植(DenseContractionOptimizer
-   実装をそのまま差し込む)、(ii) shape-keyed plan cache(現状は毎回
-   greedy で再プラン; legacy EinsumPlanCache 相当)、(iii) Tensor 層
-   select_index が入り次第 sliced executor。
-6. (後日)c64、GPU runtime
+   実装をそのまま差し込む)、(ii) Tensor 層 select_index が入り次第
+   sliced executor。
+6. 実施済み(2026-07-04): c64、`eig_*`、topology-keyed plan cache、
+   partial trace、CUDA phase 1(direct f64 contraction)。

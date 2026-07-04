@@ -25,8 +25,8 @@ pub enum Error {
     /// explicitly with [`crate::prelude::Tensor::to_c64`] first.
     DtypeMismatch,
     /// The operands live on different placements (host vs device, or
-    /// different devices); transfer explicitly with
-    /// [`crate::prelude::Tensor::to_cuda`] / `to_host` first.
+    /// different devices); transfer explicitly with `to_cuda()` / `to_host()`
+    /// first.
     PlacementMismatch,
     /// The operation has no device implementation yet; the message says
     /// which. Device tensors never fall back to host execution silently —

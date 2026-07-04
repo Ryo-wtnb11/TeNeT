@@ -151,9 +151,9 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Starts building a runtime. Currently the default CPU backend is the
-    /// only choice; the builder exists so device/cache options (e.g. CUDA)
-    /// can land without breaking the construction pattern.
+    /// Starts building a runtime. The default runtime uses the CPU backend;
+    /// feature-gated device options such as CUDA are attached through the
+    /// builder so tensor construction keeps the same shape.
     pub fn builder() -> RuntimeBuilder {
         RuntimeBuilder::default()
     }
