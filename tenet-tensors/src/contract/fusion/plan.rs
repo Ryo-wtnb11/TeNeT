@@ -1,9 +1,10 @@
 use tenet_core::{FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
-use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
+use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
+use super::super::dynamic_space::DynamicFusionMapSpace;
 use super::super::structure::TensorContractAxisPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,69 +123,59 @@ pub fn prepare_tensorcontract_fusion_plan<
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    prepare_tensorcontract_fusion_plan_dyn(
+        rule,
+        &DynamicFusionMapSpace::from_typed(dst),
+        &DynamicFusionMapSpace::from_typed(lhs),
+        &DynamicFusionMapSpace::from_typed(rhs),
+        axes,
+    )
+}
+
+/// Dynamic-rank variant of [`prepare_tensorcontract_fusion_plan`]: same
+/// lowering, spaces given as [`DynamicFusionMapSpace`] handles.
+pub fn prepare_tensorcontract_fusion_plan_dyn<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     let lowered_axes =
-        lower_tensorcontract_adjoint_axes::<LHS_NOUT, LHS_NIN, RHS_NOUT, RHS_NIN>(axes)?;
-    if axes.lhs_conjugate() && axes.rhs_conjugate() {
-        let lhs_adjoint = adjoint_fusion_space_view(lhs)?;
-        let rhs_adjoint = adjoint_fusion_space_view(rhs)?;
-        return prepare_tensorcontract_fusion_plan_from_spaces(
-            rule,
-            dst,
-            &lhs_adjoint,
-            &rhs_adjoint,
-            lowered_axes.as_spec(),
-            lowered_axes.lhs_storage_conjugate(),
-            lowered_axes.rhs_storage_conjugate(),
-        );
-    }
-    if axes.lhs_conjugate() {
-        let lhs_adjoint = adjoint_fusion_space_view(lhs)?;
-        return prepare_tensorcontract_fusion_plan_from_spaces(
-            rule,
-            dst,
-            &lhs_adjoint,
-            rhs,
-            lowered_axes.as_spec(),
-            lowered_axes.lhs_storage_conjugate(),
-            lowered_axes.rhs_storage_conjugate(),
-        );
-    }
-    if axes.rhs_conjugate() {
-        let rhs_adjoint = adjoint_fusion_space_view(rhs)?;
-        return prepare_tensorcontract_fusion_plan_from_spaces(
-            rule,
-            dst,
-            lhs,
-            &rhs_adjoint,
-            lowered_axes.as_spec(),
-            lowered_axes.lhs_storage_conjugate(),
-            lowered_axes.rhs_storage_conjugate(),
-        );
-    }
+        lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
+    let lhs_adjoint;
+    let lhs = if axes.lhs_conjugate() {
+        lhs_adjoint = lhs.adjoint_view()?;
+        &lhs_adjoint
+    } else {
+        lhs
+    };
+    let rhs_adjoint;
+    let rhs = if axes.rhs_conjugate() {
+        rhs_adjoint = rhs.adjoint_view()?;
+        &rhs_adjoint
+    } else {
+        rhs
+    };
     prepare_tensorcontract_fusion_plan_from_spaces(
         rule,
         dst,
         lhs,
         rhs,
         lowered_axes.as_spec(),
-        false,
-        false,
+        lowered_axes.lhs_storage_conjugate(),
+        lowered_axes.rhs_storage_conjugate(),
     )
 }
 
-fn prepare_tensorcontract_fusion_plan_from_spaces<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+fn prepare_tensorcontract_fusion_plan_from_spaces<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
@@ -192,12 +183,8 @@ fn prepare_tensorcontract_fusion_plan_from_spaces<
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs.subblock_structure().rank(),
-        rhs.subblock_structure().rank(),
-        dst.subblock_structure().rank(),
-        axes,
-    )?;
+    let dst_nout = dst.nout();
+    let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
     let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
         rule,
         lhs.homspace(),
@@ -205,7 +192,7 @@ where
         axes.lhs_contracting_axes(),
         axes.rhs_contracting_axes(),
         axis_plan.output_axes.as_slice(),
-        DST_NOUT,
+        dst_nout,
     )
     .map_err(OperationError::from_core_preserving_context)?;
     if &expected_homspace != dst.homspace() {
@@ -220,8 +207,8 @@ where
     let core_dst_open_rhs_rank = rhs_open_rank;
     let core_output_rank = core_dst_open_lhs_rank + core_dst_open_rhs_rank;
     let output_transform = TreeTransformOperation::permute(
-        axis_plan.output_axes[..DST_NOUT].to_vec(),
-        axis_plan.output_axes[DST_NOUT..].to_vec(),
+        axis_plan.output_axes[..dst_nout].to_vec(),
+        axis_plan.output_axes[dst_nout..].to_vec(),
     );
     Ok(FusionContractPlan {
         lhs_transform: TreeTransformOperation::permute(

@@ -19,28 +19,29 @@ mod tensortrace;
 mod tree_context;
 mod tree_transform;
 
-pub use adjoint::adjoint;
+pub use adjoint::{adjoint, adjoint_dyn};
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{
     BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
     TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCache,
     TreeTransformStructureCacheKey,
 };
+pub use contract::DynamicFusionMapSpace;
 #[cfg(test)]
 pub(crate) use contract::{
     contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
 pub use contract::{
-    prepare_tensorcontract_fusion_plan, tensorcontract_execute_with,
-    tensorcontract_fusion_block_specs, tensorcontract_fusion_into, tensorcontract_fusion_into_with,
-    tensorcontract_fusion_into_with_backends, tensorcontract_fusion_prepared_into,
-    tensorcontract_fusion_prepared_into_core_dst,
+    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
+    tensorcontract_execute_with, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
+    tensorcontract_fusion_into_with, tensorcontract_fusion_into_with_backends,
+    tensorcontract_fusion_prepared_into, tensorcontract_fusion_prepared_into_core_dst,
     tensorcontract_fusion_prepared_into_core_dst_with, tensorcontract_fusion_prepared_into_with,
-    tensorcontract_fusion_structure, tensorcontract_fusion_via_tree_pair_transforms_into,
-    tensorcontract_into, tensorcontract_into_with, tensorcontract_into_with_context,
-    tensorcontract_structure, tensorproduct_fusion_into,
-    tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
+    tensorcontract_fusion_structure, tensorcontract_fusion_structure_dyn,
+    tensorcontract_fusion_via_tree_pair_transforms_into, tensorcontract_into,
+    tensorcontract_into_with, tensorcontract_into_with_context, tensorcontract_structure,
+    tensorproduct_fusion_into, tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
     tensorproduct_into_with_conjugation, FusionContractPlan, HostTensorContractBackend,
     HostTensorContractWorkspace, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
     TensorContractBackend, TensorContractBlockPlanKey, TensorContractBlockPlanTerm,

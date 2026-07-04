@@ -914,6 +914,166 @@ where
         self.execute_resolution(&resolution, rule, dst, lhs, rhs, alpha, beta)
     }
 
+    /// Dynamic-rank `tensorcontract!`: same resolution-cache path and route
+    /// gates as [`Self::tensorcontract_fusion_into`], operating on
+    /// [`DynamicFusionMapSpace`] handles plus raw slices in the
+    /// coupled-sector matrix layout. `dst_data` must be sized for
+    /// `dst_space.required_len()`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_into<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: &mut [D],
+        lhs_space: &DynamicFusionMapSpace,
+        lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        let resolution = self.resolution_cache.get_or_resolve(
+            rule,
+            dst_space,
+            lhs_space,
+            rhs_space,
+            axes,
+            || match super::fusion::tensorcontract_fusion_structure_dyn(
+                rule,
+                dst_space,
+                lhs_space,
+                rhs_space,
+                Arc::clone(lhs_space.structure()),
+                Arc::clone(rhs_space.structure()),
+                axes,
+            ) {
+                Ok(structure) => Ok(Some(Arc::new(structure))),
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => Ok(None),
+                Err(err) => Err(err),
+            },
+            || {
+                super::fusion::prepare_tensorcontract_fusion_plan_dyn(
+                    rule, dst_space, lhs_space, rhs_space, axes,
+                )
+                .map(Arc::new)
+            },
+        )?;
+        self.execute_resolution_dyn(
+            &resolution,
+            rule,
+            dst_space,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            alpha,
+            beta,
+        )
+    }
+
+    /// Executes a resolved contraction on dynamic spaces and raw slices.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_resolution_dyn<R>(
+        &mut self,
+        resolution: &Resolution,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: &mut [D],
+        lhs_space: &DynamicFusionMapSpace,
+        lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        match resolution {
+            Resolution::Core(block_plan) => {
+                let Self {
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    ..
+                } = self;
+                block_plan.execute_raw(
+                    &mut crate::StridedHostKernelAdapter,
+                    &mut super::fusion_block::BackendRank2Gemm {
+                        backend: contract_backend,
+                        workspace: contract_workspace,
+                    },
+                    fusion_block_workspace,
+                    dst_space.structure(),
+                    dst_data,
+                    lhs_space.structure(),
+                    lhs_data,
+                    rhs_space.structure(),
+                    rhs_data,
+                    alpha,
+                    beta,
+                )
+            }
+            Resolution::DynamicTree(plan) => {
+                let Self {
+                    tree_context,
+                    dynamic_space_cache,
+                    resolution_cache,
+                    contract_backend,
+                    contract_workspace,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                    ..
+                } = self;
+                super::dynamic::tensorcontract_fusion_dynamic_plan_dyn_into_context(
+                    tree_context,
+                    contract_backend,
+                    contract_workspace,
+                    dynamic_space_cache,
+                    resolution_cache,
+                    fusion_block_workspace,
+                    fusion_scratch,
+                    rule,
+                    plan.as_ref(),
+                    dst_space,
+                    &Arc::clone(dst_space.structure()),
+                    dst_data,
+                    lhs_space,
+                    &Arc::clone(lhs_space.structure()),
+                    lhs_data,
+                    rhs_space,
+                    &Arc::clone(rhs_space.structure()),
+                    rhs_data,
+                    alpha,
+                    beta,
+                )
+            }
+            Resolution::Structure(structure) => {
+                self.contract_backend.tensorcontract_structure_into_raw(
+                    &mut self.contract_workspace,
+                    structure,
+                    dst_space.structure(),
+                    lhs_space.structure(),
+                    rhs_space.structure(),
+                    dst_data,
+                    lhs_data,
+                    rhs_data,
+                    alpha,
+                    beta,
+                )
+            }
+        }
+    }
+
     /// Executes a resolved contraction; shared by the facade and the
     /// prepared-handle path.
     #[allow(clippy::too_many_arguments)]

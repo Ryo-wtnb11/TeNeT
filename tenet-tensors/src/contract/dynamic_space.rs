@@ -8,6 +8,7 @@ use tenet_core::{
 
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{OperationError, TreeTransformOperation};
+use tenet_operations::TensorContractSpec;
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
 /// spaces enumerate the full tree set of their hom spaces, so the coupled
@@ -40,11 +41,14 @@ where
 use super::fusion::{contracted_fusion_tree_basis_matches, FusionContractPlan};
 use super::structure::TensorContractAxisPlan;
 
-/// Internal dynamic-rank fusion space used for TensorKit-style temporary
-/// materialization. Public tensors remain const-generic; source/output tree
-/// transforms that change the codomain/domain split are absorbed here.
+/// Dynamic-rank fusion space: the expert-layer space handle whose
+/// codomain/domain split is a runtime property.
+///
+/// Typed [`FusionTensorMapSpace`] facades lower to this type internally; the
+/// dynamic expert entry points (`*_dyn_into`) take it directly together with
+/// raw `f64` slices in the coupled-sector matrix layout.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DynamicFusionMapSpace {
+pub struct DynamicFusionMapSpace {
     nout: usize,
     nin: usize,
     homspace: Arc<FusionTreeHomSpace>,
@@ -52,7 +56,9 @@ pub(crate) struct DynamicFusionMapSpace {
 }
 
 impl DynamicFusionMapSpace {
-    pub(crate) fn from_typed<const NOUT: usize, const NIN: usize>(
+    /// Rank-erases a typed fusion space (shares the hom space and subblock
+    /// structure handles; no data copies).
+    pub fn from_typed<const NOUT: usize, const NIN: usize>(
         space: &FusionTensorMapSpace<NOUT, NIN>,
     ) -> Self {
         Self {
@@ -63,6 +69,48 @@ impl DynamicFusionMapSpace {
         }
     }
 
+    /// Builds a dynamic space directly from an untyped description: a hom
+    /// space plus one degeneracy shape per fusion-tree key (in
+    /// [`FusionTreeHomSpace::fusion_tree_keys`] order). The storage layout is
+    /// the TensorKit-equivalent coupled-sector matrix layout, identical to
+    /// [`FusionTensorMapSpace::from_degeneracy_shapes`].
+    pub fn from_degeneracy_shapes<R, Shapes>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let keys = homspace.fusion_tree_keys(rule);
+        let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
+        if keys.len() != shapes.len() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::BlockCountMismatch {
+                    expected: keys.len(),
+                    actual: shapes.len(),
+                },
+            ));
+        }
+        let blocks = keys
+            .into_iter()
+            .map(BlockKey::from)
+            .zip(shapes)
+            .collect::<Vec<_>>();
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+        })
+    }
+
     pub(crate) fn transformed_from_typed<R, const NOUT: usize, const NIN: usize>(
         rule: &R,
         source: &FusionTensorMapSpace<NOUT, NIN>,
@@ -71,6 +119,22 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
+        Self::from_typed(source).transformed(rule, operation)
+    }
+
+    /// Space of the tree-transformed (permute / braid / transpose) tensor:
+    /// the hom space is permuted and the full tree set of the result is
+    /// enumerated (trees the transform coefficients never reach stay as
+    /// structural zeros, keeping every coupled sector grid complete).
+    pub fn transformed<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let source = self;
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let nout = codomain_axes.len();
         let nin = domain_axes.len();
@@ -78,11 +142,7 @@ impl DynamicFusionMapSpace {
             .homspace()
             .permute(rule, codomain_axes, domain_axes)
             .map_err(OperationError::from_core_preserving_context)?;
-        // Enumerate the FULL tree set of the permuted hom space (TensorKit
-        // semantics): trees the transform coefficients never reach stay as
-        // structural zeros in the scratch buffer, keeping every coupled
-        // sector grid complete so the coupled matrix layout always applies.
-        let src_dims = axis_sector_dims(rule, source.subblock_structure())?;
+        let src_dims = axis_sector_dims(rule, source.structure())?;
         let src_axes = codomain_axes
             .iter()
             .chain(domain_axes.iter())
@@ -113,6 +173,44 @@ impl DynamicFusionMapSpace {
         })
     }
 
+    /// Space of the contraction result in the default output order (`lhs`
+    /// open axes ascending on the codomain side, `rhs` open axes ascending on
+    /// the domain side). Mirrors the destination TensorKit's
+    /// `tensorcontract!` with default `pAB` writes into.
+    pub fn contracted<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(OperationError::ContractAxisCountMismatch {
+                lhs: lhs_axes.len(),
+                rhs: rhs_axes.len(),
+            });
+        }
+        let nout = lhs
+            .rank()
+            .checked_sub(lhs_axes.len())
+            .ok_or(OperationError::RankMismatch {
+                expected: lhs_axes.len(),
+                actual: lhs.rank(),
+            })?;
+        let nin = rhs
+            .rank()
+            .checked_sub(rhs_axes.len())
+            .ok_or(OperationError::RankMismatch {
+                expected: rhs_axes.len(),
+                actual: rhs.rank(),
+            })?;
+        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
+        Self::contracted_space(rule, lhs, rhs, axes, nout, nin, None)
+    }
+
     pub(crate) fn core_dst<R>(
         rule: &R,
         lhs: &Self,
@@ -125,7 +223,29 @@ impl DynamicFusionMapSpace {
     {
         let nout = plan.core_dst_open_lhs_rank();
         let nin = plan.core_dst_open_rhs_rank();
-        let axes = plan.core_axes().as_spec();
+        Self::contracted_space(
+            rule,
+            lhs,
+            rhs,
+            plan.core_axes().as_spec(),
+            nout,
+            nin,
+            output_dst.map(|output_dst| (plan, output_dst)),
+        )
+    }
+
+    fn contracted_space<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        axes: TensorContractSpec<'_>,
+        nout: usize,
+        nin: usize,
+        output_dst: Option<(&FusionContractPlan, &Self)>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
         let output_axes = (0..nout + nin).collect::<Vec<_>>();
         let homspace = FusionTreeHomSpace::tensorcontract_homspace(
@@ -140,7 +260,7 @@ impl DynamicFusionMapSpace {
         .map_err(OperationError::from_core_preserving_context)?;
 
         let mut inferred_shapes = infer_core_dst_shapes(rule, lhs, rhs, &axis_plan)?;
-        if let Some(output_dst) = output_dst {
+        if let Some((plan, output_dst)) = output_dst {
             infer_core_dst_shapes_from_output(
                 rule,
                 &homspace,
@@ -191,33 +311,65 @@ impl DynamicFusionMapSpace {
         })
     }
 
+    /// Adjoint view: codomain and domain swap (spaces and per-block shapes),
+    /// no data movement implied. The block layout is a strided view into the
+    /// source layout, so this space is for replay bookkeeping, not for
+    /// allocating fresh coupled storage.
+    pub(crate) fn adjoint_view(&self) -> Result<Self, OperationError> {
+        let homspace = FusionTreeHomSpace::new(
+            self.homspace.domain().clone(),
+            self.homspace.codomain().clone(),
+        );
+        let structure = crate::lowering::adjoint_block_structure_view(
+            self.nout,
+            self.nin,
+            &self.subblock_structure,
+        )?;
+        Ok(Self {
+            nout: self.nin,
+            nin: self.nout,
+            homspace: Arc::new(homspace),
+            subblock_structure: Arc::new(structure),
+        })
+    }
+
+    /// Number of codomain legs.
     #[inline]
-    pub(crate) fn nout(&self) -> usize {
+    pub fn nout(&self) -> usize {
         self.nout
     }
 
+    /// Number of domain legs.
     #[inline]
-    pub(crate) fn rank(&self) -> usize {
+    pub fn nin(&self) -> usize {
+        self.nin
+    }
+
+    /// Total number of legs.
+    #[inline]
+    pub fn rank(&self) -> usize {
         self.nout + self.nin
     }
 
     #[inline]
-    pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
+    pub fn homspace(&self) -> &FusionTreeHomSpace {
         &self.homspace
     }
 
     /// Shared hom-space handle for pointer-identity fast paths in replay
     /// caches.
-    pub(crate) fn homspace_arc(&self) -> &Arc<FusionTreeHomSpace> {
+    pub fn homspace_arc(&self) -> &Arc<FusionTreeHomSpace> {
         &self.homspace
     }
 
+    /// Subblock (fusion-tree) block structure of the coupled storage layout.
     #[inline]
-    pub(crate) fn structure(&self) -> &Arc<BlockStructure> {
+    pub fn structure(&self) -> &Arc<BlockStructure> {
         &self.subblock_structure
     }
 
-    pub(crate) fn required_len(&self) -> Result<usize, CoreError> {
+    /// Flat storage length this space requires.
+    pub fn required_len(&self) -> Result<usize, CoreError> {
         self.subblock_structure.required_len()
     }
 }

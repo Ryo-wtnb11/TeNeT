@@ -265,12 +265,11 @@ impl LoweredTensorContractSpec {
     }
 }
 
-pub(crate) fn lower_tensorcontract_adjoint_axes<
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+pub(crate) fn lower_tensorcontract_adjoint_axes(
+    lhs_nout: usize,
+    lhs_nin: usize,
+    rhs_nout: usize,
+    rhs_nin: usize,
     axes: TensorContractSpec<'_>,
 ) -> Result<LoweredTensorContractSpec, OperationError> {
     if axes.lhs_contracting_axes().len() != axes.rhs_contracting_axes().len() {
@@ -279,11 +278,11 @@ pub(crate) fn lower_tensorcontract_adjoint_axes<
             rhs: axes.rhs_contracting_axes().len(),
         });
     }
-    let lhs_rank = LHS_NOUT
-        .checked_add(LHS_NIN)
+    let lhs_rank = lhs_nout
+        .checked_add(lhs_nin)
         .ok_or(OperationError::ElementCountOverflow)?;
-    let rhs_rank = RHS_NOUT
-        .checked_add(RHS_NIN)
+    let rhs_rank = rhs_nout
+        .checked_add(rhs_nin)
         .ok_or(OperationError::ElementCountOverflow)?;
     let contract_count = axes.lhs_contracting_axes().len();
     let core_output_rank = lhs_rank
@@ -296,12 +295,12 @@ pub(crate) fn lower_tensorcontract_adjoint_axes<
         .ok_or(OperationError::ElementCountOverflow)?;
     Ok(LoweredTensorContractSpec {
         lhs_contracting_axes: if axes.lhs_conjugate() {
-            adjoint_tensor_axes(LHS_NOUT, LHS_NIN, axes.lhs_contracting_axes())?
+            adjoint_tensor_axes(lhs_nout, lhs_nin, axes.lhs_contracting_axes())?
         } else {
             axes.lhs_contracting_axes().to_vec()
         },
         rhs_contracting_axes: if axes.rhs_conjugate() {
-            adjoint_tensor_axes(RHS_NOUT, RHS_NIN, axes.rhs_contracting_axes())?
+            adjoint_tensor_axes(rhs_nout, rhs_nin, axes.rhs_contracting_axes())?
         } else {
             axes.rhs_contracting_axes().to_vec()
         },
@@ -351,18 +350,22 @@ pub(crate) fn adjoint_fusion_space_view<const NOUT: usize, const NIN: usize>(
         source.homspace().domain().clone(),
         source.homspace().codomain().clone(),
     );
-    let structure = Arc::new(adjoint_block_structure_view::<NOUT, NIN>(
+    let structure = Arc::new(adjoint_block_structure_view(
+        NOUT,
+        NIN,
         source.subblock_structure(),
     )?);
     FusionTensorMapSpace::from_shared_subblock_structure(dense_space, homspace, structure)
         .map_err(OperationError::from_core_preserving_context)
 }
 
-pub(crate) fn adjoint_block_structure_view<const NOUT: usize, const NIN: usize>(
+pub(crate) fn adjoint_block_structure_view(
+    nout: usize,
+    nin: usize,
     source: &BlockStructure,
 ) -> Result<BlockStructure, OperationError> {
-    let rank = NOUT
-        .checked_add(NIN)
+    let rank = nout
+        .checked_add(nin)
         .ok_or(OperationError::ElementCountOverflow)?;
     if source.rank() != rank {
         return Err(OperationError::StructureRankMismatch {
@@ -376,11 +379,11 @@ pub(crate) fn adjoint_block_structure_view<const NOUT: usize, const NIN: usize>(
         let block = source.block(index)?;
         let key = adjoint_block_key(block.key())?;
         let mut shape = Vec::with_capacity(rank);
-        shape.extend_from_slice(&block.shape()[NOUT..]);
-        shape.extend_from_slice(&block.shape()[..NOUT]);
+        shape.extend_from_slice(&block.shape()[nout..]);
+        shape.extend_from_slice(&block.shape()[..nout]);
         let mut strides = Vec::with_capacity(rank);
-        strides.extend_from_slice(&block.strides()[NOUT..]);
-        strides.extend_from_slice(&block.strides()[..NOUT]);
+        strides.extend_from_slice(&block.strides()[nout..]);
+        strides.extend_from_slice(&block.strides()[..nout]);
         blocks.push(BlockSpec::with_key(key, shape, strides, block.offset())?);
     }
     BlockStructure::from_blocks_with_rank(rank, blocks)

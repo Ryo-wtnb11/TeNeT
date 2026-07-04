@@ -6,10 +6,11 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
-use crate::lowering::{adjoint_fusion_space_view, lower_tensorcontract_adjoint_axes};
+use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::OperationError;
 use tenet_operations::TensorContractSpec;
 
+use super::super::dynamic_space::DynamicFusionMapSpace;
 use super::super::structure::{
     TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,
 };
@@ -53,68 +54,64 @@ where
     let rhs_fusion = rhs
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    let lowered_axes =
-        lower_tensorcontract_adjoint_axes::<LHS_NOUT, LHS_NIN, RHS_NOUT, RHS_NIN>(axes)?;
-    if axes.lhs_conjugate() && axes.rhs_conjugate() {
-        let lhs_adjoint = adjoint_fusion_space_view(lhs_fusion)?;
-        let rhs_adjoint = adjoint_fusion_space_view(rhs_fusion)?;
-        tensorcontract_fusion_structure_from_spaces(
-            rule,
-            dst_fusion,
-            &lhs_adjoint,
-            &rhs_adjoint,
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            lowered_axes.as_spec(),
-        )
-    } else if axes.lhs_conjugate() {
-        let lhs_adjoint = adjoint_fusion_space_view(lhs_fusion)?;
-        tensorcontract_fusion_structure_from_spaces(
-            rule,
-            dst_fusion,
-            &lhs_adjoint,
-            rhs_fusion,
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            lowered_axes.as_spec(),
-        )
-    } else if axes.rhs_conjugate() {
-        let rhs_adjoint = adjoint_fusion_space_view(rhs_fusion)?;
-        tensorcontract_fusion_structure_from_spaces(
-            rule,
-            dst_fusion,
-            lhs_fusion,
-            &rhs_adjoint,
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            lowered_axes.as_spec(),
-        )
-    } else {
-        tensorcontract_fusion_structure_from_spaces(
-            rule,
-            dst_fusion,
-            lhs_fusion,
-            rhs_fusion,
-            Arc::clone(lhs.structure()),
-            Arc::clone(rhs.structure()),
-            lowered_axes.as_spec(),
-        )
-    }
+    tensorcontract_fusion_structure_dyn(
+        rule,
+        &DynamicFusionMapSpace::from_typed(dst_fusion),
+        &DynamicFusionMapSpace::from_typed(lhs_fusion),
+        &DynamicFusionMapSpace::from_typed(rhs_fusion),
+        Arc::clone(lhs.structure()),
+        Arc::clone(rhs.structure()),
+        axes,
+    )
 }
 
-fn tensorcontract_fusion_structure_from_spaces<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+/// Dynamic-rank variant of [`tensorcontract_fusion_structure`]. The storage
+/// structures are the layouts the source data slices are replayed with (for
+/// unconjugated operands these are the spaces' own subblock structures).
+pub fn tensorcontract_fusion_structure_dyn<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    lhs_storage_structure: Arc<tenet_core::BlockStructure>,
+    rhs_storage_structure: Arc<tenet_core::BlockStructure>,
+    axes: TensorContractSpec<'_>,
+) -> Result<TensorContractStructure, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let lowered_axes =
+        lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
+    let lhs_adjoint;
+    let lhs = if axes.lhs_conjugate() {
+        lhs_adjoint = lhs.adjoint_view()?;
+        &lhs_adjoint
+    } else {
+        lhs
+    };
+    let rhs_adjoint;
+    let rhs = if axes.rhs_conjugate() {
+        rhs_adjoint = rhs.adjoint_view()?;
+        &rhs_adjoint
+    } else {
+        rhs
+    };
+    tensorcontract_fusion_structure_from_spaces(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        lhs_storage_structure,
+        rhs_storage_structure,
+        lowered_axes.as_spec(),
+    )
+}
+
+fn tensorcontract_fusion_structure_from_spaces<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     lhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
     rhs_storage_structure: std::sync::Arc<tenet_core::BlockStructure>,
     axes: TensorContractSpec<'_>,
@@ -124,9 +121,9 @@ where
 {
     let block_specs = tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)?;
     TensorContractStructure::compile_shared_structures_with_block_specs_and_storage(
-        std::sync::Arc::clone(dst.subblock_structure()),
-        std::sync::Arc::clone(lhs.subblock_structure()),
-        std::sync::Arc::clone(rhs.subblock_structure()),
+        std::sync::Arc::clone(dst.structure()),
+        std::sync::Arc::clone(lhs.structure()),
+        std::sync::Arc::clone(rhs.structure()),
         lhs_storage_structure,
         rhs_storage_structure,
         axes,
@@ -153,33 +150,27 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     reject_fusion_contract_conjugation(axes)?;
-    tensorcontract_fusion_block_specs_lowered(rule, dst, lhs, rhs, axes)
+    tensorcontract_fusion_block_specs_lowered(
+        rule,
+        &DynamicFusionMapSpace::from_typed(dst),
+        &DynamicFusionMapSpace::from_typed(lhs),
+        &DynamicFusionMapSpace::from_typed(rhs),
+        axes,
+    )
 }
 
-fn tensorcontract_fusion_block_specs_lowered<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+fn tensorcontract_fusion_block_specs_lowered<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
 ) -> Result<Vec<TensorContractBlockSpec>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs.subblock_structure().rank(),
-        rhs.subblock_structure().rank(),
-        dst.subblock_structure().rank(),
-        axes,
-    )?;
+    let dst_nout = dst.nout();
+    let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
     let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
         rule,
         lhs.homspace(),
@@ -187,7 +178,7 @@ where
         axes.lhs_contracting_axes(),
         axes.rhs_contracting_axes(),
         axis_plan.output_axes.as_slice(),
-        DST_NOUT,
+        dst_nout,
     )
     .map_err(OperationError::from_core_preserving_context)?;
     if &expected_homspace != dst.homspace() {
@@ -209,41 +200,33 @@ where
         axis_plan.lhs_contracting_axes.as_slice(),
         axis_plan.rhs_contracting_axes.as_slice(),
         axis_plan.output_axes.as_slice(),
-        DST_NOUT,
+        dst_nout,
     ) {
         return tensorcontract_core_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan);
     }
 
-    tensorcontract_transformed_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan, DST_NOUT)
+    tensorcontract_transformed_fusion_block_specs(rule, dst, lhs, rhs, &axis_plan, dst_nout)
 }
 
-fn tensorcontract_core_fusion_block_specs<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+fn tensorcontract_core_fusion_block_specs<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     axis_plan: &TensorContractAxisPlan,
 ) -> Result<Vec<TensorContractBlockSpec>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let mut specs = Vec::new();
-    for lhs_index in 0..lhs.subblock_structure().block_count() {
-        let lhs_block = lhs.subblock_structure().block(lhs_index)?;
+    for lhs_index in 0..lhs.structure().block_count() {
+        let lhs_block = lhs.structure().block(lhs_index)?;
         let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
             continue;
         };
         let lhs_external = lhs_key.external_sectors(rule);
-        for rhs_index in 0..rhs.subblock_structure().block_count() {
-            let rhs_block = rhs.subblock_structure().block(rhs_index)?;
+        for rhs_index in 0..rhs.structure().block_count() {
+            let rhs_block = rhs.structure().block(rhs_index)?;
             let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
                 continue;
             };
@@ -282,11 +265,12 @@ where
                     key: BlockKey::from(dst_key),
                 });
             }
-            let dst_index = dst.find_subblock_index(&dst_key).ok_or_else(|| {
-                OperationError::MissingBlockKey {
+            let dst_index = dst
+                .structure()
+                .find_block_index_by_fusion_tree_key(&dst_key)
+                .ok_or_else(|| OperationError::MissingBlockKey {
                     key: BlockKey::from(dst_key.clone()),
-                }
-            })?;
+                })?;
             let coefficient = rhs_contract_twist_factor(
                 rule,
                 rhs.homspace(),
@@ -304,19 +288,11 @@ where
     Ok(specs)
 }
 
-fn tensorcontract_transformed_fusion_block_specs<
-    R,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
->(
+fn tensorcontract_transformed_fusion_block_specs<R>(
     rule: &R,
-    dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
-    lhs: &FusionTensorMapSpace<LHS_NOUT, LHS_NIN>,
-    rhs: &FusionTensorMapSpace<RHS_NOUT, RHS_NIN>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
     axis_plan: &TensorContractAxisPlan,
     dst_codomain_rank: usize,
 ) -> Result<Vec<TensorContractBlockSpec>, OperationError>
@@ -326,8 +302,8 @@ where
     let output_codomain_axes = &axis_plan.output_axes[..dst_codomain_rank];
     let output_domain_axes = &axis_plan.output_axes[dst_codomain_rank..];
     let mut specs = Vec::new();
-    for lhs_index in 0..lhs.subblock_structure().block_count() {
-        let lhs_block = lhs.subblock_structure().block(lhs_index)?;
+    for lhs_index in 0..lhs.structure().block_count() {
+        let lhs_block = lhs.structure().block(lhs_index)?;
         let BlockKey::FusionTree(lhs_key) = lhs_block.key() else {
             continue;
         };
@@ -338,8 +314,8 @@ where
             axis_plan.lhs_contracting_axes.as_slice(),
         )
         .map_err(OperationError::from_core_preserving_context)?;
-        for rhs_index in 0..rhs.subblock_structure().block_count() {
-            let rhs_block = rhs.subblock_structure().block(rhs_index)?;
+        for rhs_index in 0..rhs.structure().block_count() {
+            let rhs_block = rhs.structure().block(rhs_index)?;
             let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
                 continue;
             };
@@ -378,11 +354,12 @@ where
                     )
                     .map_err(OperationError::from_core_preserving_context)?;
                     for (dst_key, dst_coeff) in dst_terms {
-                        let dst_index = dst.find_subblock_index(&dst_key).ok_or_else(|| {
-                            OperationError::MissingBlockKey {
+                        let dst_index = dst
+                            .structure()
+                            .find_block_index_by_fusion_tree_key(&dst_key)
+                            .ok_or_else(|| OperationError::MissingBlockKey {
                                 key: BlockKey::from(dst_key.clone()),
-                            }
-                        })?;
+                            })?;
                         specs.push(TensorContractBlockSpec::with_coefficient(
                             dst_index,
                             lhs_index,

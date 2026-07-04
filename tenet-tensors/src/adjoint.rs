@@ -12,7 +12,115 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
+use crate::contract::DynamicFusionMapSpace;
 use crate::{ConjugateValue, OperationError};
+
+/// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
+/// domain swapped) together with freshly allocated coupled-layout data whose
+/// blocks are the conjugate transposes of the source blocks.
+pub fn adjoint_dyn<R, D>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    let nout = space.nout();
+    let nin = space.nin();
+    let homspace = space.homspace();
+    let adjoint_hom =
+        FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+
+    let structure = Arc::clone(space.structure());
+    let keys = adjoint_hom.fusion_tree_keys(rule);
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+                key.domain_tree().clone(),
+                key.codomain_tree().clone(),
+            ));
+            let index = structure.find_block_index_by_key(&source_key).ok_or(
+                OperationError::MissingBlockKey {
+                    key: source_key.clone(),
+                },
+            )?;
+            let source_shape = structure
+                .block(index)
+                .map_err(OperationError::from_core_preserving_context)?
+                .shape();
+            let mut shape = source_shape[nout..].to_vec();
+            shape.extend_from_slice(&source_shape[..nout]);
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+
+    let adjoint_space = DynamicFusionMapSpace::from_degeneracy_shapes(rule, adjoint_hom, shapes)?;
+    let len = adjoint_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut result = vec![D::zero(); len];
+
+    let result_structure = Arc::clone(adjoint_space.structure());
+    for index in 0..result_structure.block_count() {
+        let block = result_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+            key.domain_tree().clone(),
+            key.codomain_tree().clone(),
+        ));
+        let source_index = structure
+            .find_block_index_by_key(&source_key)
+            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+        let source_block = structure
+            .block(source_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+
+        let shape = block.shape().to_vec();
+        let strides = block.strides().to_vec();
+        let offset = block.offset();
+        let source_strides = source_block.strides().to_vec();
+        let source_offset = source_block.offset();
+        // Adjoint index map: result (j[..nin], i[..nout]) reads
+        // conj(source(i, j)).
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(&strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let source_position = source_offset
+                + indices[nin..]
+                    .iter()
+                    .zip(&source_strides[..nout])
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>()
+                + indices[..nin]
+                    .iter()
+                    .zip(&source_strides[nout..])
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            result[position] = data[source_position].maybe_conj(true);
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    Ok((adjoint_space, result))
+}
 
 /// Eager blockwise adjoint; the output uses the coupled-sector matrix layout.
 pub fn adjoint<R, D, const NOUT: usize, const NIN: usize>(

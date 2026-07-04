@@ -183,6 +183,39 @@ where
         backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
     }
 
+    /// Dynamic-rank tree transform (permute / braid / transpose): operates
+    /// on raw slices plus their block structures, through the same
+    /// structure-compile cache as the typed facade. `dst_data` must be
+    /// zero-filled (or carry the `beta`-scaled accumuland) and sized for
+    /// `dst_structure.required_len()`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tree_transform_dyn_into<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        self.tree_transform_into_raw_with_storage_conjugation(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            false,
+            alpha,
+            beta,
+        )
+    }
+
     #[allow(dead_code)]
     pub(crate) fn tree_transform_into_storage_workspace<
         R,

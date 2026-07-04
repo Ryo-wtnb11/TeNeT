@@ -29,13 +29,15 @@ pub use context::{
     TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractPlanKey,
 };
+pub use dynamic_space::DynamicFusionMapSpace;
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
 };
 pub use fusion::{
-    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_block_specs,
-    tensorcontract_fusion_structure, FusionContractPlan,
+    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn,
+    tensorcontract_fusion_block_specs, tensorcontract_fusion_structure,
+    tensorcontract_fusion_structure_dyn, FusionContractPlan,
 };
 #[cfg(test)]
 pub(crate) use structure::TensorContractDenseRouteKind;
