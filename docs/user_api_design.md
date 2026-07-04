@@ -9,8 +9,14 @@
    `Tensor` が `Arc<Runtime>` を保持。演算はオペランドの runtime を使う。
    日常コードに context 引数は現れない。低レイヤの明示 context API は
    expert 層としてそのまま残す。
-3. **メソッド API 先行**: `tensor!` / `einsum!` マクロは後付け。下のメソッド
-   API が固まってから薄い糖衣として実装する。
+3. **メソッド API 先行**: `tensor!` マクロは後付け。下のメソッド API が
+   固まってから薄い糖衣として実装する。
+4. **記法は @tensor 準拠、einsum 文字列は公開しない**(2026-07-04 合意):
+   ユーザー面は識別子インデックスの proc-macro
+   `tensor!(c[a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])`。
+   ラベルは legacy planner の NetworkIR に直接下ろす(文字列 einsum
+   パーサは公開 API に出さない)。N 体は planner(greedy/cotengrust)が
+   順序を自動選択。
 
 ## 目標ユーザーコード
 
@@ -97,4 +103,7 @@ expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
 2. 縮約・インデックス操作メソッド(compose/contract/permute/adjoint)
 3. 分解・行列関数 wrapper(tsvd/leftorth/rightorth/exp/inv/pinv/norm)
 4. tutorial.md をユーザー層ベースに書き直し
-5. (後日)`tensor!` マクロ、c64、GPU runtime
+5. legacy planner (tenet-legacy/tenet-contract の構造半分 + tenet-cotengrust)
+   を移植し、`tensor!` proc-macro(@tensor 記法)を NetworkIR 直結で実装。
+   execution 半分のみ新ユーザー層 Tensor に再結線
+6. (後日)c64、GPU runtime
