@@ -19,6 +19,7 @@ blas-mkl = ["tenet-dense/blas-mkl", "tenet-tensors/blas-mkl", "tenet-matrixalgeb
 provider-inject = ["tenet-dense/provider-inject", "tenet-tensors/provider-inject"]
 
 [dependencies]
+num-complex = "0.4"
 tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense", default-features = false }
 tenet-matrixalgebra = { path = "../tenet-matrixalgebra", default-features = false }

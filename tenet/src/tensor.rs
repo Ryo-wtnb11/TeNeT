@@ -1,26 +1,97 @@
 //! User-layer symmetric tensor: dynamic rank, rule-erased, runtime-carrying.
 //!
 //! A [`Tensor`] stores a [`tenet_tensors::DynamicFusionMapSpace`] handle plus
-//! flat `f64` storage in the TensorKit-equivalent coupled-sector matrix
-//! layout. The concrete fusion rule is erased behind
-//! [`crate::space::RuleKind`]; rank is fully dynamic (no ceiling), matching
-//! TensorKit's `tensorcontract!`. Operations lock the shared [`Runtime`]
-//! state once and dispatch to the dynamic expert entry points
-//! (`tensorcontract_fusion_dyn_into`, `tree_transform_dyn_into`,
-//! `adjoint_dyn`).
+//! flat scalar storage (`f64` or `Complex64`, chosen at construction) in the
+//! TensorKit-equivalent coupled-sector matrix layout. The concrete fusion
+//! rule is erased behind [`crate::space::RuleKind`] and the scalar type is
+//! erased behind an internal storage enum, mirroring the dynamic-rank
+//! decision; rank is fully dynamic (no ceiling), matching TensorKit's
+//! `tensorcontract!`. Operations lock the shared [`Runtime`] state once,
+//! dispatch on the stored dtype once per call (never per block), and forward
+//! to the dynamic expert entry points (`tensorcontract_fusion_dyn_into`,
+//! `tree_transform_dyn_into`, `adjoint_dyn`).
 
+use std::hash::Hash;
 use std::sync::Arc;
 
+use num_complex::Complex64;
 use tenet_core::{
     BlockKey, BlockStructure, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     SectorId,
 };
-use tenet_matrixalgebra::{DynFactor, SectorSpectrum, Truncation};
-use tenet_tensors::{DynamicFusionMapSpace, TensorContractSpec, TreeTransformOperation};
+use tenet_matrixalgebra::{DynFactor, FactorScalar, SectorSpectrum, Truncation};
+use tenet_tensors::{
+    DynamicFusionMapSpace, RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
+};
 
 use crate::error::Error;
-use crate::runtime::{with_rule_ctx, Runtime};
+use crate::runtime::{with_rule_ctx, Ctx, Ctxs, Runtime};
 use crate::space::{with_rule, RuleKind, Space};
+
+/// The scalar type a [`Tensor`] stores, fixed at construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Dtype {
+    /// Real double precision (`f64`).
+    F64,
+    /// Complex double precision ([`Complex64`]).
+    C64,
+}
+
+/// Dtype-erased flat storage in the coupled-sector matrix layout.
+#[derive(Clone, Debug)]
+enum Data {
+    F64(Vec<f64>),
+    C64(Vec<Complex64>),
+}
+
+/// The scalar types the user layer stores: the expert-layer scalar machinery
+/// plus the glue to lift typed data into the erased [`Data`] storage and to
+/// pick the matching per-scalar execution context.
+trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
+    fn lift(data: Vec<Self>) -> Data;
+    fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key>;
+    fn rand_unit(state: &mut u64) -> Self;
+}
+
+impl UserScalar for f64 {
+    fn lift(data: Vec<Self>) -> Data {
+        Data::F64(data)
+    }
+
+    fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key> {
+        &mut ctxs.f64
+    }
+
+    fn rand_unit(state: &mut u64) -> Self {
+        rand_unit(state)
+    }
+}
+
+impl UserScalar for Complex64 {
+    fn lift(data: Vec<Self>) -> Data {
+        Data::C64(data)
+    }
+
+    fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key> {
+        &mut ctxs.c64
+    }
+
+    fn rand_unit(state: &mut u64) -> Self {
+        Complex64::new(rand_unit(state), rand_unit(state))
+    }
+}
+
+/// Dispatches once on the stored dtype of `$tensor`, binding `$data` to the
+/// typed data vector in both arms; `$body` must be dtype-generic (the expert
+/// entry points are generic over the scalar).
+macro_rules! with_data {
+    ($tensor:expr, $data:ident, $body:expr) => {
+        match &$tensor.data {
+            Data::F64($data) => $body,
+            Data::C64($data) => $body,
+        }
+    };
+}
 
 /// Result of [`Tensor::svd_trunc`]: `t ~ u * s * vh` with the truncated bond
 /// (TensorKit 0.17 / MatrixAlgebraKit `svd_trunc`). `singular_values` holds
@@ -46,11 +117,23 @@ pub struct EighTrunc {
     pub error: f64,
 }
 
+/// Result of [`Tensor::eig_trunc`]: `t ~ v * d * v^-1` with the truncated
+/// bond. `d` and `v` are always c64 (the general eigendecomposition is
+/// complex-valued even for real input); `error` is the
+/// quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
+#[derive(Clone, Debug)]
+pub struct EigTrunc {
+    pub d: Tensor,
+    pub v: Tensor,
+    pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
+    pub error: f64,
+}
+
 /// How a freshly built tensor is filled.
-enum Fill<'f> {
+enum Fill<'f, D> {
     Zeros,
     Rand(u64),
-    BlockFn(&'f mut dyn FnMut(&BlockKey, &[usize]) -> f64),
+    BlockFn(&'f mut dyn FnMut(&BlockKey, &[usize]) -> D),
 }
 
 /// splitmix64: small deterministic RNG for [`Tensor::rand`]; no external
@@ -98,10 +181,10 @@ fn build_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
 /// mirroring [`tenet_core::TensorMap::from_block_fn_with_fusion_space`]
 /// (degeneracy coordinates local to the block, codomain axes first, first
 /// axis fastest).
-fn fill_block_elements(
+fn fill_block_elements<D: UserScalar>(
     structure: &BlockStructure,
-    data: &mut [f64],
-    fill: &mut dyn FnMut(&BlockKey, &[usize]) -> f64,
+    data: &mut [D],
+    fill: &mut dyn FnMut(&BlockKey, &[usize]) -> D,
 ) -> Result<(), Error> {
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
@@ -131,14 +214,20 @@ fn fill_block_elements(
 }
 
 /// Quantum-dimension-weighted Frobenius inner product over the stored
-/// blocks: `sum_c dim(c) * <a_c, b_c>`, matching TensorKit's `dot`.
-fn weighted_inner<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+/// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
+/// matching TensorKit's `dot` (which conjugates its first argument). Real
+/// tensors produce an exactly-real result.
+fn weighted_inner<R, D>(
     rule: &R,
     structure: &BlockStructure,
-    a: &[f64],
-    b: &[f64],
-) -> Result<f64, Error> {
-    let mut total = 0.0;
+    a: &[D],
+    b: &[D],
+) -> Result<Complex64, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: UserScalar,
+{
+    let mut total = Complex64::new(0.0, 0.0);
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
         let weight = match block.key() {
@@ -159,7 +248,7 @@ fn weighted_inner<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
         // ever shows up in a profile.
         let count: usize = shape.iter().product();
         let mut indices = vec![0usize; shape.len()];
-        let mut partial = 0.0;
+        let mut partial = D::from_real(0.0);
         for _ in 0..count {
             let position = offset
                 + indices
@@ -167,7 +256,7 @@ fn weighted_inner<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
                     .zip(strides)
                     .map(|(&i, &s)| i * s)
                     .sum::<usize>();
-            partial += a[position] * b[position];
+            partial = partial + FactorScalar::adjoint(a[position]) * b[position];
             for axis in 0..shape.len() {
                 indices[axis] += 1;
                 if indices[axis] < shape[axis] {
@@ -176,7 +265,7 @@ fn weighted_inner<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
                 indices[axis] = 0;
             }
         }
-        total += weight * partial;
+        total += partial.widen_complex() * weight;
     }
     Ok(total)
 }
@@ -213,7 +302,11 @@ fn open_axes(contracted: &[usize], rank: usize) -> Result<Vec<usize>, Error> {
 /// is a runtime property with no rank ceiling. Mixing tensors of different
 /// rules or different runtimes in one operation is an error.
 ///
-/// Scalar type is currently `f64`.
+/// Scalar type: each tensor stores either real `f64` or complex
+/// [`Complex64`] data, fixed at construction ([`Self::rand`] vs
+/// [`Self::rand_c64`] and so on) and reported by [`Self::dtype`]. Operations
+/// dispatch on the stored dtype internally; mixing dtypes in one operation
+/// is [`Error::DtypeMismatch`] (widen explicitly with [`Self::to_c64`]).
 ///
 /// # Examples
 ///
@@ -241,14 +334,20 @@ pub struct Tensor {
     rt: Runtime,
     rule: RuleKind,
     space: Arc<DynamicFusionMapSpace>,
-    data: Vec<f64>,
+    data: Data,
 }
 
 impl Tensor {
-    fn build<'a, C, D>(rt: &Runtime, codomain: C, domain: D, fill: Fill<'_>) -> Result<Self, Error>
+    fn build<'a, C, D, S>(
+        rt: &Runtime,
+        codomain: C,
+        domain: D,
+        fill: Fill<'_, S>,
+    ) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
+        S: UserScalar,
     {
         let codomain: Vec<&Space> = codomain.into_iter().collect();
         let domain: Vec<&Space> = domain.into_iter().collect();
@@ -272,20 +371,20 @@ impl Tensor {
         let (space, data) = with_rule!(rule_kind, rule, {
             let space = build_space(rule, hom)?;
             let len = space.required_len()?;
-            let mut data = vec![0.0; len];
+            let mut data = vec![S::from_real(0.0); len];
             match fill {
                 Fill::Zeros => {}
                 Fill::Rand(seed) => {
                     let mut state = seed;
                     for value in &mut data {
-                        *value = rand_unit(&mut state);
+                        *value = S::rand_unit(&mut state);
                     }
                 }
                 Fill::BlockFn(fill) => {
                     fill_block_elements(space.structure(), &mut data, fill)?;
                 }
             }
-            Ok::<_, Error>((space, data))
+            Ok::<_, Error>((space, S::lift(data)))
         })?;
         Ok(Self {
             rt: rt.clone(),
@@ -302,20 +401,39 @@ impl Tensor {
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
-        Self::build(rt, codomain, domain, Fill::Zeros)
+        Self::build::<_, _, f64>(rt, codomain, domain, Fill::Zeros)
+    }
+
+    /// Complex (c64) zero tensor on `codomain <- domain`.
+    pub fn zeros_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Zeros)
     }
 
     /// Random tensor on `codomain <- domain`, entries uniform in `[-1, 1)`.
     ///
-    /// Deterministic per runtime: the n-th `rand` call on a given runtime
-    /// always produces the same tensor. Use [`Self::rand_with_seed`] for an
-    /// explicit stream.
+    /// Deterministic per runtime: the n-th `rand`-family call on a given
+    /// runtime always produces the same tensor. Use [`Self::rand_with_seed`]
+    /// for an explicit stream.
     pub fn rand<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
-        Self::build(rt, codomain, domain, Fill::Rand(rt.next_rand_seed()))
+        Self::build::<_, _, f64>(rt, codomain, domain, Fill::Rand(rt.next_rand_seed()))
+    }
+
+    /// Complex (c64) random tensor: real and imaginary parts each uniform in
+    /// `[-1, 1)`; same determinism as [`Self::rand`].
+    pub fn rand_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Rand(rt.next_rand_seed()))
     }
 
     /// Random tensor with an explicit seed (splitmix64 stream, entries
@@ -330,7 +448,21 @@ impl Tensor {
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
     {
-        Self::build(rt, codomain, domain, Fill::Rand(seed))
+        Self::build::<_, _, f64>(rt, codomain, domain, Fill::Rand(seed))
+    }
+
+    /// Complex (c64) random tensor with an explicit seed.
+    pub fn rand_with_seed_c64<'a, C, D>(
+        rt: &Runtime,
+        codomain: C,
+        domain: D,
+        seed: u64,
+    ) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Self::build::<_, _, Complex64>(rt, codomain, domain, Fill::Rand(seed))
     }
 
     /// Tensor filled block-by-block: `fill(key, indices)` is called for
@@ -355,6 +487,39 @@ impl Tensor {
         Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
     }
 
+    /// Complex (c64) [`Self::from_block_fn`]: `fill` returns [`Complex64`].
+    pub fn from_block_fn_c64<'a, C, D, F>(
+        rt: &Runtime,
+        codomain: C,
+        domain: D,
+        mut fill: F,
+    ) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+        F: FnMut(&BlockKey, &[usize]) -> Complex64,
+    {
+        Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
+    }
+
+    /// Wraps a same-runtime, same-rule result of an expert-layer call.
+    fn with(&self, space: DynamicFusionMapSpace, data: Data) -> Self {
+        Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::new(space),
+            data,
+        }
+    }
+
+    /// The scalar type this tensor stores.
+    pub fn dtype(&self) -> Dtype {
+        match self.data {
+            Data::F64(_) => Dtype::F64,
+            Data::C64(_) => Dtype::C64,
+        }
+    }
+
     /// Number of codomain legs.
     pub fn codomain_rank(&self) -> usize {
         self.space.nout()
@@ -370,10 +535,48 @@ impl Tensor {
         self.space.rank()
     }
 
-    /// Flat storage in the TensorKit-equivalent coupled-sector matrix
+    /// Flat `f64` storage in the TensorKit-equivalent coupled-sector matrix
     /// layout (column-major inside each coupled block).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tensor stores c64 data; use [`Self::data_c64`] then.
     pub fn data(&self) -> &[f64] {
-        &self.data
+        match &self.data {
+            Data::F64(data) => data,
+            Data::C64(_) => panic!("data(): tensor stores c64 data; use data_c64()"),
+        }
+    }
+
+    /// Flat [`Complex64`] storage in the coupled-sector matrix layout.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tensor stores f64 data; use [`Self::data`] then.
+    pub fn data_c64(&self) -> &[Complex64] {
+        match &self.data {
+            Data::C64(data) => data,
+            Data::F64(_) => panic!("data_c64(): tensor stores f64 data; use data()"),
+        }
+    }
+
+    /// Widens to a c64 tensor (imaginary parts zero); a cheap clone when the
+    /// tensor already stores c64 data.
+    pub fn to_c64(&self) -> Self {
+        let data = match &self.data {
+            Data::F64(data) => Data::C64(
+                data.iter()
+                    .map(|&value| Complex64::new(value, 0.0))
+                    .collect(),
+            ),
+            Data::C64(data) => Data::C64(data.clone()),
+        };
+        Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data,
+        }
     }
 
     /// Quantum-dimension-weighted total dimension of every leg, in flat
@@ -438,16 +641,35 @@ impl Tensor {
             .collect()
     }
 
-    /// The single element of a rank-0 (scalar) tensor, e.g. the result of
-    /// contracting every leg. Errors on tensors with legs.
-    pub fn scalar(&self) -> Result<f64, Error> {
+    fn check_rank0(&self) -> Result<(), Error> {
         if self.rank() != 0 {
             return Err(Error::InvalidArgument(format!(
                 "scalar() requires a rank-0 tensor, got rank {}",
                 self.rank()
             )));
         }
-        Ok(self.data.iter().sum())
+        Ok(())
+    }
+
+    /// The single element of a rank-0 (scalar) f64 tensor, e.g. the result
+    /// of contracting every leg. Errors on tensors with legs and on c64
+    /// tensors (use [`Self::scalar_c64`]).
+    pub fn scalar(&self) -> Result<f64, Error> {
+        self.check_rank0()?;
+        match &self.data {
+            Data::F64(data) => Ok(data.iter().sum()),
+            Data::C64(_) => Err(Error::DtypeMismatch),
+        }
+    }
+
+    /// The single element of a rank-0 (scalar) tensor as [`Complex64`];
+    /// works for both dtypes (f64 widens with zero imaginary part).
+    pub fn scalar_c64(&self) -> Result<Complex64, Error> {
+        self.check_rank0()?;
+        match &self.data {
+            Data::F64(data) => Ok(Complex64::new(data.iter().sum(), 0.0)),
+            Data::C64(data) => Ok(data.iter().sum()),
+        }
     }
 
     fn check_same_world(&self, other: &Self) -> Result<(), Error> {
@@ -456,6 +678,9 @@ impl Tensor {
         }
         if !self.rt.same_runtime(&other.rt) {
             return Err(Error::RuntimeMismatch);
+        }
+        if self.dtype() != other.dtype() {
+            return Err(Error::DtypeMismatch);
         }
         Ok(())
     }
@@ -495,8 +720,23 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
+        match (&self.data, &rhs.data) {
+            (Data::F64(a), Data::F64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
+            (Data::C64(a), Data::C64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    fn contract_impl<D: UserScalar>(
+        &self,
+        rhs: &Self,
+        lhs_data: &[D],
+        rhs_data: &[D],
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, Error> {
         let mut state = self.rt.lock();
-        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctx, {
+        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             let dst_space = DynamicFusionMapSpace::contracted(
                 rule,
                 &self.space,
@@ -504,28 +744,23 @@ impl Tensor {
                 lhs_axes,
                 rhs_axes,
             )?;
-            let mut data = vec![0.0; dst_space.required_len()?];
-            ctx.tensorcontract_fusion_dyn_into(
+            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
+            D::ctx_of(ctxs).tensorcontract_fusion_dyn_into(
                 rule,
                 &dst_space,
                 &mut data,
                 &self.space,
-                &self.data,
+                lhs_data,
                 &rhs.space,
-                &rhs.data,
+                rhs_data,
                 TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
-                1.0,
-                0.0,
+                D::from_real(1.0),
+                D::from_real(0.0),
             )?;
-            Ok::<_, Error>((dst_space, data))
+            Ok::<_, Error>((dst_space, D::lift(data)))
         })?;
         drop(state);
-        Ok(Self {
-            rt: self.rt.clone(),
-            rule: self.rule,
-            space: Arc::new(space),
-            data,
-        })
+        Ok(self.with(space, data))
     }
 
     /// Like [`Self::contract`], but with an explicit output axis order
@@ -618,61 +853,65 @@ impl Tensor {
             ),
         };
 
+        with_data!(self, data, self.transformed_impl(data, operation))
+    }
+
+    fn transformed_impl<D: UserScalar>(
+        &self,
+        src_data: &[D],
+        operation: TreeTransformOperation,
+    ) -> Result<Self, Error> {
         let mut state = self.rt.lock();
-        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctx, {
+        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             let dst_space = self.space.transformed(rule, &operation)?;
-            let mut data = vec![0.0; dst_space.required_len()?];
-            ctx.tree_context_mut().tree_transform_dyn_into(
+            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
+            D::ctx_of(ctxs).tree_context_mut().tree_transform_dyn_into(
                 rule,
                 operation,
                 &Arc::clone(dst_space.structure()),
                 self.space.structure(),
                 &mut data,
-                &self.data,
-                1.0,
-                0.0,
+                src_data,
+                D::from_real(1.0),
+                D::from_real(0.0),
             )?;
-            Ok::<_, Error>((dst_space, data))
+            Ok::<_, Error>((dst_space, D::lift(data)))
         })?;
         drop(state);
-        Ok(Self {
-            rt: self.rt.clone(),
-            rule: self.rule,
-            space: Arc::new(space),
-            data,
-        })
+        Ok(self.with(space, data))
     }
 
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
-    /// conjugate-transposes every block (real scalars: transpose only).
+    /// conjugate-transposes every block (real scalars: transpose only, c64:
+    /// entries conjugated).
     pub fn adjoint(&self) -> Result<Self, Error> {
-        let (space, data) = with_rule!(self.rule, rule, {
-            tenet_tensors::adjoint_dyn(rule, &self.space, &self.data)
-        })?;
-        Ok(Self {
-            rt: self.rt.clone(),
-            rule: self.rule,
-            space: Arc::new(space),
-            data,
+        with_data!(self, data, {
+            let (space, out) = with_rule!(self.rule, rule, {
+                tenet_tensors::adjoint_dyn(rule, &self.space, data)
+            })?;
+            Ok(self.with(space, UserScalar::lift(out)))
         })
     }
 
     /// Frobenius norm, weighted by coupled-sector quantum dimensions
     /// (`norm(t)^2 = sum_c dim(c) * |block_c|^2`), matching TensorKit's
-    /// `norm`.
+    /// `norm`. Always real, for both dtypes.
     pub fn norm(&self) -> Result<f64, Error> {
-        with_rule!(self.rule, rule, {
-            weighted_inner(rule, self.space.structure(), &self.data, &self.data)
-        })
-        .map(f64::sqrt)
+        let value = with_data!(self, data, {
+            with_rule!(self.rule, rule, {
+                weighted_inner(rule, self.space.structure(), data, data)
+            })
+        })?;
+        Ok(value.re.sqrt())
     }
 
-    /// Returns `factor * self`.
+    /// Returns `factor * self` (real factor, both dtypes). Use
+    /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
-        let mut data = self.data.clone();
-        for value in &mut data {
-            *value *= factor;
-        }
+        let data = match &self.data {
+            Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
+            Data::C64(data) => Data::C64(data.iter().map(|&value| value * factor).collect()),
+        };
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
@@ -681,14 +920,41 @@ impl Tensor {
         })
     }
 
-    /// Returns `alpha * self + beta * other`. Both tensors must live on the
-    /// same spaces (identical hom space and block layout).
+    /// Returns `factor * self` for a c64 tensor. Errors with
+    /// [`Error::DtypeMismatch`] on f64 tensors (widen with
+    /// [`Self::to_c64`] first).
+    pub fn scale_c64(&self, factor: Complex64) -> Result<Self, Error> {
+        match &self.data {
+            Data::C64(data) => Ok(Self {
+                rt: self.rt.clone(),
+                rule: self.rule,
+                space: Arc::clone(&self.space),
+                data: Data::C64(data.iter().map(|&value| value * factor).collect()),
+            }),
+            Data::F64(_) => Err(Error::DtypeMismatch),
+        }
+    }
+
+    /// Returns `alpha * self + beta * other` (real coefficients, both
+    /// dtypes). Both tensors must live on the same spaces (identical hom
+    /// space and block layout) and store the same dtype.
     pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
         self.check_same_space(other)?;
-        let mut data = self.data.clone();
-        for (value, &rhs) in data.iter_mut().zip(&other.data) {
-            *value = alpha * *value + beta * rhs;
-        }
+        let data = match (&self.data, &other.data) {
+            (Data::F64(a), Data::F64(b)) => Data::F64(
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &y)| alpha * x + beta * y)
+                    .collect(),
+            ),
+            (Data::C64(a), Data::C64(b)) => Data::C64(
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &y)| x * alpha + y * beta)
+                    .collect(),
+            ),
+            _ => return Err(Error::DtypeMismatch),
+        };
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
@@ -697,14 +963,43 @@ impl Tensor {
         })
     }
 
-    /// Frobenius inner product `<self, other>`, weighted by coupled-sector
-    /// quantum dimensions; `t.inner(&t)? == t.norm()?.powi(2)` up to
-    /// floating-point error. Both tensors must live on the same spaces.
-    pub fn inner(&self, other: &Self) -> Result<f64, Error> {
+    /// Returns `alpha * self + beta * other` with complex coefficients; both
+    /// tensors must be c64 (widen with [`Self::to_c64`] first).
+    pub fn add_c64(&self, other: &Self, alpha: Complex64, beta: Complex64) -> Result<Self, Error> {
         self.check_same_space(other)?;
-        with_rule!(self.rule, rule, {
-            weighted_inner(rule, self.space.structure(), &self.data, &other.data)
-        })
+        match (&self.data, &other.data) {
+            (Data::C64(a), Data::C64(b)) => Ok(Self {
+                rt: self.rt.clone(),
+                rule: self.rule,
+                space: Arc::clone(&self.space),
+                data: Data::C64(
+                    a.iter()
+                        .zip(b)
+                        .map(|(&x, &y)| alpha * x + beta * y)
+                        .collect(),
+                ),
+            }),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    /// Frobenius inner product `<self, other>` with `self` conjugated,
+    /// weighted by coupled-sector quantum dimensions, matching TensorKit's
+    /// `dot(x, y)`. Always returned as [`Complex64`]: real tensors give an
+    /// exactly-zero imaginary part, so `t.inner(&t)?.re == t.norm()?.powi(2)`
+    /// up to floating-point error. Both tensors must live on the same spaces
+    /// and store the same dtype.
+    pub fn inner(&self, other: &Self) -> Result<Complex64, Error> {
+        self.check_same_space(other)?;
+        match (&self.data, &other.data) {
+            (Data::F64(a), Data::F64(b)) => with_rule!(self.rule, rule, {
+                weighted_inner(rule, self.space.structure(), a, b)
+            }),
+            (Data::C64(a), Data::C64(b)) => with_rule!(self.rule, rule, {
+                weighted_inner(rule, self.space.structure(), a, b)
+            }),
+            _ => Err(Error::DtypeMismatch),
+        }
     }
 
     fn check_same_space(&self, other: &Self) -> Result<(), Error> {
@@ -723,12 +1018,12 @@ impl Tensor {
     // -----------------------------------------------------------------------
 
     /// Wraps a dynamic factor produced by the matrixalgebra layer.
-    fn from_dyn(&self, (space, data): DynFactor<f64>) -> Self {
+    fn from_dyn<D: UserScalar>(&self, (space, data): DynFactor<D>) -> Self {
         Self {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::new(space),
-            data,
+            data: D::lift(data),
         }
     }
 
@@ -737,14 +1032,16 @@ impl Tensor {
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::svd_compact_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((
-            self.from_dyn(out.u),
-            self.from_dyn(out.s),
-            self.from_dyn(out.vh),
-        ))
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::svd_compact_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((
+                self.from_dyn(out.u),
+                self.from_dyn(out.s),
+                self.from_dyn(out.vh),
+            ))
+        })
     }
 
     /// Full SVD `t = u * s * vh` (MatrixAlgebraKit `svd_full`): square
@@ -752,47 +1049,53 @@ impl Tensor {
     pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::svd_full_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((
-            self.from_dyn(out.u),
-            self.from_dyn(out.s),
-            self.from_dyn(out.vh),
-        ))
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::svd_full_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((
+                self.from_dyn(out.u),
+                self.from_dyn(out.s),
+                self.from_dyn(out.vh),
+            ))
+        })
     }
 
     /// Truncated SVD (MatrixAlgebraKit `svd_trunc`); see [`SvdTrunc`].
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::svd_trunc_dyn(
-                &mut state.dense,
-                rule,
-                &self.space,
-                &self.data,
-                truncation,
-            )
-        })?;
-        Ok(SvdTrunc {
-            u: self.from_dyn(out.u),
-            s: self.from_dyn(out.s),
-            vh: self.from_dyn(out.vh),
-            singular_values: out.singular_values,
-            error: out.error,
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::svd_trunc_dyn(
+                    &mut state.dense,
+                    rule,
+                    &self.space,
+                    data,
+                    truncation,
+                )
+            })?;
+            Ok(SvdTrunc {
+                u: self.from_dyn(out.u),
+                s: self.from_dyn(out.s),
+                vh: self.from_dyn(out.vh),
+                singular_values: out.singular_values,
+                error: out.error,
+            })
         })
     }
 
     /// All singular values per coupled sector, descending (MatrixAlgebraKit
-    /// `svd_vals`).
+    /// `svd_vals`). Real for both dtypes.
     pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::svd_vals_dyn(&mut state.dense, rule, &self.space, &self.data)
+        with_data!(self, data, {
+            with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::svd_vals_dyn(&mut state.dense, rule, &self.space, data)
+            })
+            .map_err(Into::into)
         })
-        .map_err(Into::into)
     }
 
     /// Compact QR `t = q * r` (MatrixAlgebraKit `qr_compact`): `q` has
@@ -800,10 +1103,12 @@ impl Tensor {
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let (q, r) = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::qr_compact_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((self.from_dyn(q), self.from_dyn(r)))
+        with_data!(self, data, {
+            let (q, r) = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::qr_compact_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((self.from_dyn(q), self.from_dyn(r)))
+        })
     }
 
     /// Full QR `t = q * r` (MatrixAlgebraKit `qr_full`): square `q` per
@@ -811,10 +1116,12 @@ impl Tensor {
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let (q, r) = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::qr_full_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((self.from_dyn(q), self.from_dyn(r)))
+        with_data!(self, data, {
+            let (q, r) = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::qr_full_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((self.from_dyn(q), self.from_dyn(r)))
+        })
     }
 
     /// Compact LQ `t = l * q` (MatrixAlgebraKit `lq_compact`): `q` has
@@ -822,10 +1129,12 @@ impl Tensor {
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let (l, q) = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::lq_compact_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((self.from_dyn(l), self.from_dyn(q)))
+        with_data!(self, data, {
+            let (l, q) = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::lq_compact_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((self.from_dyn(l), self.from_dyn(q)))
+        })
     }
 
     /// Full LQ `t = l * q` (MatrixAlgebraKit `lq_full`): square `q` per
@@ -833,10 +1142,12 @@ impl Tensor {
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let (l, q) = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::lq_full_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((self.from_dyn(l), self.from_dyn(q)))
+        with_data!(self, data, {
+            let (l, q) = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::lq_full_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((self.from_dyn(l), self.from_dyn(q)))
+        })
     }
 
     /// Left isometry factorization `t = v * c` (TensorKit 0.17 `left_orth`,
@@ -856,10 +1167,12 @@ impl Tensor {
     pub fn left_null(&self) -> Result<Self, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::left_null_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok(self.from_dyn(out))
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::left_null_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok(self.from_dyn(out))
+        })
     }
 
     /// Right null space `n : W <- domain` with `t * n^H = 0` (MatrixAlgebraKit
@@ -867,24 +1180,30 @@ impl Tensor {
     pub fn right_null(&self) -> Result<Self, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::right_null_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok(self.from_dyn(out))
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::right_null_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok(self.from_dyn(out))
+        })
     }
 
     /// Left polar decomposition `t = w * p` (MatrixAlgebraKit `left_polar`):
     /// `w` isometric, `p` positive on the domain.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
+        with_data!(self, data, self.left_polar_impl(data))
+    }
+
+    fn left_polar_impl<D: UserScalar>(&self, data: &[D]) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let (w, p) = with_rule_ctx!(self.rule, state, rule, ctx, {
+        let (w, p) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             tenet_matrixalgebra::left_polar_dyn(
                 &mut state.dense,
-                ctx,
+                D::ctx_of(ctxs),
                 rule,
                 &self.space,
-                &self.data,
+                data,
             )
         })?;
         Ok((self.from_dyn(w), self.from_dyn(p)))
@@ -893,15 +1212,19 @@ impl Tensor {
     /// Right polar decomposition `t = p * w` (MatrixAlgebraKit
     /// `right_polar`): `p` positive on the codomain, `w` isometric.
     pub fn right_polar(&self) -> Result<(Self, Self), Error> {
+        with_data!(self, data, self.right_polar_impl(data))
+    }
+
+    fn right_polar_impl<D: UserScalar>(&self, data: &[D]) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let (p, w) = with_rule_ctx!(self.rule, state, rule, ctx, {
+        let (p, w) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             tenet_matrixalgebra::right_polar_dyn(
                 &mut state.dense,
-                ctx,
+                D::ctx_of(ctxs),
                 rule,
                 &self.space,
-                &self.data,
+                data,
             )
         })?;
         Ok((self.from_dyn(p), self.from_dyn(w)))
@@ -909,14 +1232,18 @@ impl Tensor {
 
     /// Full Hermitian eigendecomposition `t = v * d * v^H` (MatrixAlgebraKit
     /// `eigh_full`), returned as `(d, v)`. Requires an endomorphism with
-    /// Hermitian coupled blocks.
+    /// Hermitian coupled blocks. The eigenvalues are real for both dtypes
+    /// (TensorKit: real `D`); `d` keeps the input dtype so it composes with
+    /// `v` directly.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::eigh_full_dyn(&mut state.dense, rule, &self.space, &self.data)
-        })?;
-        Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::eigh_full_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+        })
     }
 
     /// Truncated Hermitian eigendecomposition (MatrixAlgebraKit
@@ -924,46 +1251,103 @@ impl Tensor {
     pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::eigh_trunc_dyn(
-                &mut state.dense,
-                rule,
-                &self.space,
-                &self.data,
-                truncation,
-            )
-        })?;
-        Ok(EighTrunc {
-            d: self.from_dyn(out.d),
-            v: self.from_dyn(out.v),
-            eigenvalues: out.eigenvalues,
-            error: out.error,
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::eigh_trunc_dyn(
+                    &mut state.dense,
+                    rule,
+                    &self.space,
+                    data,
+                    truncation,
+                )
+            })?;
+            Ok(EighTrunc {
+                d: self.from_dyn(out.d),
+                v: self.from_dyn(out.v),
+                eigenvalues: out.eigenvalues,
+                error: out.error,
+            })
         })
     }
 
     /// All Hermitian eigenvalues per coupled sector, descending by magnitude
-    /// (MatrixAlgebraKit `eigh_vals`).
+    /// (MatrixAlgebraKit `eigh_vals`). Real for both dtypes.
     pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::eigh_vals_dyn(&mut state.dense, rule, &self.space, &self.data)
+        with_data!(self, data, {
+            with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::eigh_vals_dyn(&mut state.dense, rule, &self.space, data)
+            })
+            .map_err(Into::into)
         })
-        .map_err(Into::into)
     }
 
-    // eig_full / eig_trunc / eig_vals are deferred to the c64 milestone: the
-    // general eigendecomposition is complex-valued and the user layer is
-    // f64-only today. The expert layer (`tenet_matrixalgebra::eig_*_dyn`)
-    // already supports them.
+    /// Full general (non-Hermitian) eigendecomposition `t = v * d * v^-1`
+    /// (MatrixAlgebraKit `eig_full`), returned as `(d, v)`. Requires an
+    /// endomorphism. The output tensors are always c64, even for f64 input
+    /// (real matrices have complex eigenpairs), matching TensorKit's
+    /// `eigen`, whose `D` and `V` are `ComplexF64` for real input.
+    pub fn eig_full(&self) -> Result<(Self, Self), Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::eig_full_dyn(&mut state.dense, rule, &self.space, data)
+            })?;
+            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+        })
+    }
+
+    /// Truncated general eigendecomposition (MatrixAlgebraKit `eig_trunc`,
+    /// kept by descending `|eigenvalue|`); see [`EigTrunc`]. Output tensors
+    /// are always c64.
+    pub fn eig_trunc(&self, truncation: &Truncation) -> Result<EigTrunc, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        with_data!(self, data, {
+            let out = with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::eig_trunc_dyn(
+                    &mut state.dense,
+                    rule,
+                    &self.space,
+                    data,
+                    truncation,
+                )
+            })?;
+            Ok(EigTrunc {
+                d: self.from_dyn(out.d),
+                v: self.from_dyn(out.v),
+                eigenvalues: out.eigenvalues,
+                error: out.error,
+            })
+        })
+    }
+
+    /// All general eigenvalues per coupled sector, descending by magnitude
+    /// (MatrixAlgebraKit `eig_vals`). Complex for both dtypes.
+    pub fn eig_vals(&self) -> Result<Vec<SectorSpectrum<Complex64>>, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        with_data!(self, data, {
+            with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::eig_vals_dyn(&mut state.dense, rule, &self.space, data)
+            })
+            .map_err(Into::into)
+        })
+    }
 
     /// Matrix exponential of a Hermitian endomorphism, `exp(t) = v exp(d)
     /// v^H` (TensorKit `exp`, via the eigendecomposition).
     pub fn exp(&self) -> Result<Self, Error> {
+        with_data!(self, data, self.exp_impl(data))
+    }
+
+    fn exp_impl<D: UserScalar>(&self, data: &[D]) -> Result<Self, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule_ctx!(self.rule, state, rule, ctx, {
-            tenet_matrixalgebra::exp_dyn(&mut state.dense, ctx, rule, &self.space, &self.data)
+        let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
+            tenet_matrixalgebra::exp_dyn(&mut state.dense, D::ctx_of(ctxs), rule, &self.space, data)
         })?;
         Ok(self.from_dyn(out))
     }
@@ -972,10 +1356,14 @@ impl Tensor {
     /// `inv`); fails when any coupled block is rank-deficient at working
     /// precision.
     pub fn inv(&self) -> Result<Self, Error> {
+        with_data!(self, data, self.inv_impl(data))
+    }
+
+    fn inv_impl<D: UserScalar>(&self, data: &[D]) -> Result<Self, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule_ctx!(self.rule, state, rule, ctx, {
-            tenet_matrixalgebra::inv_dyn(&mut state.dense, ctx, rule, &self.space, &self.data)
+        let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
+            tenet_matrixalgebra::inv_dyn(&mut state.dense, D::ctx_of(ctxs), rule, &self.space, data)
         })?;
         Ok(self.from_dyn(out))
     }
@@ -983,15 +1371,19 @@ impl Tensor {
     /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
     /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
     pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+        with_data!(self, data, self.pinv_impl(data, rcond))
+    }
+
+    fn pinv_impl<D: UserScalar>(&self, data: &[D], rcond: f64) -> Result<Self, Error> {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
-        let out = with_rule_ctx!(self.rule, state, rule, ctx, {
+        let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
             tenet_matrixalgebra::pinv_dyn(
                 &mut state.dense,
-                ctx,
+                D::ctx_of(ctxs),
                 rule,
                 &self.space,
-                &self.data,
+                data,
                 rcond,
             )
         })?;

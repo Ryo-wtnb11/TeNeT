@@ -57,7 +57,7 @@ fn bond_energy(h: &Tensor, l_out: &Tensor, g1: &Tensor, l_mid: &Tensor, g2: &Ten
         .unwrap()
         .scalar()
         .unwrap();
-    num / theta.inner(&theta).unwrap()
+    num / theta.inner(&theta).unwrap().re
 }
 
 /// Runs the schedule from a Neel state; returns the energy per bond.

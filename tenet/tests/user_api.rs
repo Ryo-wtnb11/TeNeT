@@ -256,7 +256,7 @@ fn vector_interface_identities() {
         let d = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 52).unwrap();
 
         let norm = c.norm().unwrap();
-        let inner_cc = c.inner(&c).unwrap();
+        let inner_cc = c.inner(&c).unwrap().re;
         assert!((inner_cc - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 
         let scaled = c.scale(0.5).unwrap();
@@ -264,8 +264,8 @@ fn vector_interface_identities() {
 
         // w = c - d; |w|^2 = <c,c> - 2<c,d> + <d,d>.
         let w = c.add(&d, 1.0, -1.0).unwrap();
-        let expected = inner_cc - 2.0 * c.inner(&d).unwrap() + d.inner(&d).unwrap();
-        let actual = w.inner(&w).unwrap();
+        let expected = inner_cc - 2.0 * c.inner(&d).unwrap().re + d.inner(&d).unwrap().re;
+        let actual = w.inner(&w).unwrap().re;
         assert!((actual - expected).abs() <= 1e-10 * (1.0 + expected.abs()));
     }
 }
@@ -626,7 +626,7 @@ fn fz2_u1_su2_space_and_identity_invariants_vs_tensorkit() {
     assert!((norm - 4.0).abs() <= 1e-12, "norm(id) = {norm}");
 
     // inner(id, id) = ‖id‖² = tr(id† id) = 16.0; Julia: tr(id(S⊗S)) = 16.0.
-    let inner = id.inner(&id).unwrap();
+    let inner = id.inner(&id).unwrap().re;
     assert!((inner - 16.0).abs() <= 1e-12, "inner(id, id) = {inner}");
 
     // Julia blocksectors of id(S⊗S): 6 coupled sectors with block dims
@@ -687,8 +687,8 @@ fn fz2_u1_su2_braid_fermion_sign_vs_tensorkit() {
             _ => 0.0,
         })
         .unwrap();
-        let before = proj.inner(&t).unwrap();
-        let after = proj.inner(&tb).unwrap();
+        let before = proj.inner(&t).unwrap().re;
+        let after = proj.inner(&tb).unwrap().re;
         assert!((before - qdim).abs() <= 1e-12, "before = {before}");
         assert!(
             (after - sign * qdim).abs() <= 1e-12,

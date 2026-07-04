@@ -1,9 +1,11 @@
 //! User-layer runtime: owns the per-rule execution/cache state so everyday
 //! tensor code never passes explicit contexts around.
 
+use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use num_complex::Complex64;
 use tenet_tensors::{
     TensorContractFusionExecutionContext, TreeTransformBuiltinRuleCacheKey,
     TreeTransformProductRuleCacheKey,
@@ -11,11 +13,27 @@ use tenet_tensors::{
 
 use crate::error::Error;
 
-pub(crate) type Ctx<Key> = TensorContractFusionExecutionContext<f64, Key>;
+pub(crate) type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
 pub(crate) type ProductKey = TreeTransformProductRuleCacheKey<BuiltinKey, BuiltinKey>;
 /// Cache key of the left-associated triple product `(fZ2 ⊠ U1) ⊠ SU2`.
 pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, BuiltinKey>;
+
+/// The pair of per-scalar execution contexts for one fusion rule: tensor
+/// operations dispatch on the stored dtype once per call and pick one side.
+pub(crate) struct Ctxs<Key: Clone + Eq + Hash> {
+    pub(crate) f64: Ctx<f64, Key>,
+    pub(crate) c64: Ctx<Complex64, Key>,
+}
+
+impl<Key: Clone + Eq + Hash> Default for Ctxs<Key> {
+    fn default() -> Self {
+        Self {
+            f64: Ctx::default(),
+            c64: Ctx::default(),
+        }
+    }
+}
 
 /// Per-rule expert-layer execution contexts (contraction resolution caches,
 /// tree-transform replay caches, dense backends and workspaces).
@@ -24,20 +42,20 @@ pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, Builtin
 /// empty contexts are cheap, and filled lazily by use.
 #[derive(Default)]
 pub(crate) struct RuntimeState {
-    pub(crate) u1: Ctx<BuiltinKey>,
-    pub(crate) z2: Ctx<BuiltinKey>,
-    pub(crate) fz2: Ctx<BuiltinKey>,
-    pub(crate) su2: Ctx<BuiltinKey>,
-    pub(crate) u1_fz2: Ctx<ProductKey>,
-    pub(crate) fz2_u1_su2: Ctx<TripleKey>,
+    pub(crate) u1: Ctxs<BuiltinKey>,
+    pub(crate) z2: Ctxs<BuiltinKey>,
+    pub(crate) fz2: Ctxs<BuiltinKey>,
+    pub(crate) su2: Ctxs<BuiltinKey>,
+    pub(crate) u1_fz2: Ctxs<ProductKey>,
+    pub(crate) fz2_u1_su2: Ctxs<TripleKey>,
     /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
     /// coupled-sector matrices), shared by all decomposition methods.
     pub(crate) dense: tenet_dense::DefaultDenseExecutor,
 }
 
 /// Dispatches on a [`crate::space::RuleKind`], binding `$rule` to the
-/// concrete fusion rule and `$ctx` to the matching execution context of a
-/// [`RuntimeState`].
+/// concrete fusion rule and `$ctx` to the matching per-scalar execution
+/// context pair ([`Ctxs`]) of a [`RuntimeState`].
 macro_rules! with_rule_ctx {
     ($kind:expr, $state:expr, $rule:ident, $ctx:ident, $body:expr) => {
         match $kind {
