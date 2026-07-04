@@ -93,8 +93,9 @@ pub(crate) use tenet_operations::{HostKernelAdapter, StridedHostKernelAdapter};
 pub use tenet_operations::{HostTreeTransformWorkspace, TreeTransformWorkspace};
 pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec};
 pub use tensortrace::{
-    tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
-    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
+    tensortrace_fusion_dyn_into, tensortrace_fusion_structure, tensortrace_structure,
+    TensorTraceFusionStructure, TensorTraceFusionStructureTerm, TensorTraceStructure,
+    TensorTraceStructureTerm,
 };
 pub use tree_context::TreeTransformExecutionContext;
 pub use tree_transform::{

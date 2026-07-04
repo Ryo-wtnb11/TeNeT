@@ -9,6 +9,7 @@ use tenet_core::{
     TensorStorage,
 };
 
+use crate::contract::DynamicFusionMapSpace;
 use crate::lowering::{adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes};
 use crate::strided::offset_to_isize;
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
@@ -166,18 +167,79 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        Self::compile_fusion_parts(
+            rule,
+            dst.homspace(),
+            Arc::clone(dst.subblock_structure()),
+            src.homspace(),
+            Arc::clone(src.subblock_structure()),
+            src_storage_structure,
+            DST_NOUT,
+            axes,
+        )
+    }
+
+    /// Dynamic-rank [`Self::compile_fusion_spaces`] over
+    /// [`DynamicFusionMapSpace`] handles (the user-layer representation).
+    pub fn compile_fusion_dyn<R>(
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        src: &DynamicFusionMapSpace,
+        axes: TensorTraceAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+    {
+        Self::compile_fusion_parts(
+            rule,
+            dst.homspace(),
+            Arc::clone(dst.structure()),
+            src.homspace(),
+            Arc::clone(src.structure()),
+            Arc::clone(src.structure()),
+            dst.nout(),
+            axes,
+        )
+    }
+
+    /// Rank-runtime core shared by the const-generic and dynamic compiles.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_fusion_parts<R>(
+        rule: &R,
+        dst_homspace: &FusionTreeHomSpace,
+        dst_structure: Arc<BlockStructure>,
+        src_homspace: &FusionTreeHomSpace,
+        src_structure: Arc<BlockStructure>,
+        src_storage_structure: Arc<BlockStructure>,
+        dst_codomain_rank: usize,
+        axes: TensorTraceAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+    {
         if !rule.braiding_style().is_symmetric() {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
             });
         }
-        let dst_structure = Arc::clone(dst.subblock_structure());
-        let src_structure = Arc::clone(src.subblock_structure());
         let axis_plan =
             TensorTraceAxisPlan::compile(src_structure.rank(), dst_structure.rank(), axes)?;
-        validate_fusion_trace_homspace(rule, dst.homspace(), src.homspace(), &axis_plan, DST_NOUT)?;
-        let terms =
-            build_fusion_trace_terms(rule, &dst_structure, &src_structure, &axis_plan, DST_NOUT)?;
+        validate_fusion_trace_homspace(
+            rule,
+            dst_homspace,
+            src_homspace,
+            &axis_plan,
+            dst_codomain_rank,
+        )?;
+        let terms = build_fusion_trace_terms(
+            rule,
+            &dst_structure,
+            &src_structure,
+            &axis_plan,
+            dst_codomain_rank,
+        )?;
         let dense_terms = terms
             .iter()
             .map(|term| TensorTraceStructureTerm {
@@ -984,6 +1046,61 @@ where
         tensortrace_raw_strided_kernel_add_with_coefficient(
             dst.data_mut(),
             src.data(),
+            descriptor.output_shape(term),
+            descriptor.trace_shape(term),
+            descriptor.dst_strides(term),
+            descriptor.src_output_strides(term),
+            descriptor.src_trace_strides(term),
+            term.dst_offset,
+            term.src_offset,
+            descriptor.source_conjugate(),
+            alpha,
+            fusion_term.coefficient,
+        )?;
+    }
+    Ok(())
+}
+
+/// Dynamic-rank fusion tensortrace: partial (or full) trace of `src` over
+/// the `axes` trace pairs into caller-allocated `dst_data`
+/// (`dst = beta * dst + alpha * trace(src)`), operating on
+/// [`DynamicFusionMapSpace`] handles plus raw coupled-layout slices —
+/// the dynamic analog of [`crate::tensortrace_fusion_into`], sharing the
+/// same term compilation (TensorKit `tensortrace!` semantics: quantum
+/// dimension factors and twists, i.e. the fermionic supertrace).
+#[allow(clippy::too_many_arguments)]
+pub fn tensortrace_fusion_dyn_into<R, D>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src_space: &DynamicFusionMapSpace,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let structure =
+        TensorTraceFusionStructure::compile_fusion_dyn(rule, dst_space, src_space, axes)?;
+    scale_trace_destination(dst_data, beta);
+    let descriptor = structure.descriptor();
+    for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
+        tensortrace_raw_strided_kernel_add_with_coefficient(
+            dst_data,
+            src_data,
             descriptor.output_shape(term),
             descriptor.trace_shape(term),
             descriptor.dst_strides(term),

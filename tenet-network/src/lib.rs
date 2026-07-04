@@ -26,9 +26,6 @@
 //!
 //! ## Follow-ups (intentionally not in this round)
 //!
-//! - **Plan cache**: `Network::contract` re-plans per call; greedy planning
-//!   is cheap. A shape-keyed plan cache (like the legacy `EinsumPlanCache`)
-//!   is a follow-up for iterative sweeps.
 //! - **cotengrust / external path search**: the legacy `tenet-cotengrust`
 //!   crate implements [`DenseContractionOptimizer`] and drops into
 //!   [`Network::plan`] unchanged once ported. The optional `opt-path`
@@ -49,6 +46,7 @@ pub(crate) mod parse;
 #[cfg(feature = "opt-path")]
 mod pathopt;
 mod plan;
+mod plancache;
 mod slice;
 mod tree;
 
@@ -73,6 +71,11 @@ pub use pathopt::{
 pub use plan::{
     active_pair_path_from_steps, active_pair_path_from_tree, dense_steps_from_active_pair_path,
     ActivePair, ContractionPlan,
+};
+pub use plancache::{
+    clear_plan_cache, configure_plan_cache, plan_cache_config, plan_cache_stats, Optimizer,
+    PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
+    DEFAULT_REPLAN_DRIFT_FACTOR,
 };
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,

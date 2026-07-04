@@ -13,7 +13,9 @@
 //!   parenthesized expression, or `conj(expr)` marking an adjoint operand.
 //!   Each `expr` must evaluate to a `Tensor` or `&Tensor`.
 //! - A label appearing on two operands is contracted; a label appearing
-//!   once must be listed in the output. Violations are compile errors.
+//!   twice on ONE operand is a partial trace of that operand (TensorKit
+//!   `@tensor a[i, i; j]`); a label appearing once must be listed in the
+//!   output. Violations are compile errors.
 //! - Lowers to `tenet_network::contract_network` (planner IR directly; no
 //!   einsum strings).
 
@@ -109,11 +111,13 @@ impl Parse for TensorExpr {
     }
 }
 
-/// Compile-time label validation, mirroring the planner's runtime rules
-/// (`NetworkIR::from_labels`): every RHS label is either contracted
-/// (exactly two occurrences on two different operands, not in the output)
-/// or open (exactly one occurrence, listed in the output); output labels
-/// are unique and come from the RHS.
+/// Compile-time label validation, following TensorOperations `@tensor`
+/// semantics: every RHS label appears either once (open: must be listed in
+/// the output) or exactly twice (contracted: on two different operands it
+/// is a pairwise contraction, twice on the SAME operand it is a partial
+/// trace of that operand; either way it must not be in the output). Three
+/// or more appearances (hyperedges) are rejected, and output labels are
+/// unique and come from the RHS.
 fn check_labels(inputs: &[Vec<String>], output: &[String]) -> Result<(), String> {
     let mut seen_output = std::collections::BTreeSet::new();
     for label in output {
@@ -126,15 +130,10 @@ fn check_labels(inputs: &[Vec<String>], output: &[String]) -> Result<(), String>
     for labels in inputs {
         let mut seen_here = std::collections::BTreeSet::new();
         for label in labels {
-            let entry = counts.entry(label).or_insert((0, 0));
+            let entry = counts.entry(label.as_str()).or_insert((0, 0));
             entry.0 += 1;
             if seen_here.insert(label) {
                 entry.1 += 1;
-            } else {
-                return Err(format!(
-                    "label `{label}` is repeated within one tensor \
-                     (trace/diagonal is not supported)"
-                ));
             }
         }
     }
@@ -162,7 +161,7 @@ fn check_labels(inputs: &[Vec<String>], output: &[String]) -> Result<(), String>
         } else if *total != 2 {
             return Err(format!(
                 "label `{label}` appears {total} time(s) but is not an output \
-                 label (a contracted label must appear exactly twice)"
+                 label (a contracted or traced label must appear exactly twice)"
             ));
         }
     }
@@ -287,8 +286,31 @@ mod tests {
     }
 
     #[test]
-    fn trace_within_one_operand_is_rejected() {
-        let err = check_labels(&labels(&[&["a", "a"]]), &out(&[])).unwrap_err();
-        assert!(err.contains("repeated within one tensor"), "{err}");
+    fn trace_pairs_within_one_operand_are_accepted() {
+        // Full trace to a scalar.
+        check_labels(&labels(&[&["a", "a"]]), &out(&[])).unwrap();
+        // Partial trace with an open leg.
+        check_labels(&labels(&[&["a", "a", "j"]]), &out(&["j"])).unwrap();
+        // Trace combined with a pairwise contraction.
+        check_labels(&labels(&[&["a", "a", "j"], &["j", "m"]]), &out(&["m"])).unwrap();
+    }
+
+    #[test]
+    fn traced_label_in_output_is_rejected() {
+        let err = check_labels(&labels(&[&["a", "a"]]), &out(&["a"])).unwrap_err();
+        assert!(err.contains("output label `a` appears 2 times"), "{err}");
+    }
+
+    #[test]
+    fn trace_pair_plus_third_occurrence_is_rejected() {
+        // `a` twice on operand 0 and once on operand 1: three appearances.
+        let err = check_labels(&labels(&[&["a", "a"], &["a", "b"]]), &out(&["b"])).unwrap_err();
+        assert!(err.contains("label `a` appears 3 time(s)"), "{err}");
+    }
+
+    #[test]
+    fn label_thrice_on_one_operand_is_rejected() {
+        let err = check_labels(&labels(&[&["a", "a", "a"]]), &out(&[])).unwrap_err();
+        assert!(err.contains("label `a` appears 3 time(s)"), "{err}");
     }
 }

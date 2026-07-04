@@ -14,8 +14,9 @@ use tenet::prelude::{Error, Tensor};
 use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::ir::NetworkIR;
 use crate::labels::{TemporaryLabel, TensorId};
-use crate::optimizer::{ContractionStep, DenseContractionOptimizer, GreedyDenseOptimizer};
+use crate::optimizer::{ContractionStep, DenseContractionOptimizer};
 use crate::plan::ContractionPlan;
+use crate::plancache::Optimizer;
 
 /// One operand of a labeled network: a tensor reference, an adjoint
 /// (`conj`) marker, its leg labels as written (flat order: codomain legs
@@ -39,13 +40,13 @@ pub struct NetOperand<'a> {
 ///
 /// [`tensor!`]: https://docs.rs/tenet-macros
 pub struct Network {
-    inputs: Vec<Vec<TemporaryLabel>>,
-    conj: Vec<bool>,
-    codomain_splits: Vec<Option<usize>>,
-    output: Vec<TemporaryLabel>,
+    pub(crate) inputs: Vec<Vec<TemporaryLabel>>,
+    pub(crate) conj: Vec<bool>,
+    pub(crate) codomain_splits: Vec<Option<usize>>,
+    pub(crate) output: Vec<TemporaryLabel>,
     /// Number of output labels on the codomain side (`;` position);
     /// `None` = all-codomain output.
-    output_codomain_rank: Option<usize>,
+    pub(crate) output_codomain_rank: Option<usize>,
 }
 
 fn invalid(message: impl std::fmt::Display) -> Error {
@@ -186,11 +187,25 @@ impl Network {
         })
     }
 
-    /// One-shot contraction with the default (greedy) optimizer.
-    // ponytail: plan rebuilt per call (greedy is cheap). Follow-ups noted in
-    // the crate docs: a shape-keyed plan cache and a cotengrust optimizer.
+    /// One-shot contraction with the configured default [`Optimizer`]
+    /// (greedy unless changed via [`crate::configure_plan_cache`]), going
+    /// through the topology-keyed plan cache. This is what the `tensor!`
+    /// macro path runs.
     pub fn contract(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
-        self.plan(tensors, &GreedyDenseOptimizer)?.execute(tensors)
+        let optimizer = crate::plancache::plan_cache_config().optimizer;
+        self.contract_with(tensors, &optimizer)
+    }
+
+    /// [`Self::contract`] with an explicit per-call [`Optimizer`] choice
+    /// (still cached; the optimizer is part of the cache key). For a raw
+    /// [`DenseContractionOptimizer`] implementation, use [`Self::plan`],
+    /// which always plans fresh.
+    pub fn contract_with(
+        &self,
+        tensors: &[&Tensor],
+        optimizer: &Optimizer,
+    ) -> Result<Tensor, Error> {
+        crate::plancache::get_or_plan(self, tensors, optimizer)?.execute(tensors)
     }
 }
 
@@ -471,15 +486,128 @@ fn next_consumer(
     })
 }
 
-/// One-shot entry point used by the `tensor!` macro expansion: build a
-/// [`Network`] from written labels, plan with the greedy optimizer, and
-/// execute over the given operands.
+/// One-shot entry point used by the `tensor!` macro expansion: lower
+/// intra-operand trace pairs, build a [`Network`] from the (reduced)
+/// written labels, plan with the configured optimizer (through the plan
+/// cache), and execute over the given operands.
 pub fn contract_network(
     operands: &[NetOperand<'_>],
     output: &[&str],
     output_codomain_rank: Option<usize>,
 ) -> Result<Tensor, Error> {
-    let network = Network::from_names(operands, output, output_codomain_rank)?;
-    let tensors: Vec<&Tensor> = operands.iter().map(|op| op.tensor).collect();
+    // Pre-pass, mirroring TensorOperations' @tensor lowering: a label
+    // written twice on ONE operand is a partial trace of that operand. The
+    // operand is traced first (user-layer categorical trace, i.e. the
+    // expert tensortrace with quantum-dimension/twist coefficients) and
+    // re-enters the pairwise network with its trace labels removed, so the
+    // cost model plans over the shrunk dimensions.
+    let mut inputs: Vec<Vec<TemporaryLabel>> = Vec::with_capacity(operands.len());
+    let mut conj = Vec::with_capacity(operands.len());
+    let mut splits = Vec::with_capacity(operands.len());
+    let mut lowered: Vec<Option<Tensor>> = Vec::with_capacity(operands.len());
+    for (index, op) in operands.iter().enumerate() {
+        let written: Vec<TemporaryLabel> =
+            op.labels.iter().map(|&l| TemporaryLabel::from(l)).collect();
+        if !has_intra_operand_pair(&written) {
+            inputs.push(written);
+            conj.push(op.conj);
+            splits.push(op.codomain_split);
+            lowered.push(None);
+            continue;
+        }
+        if written.len() != op.tensor.rank() {
+            return Err(invalid(format!(
+                "operand {index} has {} labels but tensor rank {}",
+                written.len(),
+                op.tensor.rank()
+            )));
+        }
+        if let Some(split) = op.codomain_split {
+            if split != op.tensor.codomain_rank() {
+                return Err(invalid(format!(
+                    "operand {index} puts {split} label(s) before `;` but the tensor's \
+                     codomain rank is {}",
+                    op.tensor.codomain_rank()
+                )));
+            }
+        }
+        // conj lowers first (adjoint; domain legs lead), exactly as the
+        // executor does, so the trace pairs address the adjointed legs:
+        // @tensor conj(a)[i, i] is the trace of a's adjoint.
+        let (tensor, labels) = if op.conj {
+            (
+                op.tensor.adjoint()?,
+                rotate(&written, op.tensor.codomain_rank()),
+            )
+        } else {
+            (op.tensor.clone(), written)
+        };
+        let (pairs, reduced) = split_trace_pairs(index, &labels)?;
+        lowered.push(Some(tensor.trace_pairs(&pairs)?));
+        inputs.push(reduced);
+        conj.push(false);
+        splits.push(None);
+    }
+
+    let network = Network::new(
+        inputs,
+        conj,
+        splits,
+        output.iter().map(|&l| TemporaryLabel::from(l)).collect(),
+        output_codomain_rank,
+    )?;
+    let tensors: Vec<&Tensor> = operands
+        .iter()
+        .zip(&lowered)
+        .map(|(op, traced)| traced.as_ref().unwrap_or(op.tensor))
+        .collect();
     network.contract(&tensors)
+}
+
+fn has_intra_operand_pair(labels: &[TemporaryLabel]) -> bool {
+    labels
+        .iter()
+        .enumerate()
+        .any(|(i, l)| labels[..i].contains(l))
+}
+
+/// Splits an operand's (conj-lowered) labels into intra-operand trace pairs
+/// (first occurrence, second occurrence) and the surviving open labels in
+/// written order. A label written three or more times on one operand is
+/// rejected (the macro already rejects it at compile time; this guards the
+/// direct API).
+fn split_trace_pairs(
+    operand: usize,
+    labels: &[TemporaryLabel],
+) -> Result<(Vec<(usize, usize)>, Vec<TemporaryLabel>), Error> {
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut traced = vec![false; labels.len()];
+    for (second, label) in labels.iter().enumerate() {
+        let occurrences: Vec<usize> = labels[..second]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| *l == label)
+            .map(|(i, _)| i)
+            .collect();
+        match occurrences.len() {
+            0 => {}
+            1 => {
+                pairs.push((occurrences[0], second));
+                traced[occurrences[0]] = true;
+                traced[second] = true;
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "label `{label}` appears more than twice on operand {operand}"
+                )))
+            }
+        }
+    }
+    let reduced = labels
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| !traced[i])
+        .map(|(_, l)| l.clone())
+        .collect();
+    Ok((pairs, reduced))
 }
