@@ -1,0 +1,444 @@
+//! Contraction of a labeled tensor network over the user-layer
+//! [`tenet::prelude::Tensor`].
+//!
+//! This is the execution half rewritten for the current user layer: the
+//! planner ([`NetworkIR`], [`DenseCostModel`], [`ContractionPlan`]) is pure
+//! structure, and each planned pairwise step lowers to
+//! [`Tensor::contract`] plus orientation/final [`Tensor::permute`] calls,
+//! mirroring the legacy `tenet-contract` executor over the old core.
+
+use std::collections::HashMap;
+
+use tenet::prelude::{Error, Tensor};
+
+use crate::cost::{DenseCostModel, DenseTensorInfo};
+use crate::ir::NetworkIR;
+use crate::labels::{TemporaryLabel, TensorId};
+use crate::optimizer::{ContractionStep, DenseContractionOptimizer, GreedyDenseOptimizer};
+use crate::plan::ContractionPlan;
+
+/// One operand of a labeled network: a tensor reference, an adjoint
+/// (`conj`) marker, its leg labels as written (flat order: codomain legs
+/// then domain legs of the *original* tensor), and an optional stated
+/// codomain rank (the position of `;` in the written label list, checked
+/// against the tensor at plan time).
+pub struct NetOperand<'a> {
+    pub tensor: &'a Tensor,
+    pub conj: bool,
+    pub labels: &'a [&'a str],
+    pub codomain_split: Option<usize>,
+}
+
+/// A labeled tensor network: per-operand label lists (+ conj markers) and
+/// the requested output labels with their codomain/domain split.
+///
+/// Labels are expression-local identifiers supplied by the [`tensor!`]
+/// macro (or directly by a caller); there is no public einsum-string
+/// parser. Build with [`Network::new`], then [`Network::plan`] +
+/// [`PlannedNetwork::execute`], or one-shot [`Network::contract`].
+///
+/// [`tensor!`]: https://docs.rs/tenet-macros
+pub struct Network {
+    inputs: Vec<Vec<TemporaryLabel>>,
+    conj: Vec<bool>,
+    codomain_splits: Vec<Option<usize>>,
+    output: Vec<TemporaryLabel>,
+    /// Number of output labels on the codomain side (`;` position);
+    /// `None` = all-codomain output.
+    output_codomain_rank: Option<usize>,
+}
+
+fn invalid(message: impl std::fmt::Display) -> Error {
+    Error::InvalidArgument(message.to_string())
+}
+
+impl Network {
+    /// Build and validate a network from written label lists.
+    ///
+    /// `inputs[i]` are operand `i`'s labels in flat leg order (codomain
+    /// then domain of the tensor as passed, i.e. *before* any conj
+    /// lowering), `conj[i]` marks adjoint operands, `codomain_splits[i]`
+    /// is the written `;` position (validated against the tensor later).
+    /// Label structure (each label open-once or contracted-twice, output
+    /// labels present and unique) is validated here.
+    pub fn new(
+        inputs: Vec<Vec<TemporaryLabel>>,
+        conj: Vec<bool>,
+        codomain_splits: Vec<Option<usize>>,
+        output: Vec<TemporaryLabel>,
+        output_codomain_rank: Option<usize>,
+    ) -> Result<Self, Error> {
+        if conj.len() != inputs.len() || codomain_splits.len() != inputs.len() {
+            return Err(invalid("operand marker lists must match operand count"));
+        }
+        if let Some(k) = output_codomain_rank {
+            if k > output.len() {
+                return Err(invalid(format!(
+                    "output codomain rank {k} exceeds output rank {}",
+                    output.len()
+                )));
+            }
+        }
+        // Validates hyperedge structure (diagonal / hyperedge / batch /
+        // reduction rejection) on the WRITTEN labels; conj rotation is a
+        // cyclic per-operand relabeling that does not change the structure.
+        NetworkIR::from_labels(inputs.clone(), output.clone()).map_err(invalid)?;
+        Ok(Self {
+            inputs,
+            conj,
+            codomain_splits,
+            output,
+            output_codomain_rank,
+        })
+    }
+
+    /// Convenience constructor from `&str` labels (what the `tensor!`
+    /// macro emits).
+    pub fn from_names(
+        operands: &[NetOperand<'_>],
+        output: &[&str],
+        output_codomain_rank: Option<usize>,
+    ) -> Result<Self, Error> {
+        Self::new(
+            operands
+                .iter()
+                .map(|op| op.labels.iter().map(|&l| TemporaryLabel::from(l)).collect())
+                .collect(),
+            operands.iter().map(|op| op.conj).collect(),
+            operands.iter().map(|op| op.codomain_split).collect(),
+            output.iter().map(|&l| TemporaryLabel::from(l)).collect(),
+            output_codomain_rank,
+        )
+    }
+
+    /// Plan the contraction order for concrete operand tensors using the
+    /// given optimizer. The plan is data-independent (labels + leg
+    /// dimensions only) and can be executed repeatedly over same-shaped
+    /// operands.
+    pub fn plan(
+        &self,
+        tensors: &[&Tensor],
+        optimizer: &(impl DenseContractionOptimizer + ?Sized),
+    ) -> Result<PlannedNetwork, Error> {
+        if tensors.len() != self.inputs.len() {
+            return Err(invalid(format!(
+                "network has {} operands but {} tensors were given",
+                self.inputs.len(),
+                tensors.len()
+            )));
+        }
+
+        // Validate ranks and written `;` splits, then lower conj: the
+        // adjoint swaps codomain and domain (domain legs lead), so the
+        // labels and leg dims rotate by the original codomain rank.
+        let mut lowered_labels = Vec::with_capacity(tensors.len());
+        let mut infos = Vec::with_capacity(tensors.len());
+        for (i, (&tensor, labels)) in tensors.iter().zip(&self.inputs).enumerate() {
+            if labels.len() != tensor.rank() {
+                return Err(invalid(format!(
+                    "operand {i} has {} labels but tensor rank {}",
+                    labels.len(),
+                    tensor.rank()
+                )));
+            }
+            if let Some(split) = self.codomain_splits[i] {
+                if split != tensor.codomain_rank() {
+                    return Err(invalid(format!(
+                        "operand {i} puts {split} label(s) before `;` but the tensor's \
+                         codomain rank is {}",
+                        tensor.codomain_rank()
+                    )));
+                }
+            }
+            let dims = tensor.leg_dims()?;
+            if self.conj[i] {
+                let c = tensor.codomain_rank();
+                lowered_labels.push(rotate(labels, c));
+                infos.push(DenseTensorInfo::new(rotate(&dims, c)));
+            } else {
+                lowered_labels.push(labels.clone());
+                infos.push(DenseTensorInfo::new(dims));
+            }
+        }
+
+        let ir = NetworkIR::from_labels(lowered_labels, self.output.clone()).map_err(invalid)?;
+        let plan = if ir.tensors().len() == 1 {
+            // Single operand: nothing to order; the executor just permutes.
+            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+        } else {
+            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+            ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost).map_err(invalid)?
+        };
+        Ok(PlannedNetwork {
+            ir,
+            plan,
+            conj: self.conj.clone(),
+            output_codomain_rank: self.output_codomain_rank,
+        })
+    }
+
+    /// One-shot contraction with the default (greedy) optimizer.
+    // ponytail: plan rebuilt per call (greedy is cheap). Follow-ups noted in
+    // the crate docs: a shape-keyed plan cache and a cotengrust optimizer.
+    pub fn contract(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
+        self.plan(tensors, &GreedyDenseOptimizer)?.execute(tensors)
+    }
+}
+
+fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
+    items[split..]
+        .iter()
+        .chain(items[..split].iter())
+        .cloned()
+        .collect()
+}
+
+/// A [`Network`] with a resolved contraction order for concrete operand
+/// shapes. Inspect the order via [`Self::plan`], run it via
+/// [`Self::execute`].
+pub struct PlannedNetwork {
+    ir: NetworkIR,
+    plan: ContractionPlan,
+    conj: Vec<bool>,
+    output_codomain_rank: Option<usize>,
+}
+
+impl PlannedNetwork {
+    /// The resolved pairwise contraction order with its cost estimates.
+    pub fn plan(&self) -> &ContractionPlan {
+        &self.plan
+    }
+
+    /// Run the plan over `tensors` (same operand order and shapes as
+    /// given to [`Network::plan`]). Conj-marked operands are adjointed
+    /// here; each pairwise step is one [`Tensor::contract`], intermediates
+    /// are oriented for their next use, and the final tensor is permuted
+    /// to the requested output label order and codomain/domain split.
+    pub fn execute(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
+        if tensors.len() != self.conj.len() {
+            return Err(invalid(format!(
+                "plan has {} operands but {} tensors were given",
+                self.conj.len(),
+                tensors.len()
+            )));
+        }
+
+        // Active tensors keyed by planner TensorId, each with its current
+        // leg labels in the tensor's flat leg order.
+        let mut active: HashMap<TensorId, (Tensor, Vec<TemporaryLabel>)> = HashMap::new();
+        for (i, (node, &tensor)) in self.ir.tensors().iter().zip(tensors).enumerate() {
+            let lowered = if self.conj[i] {
+                tensor.adjoint()?
+            } else {
+                tensor.clone()
+            };
+            if node.labels().len() != lowered.rank() {
+                return Err(invalid(format!(
+                    "operand {i} has {} labels but tensor rank {}",
+                    node.labels().len(),
+                    lowered.rank()
+                )));
+            }
+            active.insert(TensorId::new(i), (lowered, node.labels().to_vec()));
+        }
+
+        let labels_by_id = planned_label_orders(&self.ir, &self.plan)?;
+        let steps = self.plan.steps();
+        for (step_index, step) in steps.iter().enumerate() {
+            let (lt, ll) = active
+                .remove(&step.lhs())
+                .ok_or_else(|| invalid("lhs operand already consumed"))?;
+            let (rt, rl) = active
+                .remove(&step.rhs())
+                .ok_or_else(|| invalid("rhs operand already consumed"))?;
+
+            // Contracted = labels shared by both operands and absent from
+            // the step result (batch labels were rejected at build time).
+            let mut a_contracted = Vec::new();
+            let mut b_contracted = Vec::new();
+            for (ai, la) in ll.iter().enumerate() {
+                if let Some(bi) = rl.iter().position(|x| x == la) {
+                    if step.result_labels().contains(la) {
+                        return Err(invalid(format!(
+                            "batch label `{la}` (shared + in result) unsupported"
+                        )));
+                    }
+                    a_contracted.push(ai);
+                    b_contracted.push(bi);
+                }
+            }
+
+            let c = lt.contract(&rt, &a_contracted, &b_contracted)?;
+            // `contract` returns (open lhs legs ascending <- open rhs legs
+            // ascending); track labels in that flat order.
+            let mut c_labels: Vec<TemporaryLabel> = ll
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !a_contracted.contains(i))
+                .map(|(_, l)| l.clone())
+                .collect();
+            c_labels.extend(
+                rl.iter()
+                    .enumerate()
+                    .filter(|(i, _)| !b_contracted.contains(i))
+                    .map(|(_, l)| l.clone()),
+            );
+            let (c, c_labels) = orient_intermediate_for_next_use(
+                c,
+                c_labels,
+                step_index,
+                step.result(),
+                steps,
+                &labels_by_id,
+            )?;
+            active.insert(step.result(), (c, c_labels));
+        }
+
+        let final_id = steps
+            .last()
+            .map(|s| s.result())
+            .unwrap_or_else(|| TensorId::new(0));
+        let (result, labels) = active
+            .remove(&final_id)
+            .ok_or_else(|| invalid("no final tensor produced"))?;
+
+        let output = self.ir.output_labels();
+        let split = self.output_codomain_rank.unwrap_or(output.len());
+        let cod_axes = label_positions(&output[..split], &labels)?;
+        let dom_axes = label_positions(&output[split..], &labels)?;
+        let identity = result.codomain_rank() == cod_axes.len()
+            && cod_axes
+                .iter()
+                .chain(dom_axes.iter())
+                .copied()
+                .eq(0..labels.len());
+        if identity {
+            return Ok(result);
+        }
+        result.permute(&cod_axes, &dom_axes)
+    }
+}
+
+/// Positions of each `wanted` label within `have` (the current leg labels).
+fn label_positions(
+    wanted: &[TemporaryLabel],
+    have: &[TemporaryLabel],
+) -> Result<Vec<usize>, Error> {
+    wanted
+        .iter()
+        .map(|l| {
+            have.iter()
+                .position(|x| x == l)
+                .ok_or_else(|| invalid(format!("label `{l}` not among available legs")))
+        })
+        .collect()
+}
+
+/// Leg-label order of every input and planned intermediate, mirroring the
+/// executor's own tracking (open lhs legs then open rhs legs per step).
+fn planned_label_orders(
+    ir: &NetworkIR,
+    plan: &ContractionPlan,
+) -> Result<HashMap<TensorId, Vec<TemporaryLabel>>, Error> {
+    let mut labels_by_id: HashMap<TensorId, Vec<TemporaryLabel>> = HashMap::new();
+    let mut active: HashMap<TensorId, Vec<TemporaryLabel>> = HashMap::new();
+    for node in ir.tensors() {
+        let labels = node.labels().to_vec();
+        labels_by_id.insert(node.id(), labels.clone());
+        active.insert(node.id(), labels);
+    }
+    for step in plan.steps() {
+        let ll = active
+            .remove(&step.lhs())
+            .ok_or_else(|| invalid("lhs operand already consumed while planning labels"))?;
+        let rl = active
+            .remove(&step.rhs())
+            .ok_or_else(|| invalid("rhs operand already consumed while planning labels"))?;
+        let mut labels: Vec<TemporaryLabel> =
+            ll.iter().filter(|l| !rl.contains(l)).cloned().collect();
+        labels.extend(rl.iter().filter(|l| !ll.contains(l)).cloned());
+        labels_by_id.insert(step.result(), labels.clone());
+        active.insert(step.result(), labels);
+    }
+    Ok(labels_by_id)
+}
+
+/// Materialize an intermediate as (codomain <- domain) matching its next
+/// pairwise use: a left child as (open_to_parent <- contracted_with_sibling),
+/// a right child mirrored. Keeps later `contract` calls from re-bending
+/// surviving legs path-dependently (same convention as the legacy executor
+/// and TensorOperations.jl contextual temporaries).
+fn orient_intermediate_for_next_use(
+    tensor: Tensor,
+    labels: Vec<TemporaryLabel>,
+    step_index: usize,
+    result_id: TensorId,
+    steps: &[ContractionStep],
+    labels_by_id: &HashMap<TensorId, Vec<TemporaryLabel>>,
+) -> Result<(Tensor, Vec<TemporaryLabel>), Error> {
+    let Some((future_step, result_is_lhs)) = next_consumer(step_index, result_id, steps) else {
+        return Ok((tensor, labels));
+    };
+    let sibling_id = if result_is_lhs {
+        future_step.rhs()
+    } else {
+        future_step.lhs()
+    };
+    let sibling_labels = labels_by_id
+        .get(&sibling_id)
+        .ok_or_else(|| invalid("future sibling labels missing"))?;
+
+    let mut open_axes = Vec::new();
+    let mut contracted_axes = Vec::new();
+    for (axis, label) in labels.iter().enumerate() {
+        if sibling_labels.contains(label) {
+            contracted_axes.push(axis);
+        } else {
+            open_axes.push(axis);
+        }
+    }
+    let (cod_axes, dom_axes) = if result_is_lhs {
+        (open_axes, contracted_axes)
+    } else {
+        (contracted_axes, open_axes)
+    };
+    let cod_rank = tensor.codomain_rank();
+    let rank = tensor.rank();
+    if cod_axes.iter().copied().eq(0..cod_rank) && dom_axes.iter().copied().eq(cod_rank..rank) {
+        return Ok((tensor, labels));
+    }
+    let mut oriented_labels = Vec::with_capacity(labels.len());
+    oriented_labels.extend(cod_axes.iter().map(|&axis| labels[axis].clone()));
+    oriented_labels.extend(dom_axes.iter().map(|&axis| labels[axis].clone()));
+    let oriented = tensor.permute(&cod_axes, &dom_axes)?;
+    Ok((oriented, oriented_labels))
+}
+
+fn next_consumer(
+    step_index: usize,
+    result_id: TensorId,
+    steps: &[ContractionStep],
+) -> Option<(&ContractionStep, bool)> {
+    steps.iter().skip(step_index + 1).find_map(|step| {
+        if step.lhs() == result_id {
+            Some((step, true))
+        } else if step.rhs() == result_id {
+            Some((step, false))
+        } else {
+            None
+        }
+    })
+}
+
+/// One-shot entry point used by the `tensor!` macro expansion: build a
+/// [`Network`] from written labels, plan with the greedy optimizer, and
+/// execute over the given operands.
+pub fn contract_network(
+    operands: &[NetOperand<'_>],
+    output: &[&str],
+    output_codomain_rank: Option<usize>,
+) -> Result<Tensor, Error> {
+    let network = Network::from_names(operands, output, output_codomain_rank)?;
+    let tensors: Vec<&Tensor> = operands.iter().map(|op| op.tensor).collect();
+    network.contract(&tensors)
+}

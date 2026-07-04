@@ -1,0 +1,26 @@
+[package]
+name = "tenet-network"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tenet_network"
+path = "src/lib.rs"
+
+[features]
+default = ["cpu-faer"]
+cpu-faer = ["tenet/cpu-faer"]
+cpu-blas = ["tenet/cpu-blas"]
+blas-accelerate = ["tenet/blas-accelerate"]
+blas-openblas = ["tenet/blas-openblas"]
+blas-mkl = ["tenet/blas-mkl"]
+provider-inject = ["tenet/provider-inject"]
+# Wraps the `opt-einsum-path` crate (Apache-2.0) as a
+# `DenseContractionOptimizer` backend (optimal / dp / branch / random-greedy).
+opt-path = ["dep:opt-einsum-path"]
+
+[dependencies]
+tenet = { path = "../tenet", default-features = false }
+opt-einsum-path = { version = "0.2", optional = true }

@@ -398,6 +398,52 @@ impl Tensor {
         &self.data
     }
 
+    /// Quantum-dimension-weighted total dimension of every leg, in flat
+    /// order (codomain legs first, then domain legs). This is the same
+    /// notion as [`crate::prelude::Space::dim`] per leg; contraction
+    /// planners use it as a size/FLOP proxy.
+    pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
+        let structure = self.space.structure();
+        let rank = self.rank();
+        let mut per_axis: Vec<BTreeMap<SectorId, usize>> = vec![BTreeMap::new(); rank];
+        with_rule!(self.rule, rule, {
+            for index in 0..structure.block_count() {
+                let block = structure.block(index)?;
+                let BlockKey::FusionTree(key) = block.key() else {
+                    continue;
+                };
+                let sectors = key.external_sectors(rule);
+                for (axis, (&sector, &deg)) in sectors.iter().zip(block.shape()).enumerate() {
+                    per_axis[axis].insert(sector, deg);
+                }
+            }
+            Ok::<_, Error>(
+                per_axis
+                    .iter()
+                    .map(|dims| {
+                        dims.iter()
+                            .map(|(&sector, &deg)| {
+                                (deg as f64 * rule.dim_scalar(sector)).round() as usize
+                            })
+                            .sum()
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    /// The single element of a rank-0 (scalar) tensor, e.g. the result of
+    /// contracting every leg. Errors on tensors with legs.
+    pub fn scalar(&self) -> Result<f64, Error> {
+        if self.rank() != 0 {
+            return Err(Error::InvalidArgument(format!(
+                "scalar() requires a rank-0 tensor, got rank {}",
+                self.rank()
+            )));
+        }
+        Ok(self.data.iter().sum())
+    }
+
     fn check_same_world(&self, other: &Self) -> Result<(), Error> {
         if self.rule != other.rule {
             return Err(Error::RuleMismatch);
