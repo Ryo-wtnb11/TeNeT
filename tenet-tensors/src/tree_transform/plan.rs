@@ -91,16 +91,16 @@ where
             return Err(OperationError::EmptyTransformBlock);
         }
         let src_count = src_keys.len();
-        let mut coefficients_src_by_dst = Vec::with_capacity(dst_keys.len() * src_count);
+        let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
         for row in rows {
-            coefficients_src_by_dst.extend(row);
+            recoupling_coefficients_dst_src.extend(row);
         }
         specs.push(
             TreeTransformGroupBlockSpec::multi(
                 group.group_key().clone(),
                 dst_keys,
                 src_keys,
-                coefficients_src_by_dst,
+                recoupling_coefficients_dst_src,
             )
             .with_source_axes(source_axes.clone()),
         );
@@ -330,16 +330,16 @@ where
         }
 
         let src_count = src_keys.len();
-        let mut coefficients_src_by_dst = Vec::with_capacity(dst_keys.len() * src_count);
+        let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
         for row in rows {
-            coefficients_src_by_dst.extend(row);
+            recoupling_coefficients_dst_src.extend(row);
         }
         specs.push(
             TreeTransformGroupBlockSpec::multi(
                 group.group_key().clone(),
                 dst_keys,
                 src_keys,
-                coefficients_src_by_dst,
+                recoupling_coefficients_dst_src,
             )
             .with_source_axes(source_axes.clone()),
         );
@@ -518,16 +518,16 @@ where
         }
 
         let src_count = src_keys.len();
-        let mut coefficients_src_by_dst = Vec::with_capacity(dst_keys.len() * src_count);
+        let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
         for row in rows {
-            coefficients_src_by_dst.extend(row);
+            recoupling_coefficients_dst_src.extend(row);
         }
         specs.push(
             TreeTransformGroupBlockSpec::multi(
                 group.group_key().clone(),
                 dst_keys,
                 src_keys,
-                coefficients_src_by_dst,
+                recoupling_coefficients_dst_src,
             )
             .with_source_axes(source_axes.clone()),
         );

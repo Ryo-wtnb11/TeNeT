@@ -252,7 +252,7 @@ pub trait HostKernelAdapter<T> {
         &mut self,
         destination: &mut [T],
         source: &[T],
-        coefficients_src_by_dst: &[C],
+        recoupling_coefficients_dst_src: &[C],
         coefficient_start: usize,
         element_count: usize,
         src_count: usize,
@@ -445,7 +445,7 @@ where
         &mut self,
         destination: &mut [T],
         source: &[T],
-        coefficients_src_by_dst: &[C],
+        recoupling_coefficients_dst_src: &[C],
         coefficient_start: usize,
         element_count: usize,
         src_count: usize,
@@ -458,7 +458,7 @@ where
         validate_recoupling_lens(
             destination.len(),
             source.len(),
-            coefficients_src_by_dst.len(),
+            recoupling_coefficients_dst_src.len(),
             coefficient_start,
             element_count,
             src_count,
@@ -470,7 +470,7 @@ where
             for element in 0..element_count {
                 let mut sum = T::zero();
                 for src_index in 0..src_count {
-                    let coeff = coefficients_src_by_dst[coefficient_row_start + src_index];
+                    let coeff = recoupling_coefficients_dst_src[coefficient_row_start + src_index];
                     let src_value = source[element + src_index * element_count];
                     sum = sum + src_value.scale_by_coefficient(coeff);
                 }

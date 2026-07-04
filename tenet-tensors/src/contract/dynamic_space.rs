@@ -330,7 +330,8 @@ where
                 continue;
             };
             for (dst_row, dst_key) in spec.dst_keys().iter().enumerate() {
-                let coefficient = spec.coefficients_src_by_dst()[src_column + dst_row * src_count];
+                let coefficient =
+                    spec.recoupling_coefficients_dst_src()[src_column + dst_row * src_count];
                 if coefficient == 0.0 {
                     continue;
                 }

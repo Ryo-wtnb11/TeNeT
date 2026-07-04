@@ -17,7 +17,7 @@ use crate::OperationError;
 pub struct TreeTransformBlockSpec<T> {
     pub(crate) dst_blocks: Vec<usize>,
     pub(crate) src_blocks: Vec<usize>,
-    pub(crate) coefficients_src_by_dst: Vec<T>,
+    pub(crate) recoupling_coefficients_dst_src: Vec<T>,
     pub(crate) source_axes: Option<Vec<usize>>,
 }
 
@@ -26,7 +26,7 @@ impl<T> TreeTransformBlockSpec<T> {
         Self {
             dst_blocks: vec![dst_block],
             src_blocks: vec![src_block],
-            coefficients_src_by_dst: vec![coefficient],
+            recoupling_coefficients_dst_src: vec![coefficient],
             source_axes: None,
         }
     }
@@ -34,12 +34,12 @@ impl<T> TreeTransformBlockSpec<T> {
     pub fn multi(
         dst_blocks: Vec<usize>,
         src_blocks: Vec<usize>,
-        coefficients_src_by_dst: Vec<T>,
+        recoupling_coefficients_dst_src: Vec<T>,
     ) -> Self {
         Self {
             dst_blocks,
             src_blocks,
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             source_axes: None,
         }
     }
@@ -70,8 +70,8 @@ impl<T> TreeTransformBlockSpec<T> {
     /// Recoupling matrix coefficients stored as `U[dst, src]` in row-major
     /// destination-by-source order: `coeff[src + dst * src_count]`.
     #[inline]
-    pub fn coefficients_src_by_dst(&self) -> &[T] {
-        &self.coefficients_src_by_dst
+    pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
+        &self.recoupling_coefficients_dst_src
     }
 
     #[inline]
@@ -84,7 +84,7 @@ impl<T> TreeTransformBlockSpec<T> {
 pub struct TreeTransformKeyBlockSpec<T> {
     dst_keys: Vec<BlockKey>,
     src_keys: Vec<BlockKey>,
-    coefficients_src_by_dst: Vec<T>,
+    recoupling_coefficients_dst_src: Vec<T>,
     source_axes: Option<Vec<usize>>,
 }
 
@@ -97,7 +97,7 @@ impl<T> TreeTransformKeyBlockSpec<T> {
         Self {
             dst_keys: vec![dst_key.into()],
             src_keys: vec![src_key.into()],
-            coefficients_src_by_dst: vec![coefficient],
+            recoupling_coefficients_dst_src: vec![coefficient],
             source_axes: None,
         }
     }
@@ -105,7 +105,7 @@ impl<T> TreeTransformKeyBlockSpec<T> {
     pub fn multi<DstKeys, SrcKeys, KDst, KSrc>(
         dst_keys: DstKeys,
         src_keys: SrcKeys,
-        coefficients_src_by_dst: Vec<T>,
+        recoupling_coefficients_dst_src: Vec<T>,
     ) -> Self
     where
         DstKeys: IntoIterator<Item = KDst>,
@@ -116,7 +116,7 @@ impl<T> TreeTransformKeyBlockSpec<T> {
         Self {
             dst_keys: dst_keys.into_iter().map(Into::into).collect(),
             src_keys: src_keys.into_iter().map(Into::into).collect(),
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             source_axes: None,
         }
     }
@@ -142,8 +142,8 @@ impl<T> TreeTransformKeyBlockSpec<T> {
     /// Recoupling matrix coefficients stored as `U[dst, src]` in row-major
     /// destination-by-source order: `coeff[src + dst * src_count]`.
     #[inline]
-    pub fn coefficients_src_by_dst(&self) -> &[T] {
-        &self.coefficients_src_by_dst
+    pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
+        &self.recoupling_coefficients_dst_src
     }
 }
 
@@ -159,7 +159,7 @@ impl<T: Copy> TreeTransformKeyBlockSpec<T> {
         Ok(TreeTransformBlockSpec::multi(
             dst_blocks,
             src_blocks,
-            self.coefficients_src_by_dst.clone(),
+            self.recoupling_coefficients_dst_src.clone(),
         ))
         .map(|spec| spec.with_optional_source_axes(self.source_axes.clone()))
     }
@@ -170,7 +170,7 @@ pub struct TreeTransformGroupBlockSpec<T> {
     group_key: FusionTreeGroupKey,
     dst_keys: Vec<BlockKey>,
     src_keys: Vec<BlockKey>,
-    coefficients_src_by_dst: Vec<T>,
+    recoupling_coefficients_dst_src: Vec<T>,
     source_axes: Option<Vec<usize>>,
 }
 
@@ -189,7 +189,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             group_key,
             dst_keys: vec![dst_key.into()],
             src_keys: vec![src_key.into()],
-            coefficients_src_by_dst: vec![coefficient],
+            recoupling_coefficients_dst_src: vec![coefficient],
             source_axes: None,
         }
     }
@@ -198,7 +198,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
         group_key: FusionTreeGroupKey,
         dst_keys: DstKeys,
         src_keys: SrcKeys,
-        coefficients_src_by_dst: Vec<T>,
+        recoupling_coefficients_dst_src: Vec<T>,
     ) -> Self
     where
         DstKeys: IntoIterator<Item = KDst>,
@@ -210,7 +210,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             group_key,
             dst_keys: dst_keys.into_iter().map(Into::into).collect(),
             src_keys: src_keys.into_iter().map(Into::into).collect(),
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             source_axes: None,
         }
     }
@@ -228,7 +228,7 @@ impl<T> TreeTransformGroupBlockSpec<T> {
         dst_group: &FusionTreeBlockGroup,
         src_structure: &BlockStructure,
         src_group: &FusionTreeBlockGroup,
-        coefficients_src_by_dst: Vec<T>,
+        recoupling_coefficients_dst_src: Vec<T>,
     ) -> Result<Self, OperationError> {
         let dst_keys = fusion_tree_group_block_keys(dst_structure, dst_group, "dst")?;
         let src_keys = fusion_tree_group_block_keys(src_structure, src_group, "src")?;
@@ -236,17 +236,17 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             .len()
             .checked_mul(src_keys.len())
             .ok_or(OperationError::ElementCountOverflow)?;
-        if coefficients_src_by_dst.len() != expected {
+        if recoupling_coefficients_dst_src.len() != expected {
             return Err(OperationError::CoefficientCountMismatch {
                 expected,
-                actual: coefficients_src_by_dst.len(),
+                actual: recoupling_coefficients_dst_src.len(),
             });
         }
         Ok(Self::multi(
             src_group.group_key().clone(),
             dst_keys,
             src_keys,
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
         ))
     }
 
@@ -268,8 +268,8 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     /// Recoupling matrix coefficients stored as `U[dst, src]` in row-major
     /// destination-by-source order: `coeff[src + dst * src_count]`.
     #[inline]
-    pub fn coefficients_src_by_dst(&self) -> &[T] {
-        &self.coefficients_src_by_dst
+    pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
+        &self.recoupling_coefficients_dst_src
     }
 }
 
@@ -285,7 +285,7 @@ impl<T: Copy> TreeTransformGroupBlockSpec<T> {
         Ok(TreeTransformBlockSpec::multi(
             dst_blocks,
             src_blocks,
-            self.coefficients_src_by_dst.clone(),
+            self.recoupling_coefficients_dst_src.clone(),
         ))
         .map(|spec| spec.with_optional_source_axes(self.source_axes.clone()))
     }

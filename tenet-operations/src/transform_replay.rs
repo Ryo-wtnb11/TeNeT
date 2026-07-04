@@ -292,7 +292,7 @@ where
                     src_count,
                     coefficient_start,
                     element_count,
-                    &structure.coefficients_src_by_dst,
+                    &structure.recoupling_coefficients_dst_src,
                     structure.storage_conjugate(),
                     dst.data_mut(),
                     src_data,
@@ -369,7 +369,7 @@ where
                 src_count,
                 coefficient_start,
                 element_count,
-                &structure.coefficients_src_by_dst,
+                &structure.recoupling_coefficients_dst_src,
                 structure.storage_conjugate(),
                 dst_data,
                 src_data,
@@ -487,7 +487,7 @@ where
                 src_count,
                 coefficient_start,
                 element_count,
-                &structure.coefficients_src_by_dst,
+                &structure.recoupling_coefficients_dst_src,
                 structure.storage_conjugate(),
                 dst_data,
                 src_data,
@@ -572,7 +572,7 @@ where
                     src_count,
                     coefficient_start,
                     element_count,
-                    &structure.coefficients_src_by_dst,
+                    &structure.recoupling_coefficients_dst_src,
                     structure.storage_conjugate(),
                     dst_data,
                     src_data,
@@ -764,7 +764,7 @@ where
 
 /// Applies the recoupling matrix as one GEMM: `destination = source * U^T`
 /// with `source` packed as (element_count x src_count) and
-/// `coefficients_src_by_dst` (row-major `U[dst, src]`) reinterpreted as the
+/// `recoupling_coefficients_dst_src` (row-major `U[dst, src]`) reinterpreted as the
 /// column-major (src_count x dst_count) matrix `U^T`. This is TensorKit's
 /// `_add_transform_multi!` `mul!` step; the naive per-element loop in the
 /// kernel adapter remains only for adapters without a dense executor.
@@ -774,7 +774,7 @@ fn recoupling_gemm<E, D, C>(
     coefficient_scratch: &mut Vec<D>,
     destination: &mut [D],
     source: &[D],
-    coefficients_src_by_dst: &[C],
+    recoupling_coefficients_dst_src: &[C],
     coefficient_start: usize,
     element_count: usize,
     src_count: usize,
@@ -791,11 +791,11 @@ where
     let coefficient_end = coefficient_start
         .checked_add(coefficient_len)
         .ok_or(OperationError::ElementCountOverflow)?;
-    let coefficients = coefficients_src_by_dst
+    let coefficients = recoupling_coefficients_dst_src
         .get(coefficient_start..coefficient_end)
         .ok_or(OperationError::CoefficientCountMismatch {
             expected: coefficient_end,
-            actual: coefficients_src_by_dst.len(),
+            actual: recoupling_coefficients_dst_src.len(),
         })?;
     let source_len = element_count
         .checked_mul(src_count)
@@ -857,7 +857,7 @@ fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
     src_count: usize,
     coefficient_start: usize,
     element_count: usize,
-    coefficients_src_by_dst: &[C],
+    recoupling_coefficients_dst_src: &[C],
     source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
@@ -887,7 +887,7 @@ where
         src_count,
         coefficient_start,
         element_count,
-        coefficients_src_by_dst,
+        recoupling_coefficients_dst_src,
         source_conjugate,
         dst_data,
         src_data,
@@ -908,7 +908,7 @@ fn tree_transform_multi_with_scratch_buffers<A, D, C, SourceScratch, Destination
     src_count: usize,
     coefficient_start: usize,
     element_count: usize,
-    coefficients_src_by_dst: &[C],
+    recoupling_coefficients_dst_src: &[C],
     source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
@@ -940,7 +940,7 @@ where
         kernels.recoupling_src_times_u_transpose(
             destination.as_mut_slice(),
             source.as_slice(),
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             coefficient_start,
             element_count,
             src_count,
@@ -977,7 +977,7 @@ fn tree_transform_multi_with_structural_recoupling<A, E, D, C>(
     src_count: usize,
     coefficient_start: usize,
     element_count: usize,
-    coefficients_src_by_dst: &[C],
+    recoupling_coefficients_dst_src: &[C],
     source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
@@ -1018,7 +1018,7 @@ where
             &mut workspace.coefficient_scratch,
             destination.as_mut_slice(),
             source.as_slice(),
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             coefficient_start,
             element_count,
             src_count,
@@ -1055,7 +1055,7 @@ fn tree_transform_multi_with_structural_recoupling_profiled<A, E, D, C>(
     src_count: usize,
     coefficient_start: usize,
     element_count: usize,
-    coefficients_src_by_dst: &[C],
+    recoupling_coefficients_dst_src: &[C],
     source_conjugate: bool,
     dst_data: &mut [D],
     src_data: &[D],
@@ -1105,7 +1105,7 @@ where
             &mut workspace.coefficient_scratch,
             destination.as_mut_slice(),
             source.as_slice(),
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             coefficient_start,
             element_count,
             src_count,

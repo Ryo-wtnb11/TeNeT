@@ -177,7 +177,7 @@ fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
     assert_eq!(spec.group_key().domain_is_dual(), &[true]);
     assert_eq!(spec.dst_keys(), &[dst_key1, dst_key2]);
     assert_eq!(spec.src_keys(), &[src_key]);
-    assert_eq!(spec.coefficients_src_by_dst(), &[2.0, 3.0]);
+    assert_eq!(spec.recoupling_coefficients_dst_src(), &[2.0, 3.0]);
 }
 
 #[test]
@@ -219,11 +219,11 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
     assert_eq!(plan.specs()[0].group_key(), &src_tree1.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[src_key1]);
     assert_eq!(plan.specs()[0].dst_keys(), &[dst_key1]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[2.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[2.0]);
     assert_eq!(plan.specs()[1].group_key(), &src_tree2.group_key());
     assert_eq!(plan.specs()[1].src_keys(), &[src_key2]);
     assert_eq!(plan.specs()[1].dst_keys(), &[dst_key2]);
-    assert_eq!(plan.specs()[1].coefficients_src_by_dst(), &[3.0]);
+    assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
     assert_eq!(spec.src_keys(), &[src_key0.clone(), src_key1.clone()]);
     assert_eq!(spec.dst_keys(), &[src_key0, src_key1]);
     assert_eq!(
-        spec.coefficients_src_by_dst(),
+        spec.recoupling_coefficients_dst_src(),
         &[0.5, 0.866_025_403_784_438_6, 0.866_025_403_784_438_6, -0.5]
     );
 }
@@ -341,8 +341,8 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
     assert_eq!(spec.src_keys(), &[src_key0.clone(), src_key1.clone()]);
     assert_eq!(spec.dst_keys(), &[src_key0, src_key1]);
     let expected = [0.5, 0.866_025_403_784_438_6, 0.866_025_403_784_438_6, -0.5];
-    assert_eq!(spec.coefficients_src_by_dst().len(), expected.len());
-    for (&actual, expected) in spec.coefficients_src_by_dst().iter().zip(expected) {
+    assert_eq!(spec.recoupling_coefficients_dst_src().len(), expected.len());
+    for (&actual, expected) in spec.recoupling_coefficients_dst_src().iter().zip(expected) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
             "coefficient {actual} != {expected}"
@@ -1175,8 +1175,8 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
     let spec = &plan.specs()[0];
     assert_eq!(spec.src_keys(), &[src_key]);
     assert_eq!(spec.dst_keys(), &[expected_dst_key]);
-    assert_eq!(spec.coefficients_src_by_dst().len(), 1);
-    assert!((spec.coefficients_src_by_dst()[0] - 1.0).abs() < 1.0e-12);
+    assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
+    assert!((spec.recoupling_coefficients_dst_src()[0] - 1.0).abs() < 1.0e-12);
     plan.compile_structures(&dst_structure, &src_structure)
         .unwrap();
 }
@@ -1420,7 +1420,8 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
         let dst_key = &spec.dst_keys()[0];
         let src_offset = src.structure().block_by_key(src_key).unwrap().offset();
         let dst_offset = dst.structure().block_by_key(dst_key).unwrap().offset();
-        expected[dst_offset] += 2.0 * spec.coefficients_src_by_dst()[0] * src.data()[src_offset];
+        expected[dst_offset] +=
+            2.0 * spec.recoupling_coefficients_dst_src()[0] * src.data()[src_offset];
     }
 
     tree_transform_into(&rule, operation, &mut dst, &src, 2.0, 3.0).unwrap();
@@ -1465,7 +1466,8 @@ fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
         let src_offset = src.structure().block_by_key(src_key).unwrap().offset();
         let dst_offset = dst.structure().block_by_key(dst_key).unwrap().offset();
         expected[dst_offset] = expected[dst_offset]
-            + src.data()[src_offset].scale_by_coefficient(spec.coefficients_src_by_dst()[0])
+            + src.data()[src_offset]
+                .scale_by_coefficient(spec.recoupling_coefficients_dst_src()[0])
                 * alpha;
     }
 
@@ -1919,7 +1921,7 @@ fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_lo
     assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[src_key.clone()]);
     assert_eq!(plan.specs()[0].dst_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
 #[test]
@@ -1941,7 +1943,7 @@ fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
     assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[-2.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-2.0]);
 }
 
 #[test]
@@ -1961,7 +1963,7 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
 #[test]
@@ -2008,7 +2010,7 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
 #[test]
@@ -2110,7 +2112,7 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
     assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
 #[test]
@@ -2149,7 +2151,7 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[-2.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-2.0]);
 }
 
 #[test]
@@ -2176,7 +2178,7 @@ fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
 #[test]
@@ -2213,7 +2215,7 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
     assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
-    assert_eq!(plan.specs()[0].coefficients_src_by_dst(), &[1.0]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
 #[test]
@@ -2594,7 +2596,10 @@ fn tree_transform_group_block_spec_from_groups_uses_source_group_and_ordered_key
     assert_ne!(spec.group_key(), dst_groups[0].group_key());
     assert_eq!(spec.src_keys(), &[src_key1, src_key2]);
     assert_eq!(spec.dst_keys(), &[dst_key1, dst_key2]);
-    assert_eq!(spec.coefficients_src_by_dst(), &[1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        spec.recoupling_coefficients_dst_src(),
+        &[1.0, 2.0, 3.0, 4.0]
+    );
 }
 
 #[test]
@@ -2985,7 +2990,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         &mut self,
         destination: &mut [f64],
         source: &[f64],
-        coefficients_src_by_dst: &[C],
+        recoupling_coefficients_dst_src: &[C],
         coefficient_start: usize,
         element_count: usize,
         src_count: usize,
@@ -2999,7 +3004,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         crate::StridedHostKernelAdapter.recoupling_src_times_u_transpose(
             destination,
             source,
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             coefficient_start,
             element_count,
             src_count,

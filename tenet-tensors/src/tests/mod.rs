@@ -273,11 +273,11 @@ fn single_transform_coefficient_for_coupled(
     for spec in plan.specs() {
         assert_eq!(spec.src_keys().len(), 1);
         assert_eq!(spec.dst_keys().len(), 1);
-        assert_eq!(spec.coefficients_src_by_dst().len(), 1);
+        assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
         let dst_coupled = expect_tree_key(&spec.dst_keys()[0]).coupled().unwrap();
         if dst_coupled == coupled {
             assert!(found.is_none(), "duplicate coefficient for {coupled:?}");
-            found = Some(spec.coefficients_src_by_dst()[0]);
+            found = Some(spec.recoupling_coefficients_dst_src()[0]);
         }
     }
     found.unwrap_or_else(|| panic!("missing coefficient for {coupled:?}"))
@@ -299,12 +299,13 @@ fn expected_single_tree_pair_replay(
     for spec in plan.specs() {
         assert_eq!(spec.src_keys().len(), 1);
         assert_eq!(spec.dst_keys().len(), 1);
-        assert_eq!(spec.coefficients_src_by_dst().len(), 1);
+        assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
         let src_key = &spec.src_keys()[0];
         let dst_key = &spec.dst_keys()[0];
         let src_offset = src_structure.block_by_key(src_key).unwrap().offset();
         let dst_offset = dst_structure.block_by_key(dst_key).unwrap().offset();
-        expected[dst_offset] += alpha * spec.coefficients_src_by_dst()[0] * src_data[src_offset];
+        expected[dst_offset] +=
+            alpha * spec.recoupling_coefficients_dst_src()[0] * src_data[src_offset];
     }
     expected
 }
@@ -925,7 +926,7 @@ fn assert_tree_single_mixed_dtype<D, C>(
 
 fn assert_tree_multi_mixed_dtype<D, C>(
     src_values: Vec<D>,
-    coefficients_src_by_dst: Vec<C>,
+    recoupling_coefficients_dst_src: Vec<C>,
     alpha: D,
     beta: D,
     fill: D,
@@ -948,7 +949,7 @@ fn assert_tree_multi_mixed_dtype<D, C>(
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1],
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
         )],
     )
     .unwrap();
@@ -973,7 +974,7 @@ fn assert_tree_multi_mixed_dtype<D, C>(
 
 fn assert_tree_multi_tensorkit_orientation_dtype<T>(
     src_values: Vec<T>,
-    coefficients_src_by_dst: Vec<T>,
+    recoupling_coefficients_dst_src: Vec<T>,
     alpha: T,
     beta: T,
     fill: T,
@@ -1007,7 +1008,7 @@ fn assert_tree_multi_tensorkit_orientation_dtype<T>(
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1, 2],
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
         )],
     )
     .unwrap();
@@ -1032,7 +1033,7 @@ fn assert_tree_multi_tensorkit_orientation_dtype<T>(
 
 fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
     src_values: Vec<T>,
-    coefficients_src_by_dst: Vec<T>,
+    recoupling_coefficients_dst_src: Vec<T>,
     alpha: T,
     beta: T,
     fill: T,
@@ -1056,7 +1057,7 @@ fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
         &[TreeTransformBlockSpec::multi(
             vec![0, 1],
             vec![0, 1, 2],
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
         )],
     )
     .unwrap();
@@ -1081,7 +1082,7 @@ fn assert_tree_multi_tensorkit_orientation_dense_dtype<T>(
 
 fn assert_tree_multi_keyed_dtype<T>(
     src_values: Vec<T>,
-    coefficients_src_by_dst: Vec<T>,
+    recoupling_coefficients_dst_src: Vec<T>,
     expected: Vec<T>,
 ) where
     T: Copy
@@ -1128,7 +1129,7 @@ fn assert_tree_multi_keyed_dtype<T>(
         &[TreeTransformKeyBlockSpec::multi(
             vec![key10, key20],
             vec![key100, key200, key300],
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
         )],
     )
     .unwrap();

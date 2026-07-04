@@ -568,6 +568,10 @@ impl FusionTreeHomSpace {
         Ok(Self::new(lhs.codomain.clone(), rhs.domain.clone()))
     }
 
+    /// Structural lowering of a general axis contraction, the homspace-level
+    /// analog of TensorOperations' `tensorcontract!`: reorders both operands
+    /// to `(open, contracted)` x `(contracted, open)`, composes them (see
+    /// [`Self::compose`]), and applies the requested output axis order.
     pub fn tensorcontract_homspace<R>(
         rule: &R,
         lhs: &Self,
@@ -673,6 +677,9 @@ impl FusionTreeHomSpace {
         Ok(keys.remove(0))
     }
 
+    /// Lowers external per-leg sectors to fusion-tree keys. Domain-side
+    /// external sectors are dualized into internal tree sectors here, the
+    /// same convention TensorKit applies in `subblock(t, sectors)`.
     pub fn fusion_tree_keys_from_external_sectors<R>(
         &self,
         rule: &R,
@@ -1051,6 +1058,11 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// Default constructor: TensorKit-equivalent coupled-sector matrix
     /// layout (see [`Self::from_degeneracy_shapes_coupled`]). This is the
     /// only product layout.
+    ///
+    /// The shapes are given per fusion-tree **subblock** (one entry per
+    /// fusion-tree key, in key order), not per coupled-sector matrix block.
+    /// This mirrors TensorKit's block/subblock distinction: a coupled-sector
+    /// matrix block is assembled from these tree-resolved degeneracy shapes.
     ///
     /// # Examples
     ///

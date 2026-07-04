@@ -22,7 +22,7 @@ pub struct TreeTransformStructure<T> {
     storage_conjugate: bool,
     pub blocks: Vec<TreeTransformBlock>,
     pub layouts: TreeTransformLayoutTable,
-    pub coefficients_src_by_dst: Vec<T>,
+    pub recoupling_coefficients_dst_src: Vec<T>,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
 }
@@ -245,7 +245,7 @@ impl<T: Copy> TreeTransformStructure<T> {
 
         let mut layouts = TreeTransformLayoutTable::default();
         let mut blocks = Vec::with_capacity(specs.len());
-        let mut coefficients_src_by_dst = Vec::new();
+        let mut recoupling_coefficients_dst_src = Vec::new();
         let mut touched_dst_blocks = vec![false; dst_structure.block_count()];
 
         for spec in specs {
@@ -257,10 +257,10 @@ impl<T: Copy> TreeTransformStructure<T> {
             let expected_coefficients = src_count
                 .checked_mul(dst_count)
                 .ok_or(OperationError::ElementCountOverflow)?;
-            if spec.coefficients_src_by_dst.len() != expected_coefficients {
+            if spec.recoupling_coefficients_dst_src.len() != expected_coefficients {
                 return Err(OperationError::CoefficientCountMismatch {
                     expected: expected_coefficients,
-                    actual: spec.coefficients_src_by_dst.len(),
+                    actual: spec.recoupling_coefficients_dst_src.len(),
                 });
             }
 
@@ -318,8 +318,9 @@ impl<T: Copy> TreeTransformStructure<T> {
                 }
             }
             let element_count = element_count.expect("validated non-empty block");
-            let coefficient_start = coefficients_src_by_dst.len();
-            coefficients_src_by_dst.extend_from_slice(&spec.coefficients_src_by_dst);
+            let coefficient_start = recoupling_coefficients_dst_src.len();
+            recoupling_coefficients_dst_src
+                .extend_from_slice(&spec.recoupling_coefficients_dst_src);
 
             if src_count == 1 && dst_count == 1 {
                 let dst_layout = layouts.entry(dst_layout_start);
@@ -356,7 +357,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             storage_conjugate,
             blocks,
             layouts,
-            coefficients_src_by_dst,
+            recoupling_coefficients_dst_src,
             dst_structure,
             src_structure,
         })
@@ -415,7 +416,7 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     pub fn coefficient(&self, index: usize) -> T {
-        self.coefficients_src_by_dst[index]
+        self.recoupling_coefficients_dst_src[index]
     }
 
     pub fn validate_replay_structures(
