@@ -15,7 +15,7 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
 
-pub(crate) type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
+pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
 pub(crate) type ProductKey = TreeTransformProductRuleCacheKey<BuiltinKey, BuiltinKey>;
 /// Cache key of the left-associated triple product `(fZ2 ⊠ U1) ⊠ SU2`.
@@ -23,7 +23,7 @@ pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, Builtin
 
 /// The pair of per-scalar execution contexts for one fusion rule: tensor
 /// operations dispatch on the stored dtype once per call and pick one side.
-pub(crate) struct Ctxs<Key: Clone + Eq + Hash> {
+pub struct Ctxs<Key: Clone + Eq + Hash> {
     pub(crate) f64: Ctx<f64, Key>,
     pub(crate) c64: Ctx<Complex64, Key>,
 }
@@ -58,29 +58,30 @@ pub(crate) struct RuntimeState {
     #[cfg(feature = "cuda")]
     pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
     /// Contraction-plan cache configuration (the cache state itself lives
-    /// in `plan_cache_slot`).
+    /// in `extension_slot`).
     pub(crate) plan_cache_config: PlanCacheConfig,
-    /// Type-erased contraction-plan cache. The cache and plan types live in
+    /// Type-erased downstream extension slot. Currently holds the
+    /// contraction-plan cache: the cache and plan types live in
     /// `tenet-network`, which depends on this crate, so the runtime can only
     /// hold them behind `dyn Any`; `tenet-network` claims and downcasts the
     /// slot on first use.
-    pub(crate) plan_cache_slot: Option<Box<dyn Any + Send>>,
+    pub(crate) extension_slot: Option<Box<dyn Any + Send>>,
 }
 
 impl RuntimeState {
     /// Applies the tree-transform replay worker count to every per-rule
     /// execution context (parallelism is a property of the backend, so the
     /// setting lives on each context's transform backend).
-    fn set_transform_threads(&mut self, threads: usize) {
+    fn set_recoupling_threads(&mut self, threads: usize) {
         fn apply<Key: Clone + Eq + std::hash::Hash>(ctxs: &mut Ctxs<Key>, threads: usize) {
             ctxs.f64
                 .tree_context_mut()
                 .backend_mut()
-                .set_transform_threads(threads);
+                .set_recoupling_threads(threads);
             ctxs.c64
                 .tree_context_mut()
                 .backend_mut()
-                .set_transform_threads(threads);
+                .set_recoupling_threads(threads);
         }
         apply(&mut self.u1, threads);
         apply(&mut self.z2, threads);
@@ -175,7 +176,7 @@ struct RuntimeInner {
 ///
 /// let rt = Runtime::builder().build()?;
 /// let v = Space::z2([(0, 1), (1, 1)]);
-/// let a = Tensor::zeros(&rt, [&v], [&v])?;
+/// let a = Tensor::zeros(&rt, Dtype::F64, [&v], [&v])?;
 /// assert_eq!(a.norm()?, 0.0);
 /// # Ok::<(), tenet::prelude::Error>(())
 /// ```
@@ -215,17 +216,17 @@ impl Runtime {
         self.lock().plan_cache_config = config;
     }
 
-    /// Locked access to the type-erased contraction-plan-cache slot (the
-    /// cache type lives in `tenet-network`, which claims and downcasts the
-    /// slot on first use). Expert seam for `tenet-network`;
-    /// do not hold tensors' operations inside `f` (the runtime state mutex
-    /// is held for its duration).
+    /// Locked access to the type-erased downstream extension slot
+    /// (currently the contraction-plan cache: the cache type lives in
+    /// `tenet-network`, which claims and downcasts the slot on first use).
+    /// Expert seam for `tenet-network`; do not hold tensors' operations
+    /// inside `f` (the runtime state mutex is held for its duration).
     #[doc(hidden)]
-    pub fn with_plan_cache_slot<R>(
+    pub fn with_extension_slot<R>(
         &self,
         f: impl FnOnce(&mut Option<Box<dyn Any + Send>>) -> R,
     ) -> R {
-        f(&mut self.lock().plan_cache_slot)
+        f(&mut self.lock().extension_slot)
     }
 
     /// Deterministic per-runtime stream position for [`crate::prelude::Tensor::rand`].
@@ -248,7 +249,7 @@ pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
     plan_cache: PlanCacheConfig,
-    transform_threads: Option<usize>,
+    recoupling_threads: Option<usize>,
 }
 
 impl RuntimeBuilder {
@@ -277,13 +278,13 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the CPU worker count for symmetry tree-transform replays
-    /// (permute/braid/transpose recoupling — the cold-path cost of SU(2)
-    /// workloads). Default is 1 (serial); values above 1 parallelize replays
-    /// past the backend's size gate on the shared rayon pool. Naming is
-    /// provisional pending the user-layer API pass.
-    pub fn transform_threads(mut self, threads: usize) -> Self {
-        self.transform_threads = Some(threads);
+    /// Sets the CPU worker count for symmetry recoupling replays
+    /// (permute/braid/transpose tree transforms — the cold-path cost of
+    /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
+    /// above 1 parallelize replays past the backend's size gate on the
+    /// shared rayon pool.
+    pub fn recoupling_threads(mut self, threads: usize) -> Self {
+        self.recoupling_threads = Some(threads);
         self
     }
 
@@ -292,8 +293,8 @@ impl RuntimeBuilder {
     pub fn build(self) -> Result<Runtime, Error> {
         let mut state = RuntimeState::default();
         state.plan_cache_config = self.plan_cache;
-        if let Some(threads) = self.transform_threads {
-            state.set_transform_threads(threads);
+        if let Some(threads) = self.recoupling_threads {
+            state.set_recoupling_threads(threads);
         }
         #[cfg(feature = "cuda")]
         if let Some(device) = self.cuda_device {

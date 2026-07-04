@@ -180,7 +180,7 @@ where
             cache,
         } = self;
         // One knob: compile parallelism follows the backend's replay setting.
-        cache.set_transform_threads(backend.transform_threads());
+        cache.set_recoupling_threads(backend.recoupling_threads());
         let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
         backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
     }
@@ -249,7 +249,7 @@ where
         DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     {
         self.cache
-            .set_transform_threads(self.backend.transform_threads());
+            .set_recoupling_threads(self.backend.recoupling_threads());
         let structure = self
             .cache
             .get_or_compile_tree_pair(rule, operation, dst, src)?;
@@ -276,7 +276,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
         self.cache
-            .set_transform_threads(self.backend.transform_threads());
+            .set_recoupling_threads(self.backend.recoupling_threads());
         self.cache
             .get_or_compile_tree_pair_structures_with_storage_conjugation(
                 rule,
@@ -309,7 +309,7 @@ where
             cache,
         } = self;
         // One knob: compile parallelism follows the backend's replay setting.
-        cache.set_transform_threads(backend.transform_threads());
+        cache.set_recoupling_threads(backend.recoupling_threads());
         let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
             rule,
             operation,

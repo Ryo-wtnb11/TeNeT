@@ -36,7 +36,7 @@ where
     /// The execution context mirrors it into the plan-compile cache, so the
     /// one configured knob drives both replay and compile parallelism;
     /// backends without a thread setting stay serial.
-    fn transform_threads(&self) -> usize {
+    fn recoupling_threads(&self) -> usize {
         1
     }
 
@@ -206,7 +206,7 @@ impl ReportsPlacement for HostTensorOperations {
     }
 }
 
-/// Default minimum destination length before a `transform_threads > 1`
+/// Default minimum destination length before a `recoupling_threads > 1`
 /// setting actually goes parallel; below it the replay stays serial.
 ///
 /// Mirrors TensorKit's gate `length(t.data) > Strided.MINTHREADLENGTH`
@@ -220,8 +220,8 @@ pub struct DenseTreeTransformOperations<E = DefaultDenseExecutor> {
     dense: E,
     // Replay parallelism is a property of this backend: worker count for the
     // tree-transform replay phases (1 = serial, the default).
-    transform_threads: usize,
-    // Size gate paired with transform_threads; see TRANSFORM_PARALLEL_MIN_LEN.
+    recoupling_threads: usize,
+    // Size gate paired with recoupling_threads; see TRANSFORM_PARALLEL_MIN_LEN.
     transform_parallel_min_len: usize,
 }
 
@@ -235,7 +235,7 @@ impl<E> DenseTreeTransformOperations<E> {
     pub fn new(dense: E) -> Self {
         Self {
             dense,
-            transform_threads: 1,
+            recoupling_threads: 1,
             transform_parallel_min_len: TRANSFORM_PARALLEL_MIN_LEN,
         }
     }
@@ -255,18 +255,18 @@ impl<E> DenseTreeTransformOperations<E> {
 
     /// Worker count for tree-transform replays (default 1 = serial).
     #[inline]
-    pub fn transform_threads(&self) -> usize {
-        self.transform_threads
+    pub fn recoupling_threads(&self) -> usize {
+        self.recoupling_threads
     }
 
     /// Sets the tree-transform replay worker count. `0` is treated as `1`
     /// (serial); values `> 1` parallelize replays whose destination length
     /// exceeds [`Self::transform_parallel_min_len`].
-    pub fn set_transform_threads(&mut self, threads: usize) {
-        self.transform_threads = threads.max(1);
+    pub fn set_recoupling_threads(&mut self, threads: usize) {
+        self.recoupling_threads = threads.max(1);
     }
 
-    /// Minimum destination length before `transform_threads > 1` goes
+    /// Minimum destination length before `recoupling_threads > 1` goes
     /// parallel (default [`TRANSFORM_PARALLEL_MIN_LEN`]).
     #[inline]
     pub fn transform_parallel_min_len(&self) -> usize {
@@ -281,9 +281,9 @@ impl<E> DenseTreeTransformOperations<E> {
     /// parallelism is enabled and the destination is past the size gate,
     /// otherwise 1 (the untouched serial path).
     #[inline]
-    fn effective_transform_threads(&self, dst_len: usize) -> usize {
-        if self.transform_threads > 1 && dst_len > self.transform_parallel_min_len {
-            self.transform_threads
+    fn effective_recoupling_threads(&self, dst_len: usize) -> usize {
+        if self.recoupling_threads > 1 && dst_len > self.transform_parallel_min_len {
+            self.recoupling_threads
         } else {
             1
         }
@@ -434,8 +434,8 @@ where
     type Workspace = TreeTransformWorkspace<D>;
 
     #[inline]
-    fn transform_threads(&self) -> usize {
-        DenseTreeTransformOperations::transform_threads(self)
+    fn recoupling_threads(&self) -> usize {
+        DenseTreeTransformOperations::recoupling_threads(self)
     }
 
     fn tree_transform_structure_into<
@@ -460,7 +460,7 @@ where
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {
-        let threads = self.effective_transform_threads(dst.storage().len());
+        let threads = self.effective_recoupling_threads(dst.storage().len());
         tree_transform_structure_with_structural_recoupling(
             &mut StridedHostKernelAdapter,
             &mut self.dense,
@@ -485,7 +485,7 @@ where
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
-        let threads = self.effective_transform_threads(dst_data.len());
+        let threads = self.effective_recoupling_threads(dst_data.len());
         crate::tree_transform_structure_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter,
             &mut self.dense,
@@ -513,7 +513,7 @@ where
         beta: D,
         profile: &mut TreeTransformReplayProfile,
     ) -> Result<(), OperationError> {
-        let threads = self.effective_transform_threads(dst_data.len());
+        let threads = self.effective_recoupling_threads(dst_data.len());
         crate::tree_transform_structure_with_structural_recoupling_raw_profiled(
             &mut StridedHostKernelAdapter,
             &mut self.dense,

@@ -108,7 +108,7 @@ pub fn plan_cache_config(runtime: &Runtime) -> PlanCacheConfig {
 
 /// Hit/miss/re-plan counters and the current entry count.
 pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
-    runtime.with_plan_cache_slot(|slot| {
+    runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
         PlanCacheStats {
             hits: cache.hits,
@@ -121,7 +121,7 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
 
 /// Drops every cached plan and resets the counters (not the configuration).
 pub fn clear_plan_cache(runtime: &Runtime) {
-    runtime.with_plan_cache_slot(|slot| {
+    runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
         cache.map.clear();
         cache.lru_order.clear();
@@ -222,7 +222,7 @@ pub(crate) fn get_or_plan(
         Replan,
         Miss,
     }
-    let outcome = runtime.with_plan_cache_slot(|slot| {
+    let outcome = runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
         match cache.map.get(&topology) {
             Some(entry) if !drifted(config.replan, &entry.dims_snapshot, &dims) => {
@@ -241,7 +241,7 @@ pub(crate) fn get_or_plan(
 
     let planned = Arc::new(plan_fresh(network, tensors, optimizer)?);
     let cost = planned.plan().total_cost();
-    runtime.with_plan_cache_slot(|slot| {
+    runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
         match outcome {
             Outcome::Replan => cache.replans += 1,
