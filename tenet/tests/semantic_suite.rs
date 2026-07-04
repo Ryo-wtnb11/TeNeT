@@ -313,13 +313,6 @@ fn contraction_order_independence() {
 
         // Rank-4 pair with crossed contracted legs: forces tree transforms
         // and output permutes on every route (incl. the dynamic engine).
-        //
-        // KNOWN FAILURE: SU2 with non-uniform sector degeneracies errors
-        // with `ShapeMismatch` on every tree-transform contract route; see
-        // `su2_nonuniform_degeneracy_crossed_contract_known_failure` below.
-        if name == "SU2" {
-            continue;
-        }
         let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 85).unwrap();
         let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 86).unwrap();
         let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
@@ -341,25 +334,68 @@ fn contraction_order_independence() {
     }
 }
 
-/// KNOWN FAILURE (2026-07-04): SU(2) with non-uniform sector degeneracies
-/// (`Space::su2([(0, 2), (1, 2), (2, 1)])`) fails every contract route that
-/// needs source tree transforms with
+/// Regression test for issue #12: SU(2) with non-uniform sector
+/// degeneracies (`Space::su2([(0, 2), (1, 2), (2, 1)])`) used to fail every
+/// contract route that needs source tree transforms with
 /// `Operation(ShapeMismatch { dst: [2, 2, 2, 2], src: [2, 1, 1, 2] })` —
-/// the destination shape is built from a single uniform degeneracy while
-/// the source block carries the true per-sector shape. The plain compose
-/// route (`[2,3] x [0,1]`) works; uniform-degeneracy SU(2) works; U1 / fZ2 /
-/// fZ2xU1xSU2 with non-uniform degeneracies work. The bug therefore sits in
-/// the dynamic contract route's degeneracy resolution for non-abelian rules
-/// (`tenet-tensors/src/contract/`). This test asserts the CORRECT behavior:
-/// un-ignore it once the engine is fixed.
-/// Run with: `cargo test -p tenet --test semantic_suite -- --ignored su2_nonuniform`
+/// `infer_core_dst_shapes` keyed inferred shapes by
+/// `(lhs codomain tree, rhs domain tree)`, which is only the destination key
+/// when the contracted axes are exactly lhs-domain x rhs-codomain (compose);
+/// for crossed axes the open-axis shapes of unrelated sector combinations
+/// collided under one key. Asserts contraction-order independence: crossed
+/// contract == `tensor!` reference elementwise.
 #[test]
-#[ignore = "KNOWN FAILURE: SU2 non-uniform degeneracy tree-transform contract (ShapeMismatch)"]
-fn su2_nonuniform_degeneracy_crossed_contract_known_failure() {
+fn su2_nonuniform_degeneracy_crossed_contract() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::su2([(0, 2), (1, 2), (2, 1)]);
     let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 85).unwrap();
     let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 86).unwrap();
+    let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
+    let ab = a
+        .contract(&b, &[1, 2], &[2, 1])
+        .unwrap()
+        .permute(&[0, 2], &[3, 1])
+        .unwrap();
+    let ba = b
+        .contract(&a, &[2, 1], &[1, 2])
+        .unwrap()
+        .permute(&[2, 0], &[1, 3])
+        .unwrap();
+    assert_close(via_macro.data(), ab.data(), 1e-12);
+    assert_close(via_macro.data(), ba.data(), 1e-12);
+}
+
+/// Regression test for issue #12, fZ2 shape: decreasing degeneracies
+/// (`Space::fz2([(0, 2), (1, 1)])`, the fused norm leg of the finite-torus
+/// DL network) with a single contracted leg moving open legs across the
+/// codomain/domain boundary. Same root cause as the SU(2) case above; the
+/// reference route (permute first, then plain compose) never triggered it.
+#[test]
+fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::fz2([(0, 2), (1, 1)]);
+    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 5).unwrap();
+    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 6).unwrap();
+    // Open legs cross the split: a's domain axis 3 stays open, b's axes
+    // 1..3 stay open. Default output order matches the permuted compose.
+    let direct = a.contract(&b, &[2], &[0]).unwrap();
+    let reference = a
+        .permute(&[0, 1, 3], &[2])
+        .unwrap()
+        .compose(&b.permute(&[0], &[1, 2, 3]).unwrap())
+        .unwrap();
+    assert_close(direct.data(), reference.data(), 1e-12);
+}
+
+/// Regression test for issue #12, triple-product shape: non-uniform
+/// degeneracies on the fZ2 x U1 x SU2 product rule with crossed contracted
+/// legs (the original suite only covered the degeneracy-1 triple space).
+#[test]
+fn triple_product_nonuniform_degeneracy_crossed_contract() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 1, 1), 2), ((0, 2, 0), 1)]).unwrap();
+    let a = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 87).unwrap();
+    let b = Tensor::rand_with_seed(&rt, [&v, &v], [&v, &v], 88).unwrap();
     let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
     let ab = a
         .contract(&b, &[1, 2], &[2, 1])

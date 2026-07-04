@@ -204,17 +204,8 @@ where
         );
     }
 
-    let output_dst_space = DynamicFusionMapSpace::from_typed(
-        dst.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let core_dst_space = DynamicFusionMapSpace::core_dst(
-        rule,
-        lhs_core.space(),
-        rhs_core.space(),
-        plan,
-        Some(&output_dst_space),
-    )?;
+    let core_dst_space =
+        DynamicFusionMapSpace::core_dst(rule, lhs_core.space(), rhs_core.space(), plan)?;
     let mut core_dst = DynamicFusionScratch::<D>::zeroed(Arc::new(core_dst_space))?;
     let core_dst_space_for_contract = core_dst.space().clone();
     let core_dst_structure = std::sync::Arc::clone(core_dst.space().structure());
@@ -1630,7 +1621,7 @@ where
         let rule_key = rule.tree_transform_rule_cache_key();
         if !self.policy.stores_entries() {
             self.stats.misses += 1;
-            let space = DynamicFusionMapSpace::core_dst(rule, lhs, rhs, plan, Some(output_dst))?;
+            let space = DynamicFusionMapSpace::core_dst(rule, lhs, rhs, plan)?;
             let dst_structure = Arc::clone(output_dst.structure());
             let src_structure = Arc::clone(space.structure());
             let output_transform_structure = tree_context
@@ -1743,7 +1734,7 @@ where
         }
 
         self.stats.misses += 1;
-        let space = DynamicFusionMapSpace::core_dst(rule, lhs, rhs, plan, Some(output_dst))?;
+        let space = DynamicFusionMapSpace::core_dst(rule, lhs, rhs, plan)?;
         let dst_structure = Arc::clone(output_dst.structure());
         let src_structure = Arc::clone(space.structure());
         let output_transform_structure = tree_context
