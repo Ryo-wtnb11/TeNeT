@@ -67,6 +67,30 @@ pub(crate) struct RuntimeState {
     pub(crate) plan_cache_slot: Option<Box<dyn Any + Send>>,
 }
 
+impl RuntimeState {
+    /// Applies the tree-transform replay worker count to every per-rule
+    /// execution context (parallelism is a property of the backend, so the
+    /// setting lives on each context's transform backend).
+    fn set_transform_threads(&mut self, threads: usize) {
+        fn apply<Key: Clone + Eq + std::hash::Hash>(ctxs: &mut Ctxs<Key>, threads: usize) {
+            ctxs.f64
+                .tree_context_mut()
+                .backend_mut()
+                .set_transform_threads(threads);
+            ctxs.c64
+                .tree_context_mut()
+                .backend_mut()
+                .set_transform_threads(threads);
+        }
+        apply(&mut self.u1, threads);
+        apply(&mut self.z2, threads);
+        apply(&mut self.fz2, threads);
+        apply(&mut self.su2, threads);
+        apply(&mut self.u1_fz2, threads);
+        apply(&mut self.fz2_u1_su2, threads);
+    }
+}
+
 /// Dispatches on a [`crate::space::RuleKind`], binding `$rule` to the
 /// concrete fusion rule and `$ctx` to the matching per-scalar execution
 /// context pair ([`Ctxs`]) of a [`RuntimeState`].
@@ -224,6 +248,7 @@ pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
     plan_cache: PlanCacheConfig,
+    transform_threads: Option<usize>,
 }
 
 impl RuntimeBuilder {
@@ -252,11 +277,24 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the CPU worker count for symmetry tree-transform replays
+    /// (permute/braid/transpose recoupling — the cold-path cost of SU(2)
+    /// workloads). Default is 1 (serial); values above 1 parallelize replays
+    /// past the backend's size gate on the shared rayon pool. Naming is
+    /// provisional pending the user-layer API pass.
+    pub fn transform_threads(mut self, threads: usize) -> Self {
+        self.transform_threads = Some(threads);
+        self
+    }
+
     /// Finishes the build; fails when a requested backend (e.g. the CUDA
     /// device) cannot be initialized.
     pub fn build(self) -> Result<Runtime, Error> {
         let mut state = RuntimeState::default();
         state.plan_cache_config = self.plan_cache;
+        if let Some(threads) = self.transform_threads {
+            state.set_transform_threads(threads);
+        }
         #[cfg(feature = "cuda")]
         if let Some(device) = self.cuda_device {
             state.cuda = Some(

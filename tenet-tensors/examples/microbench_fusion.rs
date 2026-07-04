@@ -172,6 +172,15 @@ where
                 .unwrap();
 
         let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
+        // Bench-only override of the transform-replay worker count; the size
+        // gate is dropped so small-degeneracy workloads exercise the parallel
+        // path too (production keeps the gate).
+        if let Ok(threads) = std::env::var("MICROBENCH_TRANSFORM_THREADS") {
+            let threads: usize = threads.parse().expect("MICROBENCH_TRANSFORM_THREADS");
+            let backend = context.tree_context_mut().backend_mut();
+            backend.set_transform_threads(threads);
+            backend.set_transform_parallel_min_len(0);
+        }
         let axes = || {
             TensorContractSpec::new(
                 &workload.lhs_axes,

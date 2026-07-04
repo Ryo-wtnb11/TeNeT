@@ -1341,7 +1341,10 @@ pub trait FusionRule {
 pub trait MultiplicityFreeFusionRule: FusionRule {}
 
 pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
-    type Scalar: Clone;
+    // Send + Sync because cached recoupling coefficients are shared across
+    // tree-transform replay workers (TensorKit sectorscalartype parity: the
+    // concrete scalar is a plain number type).
+    type Scalar: Clone + Send + Sync;
 
     fn scalar_one(&self) -> Self::Scalar;
 
