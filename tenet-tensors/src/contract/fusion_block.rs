@@ -16,6 +16,7 @@ use tenet_operations::TensorContractSpec;
 use tenet_operations::fusion_replay::{
     direct_group_matrix_offset, fusion_scale_block_layouts_excluding, FusionBlockContractGroupPlan,
     FusionBlockMatrixGroup, FusionStridedBlockLayout, FusionSubblockMatrixLayout,
+    Rank2GemmBatchJob,
 };
 pub(crate) use tenet_operations::fusion_replay::{
     FusionBlockContractPlan, FusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
@@ -60,6 +61,22 @@ where
             alpha,
             beta,
         )
+    }
+
+    fn matmul_rank2_batch(
+        &mut self,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        D: Copy,
+    {
+        self.backend
+            .matmul_rank2_batch_axpby_into_raw(self.workspace, dst, lhs, rhs, jobs, alpha, beta)
     }
 }
 

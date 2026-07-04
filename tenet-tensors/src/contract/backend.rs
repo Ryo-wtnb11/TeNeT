@@ -4,7 +4,8 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage,
     SimilarStorage, TensorMap,
 };
-use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
+use tenet_dense::{DenseExecutor, DenseGemmBatchJob, DenseView, DenseViewMut};
+use tenet_operations::fusion_replay::{direct_slice, direct_slice_mut, Rank2GemmBatchJob};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -116,6 +117,41 @@ where
         Err(OperationError::UnsupportedTensorContractScope {
             message: "contract backend does not implement the accumulate-form rank-2 GEMM",
         })
+    }
+
+    /// Batched accumulate-form rank-2 GEMM addressed by element offsets into
+    /// shared column-major buffers (see [`Rank2GemmBatchJob`]). The caller
+    /// guarantees the batch's destination ranges are pairwise disjoint, so
+    /// implementations may run jobs in any order or concurrently; the default
+    /// executes them serially through `matmul_rank2_axpby_into_raw`.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_rank2_batch_axpby_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        for job in jobs {
+            let lhs_slice = direct_slice(lhs_data, job.lhs_offset, job.rows, job.contracted)?;
+            let rhs_slice = direct_slice(rhs_data, job.rhs_offset, job.contracted, job.cols)?;
+            let dst_slice = direct_slice_mut(dst_data, job.dst_offset, job.rows, job.cols)?;
+            self.matmul_rank2_axpby_into_raw(
+                workspace,
+                dst_slice,
+                lhs_slice,
+                rhs_slice,
+                job.rows,
+                job.contracted,
+                job.cols,
+                alpha,
+                beta,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -351,6 +387,54 @@ where
         ));
         self.dense_mut()
             .matmul_axpby_into(output, lhs, rhs, alpha.dense_scalar(), beta.dense_scalar())
+            .map_err(OperationError::Dense)
+    }
+
+    fn matmul_rank2_batch_axpby_into_raw(
+        &mut self,
+        _workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        // Whole storage buffers as flat rank-1 views; the batch jobs carry the
+        // per-matrix offsets. Same plan-compile validation contract as
+        // matmul_rank2_axpby_into_raw.
+        let dst_shape = [dst_data.len()];
+        let lhs_shape = [lhs_data.len()];
+        let rhs_shape = [rhs_data.len()];
+        let flat_strides = [1];
+        let lhs = D::dense_read(DenseView::new_trusted(lhs_data, &lhs_shape, &flat_strides, 0));
+        let rhs = D::dense_read(DenseView::new_trusted(rhs_data, &rhs_shape, &flat_strides, 0));
+        let output = D::dense_write(DenseViewMut::new_trusted(
+            dst_data,
+            &dst_shape,
+            &flat_strides,
+            0,
+        ));
+        let dense_jobs: Vec<DenseGemmBatchJob> = jobs
+            .iter()
+            .map(|job| DenseGemmBatchJob {
+                dst_offset: job.dst_offset,
+                lhs_offset: job.lhs_offset,
+                rhs_offset: job.rhs_offset,
+                rows: job.rows,
+                contracted: job.contracted,
+                cols: job.cols,
+            })
+            .collect();
+        self.dense_mut()
+            .matmul_batch_axpby_into(
+                output,
+                lhs,
+                rhs,
+                &dense_jobs,
+                alpha.dense_scalar(),
+                beta.dense_scalar(),
+            )
             .map_err(OperationError::Dense)
     }
 }

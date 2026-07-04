@@ -747,7 +747,9 @@ fn direct_matrix_len(rows: usize, cols: usize) -> Result<usize, OperationError> 
         .ok_or(OperationError::ElementCountOverflow)
 }
 
-fn direct_slice_mut<T>(
+/// Checked mutable `rows x cols` column-major matrix slice at `base`; the
+/// bounds-checking counterpart of the batch-job offset addressing.
+pub fn direct_slice_mut<T>(
     data: &mut [T],
     base: usize,
     rows: usize,
@@ -865,7 +867,9 @@ where
     matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta)
 }
 
-fn direct_slice<T>(
+/// Checked shared `rows x cols` column-major matrix slice at `base`; the
+/// bounds-checking counterpart of the batch-job offset addressing.
+pub fn direct_slice<T>(
     data: &[T],
     base: usize,
     rows: usize,
