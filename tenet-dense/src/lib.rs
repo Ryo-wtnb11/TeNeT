@@ -755,7 +755,10 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseEr
 pub use tenferro_adapter::DefaultDenseExecutor;
 
 #[cfg(feature = "cuda")]
-pub use cuda_adapter::{cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage};
+pub use cuda_adapter::{
+    cuda_eigh_region, cuda_gemm_region_into, cuda_matmul_region_into, cuda_qr_region,
+    cuda_svd_region, CudaDenseContext, CudaDenseStorage,
+};
 
 #[cfg(feature = "cuda")]
 mod cuda_adapter;

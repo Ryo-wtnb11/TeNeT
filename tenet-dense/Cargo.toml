@@ -48,6 +48,7 @@ cuda = [
     "tenferro",
     "dep:tenferro-gpu",
     "tenferro-gpu/cuda",
+    "tenferro-linalg/cuda",
 ]
 provider-inject = [
     "cpu-blas-core",

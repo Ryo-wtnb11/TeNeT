@@ -15,15 +15,24 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use num_complex::Complex64;
-#[cfg(feature = "cuda")]
-use tenet_core::TensorStorage;
 use tenet_core::{
     BlockKey, BlockStructure, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     Placement, SectorId,
 };
+#[cfg(feature = "cuda")]
+use tenet_core::{FusionTreeKey, SectorLeg, TensorStorage};
+#[cfg(feature = "cuda")]
+use tenet_dense::{
+    cuda_eigh_region, cuda_gemm_region_into, cuda_qr_region, cuda_svd_region, CudaDenseContext,
+    CudaDenseStorage,
+};
+#[cfg(feature = "cuda")]
+use tenet_matrixalgebra::{select_truncation, WeightedSpectrum};
 use tenet_matrixalgebra::{DynFactor, FactorScalar, SectorSpectrum, Truncation};
 #[cfg(feature = "cuda")]
 use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
+#[cfg(feature = "cuda")]
+use tenet_tensors::OperationError;
 use tenet_tensors::{
     DynamicFusionMapSpace, RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
 };
@@ -1146,6 +1155,10 @@ impl Tensor {
     /// (`norm(t)^2 = sum_c dim(c) * |block_c|^2`), matching TensorKit's
     /// `norm`. Always real, for both dtypes.
     pub fn norm(&self) -> Result<f64, Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(storage) = &self.data {
+            return Ok(self.weighted_inner_cuda(storage, storage)?.re.sqrt());
+        }
         let value = with_data!(self, data, {
             with_rule!(self.rule, rule, {
                 weighted_inner(rule, self.space.structure(), data, data)
@@ -1161,7 +1174,9 @@ impl Tensor {
             Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
             Data::C64(data) => Data::C64(data.iter().map(|&value| value * factor).collect()),
             #[cfg(feature = "cuda")]
-            Data::CudaF64(_) => return Err(device_unsupported("scale()")),
+            Data::CudaF64(storage) => {
+                Data::CudaF64(Arc::new(self.axpby_cuda(factor, storage, None)?))
+            }
         };
         Ok(Self {
             rt: self.rt.clone(),
@@ -1207,8 +1222,8 @@ impl Tensor {
                     .collect(),
             ),
             #[cfg(feature = "cuda")]
-            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => {
-                return Err(device_unsupported("add()"))
+            (Data::CudaF64(a), Data::CudaF64(b)) => {
+                Data::CudaF64(Arc::new(self.axpby_cuda(alpha, a, Some((beta, b)))?))
             }
             _ => return Err(Error::DtypeMismatch),
         };
@@ -1258,7 +1273,7 @@ impl Tensor {
                 weighted_inner(rule, self.space.structure(), a, b)
             }),
             #[cfg(feature = "cuda")]
-            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(device_unsupported("inner()")),
+            (Data::CudaF64(a), Data::CudaF64(b)) => self.weighted_inner_cuda(a, b),
             _ => Err(Error::DtypeMismatch),
         }
     }
@@ -1291,6 +1306,11 @@ impl Tensor {
     /// Compact SVD `t = u * s * vh` (MatrixAlgebraKit `svd_compact`):
     /// per coupled sector the bond is `min(rows, cols)`.
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(storage) = &self.data {
+            let out = self.svd_cuda(storage, None)?;
+            return Ok((out.u, out.s, out.vh));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -1324,6 +1344,10 @@ impl Tensor {
 
     /// Truncated SVD (MatrixAlgebraKit `svd_trunc`); see [`SvdTrunc`].
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(storage) = &self.data {
+            return self.svd_cuda(storage, Some(truncation));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -1362,6 +1386,10 @@ impl Tensor {
     /// Compact QR `t = q * r` (MatrixAlgebraKit `qr_compact`): `q` has
     /// orthonormal columns per coupled sector.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(storage) = &self.data {
+            return self.qr_cuda(storage);
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -1497,6 +1525,11 @@ impl Tensor {
     /// (TensorKit: real `D`); `d` keeps the input dtype so it composes with
     /// `v` directly.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(storage) = &self.data {
+            let out = self.eigh_cuda(storage, None)?;
+            return Ok((out.d, out.v));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -1510,6 +1543,10 @@ impl Tensor {
     /// Truncated Hermitian eigendecomposition (MatrixAlgebraKit
     /// `eigh_trunc`); see [`EighTrunc`].
     pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc, Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(storage) = &self.data {
+            return self.eigh_cuda(storage, Some(truncation));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -1649,5 +1686,809 @@ impl Tensor {
             )
         })?;
         Ok(self.from_dyn(out))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CUDA device paths (f64 only).
+//
+// The user-layer storage is always the TensorKit-equivalent coupled-sector
+// matrix layout, so every coupled sector is one contiguous column-major
+// matrix region of the flat device buffer. All device work is expressed as
+// (a) per-sector cuSOLVER decompositions on those regions and (b) region
+// GEMMs against small host-built selector matrices (identity / prefix /
+// sign / permutation) that also perform factor assembly into freshly
+// allocated coupled-layout buffers. Only scalars ever cross PCIe implicitly:
+// per-sector reduction partials, singular/eigen values and R diagonals
+// (truncation and gauge decisions are host scalar logic).
+// ---------------------------------------------------------------------------
+
+/// One coupled sector of the packed coupled-sector matrix layout: a
+/// contiguous column-major `rows x cols` region at `offset`, with the
+/// per-fusion-tree row/column extents needed for factor assembly.
+#[cfg(feature = "cuda")]
+struct SectorRegion {
+    /// Coupled sector (`None` only for degenerate vacuum-coupled trees).
+    coupled: Option<SectorId>,
+    rows: usize,
+    cols: usize,
+    offset: usize,
+    /// `(codomain tree, row offset, row count)` in row order.
+    row_trees: Vec<(FusionTreeKey, usize, usize)>,
+    /// `(domain tree, column offset, column count)` in column order.
+    col_trees: Vec<(FusionTreeKey, usize, usize)>,
+}
+
+#[cfg(feature = "cuda")]
+fn dense_err(err: tenet_dense::DenseError) -> Error {
+    Error::Operation(OperationError::Dense(err))
+}
+
+#[cfg(feature = "cuda")]
+fn require_cuda(cuda: Option<&mut CudaDenseContext>) -> Result<&mut CudaDenseContext, Error> {
+    cuda.ok_or_else(|| {
+        Error::InvalidArgument(
+            "this runtime was built without a CUDA device; use \
+             Runtime::builder().cuda(device)"
+                .to_string(),
+        )
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn internal_layout_error(what: &str) -> Error {
+    Error::InvalidArgument(format!(
+        "internal device-layout invariant violated ({what}); please report this"
+    ))
+}
+
+/// Enumerates the coupled-sector matrix regions of a coupled-layout block
+/// structure and verifies that every fusion-tree block addresses exactly the
+/// packed column-major sector matrix. Device paths rely on these offsets, so
+/// any other layout is an explicit error, never silent misaddressing.
+#[cfg(feature = "cuda")]
+fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Vec<SectorRegion>, Error> {
+    let mut regions: Vec<SectorRegion> = Vec::new();
+    let mut block_index = 0usize;
+    let mut next_offset = 0usize;
+    while block_index < structure.block_count() {
+        let first = structure.block(block_index)?;
+        let BlockKey::FusionTree(first_key) = first.key() else {
+            return Err(device_unsupported("non-fusion-tree block layouts"));
+        };
+        let coupled = first_key.codomain_tree().coupled();
+
+        // Pass 1: extents of this sector's matrix and per-tree offsets.
+        let mut row_trees: Vec<(FusionTreeKey, usize, usize)> = Vec::new();
+        let mut col_trees: Vec<(FusionTreeKey, usize, usize)> = Vec::new();
+        let mut rows = 0usize;
+        let mut cols = 0usize;
+        let mut end = block_index;
+        while end < structure.block_count() {
+            let block = structure.block(end)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(device_unsupported("non-fusion-tree block layouts"));
+            };
+            if key.codomain_tree().coupled() != coupled {
+                break;
+            }
+            let shape = block.shape();
+            let sub_rows: usize = shape[..nout].iter().product();
+            let sub_cols: usize = shape[nout..].iter().product();
+            if !row_trees
+                .iter()
+                .any(|(tree, _, _)| tree == key.codomain_tree())
+            {
+                row_trees.push((key.codomain_tree().clone(), rows, sub_rows));
+                rows += sub_rows;
+            }
+            if !col_trees
+                .iter()
+                .any(|(tree, _, _)| tree == key.domain_tree())
+            {
+                col_trees.push((key.domain_tree().clone(), cols, sub_cols));
+                cols += sub_cols;
+            }
+            end += 1;
+        }
+
+        // Pass 2: verify packed addressing for every block of the sector.
+        let offset = next_offset;
+        let mut covered = 0usize;
+        for index in block_index..end {
+            let block = structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                unreachable!("checked in pass 1");
+            };
+            let row_offset = row_trees
+                .iter()
+                .find(|(tree, _, _)| tree == key.codomain_tree())
+                .map(|(_, offset, _)| *offset)
+                .expect("recorded in pass 1");
+            let col_offset = col_trees
+                .iter()
+                .find(|(tree, _, _)| tree == key.domain_tree())
+                .map(|(_, offset, _)| *offset)
+                .expect("recorded in pass 1");
+            let shape = block.shape();
+            let mut expected_strides = Vec::with_capacity(shape.len());
+            let mut stride = 1usize;
+            for axis in 0..nout {
+                expected_strides.push(stride);
+                stride *= shape[axis];
+            }
+            let mut stride = rows;
+            for axis in nout..shape.len() {
+                expected_strides.push(stride);
+                stride *= shape[axis];
+            }
+            if block.strides() != expected_strides.as_slice()
+                || block.offset() != offset + row_offset + rows * col_offset
+            {
+                return Err(device_unsupported("non-packed coupled-sector layouts"));
+            }
+            covered += shape.iter().product::<usize>();
+        }
+        if covered != rows * cols {
+            return Err(device_unsupported("coupled sectors with layout holes"));
+        }
+
+        regions.push(SectorRegion {
+            coupled,
+            rows,
+            cols,
+            offset,
+            row_trees,
+            col_trees,
+        });
+        next_offset = offset + rows * cols;
+        block_index = end;
+    }
+    Ok(regions)
+}
+
+#[cfg(feature = "cuda")]
+fn coupled_sector_of<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    region: &SectorRegion,
+    rule: &R,
+) -> SectorId {
+    region.coupled.unwrap_or_else(|| rule.vacuum())
+}
+
+#[cfg(feature = "cuda")]
+fn find_source<'a>(
+    regions: &'a [SectorRegion],
+    target: &SectorRegion,
+) -> Result<(usize, &'a SectorRegion), Error> {
+    regions
+        .iter()
+        .enumerate()
+        .find(|(_, region)| region.coupled == target.coupled)
+        .ok_or_else(|| internal_layout_error("factor bond sector missing in the source tensor"))
+}
+
+/// Shared host-side truncation decision (exactly the host cores' flow:
+/// `select_truncation` over quantum-dimension-weighted magnitudes, kept
+/// prefixes, empty sectors dropped, discarded weighted 2-norm as `error`;
+/// a no-op decision keeps the full factorization with `error == 0`).
+#[cfg(feature = "cuda")]
+fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    rule: &R,
+    spectra: &[SectorSpectrum],
+    truncation: Option<&Truncation>,
+) -> (Vec<SectorSpectrum>, f64) {
+    let Some(truncation) = truncation else {
+        return (spectra.to_vec(), 0.0);
+    };
+    let magnitudes: Vec<Vec<f64>> = spectra
+        .iter()
+        .map(|entry| entry.values.iter().map(|value| value.abs()).collect())
+        .collect();
+    let weighted: Vec<WeightedSpectrum<'_>> = spectra
+        .iter()
+        .zip(&magnitudes)
+        .map(|(entry, values)| WeightedSpectrum {
+            weight: rule.dim_scalar(entry.sector),
+            values,
+        })
+        .collect();
+    let decision = select_truncation(&weighted, truncation);
+    if spectra
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return (spectra.to_vec(), 0.0);
+    }
+    let mut kept = spectra.to_vec();
+    for (entry, &count) in kept.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    kept.retain(|entry| !entry.values.is_empty());
+    (kept, decision.error)
+}
+
+/// Uploads a small host-built selector matrix (`rows x cols`, column-major,
+/// zero except `entries`) used by the assembly GEMMs.
+#[cfg(feature = "cuda")]
+fn upload_selector(
+    cuda: &mut CudaDenseContext,
+    rows: usize,
+    cols: usize,
+    entries: impl Iterator<Item = (usize, usize, f64)>,
+) -> Result<CudaStorage, Error> {
+    let mut data = vec![0.0; rows * cols];
+    for (row, col, value) in entries {
+        data[row + rows * col] = value;
+    }
+    CudaStorage::upload(cuda, &data).map_err(Error::from)
+}
+
+/// Writes `factor_rows x kept` slices of `factor * selector` into the target
+/// sector region of a left factor (`codomain <- bond`), one GEMM per
+/// codomain tree so correctness never relies on tree enumeration order
+/// matching between the source and factor spaces.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn assemble_left_factor(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage,
+    target: &SectorRegion,
+    source: &SectorRegion,
+    factor: &CudaDenseStorage,
+    k_full: usize,
+    selector: &CudaStorage,
+    kept: usize,
+) -> Result<(), Error> {
+    for (tree, dst_row, sub_rows) in &target.row_trees {
+        if *sub_rows == 0 {
+            continue;
+        }
+        let src_row = source
+            .row_trees
+            .iter()
+            .find(|(source_tree, _, _)| source_tree == tree)
+            .map(|(_, offset, _)| *offset)
+            .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
+        cuda_gemm_region_into(
+            cuda,
+            &mut dst.0,
+            target.offset + dst_row,
+            target.rows,
+            factor,
+            src_row,
+            source.rows,
+            &selector.0,
+            0,
+            k_full,
+            *sub_rows,
+            k_full,
+            kept,
+            1.0,
+            0.0,
+        )
+        .map_err(dense_err)?;
+    }
+    Ok(())
+}
+
+/// Writes `kept x factor_cols` slices of `selector * factor` into the target
+/// sector region of a right factor (`bond <- domain`), one GEMM per domain
+/// tree.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn assemble_right_factor(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage,
+    target: &SectorRegion,
+    source: &SectorRegion,
+    selector: &CudaStorage,
+    kept: usize,
+    k_full: usize,
+    factor: &CudaDenseStorage,
+) -> Result<(), Error> {
+    for (tree, dst_col, sub_cols) in &target.col_trees {
+        if *sub_cols == 0 {
+            continue;
+        }
+        let src_col = source
+            .col_trees
+            .iter()
+            .find(|(source_tree, _, _)| source_tree == tree)
+            .map(|(_, offset, _)| *offset)
+            .ok_or_else(|| internal_layout_error("domain tree missing in the source sector"))?;
+        cuda_gemm_region_into(
+            cuda,
+            &mut dst.0,
+            target.offset + target.rows * dst_col,
+            target.rows,
+            &selector.0,
+            0,
+            kept,
+            factor,
+            k_full * src_col,
+            k_full,
+            kept,
+            k_full,
+            *sub_cols,
+            1.0,
+            0.0,
+        )
+        .map_err(dense_err)?;
+    }
+    Ok(())
+}
+
+/// Fills the diagonal of a coupled-layout `W <- W` buffer from per-sector
+/// spectra, mirroring the host `diagonal_bond_tensor_dyn`.
+#[cfg(feature = "cuda")]
+fn fill_diagonal_values(
+    structure: &BlockStructure,
+    data: &mut [f64],
+    spectra: &[SectorSpectrum],
+) -> Result<(), Error> {
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let BlockKey::FusionTree(tree) = block.key() else {
+            continue;
+        };
+        let sector = tree
+            .codomain_tree()
+            .coupled()
+            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        let Some(entry) = spectra.iter().find(|entry| entry.sector == sector) else {
+            continue;
+        };
+        let strides = block.strides();
+        let offset = block.offset();
+        let count = block.shape()[0].min(block.shape()[1]);
+        for position in 0..count {
+            data[offset + position * (strides[0] + strides[1])] = entry.values[position];
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+impl Tensor {
+    /// Device weighted Frobenius inner product: one `[1, len] x [len, 1]`
+    /// region GEMM per coupled sector into a device partials buffer, then a
+    /// single download of the per-sector scalars, weighted by quantum
+    /// dimensions on the host.
+    fn weighted_inner_cuda(&self, a: &CudaStorage, b: &CudaStorage) -> Result<Complex64, Error> {
+        let regions = sector_regions(self.space.structure(), self.space.nout())?;
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let cuda = require_cuda(state.cuda.as_mut())?;
+        let mut partials = CudaStorage::upload(cuda, &vec![0.0; regions.len().max(1)])?;
+        for (index, region) in regions.iter().enumerate() {
+            let len = region.rows * region.cols;
+            if len == 0 {
+                continue;
+            }
+            cuda_gemm_region_into(
+                cuda,
+                &mut partials.0,
+                index,
+                1,
+                &a.0,
+                region.offset,
+                1,
+                &b.0,
+                region.offset,
+                len,
+                1,
+                len,
+                1,
+                1.0,
+                0.0,
+            )
+            .map_err(dense_err)?;
+        }
+        let values = partials.download(cuda)?;
+        drop(guard);
+        let total = with_rule!(self.rule, rule, {
+            regions
+                .iter()
+                .zip(&values)
+                .map(|(region, &value)| value * rule.dim_scalar(coupled_sector_of(region, rule)))
+                .sum::<f64>()
+        });
+        Ok(Complex64::new(total, 0.0))
+    }
+
+    /// Device `alpha * x (+ beta * y)`: whole-buffer region GEMVs against a
+    /// `[1, 1]` ones operand (tenferro has no axpby/scale primitive; this
+    /// stays on the one proven dot-general seam).
+    fn axpby_cuda(
+        &self,
+        alpha: f64,
+        x: &CudaStorage,
+        other: Option<(f64, &CudaStorage)>,
+    ) -> Result<CudaStorage, Error> {
+        let len = TensorStorage::<f64>::len(x);
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let cuda = require_cuda(state.cuda.as_mut())?;
+        let ones = CudaStorage::upload(cuda, &[1.0])?;
+        // ponytail: destination allocated by uploading host zeros, same seam
+        // as the device contraction path; replace with a device alloc if the
+        // upload ever shows up in profiles.
+        let mut dst = CudaStorage::upload(cuda, &vec![0.0; len])?;
+        if len > 0 {
+            cuda_gemm_region_into(
+                cuda, &mut dst.0, 0, len, &x.0, 0, len, &ones.0, 0, 1, len, 1, 1, alpha, 0.0,
+            )
+            .map_err(dense_err)?;
+            if let Some((beta, y)) = other {
+                cuda_gemm_region_into(
+                    cuda, &mut dst.0, 0, len, &y.0, 0, len, &ones.0, 0, 1, len, 1, 1, beta, 1.0,
+                )
+                .map_err(dense_err)?;
+            }
+        }
+        drop(guard);
+        Ok(dst)
+    }
+
+    /// Device SVD: per-sector cuSOLVER SVD on the packed regions, values
+    /// downloaded for the (shared, host-side) truncation decision, factors
+    /// assembled on device through prefix selectors. `truncation: None` is
+    /// `svd_compact`.
+    fn svd_cuda(
+        &self,
+        storage: &CudaStorage,
+        truncation: Option<&Truncation>,
+    ) -> Result<SvdTrunc, Error> {
+        let regions = sector_regions(self.space.structure(), self.space.nout())?;
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let cuda = require_cuda(state.cuda.as_mut())?;
+        let out = with_rule!(self.rule, rule, {
+            let mut spectra: Vec<SectorSpectrum> = Vec::with_capacity(regions.len());
+            let mut factors: Vec<Option<(CudaDenseStorage, CudaDenseStorage)>> =
+                Vec::with_capacity(regions.len());
+            for region in &regions {
+                let sector = coupled_sector_of(region, rule);
+                if region.rows == 0 || region.cols == 0 {
+                    spectra.push(SectorSpectrum {
+                        sector,
+                        values: Vec::new(),
+                    });
+                    factors.push(None);
+                    continue;
+                }
+                let (u, s, vt) =
+                    cuda_svd_region(cuda, &storage.0, region.offset, region.rows, region.cols)
+                        .map_err(dense_err)?;
+                spectra.push(SectorSpectrum { sector, values: s });
+                factors.push(Some((u, vt)));
+            }
+            let (kept_spectra, error) = decide_kept(rule, &spectra, truncation);
+
+            let hom = self.space.homspace();
+            let bond_leg = SectorLeg::new(
+                kept_spectra
+                    .iter()
+                    .map(|entry| (entry.sector, entry.values.len())),
+                false,
+            );
+            let u_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+                    FusionProductSpace::new([bond_leg.clone()]),
+                ),
+            )?;
+            let s_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond_leg.clone()]),
+                    FusionProductSpace::new([bond_leg.clone()]),
+                ),
+            )?;
+            let vh_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond_leg]),
+                    FusionProductSpace::new(hom.domain().legs().iter().cloned()),
+                ),
+            )?;
+
+            let mut u_data = CudaStorage::upload(cuda, &vec![0.0; u_space.required_len()?])?;
+            for target in &sector_regions(u_space.structure(), u_space.nout())? {
+                let kept = target.cols;
+                if kept == 0 {
+                    continue;
+                }
+                let (index, source) = find_source(&regions, target)?;
+                let Some((u_dev, _)) = &factors[index] else {
+                    return Err(internal_layout_error("kept sector without a device factor"));
+                };
+                let k_full = source.rows.min(source.cols);
+                let selector = upload_selector(cuda, k_full, kept, (0..kept).map(|j| (j, j, 1.0)))?;
+                assemble_left_factor(
+                    cuda,
+                    &mut u_data,
+                    target,
+                    source,
+                    u_dev,
+                    k_full,
+                    &selector,
+                    kept,
+                )?;
+            }
+
+            let mut vh_data = CudaStorage::upload(cuda, &vec![0.0; vh_space.required_len()?])?;
+            for target in &sector_regions(vh_space.structure(), vh_space.nout())? {
+                let kept = target.rows;
+                if kept == 0 {
+                    continue;
+                }
+                let (index, source) = find_source(&regions, target)?;
+                let Some((_, vt_dev)) = &factors[index] else {
+                    return Err(internal_layout_error("kept sector without a device factor"));
+                };
+                let k_full = source.rows.min(source.cols);
+                let selector = upload_selector(cuda, kept, k_full, (0..kept).map(|j| (j, j, 1.0)))?;
+                assemble_right_factor(
+                    cuda,
+                    &mut vh_data,
+                    target,
+                    source,
+                    &selector,
+                    kept,
+                    k_full,
+                    vt_dev,
+                )?;
+            }
+
+            let mut s_host = vec![0.0; s_space.required_len()?];
+            fill_diagonal_values(s_space.structure(), &mut s_host, &kept_spectra)?;
+            let s_data = CudaStorage::upload(cuda, &s_host)?;
+
+            Ok::<_, Error>(SvdTrunc {
+                u: self.with(u_space, Data::CudaF64(Arc::new(u_data))),
+                s: self.with(s_space, Data::CudaF64(Arc::new(s_data))),
+                vh: self.with(vh_space, Data::CudaF64(Arc::new(vh_data))),
+                singular_values: kept_spectra,
+                error,
+            })
+        })?;
+        drop(guard);
+        Ok(out)
+    }
+
+    /// Device compact QR with the host's positive-diagonal gauge: only `R`'s
+    /// diagonal crosses to the host (sign decisions), the gauge is applied by
+    /// the sign-selector assembly GEMMs.
+    fn qr_cuda(&self, storage: &CudaStorage) -> Result<(Self, Self), Error> {
+        let regions = sector_regions(self.space.structure(), self.space.nout())?;
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let cuda = require_cuda(state.cuda.as_mut())?;
+        let out = with_rule!(self.rule, rule, {
+            let mut factors: Vec<Option<(CudaDenseStorage, CudaDenseStorage, Vec<f64>)>> =
+                Vec::with_capacity(regions.len());
+            let mut bond_pairs: Vec<(SectorId, usize)> = Vec::with_capacity(regions.len());
+            for region in &regions {
+                let sector = coupled_sector_of(region, rule);
+                if region.rows == 0 || region.cols == 0 {
+                    bond_pairs.push((sector, 0));
+                    factors.push(None);
+                    continue;
+                }
+                let (q, r, diag) =
+                    cuda_qr_region(cuda, &storage.0, region.offset, region.rows, region.cols)
+                        .map_err(dense_err)?;
+                // Positive-diagonal gauge (host `positive_diagonal_gauge`,
+                // real scalars): flip where R's diagonal is negative, leave
+                // exact zeros untouched.
+                let signs: Vec<f64> = diag
+                    .iter()
+                    .map(|&value| if value < 0.0 { -1.0 } else { 1.0 })
+                    .collect();
+                bond_pairs.push((sector, region.rows.min(region.cols)));
+                factors.push(Some((q, r, signs)));
+            }
+
+            let hom = self.space.homspace();
+            let bond_leg = SectorLeg::new(bond_pairs.iter().copied(), false);
+            let q_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+                    FusionProductSpace::new([bond_leg.clone()]),
+                ),
+            )?;
+            let r_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond_leg]),
+                    FusionProductSpace::new(hom.domain().legs().iter().cloned()),
+                ),
+            )?;
+
+            let mut q_data = CudaStorage::upload(cuda, &vec![0.0; q_space.required_len()?])?;
+            for target in &sector_regions(q_space.structure(), q_space.nout())? {
+                let kept = target.cols;
+                if kept == 0 {
+                    continue;
+                }
+                let (index, source) = find_source(&regions, target)?;
+                let Some((q_dev, _, signs)) = &factors[index] else {
+                    return Err(internal_layout_error("kept sector without a device factor"));
+                };
+                let selector = upload_selector(
+                    cuda,
+                    kept,
+                    kept,
+                    signs.iter().enumerate().map(|(j, &sign)| (j, j, sign)),
+                )?;
+                assemble_left_factor(
+                    cuda,
+                    &mut q_data,
+                    target,
+                    source,
+                    q_dev,
+                    kept,
+                    &selector,
+                    kept,
+                )?;
+            }
+
+            let mut r_data = CudaStorage::upload(cuda, &vec![0.0; r_space.required_len()?])?;
+            for target in &sector_regions(r_space.structure(), r_space.nout())? {
+                let kept = target.rows;
+                if kept == 0 {
+                    continue;
+                }
+                let (index, source) = find_source(&regions, target)?;
+                let Some((_, r_dev, signs)) = &factors[index] else {
+                    return Err(internal_layout_error("kept sector without a device factor"));
+                };
+                let selector = upload_selector(
+                    cuda,
+                    kept,
+                    kept,
+                    signs.iter().enumerate().map(|(j, &sign)| (j, j, sign)),
+                )?;
+                assemble_right_factor(
+                    cuda,
+                    &mut r_data,
+                    target,
+                    source,
+                    &selector,
+                    kept,
+                    kept,
+                    r_dev,
+                )?;
+            }
+
+            Ok::<_, Error>((
+                self.with(q_space, Data::CudaF64(Arc::new(q_data))),
+                self.with(r_space, Data::CudaF64(Arc::new(r_data))),
+            ))
+        })?;
+        drop(guard);
+        Ok(out)
+    }
+
+    /// Device Hermitian eigendecomposition: eigenvalues cross to the host
+    /// (descending-by-magnitude ordering and truncation are host decisions),
+    /// eigenvectors are reordered / truncated on device via a permutation
+    /// selector. `truncation: None` is `eigh_full`.
+    fn eigh_cuda(
+        &self,
+        storage: &CudaStorage,
+        truncation: Option<&Truncation>,
+    ) -> Result<EighTrunc, Error> {
+        {
+            let hom = self.space.homspace();
+            if hom.codomain() != hom.domain() {
+                return Err(Error::InvalidArgument(
+                    "eigh requires an endomorphism (codomain == domain)".to_string(),
+                ));
+            }
+        }
+        let regions = sector_regions(self.space.structure(), self.space.nout())?;
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let cuda = require_cuda(state.cuda.as_mut())?;
+        let out = with_rule!(self.rule, rule, {
+            let mut spectra: Vec<SectorSpectrum> = Vec::with_capacity(regions.len());
+            let mut factors: Vec<Option<(CudaDenseStorage, Vec<usize>)>> =
+                Vec::with_capacity(regions.len());
+            for region in &regions {
+                let sector = coupled_sector_of(region, rule);
+                let n = region.rows;
+                if n == 0 {
+                    spectra.push(SectorSpectrum {
+                        sector,
+                        values: Vec::new(),
+                    });
+                    factors.push(None);
+                    continue;
+                }
+                let (values, vectors) =
+                    cuda_eigh_region(cuda, &storage.0, region.offset, n).map_err(dense_err)?;
+                // Host ordering contract: descending by |eigenvalue|,
+                // stable on ties (mirrors `eigh_full_dyn`).
+                let mut order: Vec<usize> = (0..n).collect();
+                order.sort_by(|&a, &b| {
+                    values[b]
+                        .abs()
+                        .partial_cmp(&values[a].abs())
+                        .expect("finite eigenvalues")
+                        .then(a.cmp(&b))
+                });
+                let sorted: Vec<f64> = order.iter().map(|&index| values[index]).collect();
+                spectra.push(SectorSpectrum {
+                    sector,
+                    values: sorted,
+                });
+                factors.push(Some((vectors, order)));
+            }
+            let (kept_spectra, error) = decide_kept(rule, &spectra, truncation);
+
+            let hom = self.space.homspace();
+            let bond_leg = SectorLeg::new(
+                kept_spectra
+                    .iter()
+                    .map(|entry| (entry.sector, entry.values.len())),
+                false,
+            );
+            let v_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+                    FusionProductSpace::new([bond_leg.clone()]),
+                ),
+            )?;
+            let d_space = build_space(
+                rule,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond_leg.clone()]),
+                    FusionProductSpace::new([bond_leg]),
+                ),
+            )?;
+
+            let mut v_data = CudaStorage::upload(cuda, &vec![0.0; v_space.required_len()?])?;
+            for target in &sector_regions(v_space.structure(), v_space.nout())? {
+                let kept = target.cols;
+                if kept == 0 {
+                    continue;
+                }
+                let (index, source) = find_source(&regions, target)?;
+                let Some((v_dev, order)) = &factors[index] else {
+                    return Err(internal_layout_error("kept sector without a device factor"));
+                };
+                let n = source.rows;
+                let selector = upload_selector(
+                    cuda,
+                    n,
+                    kept,
+                    order
+                        .iter()
+                        .take(kept)
+                        .enumerate()
+                        .map(|(j, &original)| (original, j, 1.0)),
+                )?;
+                assemble_left_factor(cuda, &mut v_data, target, source, v_dev, n, &selector, kept)?;
+            }
+
+            let mut d_host = vec![0.0; d_space.required_len()?];
+            fill_diagonal_values(d_space.structure(), &mut d_host, &kept_spectra)?;
+            let d_data = CudaStorage::upload(cuda, &d_host)?;
+
+            Ok::<_, Error>(EighTrunc {
+                d: self.with(d_space, Data::CudaF64(Arc::new(d_data))),
+                v: self.with(v_space, Data::CudaF64(Arc::new(v_data))),
+                eigenvalues: kept_spectra,
+                error,
+            })
+        })?;
+        drop(guard);
+        Ok(out)
     }
 }
