@@ -18,7 +18,7 @@
 //! builder is a follow-up once a type-erased cache slot lands there.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tenet::prelude::{Error, Tensor};
@@ -155,6 +155,18 @@ struct PlanCache {
     misses: u64,
     replans: u64,
     map: HashMap<NetworkTopology, CacheEntry>,
+    /// Least-recently-used key first; same mechanism as the resolution
+    /// cache in `tenet-tensors` (whose helpers are `pub(crate)` there, so
+    /// the two small operations are replicated below).
+    lru_order: VecDeque<NetworkTopology>,
+}
+
+/// Move `key` to the most-recently-used end of `order`.
+fn touch_lru_key(order: &mut VecDeque<NetworkTopology>, key: &NetworkTopology) {
+    if let Some(position) = order.iter().position(|stored| stored == key) {
+        order.remove(position);
+    }
+    order.push_back(key.clone());
 }
 
 thread_local! {
@@ -189,6 +201,7 @@ pub fn clear_plan_cache() {
     PLAN_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         cache.map.clear();
+        cache.lru_order.clear();
         cache.hits = 0;
         cache.misses = 0;
         cache.replans = 0;
@@ -278,6 +291,7 @@ pub(crate) fn get_or_plan(
             Some(entry) if !drifted(policy, &entry.dims_snapshot, &dims) => {
                 let planned = Arc::clone(&entry.planned);
                 cache.hits += 1;
+                touch_lru_key(&mut cache.lru_order, &topology);
                 Outcome::Hit(planned)
             }
             Some(_) => Outcome::Replan,
@@ -296,19 +310,21 @@ pub(crate) fn get_or_plan(
             Outcome::Replan => cache.replans += 1,
             _ => cache.misses += 1,
         }
-        if cache.map.len() >= cache.config.capacity && !cache.map.contains_key(&topology) {
-            // ponytail: full cache is dropped wholesale; switch to LRU if a
-            // driver ever cycles through more than `capacity` expressions.
-            cache.map.clear();
-        }
         cache.map.insert(
-            topology,
+            topology.clone(),
             CacheEntry {
                 planned: Arc::clone(&planned),
                 dims_snapshot: dims,
                 cost,
             },
         );
+        touch_lru_key(&mut cache.lru_order, &topology);
+        while cache.map.len() > cache.config.capacity {
+            let Some(oldest) = cache.lru_order.pop_front() else {
+                break;
+            };
+            cache.map.remove(&oldest);
+        }
     });
     Ok(planned)
 }

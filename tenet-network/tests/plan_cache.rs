@@ -121,6 +121,60 @@ fn different_topologies_get_separate_entries() {
     assert_eq!((stats.hits, stats.misses, stats.entries), (0, 3, 3));
 }
 
+/// At capacity, inserting a new topology evicts the least-recently-used
+/// entry, not the whole cache.
+#[test]
+fn eviction_drops_least_recently_used_topology() {
+    clear_plan_cache();
+    configure_plan_cache(PlanCacheConfig {
+        capacity: 2,
+        ..PlanCacheConfig::default()
+    });
+    let rt = Runtime::builder().build().unwrap();
+    let (a, b) = chain(&rt, 2, 371);
+
+    // Three distinct topologies (different output orders).
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T1
+    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T2
+    let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T3 evicts T1
+    let stats = plan_cache_stats();
+    assert_eq!((stats.misses, stats.entries), (3, 2));
+
+    // T2 and T3 survived (hits), T1 was evicted (miss again).
+    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    assert_eq!(plan_cache_stats().hits, 2);
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let stats = plan_cache_stats();
+    assert_eq!((stats.hits, stats.misses, stats.entries), (2, 4, 2));
+}
+
+/// A hit refreshes recency: the touched entry survives the next eviction.
+#[test]
+fn touched_entry_survives_eviction() {
+    clear_plan_cache();
+    configure_plan_cache(PlanCacheConfig {
+        capacity: 2,
+        ..PlanCacheConfig::default()
+    });
+    let rt = Runtime::builder().build().unwrap();
+    let (a, b) = chain(&rt, 2, 381);
+
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T1
+    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T2
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // touch T1
+    let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T3 evicts T2
+    let stats = plan_cache_stats();
+    assert_eq!((stats.hits, stats.misses, stats.entries), (1, 3, 2));
+
+    // T1 was touched, so it survived; T2 is gone.
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    assert_eq!(plan_cache_stats().hits, 2);
+    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let stats = plan_cache_stats();
+    assert_eq!((stats.hits, stats.misses, stats.entries), (2, 4, 2));
+}
+
 #[test]
 fn disabled_cache_plans_fresh_every_call() {
     clear_plan_cache();
