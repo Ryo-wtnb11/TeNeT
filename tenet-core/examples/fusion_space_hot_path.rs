@@ -73,7 +73,7 @@ fn charges(charge_count: usize) -> Vec<i32> {
 fn fusion_space(rule: &U1FusionRule, charges: &[i32]) -> FusionTensorMapSpace<1, 1> {
     let sectors = charges
         .iter()
-        .map(|&charge| U1Irrep::new(charge))
+        .map(|&charge| (U1Irrep::new(charge), 1))
         .collect::<Vec<_>>();
     let dense = TensorMapSpace::<1, 1>::from_dims([charges.len()], [charges.len()]).unwrap();
     let hom = FusionTreeHomSpace::new(

@@ -119,7 +119,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
     R::Key: Clone + Eq + std::hash::Hash,
 {
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let homspace = || {
         FusionTreeHomSpace::new(

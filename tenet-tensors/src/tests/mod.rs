@@ -240,12 +240,18 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
     let c0 = sector(even, 0, 0);
     let c1 = sector(even, 0, 2);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
-        FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        FusionProductSpace::new([
+            SectorLeg::new([(a, 1)], false),
+            SectorLeg::new([(b, 1)], false),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
     let dst_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([b], false), SectorLeg::new([a], false)]),
-        FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        FusionProductSpace::new([
+            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(a, 1)], false),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),

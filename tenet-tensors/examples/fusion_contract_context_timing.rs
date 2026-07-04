@@ -276,8 +276,8 @@ struct Su2NoncoreFixture {
 impl Su2NoncoreFixture {
     fn new() -> Self {
         let rule = SU2FusionRule;
-        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
-        let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
+        let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
         let lhs_core_hom = lhs_hom
             .permute(&rule, &[3], &[0, 1, 2])
             .expect("valid lhs core tree-pair transform");
@@ -781,7 +781,7 @@ struct Su2OutputScratchFixture {
 impl Su2OutputScratchFixture {
     fn new() -> Self {
         let rule = SU2FusionRule;
-        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1], [1, 1]);
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1)], [(1, 1), (1, 1)]);
         let lhs_core_hom = lhs_hom
             .permute(&rule, &[0, 1, 2, 3], &[])
             .expect("valid all-open core transform");
@@ -1390,12 +1390,18 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
     let c0 = sector(even, 0, 0);
     let c1 = sector(even, 0, 2);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
-        FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        FusionProductSpace::new([
+            SectorLeg::new([(a, 1)], false),
+            SectorLeg::new([(b, 1)], false),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
     let dst_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([b], false), SectorLeg::new([a], false)]),
-        FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+        FusionProductSpace::new([
+            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(a, 1)], false),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),

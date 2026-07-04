@@ -289,45 +289,103 @@ impl BraidingStyleKind {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SectorLeg {
     sectors: Vec<SectorId>,
+    /// Per-sector degeneracy, parallel to `sectors`. The leg is the single
+    /// source of truth for the sector -> degeneracy map of one tensor axis
+    /// (TensorKit `GradedSpace` parity: the space stores the complete map
+    /// independent of which fusion trees are populated).
+    degeneracies: Vec<usize>,
     is_dual: bool,
 }
 
 impl SectorLeg {
-    /// Builds one external leg with a set of allowed sectors.
+    /// Builds one external leg from `(sector, degeneracy)` pairs.
     ///
-    /// Duplicate sectors are removed and the sector ids are stored in sorted
-    /// order.
+    /// Pairs are stored sorted by sector id; identical duplicate pairs are
+    /// removed. Panics when the same sector appears with two different
+    /// degeneracies.
     ///
     /// # Examples
     ///
     /// ```
     /// use tenet_core::{SectorLeg, Z2Irrep};
     ///
-    /// let leg = SectorLeg::new([Z2Irrep::ODD, Z2Irrep::EVEN, Z2Irrep::ODD], false);
+    /// let leg = SectorLeg::new([(Z2Irrep::ODD, 3), (Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)], false);
     /// assert_eq!(leg.sectors().len(), 2);
+    /// assert_eq!(leg.degeneracies(), &[2, 3]);
     /// assert!(!leg.is_dual());
     ///
-    /// let dual_leg = SectorLeg::new([Z2Irrep::ODD], true);
+    /// let dual_leg = SectorLeg::new([(Z2Irrep::ODD, 1)], true);
     /// assert!(dual_leg.is_dual());
     /// ```
-    pub fn new<Sectors, Sector>(sectors: Sectors, is_dual: bool) -> Self
+    pub fn new<Pairs, Sector>(pairs: Pairs, is_dual: bool) -> Self
     where
-        Sectors: IntoIterator<Item = Sector>,
+        Pairs: IntoIterator<Item = (Sector, usize)>,
         Sector: Into<SectorId>,
     {
-        let mut sectors = sectors.into_iter().map(Into::into).collect::<Vec<_>>();
-        sectors.sort_unstable();
-        sectors.dedup();
-        Self { sectors, is_dual }
+        let mut pairs = pairs
+            .into_iter()
+            .map(|(sector, degeneracy)| (sector.into(), degeneracy))
+            .collect::<Vec<_>>();
+        pairs.sort_unstable();
+        pairs.dedup();
+        for window in pairs.windows(2) {
+            assert_ne!(
+                window[0].0, window[1].0,
+                "sector {:?} listed with conflicting degeneracies {} and {}",
+                window[0].0, window[0].1, window[1].1
+            );
+        }
+        let (sectors, degeneracies) = pairs.into_iter().unzip();
+        Self {
+            sectors,
+            degeneracies,
+            is_dual,
+        }
     }
 
-    pub fn from_sector_id(sector: usize) -> Self {
-        Self::new([SectorId::new(sector)], false)
+    pub fn from_sector_id(sector: usize, degeneracy: usize) -> Self {
+        Self::new([(SectorId::new(sector), degeneracy)], false)
     }
 
     #[inline]
     pub fn sectors(&self) -> &[SectorId] {
         &self.sectors
+    }
+
+    /// Per-sector degeneracies, parallel to [`Self::sectors`].
+    #[inline]
+    pub fn degeneracies(&self) -> &[usize] {
+        &self.degeneracies
+    }
+
+    /// Degeneracy of `sector` on this leg, `None` when the sector is not
+    /// part of the leg.
+    pub fn degeneracy(&self, sector: SectorId) -> Option<usize> {
+        self.sectors
+            .binary_search(&sector)
+            .ok()
+            .map(|index| self.degeneracies[index])
+    }
+
+    /// `(sector, degeneracy)` pairs in sorted sector order.
+    pub fn iter(&self) -> impl Iterator<Item = (SectorId, usize)> + '_ {
+        self.sectors
+            .iter()
+            .copied()
+            .zip(self.degeneracies.iter().copied())
+    }
+
+    /// The dual leg: every sector is replaced by its dual (degeneracies
+    /// carried along) and the dual flag is flipped.
+    pub fn dual<R>(&self, rule: &R) -> Self
+    where
+        R: FusionRule,
+    {
+        Self::new(
+            self.iter()
+                .map(|(sector, degeneracy)| (rule.dual(sector), degeneracy)),
+            !self.is_dual,
+        )
     }
 
     #[inline]
@@ -370,8 +428,8 @@ impl FusionProductSpace {
     /// use tenet_core::{FusionProductSpace, SectorLeg, Z2Irrep};
     ///
     /// let space = FusionProductSpace::new([
-    ///     SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false),
-    ///     SectorLeg::new([Z2Irrep::EVEN], true),
+    ///     SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false),
+    ///     SectorLeg::new([(Z2Irrep::EVEN, 1)], true),
     /// ]);
     /// assert_eq!(space.len(), 2);
     /// ```
@@ -384,11 +442,17 @@ impl FusionProductSpace {
         }
     }
 
+    /// Builds a product of single-sector legs from `(sector id, degeneracy)`
+    /// pairs.
     pub fn from_sector_ids<Sectors>(sectors: Sectors) -> Self
     where
-        Sectors: IntoIterator<Item = usize>,
+        Sectors: IntoIterator<Item = (usize, usize)>,
     {
-        Self::new(sectors.into_iter().map(SectorLeg::from_sector_id))
+        Self::new(
+            sectors
+                .into_iter()
+                .map(|(sector, degeneracy)| SectorLeg::from_sector_id(sector, degeneracy)),
+        )
     }
 
     #[inline]
@@ -429,8 +493,8 @@ impl FusionTreeHomSpace {
     /// use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, Z2Irrep};
     ///
     /// let hom = FusionTreeHomSpace::new(
-    ///     FusionProductSpace::new([SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false)]),
-    ///     FusionProductSpace::new([SectorLeg::new([Z2Irrep::EVEN], false)]),
+    ///     FusionProductSpace::new([SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false)]),
+    ///     FusionProductSpace::new([SectorLeg::new([(Z2Irrep::EVEN, 1)], false)]),
     /// );
     /// assert_eq!(hom.codomain().len(), 1);
     /// assert_eq!(hom.domain().len(), 1);
@@ -439,14 +503,15 @@ impl FusionTreeHomSpace {
         Self { codomain, domain }
     }
 
-    /// Builds a hom space when each external leg has exactly one sector.
+    /// Builds a hom space when each external leg has exactly one sector,
+    /// from `(sector, degeneracy)` pairs.
     ///
     /// # Examples
     ///
     /// ```
     /// use tenet_core::{FusionTreeHomSpace, Z2Irrep};
     ///
-    /// let hom = FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::ODD]);
+    /// let hom = FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::ODD, 1)]);
     /// assert_eq!(hom.codomain().len(), 1);
     /// assert_eq!(hom.domain().len(), 1);
     /// ```
@@ -455,8 +520,8 @@ impl FusionTreeHomSpace {
         domain: Domain,
     ) -> Self
     where
-        Codomain: IntoIterator<Item = CodomainSector>,
-        Domain: IntoIterator<Item = DomainSector>,
+        Codomain: IntoIterator<Item = (CodomainSector, usize)>,
+        Domain: IntoIterator<Item = (DomainSector, usize)>,
         CodomainSector: Into<SectorId>,
         DomainSector: Into<SectorId>,
     {
@@ -464,35 +529,39 @@ impl FusionTreeHomSpace {
             FusionProductSpace::new(
                 codomain
                     .into_iter()
-                    .map(|sector| SectorLeg::new([sector], false)),
+                    .map(|(sector, degeneracy)| SectorLeg::new([(sector, degeneracy)], false)),
             ),
             FusionProductSpace::new(
                 domain
                     .into_iter()
-                    .map(|sector| SectorLeg::new([sector], false)),
+                    .map(|(sector, degeneracy)| SectorLeg::new([(sector, degeneracy)], false)),
             ),
         )
     }
 
-    /// Builds a hom space from raw integer sector ids.
+    /// Builds a hom space from raw `(sector id, degeneracy)` pairs.
     ///
     /// # Examples
     ///
     /// ```
     /// use tenet_core::FusionTreeHomSpace;
     ///
-    /// let hom = FusionTreeHomSpace::from_sector_ids([0, 1], [1]);
+    /// let hom = FusionTreeHomSpace::from_sector_ids([(0, 1), (1, 1)], [(1, 1)]);
     /// assert_eq!(hom.codomain().len(), 2);
     /// assert_eq!(hom.domain().len(), 1);
     /// ```
     pub fn from_sector_ids<Codomain, Domain>(codomain: Codomain, domain: Domain) -> Self
     where
-        Codomain: IntoIterator<Item = usize>,
-        Domain: IntoIterator<Item = usize>,
+        Codomain: IntoIterator<Item = (usize, usize)>,
+        Domain: IntoIterator<Item = (usize, usize)>,
     {
         Self::from_sectors(
-            codomain.into_iter().map(SectorId::new),
-            domain.into_iter().map(SectorId::new),
+            codomain
+                .into_iter()
+                .map(|(sector, degeneracy)| (SectorId::new(sector), degeneracy)),
+            domain
+                .into_iter()
+                .map(|(sector, degeneracy)| (SectorId::new(sector), degeneracy)),
         )
     }
 
@@ -735,6 +804,50 @@ impl FusionTreeHomSpace {
         Ok(keys)
     }
 
+    /// Validates per-tree degeneracy shapes against the leg-level
+    /// degeneracies (the legs are authoritative): for every tree key,
+    /// `shape[axis]` must equal the degeneracy the axis' leg stores for the
+    /// tree's uncoupled sector on that axis.
+    pub fn validate_degeneracy_shapes(
+        &self,
+        keys: &[FusionTreeBlockKey],
+        shapes: &[Vec<usize>],
+    ) -> Result<(), CoreError> {
+        let legs = self
+            .codomain
+            .legs()
+            .iter()
+            .chain(self.domain.legs())
+            .collect::<Vec<_>>();
+        for (key, shape) in keys.iter().zip(shapes) {
+            if shape.len() != legs.len() {
+                return Err(CoreError::StructureRankMismatch {
+                    expected: legs.len(),
+                    actual: shape.len(),
+                });
+            }
+            let uncoupled = key
+                .codomain_uncoupled()
+                .iter()
+                .chain(key.domain_uncoupled());
+            for ((leg, &sector), &dim) in legs.iter().zip(uncoupled).zip(shape) {
+                let expected = leg
+                    .degeneracy(sector)
+                    .ok_or(CoreError::MalformedFusionTree {
+                        message: "fusion tree uses a sector absent from its leg",
+                    })?;
+                if expected != dim {
+                    return Err(CoreError::LegDegeneracyMismatch {
+                        sector,
+                        expected,
+                        actual: dim,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn fusion_tree_groups<R>(&self, rule: &R) -> Result<Vec<FusionTreeBlockGroup>, CoreError>
     where
         R: MultiplicityFreeFusionRule,
@@ -743,7 +856,11 @@ impl FusionTreeHomSpace {
             .map(|structure| structure.fusion_tree_groups())
     }
 
-    fn external_axis_leg<R>(&self, rule: &R, axis: usize) -> SectorLeg
+    /// External leg view of flat axis `axis` (TensorKit's `space(t, i)`
+    /// convention, homspace.jl:60-62): codomain legs verbatim, domain legs
+    /// dualized. Degeneracies are carried along, keyed by the external
+    /// (placement-invariant) sector labels.
+    pub fn external_axis_leg<R>(&self, rule: &R, axis: usize) -> SectorLeg
     where
         R: FusionRule,
     {
@@ -759,13 +876,7 @@ fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
 where
     R: FusionRule,
 {
-    SectorLeg::new(
-        leg.sectors()
-            .iter()
-            .copied()
-            .map(|sector| rule.dual(sector)),
-        !leg.is_dual(),
-    )
+    leg.dual(rule)
 }
 
 fn validate_axis_subset(axes: &[usize], rank: usize) -> Result<Vec<bool>, CoreError> {
@@ -822,9 +933,18 @@ fn validate_composed_leg(
             actual: rhs_codomain.sectors().len(),
         });
     }
-    for (&expected, &actual) in lhs_domain.sectors().iter().zip(rhs_codomain.sectors()) {
+    for ((expected, expected_deg), (actual, actual_deg)) in
+        lhs_domain.iter().zip(rhs_codomain.iter())
+    {
         if expected != actual {
             return Err(CoreError::SectorMismatch { expected, actual });
+        }
+        if expected_deg != actual_deg {
+            return Err(CoreError::LegDegeneracyMismatch {
+                sector: expected,
+                expected: expected_deg,
+                actual: actual_deg,
+            });
         }
     }
     Ok(())
@@ -1015,7 +1135,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// };
     ///
     /// let dense = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
-    /// let hom = FusionTreeHomSpace::from_sector_ids([0], std::iter::empty::<usize>());
+    /// let hom = FusionTreeHomSpace::from_sector_ids([(0, 2)], std::iter::empty::<(usize, usize)>());
     /// let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
     ///
     /// let space = FusionTensorMapSpace::new(dense, hom, structure).unwrap();
@@ -1068,7 +1188,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// let rule = Z2FusionRule;
     /// let space = FusionTensorMapSpace::from_degeneracy_shapes(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,
     ///     [vec![1, 1]],
     /// )
@@ -1108,7 +1228,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// };
     ///
     /// let rule = Z2FusionRule;
-    /// let leg = || SectorLeg::new([Z2Irrep::EVEN, Z2Irrep::ODD], false);
+    /// let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
     /// let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
     ///     TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
     ///     FusionTreeHomSpace::new(
@@ -1142,6 +1262,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             });
         }
         let rank = NOUT + NIN;
+        homspace.validate_degeneracy_shapes(&keys, &shapes)?;
         let specs = coupled_sector_matrix_block_specs(rule, NOUT, rank, &keys, &shapes)?;
         let subblock_structure = BlockStructure::from_blocks_with_rank(rank, specs)?;
         Self::new(dense_space, homspace, subblock_structure)
@@ -5621,7 +5742,7 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
     /// let rule = Z2FusionRule;
     /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,
     ///     [vec![1, 1]],
     /// )
@@ -5663,7 +5784,7 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
     /// let rule = Z2FusionRule;
     /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,
     ///     [vec![1, 1]],
     /// )
@@ -5760,7 +5881,7 @@ where
     /// let rule = Z2FusionRule;
     /// let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
     ///     TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-    ///     FusionTreeHomSpace::from_sectors([Z2Irrep::EVEN], [Z2Irrep::EVEN]),
+    ///     FusionTreeHomSpace::from_sectors([(Z2Irrep::EVEN, 1)], [(Z2Irrep::EVEN, 1)]),
     ///     &rule,
     ///     [vec![1, 1]],
     /// )
@@ -6321,6 +6442,14 @@ pub enum CoreError {
         expected: SectorId,
         actual: SectorId,
     },
+    /// A per-sector leg degeneracy disagrees with another authoritative
+    /// source (the paired leg of a composition, or a fusion-tree degeneracy
+    /// shape validated against its leg).
+    LegDegeneracyMismatch {
+        sector: SectorId,
+        expected: usize,
+        actual: usize,
+    },
     FusionChannelCount {
         left: SectorId,
         right: SectorId,
@@ -6402,6 +6531,16 @@ impl fmt::Display for CoreError {
             Self::InvalidSector { sector } => write!(f, "invalid sector {sector:?}"),
             Self::SectorMismatch { expected, actual } => {
                 write!(f, "sector mismatch: expected {expected:?}, got {actual:?}")
+            }
+            Self::LegDegeneracyMismatch {
+                sector,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "leg degeneracy mismatch for sector {sector:?}: expected {expected}, got {actual}"
+                )
             }
             Self::FusionChannelCount { left, right, count } => {
                 write!(
@@ -6548,7 +6687,7 @@ mod tests {
     #[test]
     fn block_fn_construction_is_layout_independent() {
         let rule = Z2FusionRule;
-        let leg = |dual| SectorLeg::new([z2_even(), z2_odd()], dual);
+        let leg = |dual| SectorLeg::new([(z2_even(), 2), (z2_odd(), 2)], dual);
         let homspace = || {
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([leg(false), leg(false)]),
@@ -6627,10 +6766,12 @@ mod tests {
     #[test]
     fn coupled_layout_embeds_subblocks_into_sector_matrices() {
         let rule = Z2FusionRule;
-        let leg = |dual| SectorLeg::new([z2_even(), z2_odd()], dual);
+        let leg = |degeneracy, dual| {
+            SectorLeg::new([(z2_even(), degeneracy), (z2_odd(), degeneracy)], dual)
+        };
         let homspace = FusionTreeHomSpace::new(
-            FusionProductSpace::new([leg(false), leg(false)]),
-            FusionProductSpace::new([leg(false), leg(false)]),
+            FusionProductSpace::new([leg(2, false), leg(3, false)]),
+            FusionProductSpace::new([leg(2, false), leg(3, false)]),
         );
         let keys = homspace.fusion_tree_keys(&rule);
         let shapes = keys
@@ -7967,8 +8108,11 @@ mod tests {
         assert_eq!(c1.id(), 3);
 
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
-            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+            FusionProductSpace::new([
+                SectorLeg::new([(a, 1)], false),
+                SectorLeg::new([(b, 1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
         );
         let keys = hom.fusion_tree_keys(&rule);
 
@@ -8003,8 +8147,11 @@ mod tests {
         let c1 = sector(z2_even(), 0, 2);
         let dense = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([a], false), SectorLeg::new([b], false)]),
-            FusionProductSpace::new([SectorLeg::new([c0, c1], false)]),
+            FusionProductSpace::new([
+                SectorLeg::new([(a, 1)], false),
+                SectorLeg::new([(b, 1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
         );
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
             dense,
@@ -8036,8 +8183,8 @@ mod tests {
         let a = rule.encode_sector(z2_odd(), u1(2));
         let external_domain = rule.dual(a);
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([a], false)]),
-            FusionProductSpace::new([SectorLeg::new([a], false)]),
+            FusionProductSpace::new([SectorLeg::new([(a, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(a, 1)], false)]),
         );
 
         let keys = hom
@@ -8363,7 +8510,7 @@ mod tests {
     #[test]
     fn typed_sector_homspace_builds_u1_tree_key() {
         let rule = U1FusionRule;
-        let hom = FusionTreeHomSpace::from_sectors([U1Irrep::new(2)], [U1Irrep::new(2)]);
+        let hom = FusionTreeHomSpace::from_sectors([(U1Irrep::new(2), 1)], [(U1Irrep::new(2), 1)]);
 
         let key = hom
             .unique_fusion_tree_key_from_external_sectors(
@@ -8382,8 +8529,14 @@ mod tests {
         let rule = Z2FusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(SectorId::new(0), 1), (SectorId::new(1), 3)],
+                false,
+            )]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(SectorId::new(0), 2), (SectorId::new(1), 1)],
+                false,
+            )]),
         );
 
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
@@ -8420,7 +8573,7 @@ mod tests {
     fn fusion_tensor_space_rejects_homspace_rank_mismatch() {
         let rule = Z2FusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
-        let hom = FusionTreeHomSpace::from_sector_ids([0, 1], [0]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(0, 1), (1, 1)], [(0, 1)]);
 
         let err = FusionTensorMapSpace::from_degeneracy_shapes(
             dense,
@@ -8444,8 +8597,14 @@ mod tests {
         let rule = Z2FusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(0), SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(SectorId::new(0), 1), (SectorId::new(1), 1)],
+                false,
+            )]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(SectorId::new(0), 1), (SectorId::new(1), 1)],
+                false,
+            )]),
         );
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
             dense,
@@ -8470,8 +8629,8 @@ mod tests {
         let rule = Z4PointedRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
         );
         let fusion_space =
             FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
@@ -8490,7 +8649,7 @@ mod tests {
     fn tensormap_subblock_by_sectors_handles_fermionic_z2_key() {
         let rule = FermionParityFusionRule;
         let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
-        let hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]);
         let fusion_space =
             FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
         let mut tensor =
@@ -8514,8 +8673,8 @@ mod tests {
         let domain_tree_sector = rule.dual(Z2xZ3PointedRule::encode(1, 1));
         let dense = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([codomain_sector], false)]),
-            FusionProductSpace::new([SectorLeg::new([domain_tree_sector], false)]),
+            FusionProductSpace::new([SectorLeg::new([(codomain_sector, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(domain_tree_sector, 1)], false)]),
         );
         let fusion_space =
             FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, [vec![1, 1]]).unwrap();
@@ -8673,7 +8832,7 @@ mod tests {
     #[test]
     fn fusion_tree_homspace_generates_canonical_coupled_sector_order() {
         let rule = BranchingMultiplicityFreeRule;
-        let hom = FusionTreeHomSpace::from_sector_ids([1, 1], [1, 1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1)], [(1, 1), (1, 1)]);
 
         let keys = hom.fusion_tree_keys(&rule);
 
@@ -8706,7 +8865,7 @@ mod tests {
     #[test]
     fn unique_homspace_builds_subblock_key_from_external_sectors() {
         let rule = Z2FusionRule;
-        let hom = FusionTreeHomSpace::from_sector_ids([1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]);
 
         let key = hom
             .unique_fusion_tree_key_from_external_sectors(
@@ -8726,8 +8885,8 @@ mod tests {
     fn unique_homspace_dualizes_domain_external_sectors_like_tensorkit() {
         let rule = Z4PointedRule;
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
         );
 
         let key = hom
@@ -8746,8 +8905,8 @@ mod tests {
     fn fusion_tree_block_key_external_sectors_restore_visible_domain_sector() {
         let rule = Z4PointedRule;
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], true)]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], true)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
         );
         let key = hom
             .unique_fusion_tree_key_from_external_sectors(
@@ -8773,12 +8932,12 @@ mod tests {
         let rule = U1FusionRule;
         let physical = u1(1);
         let lhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
-            FusionProductSpace::new([SectorLeg::new([physical], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(2), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(physical, 1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([physical], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(3)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(physical, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(3), 1)], false)]),
         );
 
         let composed = FusionTreeHomSpace::compose(&rule, &lhs, &rhs).unwrap();
@@ -8792,12 +8951,12 @@ mod tests {
         let rule = U1FusionRule;
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([
-                SectorLeg::new([u1(1)], false),
-                SectorLeg::new([u1(2)], true),
+                SectorLeg::new([(u1(1), 1)], false),
+                SectorLeg::new([(u1(2), 1)], true),
             ]),
             FusionProductSpace::new([
-                SectorLeg::new([u1(3)], false),
-                SectorLeg::new([u1(-5)], true),
+                SectorLeg::new([(u1(3), 1)], false),
+                SectorLeg::new([(u1(-5), 1)], true),
             ]),
         );
 
@@ -8816,7 +8975,7 @@ mod tests {
     #[test]
     fn fusion_tree_homspace_permute_requires_full_axis_permutation() {
         let rule = U1FusionRule;
-        let hom = FusionTreeHomSpace::from_sectors([u1(0), u1(1)], [u1(2)]);
+        let hom = FusionTreeHomSpace::from_sectors([(u1(0), 1), (u1(1), 1)], [(u1(2), 1)]);
 
         let err = hom.permute(&rule, &[0], &[2]).unwrap_err();
         assert_eq!(
@@ -8841,12 +9000,12 @@ mod tests {
     fn fusion_tree_homspace_tensorcontract_preserves_canonical_compose() {
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(2), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(3)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(3), 1)], false)]),
         );
 
         let expected = FusionTreeHomSpace::compose(&rule, &lhs, &rhs).unwrap();
@@ -8861,12 +9020,12 @@ mod tests {
     fn fusion_tree_homspace_tensorcontract_matches_tensorkit_structural_formula() {
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(5)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(5), 1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(7)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(7), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
         );
 
         let lhs_permuted = lhs.permute(&rule, &[1], &[0]).unwrap();
@@ -8890,12 +9049,12 @@ mod tests {
     fn fusion_tree_homspace_tensorcontract_accepts_output_permutation_structurally() {
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(2)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(2), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(3)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(3), 1)], false)]),
         );
 
         let composed =
@@ -8915,12 +9074,12 @@ mod tests {
         // SpaceMismatch in TensorKit (`(X ← V) * (V' ← Y)` fails).
         let rule = U1FusionRule;
         let lhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([u1(0)], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 1)], false)]),
         );
         let rhs = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([rule.dual(u1(1))], false)]),
-            FusionProductSpace::new([SectorLeg::new([u1(0)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(rule.dual(u1(1)), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 1)], false)]),
         );
 
         let err = FusionTreeHomSpace::compose(&rule, &lhs, &rhs).unwrap_err();
@@ -8938,8 +9097,8 @@ mod tests {
     fn unique_homspace_rejects_invalid_external_sector_tuple() {
         let rule = Z4PointedRule;
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]),
         );
 
         let err = hom
@@ -8960,7 +9119,7 @@ mod tests {
     #[test]
     fn fusion_tree_homspace_generates_innerline_paths_for_simple_fusion() {
         let rule = BranchingMultiplicityFreeRule;
-        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
 
         let keys = hom.fusion_tree_keys(&rule);
 
@@ -8985,7 +9144,7 @@ mod tests {
     #[test]
     fn fusion_tree_homspace_matches_tensorkit_z2_fusiontreelist_order() {
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(), leg()]),
             FusionProductSpace::new([leg(), leg()]),
@@ -9022,7 +9181,11 @@ mod tests {
         let rule = SU2FusionRule;
         let leg = || {
             SectorLeg::new(
-                [SectorId::new(0), SectorId::new(1), SectorId::new(2)],
+                [
+                    (SectorId::new(0), 1),
+                    (SectorId::new(1), 1),
+                    (SectorId::new(2), 1),
+                ],
                 false,
             )
         };
@@ -9061,7 +9224,7 @@ mod tests {
     #[test]
     fn fusion_tree_homspace_matches_tensorkit_su2_innerline_order() {
         let rule = SU2FusionRule;
-        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
 
         let keys = hom.fusion_tree_keys(&rule);
 
@@ -9085,7 +9248,7 @@ mod tests {
     fn fusion_tree_homspace_external_sectors_preserve_su2_simple_innerline_order() {
         let rule = SU2FusionRule;
         let half = SectorId::new(1);
-        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
 
         let keys = hom
             .fusion_tree_keys_from_external_sectors(&rule, &[half, half, half, half])
@@ -9107,7 +9270,7 @@ mod tests {
         let rule = SU2FusionRule;
         let half = SectorId::new(1);
         let dense = TensorMapSpace::<3, 1>::from_dims([1, 1, 1], [1]).unwrap();
-        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
         let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
             dense,
             hom,
@@ -9143,7 +9306,7 @@ mod tests {
     #[test]
     fn fusion_tree_homspace_uses_tensorkit_parent_iterator_order_not_ord_sort() {
         let rule = UnsortedFusionIteratorOrderRule;
-        let hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
+        let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
 
         let keys = hom.fusion_tree_keys(&rule);
 
@@ -9161,8 +9324,8 @@ mod tests {
         let rule = U1FusionRule;
         let minus_one = U1Irrep::new(-1);
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([minus_one], true)]),
-            FusionProductSpace::new([SectorLeg::new([minus_one], false)]),
+            FusionProductSpace::new([SectorLeg::new([(minus_one, 1)], true)]),
+            FusionProductSpace::new([SectorLeg::new([(minus_one, 1)], false)]),
         );
 
         let keys = hom.fusion_tree_keys(&rule);
@@ -9182,8 +9345,8 @@ mod tests {
     fn fusion_tree_homspace_does_not_dualize_selected_dual_leg_again() {
         let rule = BranchingMultiplicityFreeRule;
         let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1)], true)]),
-            FusionProductSpace::from_sector_ids([1]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], true)]),
+            FusionProductSpace::from_sector_ids([(1, 1)]),
         );
 
         let keys = hom.fusion_tree_keys(&rule);
@@ -9201,10 +9364,13 @@ mod tests {
         let rule = BranchingMultiplicityFreeRule;
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([
-                SectorLeg::new([SectorId::new(1), SectorId::new(2)], false),
-                SectorLeg::new([SectorId::new(1)], false),
+                SectorLeg::new([(SectorId::new(1), 1), (SectorId::new(2), 1)], false),
+                SectorLeg::new([(SectorId::new(1), 1)], false),
             ]),
-            FusionProductSpace::new([SectorLeg::new([SectorId::new(1), SectorId::new(2)], false)]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(SectorId::new(1), 1), (SectorId::new(2), 1)],
+                false,
+            )]),
         );
 
         let groups = hom.fusion_tree_groups(&rule).unwrap();

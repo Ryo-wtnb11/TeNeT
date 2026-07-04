@@ -9,7 +9,6 @@
 //! (`tensorcontract_fusion_dyn_into`, `tree_transform_dyn_into`,
 //! `adjoint_dyn`).
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tenet_core::{
@@ -47,29 +46,6 @@ pub struct EighTrunc {
     pub error: f64,
 }
 
-/// Degeneracy table of one tensor leg, keyed by the *internal* sectors of
-/// the corresponding hom-space [`tenet_core::SectorLeg`]. Used only while
-/// constructing a fresh tensor; afterwards the space handle carries all
-/// structure.
-#[derive(Clone, Debug)]
-struct LegInfo {
-    degs: BTreeMap<SectorId, usize>,
-}
-
-impl LegInfo {
-    fn from_space(space: &Space) -> Self {
-        Self {
-            degs: space.sectors.iter().copied().collect(),
-        }
-    }
-
-    fn deg(&self, sector: SectorId) -> Result<usize, Error> {
-        self.degs.get(&sector).copied().ok_or_else(|| {
-            Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
-        })
-    }
-}
-
 /// How a freshly built tensor is filled.
 enum Fill<'f> {
     Zeros,
@@ -91,24 +67,27 @@ fn rand_unit(state: &mut u64) -> f64 {
     ((splitmix64(state) >> 11) as f64) / ((1u64 << 52) as f64) - 1.0
 }
 
-/// Builds the coupled-layout dynamic fusion space for the given hom space
-/// and per-leg degeneracy tables.
+/// Builds the coupled-layout dynamic fusion space for the given hom space.
+/// The hom-space legs carry the per-sector degeneracies, so the per-tree
+/// degeneracy shapes are derived directly from them.
 fn build_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     rule: &R,
     hom: FusionTreeHomSpace,
-    legs: &[LegInfo],
-    nout: usize,
 ) -> Result<DynamicFusionMapSpace, Error> {
-    debug_assert_eq!(legs.len(), nout + hom.domain().len());
+    let leg_deg = |leg: &tenet_core::SectorLeg, sector: SectorId| -> Result<usize, Error> {
+        leg.degeneracy(sector).ok_or_else(|| {
+            Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
+        })
+    };
     let keys = hom.fusion_tree_keys(rule);
     let mut shapes = Vec::with_capacity(keys.len());
     for key in &keys {
-        let mut shape = Vec::with_capacity(legs.len());
-        for (leg, &sector) in legs[..nout].iter().zip(key.codomain_uncoupled()) {
-            shape.push(leg.deg(sector)?);
+        let mut shape = Vec::with_capacity(hom.rank());
+        for (leg, &sector) in hom.codomain().legs().iter().zip(key.codomain_uncoupled()) {
+            shape.push(leg_deg(leg, sector)?);
         }
-        for (leg, &sector) in legs[nout..].iter().zip(key.domain_uncoupled()) {
-            shape.push(leg.deg(sector)?);
+        for (leg, &sector) in hom.domain().legs().iter().zip(key.domain_uncoupled()) {
+            shape.push(leg_deg(leg, sector)?);
         }
         shapes.push(shape);
     }
@@ -290,13 +269,8 @@ impl Tensor {
             FusionProductSpace::new(codomain.iter().map(|space| space.sector_leg())),
             FusionProductSpace::new(domain.iter().map(|space| space.sector_leg())),
         );
-        let legs: Vec<LegInfo> = codomain
-            .iter()
-            .chain(domain.iter())
-            .map(|space| LegInfo::from_space(space))
-            .collect();
         let (space, data) = with_rule!(rule_kind, rule, {
-            let space = build_space(rule, hom, &legs, codomain.len())?;
+            let space = build_space(rule, hom)?;
             let len = space.required_len()?;
             let mut data = vec![0.0; len];
             match fill {
@@ -407,33 +381,61 @@ impl Tensor {
     /// notion as [`crate::prelude::Space::dim`] per leg; contraction
     /// planners use it as a size/FLOP proxy.
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
-        let structure = self.space.structure();
-        let rank = self.rank();
-        let mut per_axis: Vec<BTreeMap<SectorId, usize>> = vec![BTreeMap::new(); rank];
+        let hom = self.space.homspace();
         with_rule!(self.rule, rule, {
-            for index in 0..structure.block_count() {
-                let block = structure.block(index)?;
-                let BlockKey::FusionTree(key) = block.key() else {
-                    continue;
-                };
-                let sectors = key.external_sectors(rule);
-                for (axis, (&sector, &deg)) in sectors.iter().zip(block.shape()).enumerate() {
-                    per_axis[axis].insert(sector, deg);
-                }
-            }
-            Ok::<_, Error>(
-                per_axis
-                    .iter()
-                    .map(|dims| {
-                        dims.iter()
-                            .map(|(&sector, &deg)| {
-                                (deg as f64 * rule.dim_scalar(sector)).round() as usize
-                            })
-                            .sum()
-                    })
-                    .collect(),
-            )
+            Ok(hom
+                .codomain()
+                .legs()
+                .iter()
+                .chain(hom.domain().legs())
+                .map(|leg| {
+                    leg.iter()
+                        .map(|(sector, deg)| {
+                            (deg as f64 * rule.dim_scalar(sector)).round() as usize
+                        })
+                        .sum()
+                })
+                .collect())
         })
+    }
+
+    /// The user-facing [`Space`] of flat leg `axis`, following TensorKit's
+    /// `space(t, i)` convention: `codomain[i]` for `i < codomain_rank()`,
+    /// `dual(domain[i - codomain_rank()])` otherwise.
+    pub fn space(&self, axis: usize) -> Result<Space, Error> {
+        let hom = self.space.homspace();
+        let nout = hom.codomain().len();
+        if axis < nout {
+            Ok(Space::from_leg(self.rule, &hom.codomain().legs()[axis]))
+        } else if axis < hom.rank() {
+            Ok(Space::from_leg(self.rule, &hom.domain().legs()[axis - nout]).dual())
+        } else {
+            Err(Error::InvalidArgument(format!(
+                "axis {axis} out of range for rank {}",
+                hom.rank()
+            )))
+        }
+    }
+
+    /// The codomain spaces, in leg order.
+    pub fn codomain_spaces(&self) -> Vec<Space> {
+        let hom = self.space.homspace();
+        hom.codomain()
+            .legs()
+            .iter()
+            .map(|leg| Space::from_leg(self.rule, leg))
+            .collect()
+    }
+
+    /// The domain spaces, in leg order (the spaces as written, i.e. *not*
+    /// dualized; `t.space(codomain_rank() + i)` is their dual).
+    pub fn domain_spaces(&self) -> Vec<Space> {
+        let hom = self.space.homspace();
+        hom.domain()
+            .legs()
+            .iter()
+            .map(|leg| Space::from_leg(self.rule, leg))
+            .collect()
     }
 
     /// The single element of a rank-0 (scalar) tensor, e.g. the result of

@@ -309,7 +309,12 @@ where
     D: FactorScalar,
     V: Copy,
 {
-    let new_leg = SectorLeg::new(singular_values.iter().map(|entry| entry.sector), false);
+    let new_leg = SectorLeg::new(
+        singular_values
+            .iter()
+            .map(|entry| (entry.sector, entry.values.len())),
+        false,
+    );
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
@@ -700,7 +705,10 @@ where
             .filter(|&sector| kept_of(sector) > 0)
             .collect()
     };
-    let bond_leg = SectorLeg::new(kept_sectors.iter().copied(), false);
+    let bond_leg = SectorLeg::new(
+        kept_sectors.iter().map(|&sector| (sector, kept_of(sector))),
+        false,
+    );
     let homspace = source_space.homspace();
     let new_hom = if axis < nout {
         let mut codomain_legs = homspace.codomain().legs().to_vec();
@@ -826,7 +834,7 @@ where
             .unwrap_or(0)
     };
 
-    let new_leg = SectorLeg::new(pairs.iter().map(|pair| pair.sector), false);
+    let new_leg = SectorLeg::new(pairs.iter().map(|pair| (pair.sector, pair.kept)), false);
 
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
@@ -1374,8 +1382,18 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let row_leg = SectorLeg::new(spectra.iter().map(|entry| entry.sector), false);
-    let col_leg = SectorLeg::new(spectra.iter().map(|entry| entry.sector), false);
+    let row_leg = SectorLeg::new(
+        spectra
+            .iter()
+            .map(|entry| (entry.sector, rows_of(entry.sector))),
+        false,
+    );
+    let col_leg = SectorLeg::new(
+        spectra
+            .iter()
+            .map(|entry| (entry.sector, cols_of(entry.sector))),
+        false,
+    );
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([row_leg]),
         FusionProductSpace::new([col_leg]),

@@ -195,8 +195,8 @@ fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() 
     let cod_sector = SectorId::new(1);
     let dom_sector = SectorId::new(2);
     let hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([cod_sector], false)]),
-        FusionProductSpace::new([SectorLeg::new([dom_sector], false)]),
+        FusionProductSpace::new([SectorLeg::new([(cod_sector, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(dom_sector, 3)], false)]),
     );
     let structure = BlockStructure::from_blocks_with_rank(
         2,
@@ -242,8 +242,8 @@ fn categorical_adjoint_view_does_not_dualize_nonselfdual_u1_stored_legs() {
     let q1 = U1Irrep::new(1).sector_id();
     let q2 = U1Irrep::new(2).sector_id();
     let hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([q1], false)]),
-        FusionProductSpace::new([SectorLeg::new([q2], false)]),
+        FusionProductSpace::new([SectorLeg::new([(q1, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(q2, 1)], false)]),
     );
     let space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -256,15 +256,15 @@ fn categorical_adjoint_view_does_not_dualize_nonselfdual_u1_stored_legs() {
 
     assert_eq!(
         adjoint.homspace().codomain().legs(),
-        &[SectorLeg::new([q2], false)]
+        &[SectorLeg::new([(q2, 1)], false)]
     );
     assert_eq!(
         adjoint.homspace().domain().legs(),
-        &[SectorLeg::new([q1], false)]
+        &[SectorLeg::new([(q1, 1)], false)]
     );
     assert_ne!(
         adjoint.homspace().codomain().legs(),
-        &[SectorLeg::new([U1Irrep::new(-2).sector_id()], true)]
+        &[SectorLeg::new([(U1Irrep::new(-2).sector_id(), 1)], true)]
     );
 }
 
@@ -319,8 +319,8 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -371,8 +371,8 @@ fn tensortrace_fusion_default_host_api_accepts_custom_host_storage() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -414,8 +414,8 @@ fn tensortrace_fusion_fermion_supertrace_uses_degeneracy_diagonals() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 2), (odd, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 2), (odd, 2)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -466,8 +466,8 @@ fn tensortrace_fusion_with_conjugation_lowers_lazy_adjoint_supertrace() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -514,8 +514,8 @@ fn tensortrace_fusion_scales_destination_once_for_multiple_source_terms() {
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
-        FusionProductSpace::new([SectorLeg::new([even, odd], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 1), (odd, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -559,7 +559,7 @@ fn tensortrace_fusion_fermion_open_output_matches_tensorkit_oracle() {
     let rule = FermionParityFusionRule;
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
-    let leg = || SectorLeg::new([even, odd], false);
+    let leg = || SectorLeg::new([(even, 1), (odd, 1)], false);
     let src_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
@@ -610,7 +610,7 @@ fn tensortrace_fusion_fermion_two_trace_pairs_match_tensorkit_oracle() {
     let rule = FermionParityFusionRule;
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
-    let leg = || SectorLeg::new([even, odd], false);
+    let leg = || SectorLeg::new([(even, 1), (odd, 1)], false);
     let src_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
@@ -661,7 +661,7 @@ fn tensortrace_fusion_rejects_nonsymmetric_braiding_like_tensorkit_tensortrace()
     let rule = UniqueAnyonicRule;
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        FusionTreeHomSpace::from_sector_ids([1], [1]),
+        FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]),
         &rule,
         [vec![1, 1]],
     )
@@ -695,8 +695,8 @@ fn tensortrace_fusion_su2_includes_quantum_dimension_factor() {
     let rule = SU2FusionRule;
     let half = SU2Irrep::from_twice_spin(1).sector_id();
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([half], false)]),
-        FusionProductSpace::new([SectorLeg::new([half], false)]),
+        FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -740,8 +740,8 @@ fn plain_tensortrace_rejects_one_block_fusion_tensor_instead_of_dense_trace() {
     let rule = SU2FusionRule;
     let half = SU2Irrep::from_twice_spin(1).sector_id();
     let src_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([half], false)]),
-        FusionProductSpace::new([SectorLeg::new([half], false)]),
+        FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]),
     );
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),

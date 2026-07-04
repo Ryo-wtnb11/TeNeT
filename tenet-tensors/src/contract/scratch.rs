@@ -355,8 +355,10 @@ mod tests {
 
     fn scratch_space(len: usize) -> Arc<DynamicFusionMapSpace> {
         let dense_space = TensorMapSpace::<1, 0>::from_dims([len], []).unwrap();
-        let homspace =
-            FusionTreeHomSpace::from_sectors([SectorId::new(0)], std::iter::empty::<SectorId>());
+        let homspace = FusionTreeHomSpace::from_sectors(
+            [(SectorId::new(0), len)],
+            std::iter::empty::<(SectorId, usize)>(),
+        );
         let structure = BlockStructure::packed_column_major(1, [vec![len]]).unwrap();
         let fusion_space = FusionTensorMapSpace::new(dense_space, homspace, structure).unwrap();
         Arc::new(DynamicFusionMapSpace::from_typed(&fusion_space))

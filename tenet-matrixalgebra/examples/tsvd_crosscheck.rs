@@ -59,7 +59,7 @@ fn run_case<R>(name: &str, rule: &R, sectors: &[SectorId], label_of: impl Fn(Sec
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, DEGENERACY)), false);
     let leg_dim = sectors.len() * DEGENERACY;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),

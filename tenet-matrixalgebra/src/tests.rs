@@ -106,7 +106,7 @@ where
         + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
 {
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
@@ -262,7 +262,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
@@ -618,7 +618,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
@@ -1038,7 +1038,7 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
     let rule = Z2FusionRule;
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
@@ -1230,7 +1230,7 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
     let rule = Z2FusionRule;
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
 
     // Tall map (2 codomain legs, 1 domain leg): nontrivial left null space.
@@ -1425,7 +1425,7 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     let rule = Z2FusionRule;
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
@@ -1503,7 +1503,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     let rule = Z2FusionRule;
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let degeneracy = 2usize;
-    let leg = || SectorLeg::new(sectors.iter().copied(), false);
+    let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
     let leg_dim = sectors.len() * degeneracy;
     let homspace = || {
         FusionTreeHomSpace::new(

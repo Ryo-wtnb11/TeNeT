@@ -886,13 +886,7 @@ fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
 where
     R: FusionRule,
 {
-    SectorLeg::new(
-        leg.sectors()
-            .iter()
-            .copied()
-            .map(|sector| rule.dual(sector)),
-        !leg.is_dual(),
-    )
+    leg.dual(rule)
 }
 
 pub(crate) fn tensortrace_structure_with_strided_kernel<

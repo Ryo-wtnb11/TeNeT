@@ -10,8 +10,8 @@ use tenet_tensors::{
 
 fn main() {
     let rule = SU2FusionRule;
-    let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1], [1]);
-    let rhs_hom = FusionTreeHomSpace::from_sector_ids([1], [1, 1, 1]);
+    let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
+    let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
     let axes = TensorContractSpec::with_default_output_order(&[0, 1, 2], &[1, 2, 3]);
     let tensorkit_axes =
         TensorContractSpec::new(&[0, 1, 2], &[1, 2, 3], OutputAxisOrder::from_axes(&[1, 0]));

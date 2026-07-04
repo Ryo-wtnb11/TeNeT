@@ -277,7 +277,7 @@ fn svd_compact_cross_checks_against_typed_expert_layer() {
         U1Irrep::new(0).sector_id(),
         U1Irrep::new(1).sector_id(),
     ];
-    let leg = || SectorLeg::new(sectors, false);
+    let leg = || SectorLeg::new(sectors.map(|sector| (sector, deg)), false);
     let leg_dim = sectors.len() * deg;
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
@@ -348,8 +348,8 @@ fn svd_recomposes_on_non_dualization_closed_charges() {
     assert!((trunc.error - 1.0).abs() < 1e-12);
 
     // The kept factors recompose; the coupled sector the truncation dropped
-    // entirely is absent from the result (TensorKit keeps a zero block
-    // there), so the check is the exact norm identity rather than `add`.
+    // entirely reappears as a zero block (matching TensorKit), verified both
+    // by the exact norm identity and elementwise.
     let recon = trunc
         .u
         .compose(&trunc.s)
@@ -358,5 +358,5 @@ fn svd_recomposes_on_non_dualization_closed_charges() {
         .unwrap();
     let identity = recon.norm().unwrap().powi(2) + trunc.error.powi(2) - d.norm().unwrap().powi(2);
     assert!(identity.abs() < 1e-12);
-    assert_eq!(recon.data(), &[4.0, 0.0, 0.0, 3.0, 2.0]);
+    assert_eq!(recon.data(), &[4.0, 0.0, 0.0, 3.0, 0.0, 2.0]);
 }

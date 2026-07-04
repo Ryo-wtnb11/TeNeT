@@ -107,7 +107,7 @@ fn contract_cross_checks_against_expert_layer() {
         U1Irrep::new(0).sector_id(),
         U1Irrep::new(1).sector_id(),
     ];
-    let leg = || SectorLeg::new(sectors, false);
+    let leg = || SectorLeg::new(sectors.map(|sector| (sector, deg)), false);
     let leg_dim = sectors.len() * deg;
     let homspace = || {
         FusionTreeHomSpace::new(
@@ -375,10 +375,10 @@ fn rank_five_contract_cross_checks_against_expert_layer() {
         U1Irrep::new(0).sector_id(),
         U1Irrep::new(1).sector_id(),
     ];
-    let leg = || SectorLeg::new(sectors, false);
+    let leg = || SectorLeg::new(sectors.map(|sector| (sector, deg)), false);
     // Dual leg of `Space::u1([(-1, deg), (0, deg), (1, deg)])`: the charge
     // set is symmetric, so only the dual flag flips.
-    let dual_leg = || SectorLeg::new(sectors, true);
+    let dual_leg = || SectorLeg::new(sectors.map(|sector| (sector, deg)), true);
     let leg_dim = sectors.len() * deg;
     let lhs_homspace = || {
         FusionTreeHomSpace::new(

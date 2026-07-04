@@ -2188,7 +2188,7 @@ mod tests {
     #[test]
     fn dynamic_storage_context_identity_output_allocates_scratch_from_operand_storages() {
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
         let fusion_space = || {
             FusionTensorMapSpace::from_degeneracy_shapes(
                 TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -2309,7 +2309,7 @@ mod tests {
     #[test]
     fn dynamic_storage_context_output_transform_allocates_core_dst_from_destination_storage() {
         let rule = SU2FusionRule;
-        let lhs_hom = FusionTreeHomSpace::from_sector_ids([1, 1, 1, 1], []);
+        let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1), (1, 1)], []);
         let lhs_keys = lhs_hom.fusion_tree_keys(&rule);
         assert_eq!(lhs_keys.len(), 2);
         let src_tree = lhs_keys

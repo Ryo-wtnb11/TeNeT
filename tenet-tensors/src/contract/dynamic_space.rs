@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeBlockKey,
-    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, SectorId,
+    FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
 };
 
 use crate::tree_transform::build_tree_pair_transform_group_plan;
@@ -96,6 +96,9 @@ impl DynamicFusionMapSpace {
                 },
             ));
         }
+        homspace
+            .validate_degeneracy_shapes(&keys, &shapes)
+            .map_err(OperationError::from_core_preserving_context)?;
         let blocks = keys
             .into_iter()
             .map(BlockKey::from)
@@ -142,23 +145,29 @@ impl DynamicFusionMapSpace {
             .homspace()
             .permute(rule, codomain_axes, domain_axes)
             .map_err(OperationError::from_core_preserving_context)?;
-        let src_dims = axis_sector_dims(rule, source.structure())?;
         let src_axes = codomain_axes
             .iter()
             .chain(domain_axes.iter())
             .copied()
+            .collect::<Vec<_>>();
+        // Legs are authoritative for degeneracies: the external leg of each
+        // source axis carries the full sector -> degeneracy map, keyed by
+        // the placement-invariant external sector labels.
+        let src_legs = src_axes
+            .iter()
+            .map(|&src_axis| source.homspace().external_axis_leg(rule, src_axis))
             .collect::<Vec<_>>();
         let keys = homspace.fusion_tree_keys(rule);
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
         for key in keys {
             let sectors = key.external_sectors(rule);
             let mut shape = Vec::with_capacity(src_axes.len());
-            for (out_axis, &src_axis) in src_axes.iter().enumerate() {
-                let dim = src_dims[src_axis].get(&sectors[out_axis]).copied().ok_or(
-                    OperationError::StructureMismatch {
-                        tensor: "transformed scratch",
-                    },
-                )?;
+            for (out_axis, leg) in src_legs.iter().enumerate() {
+                let dim =
+                    leg.degeneracy(sectors[out_axis])
+                        .ok_or(OperationError::StructureMismatch {
+                            tensor: "transformed scratch",
+                        })?;
                 shape.push(dim);
             }
             blocks.push((BlockKey::from(key), shape));
@@ -271,42 +280,39 @@ impl DynamicFusionMapSpace {
         }
         // Complete the tree set: keys the contraction pairing never produces
         // still get a subblock (structural zero) so the coupled grid is full.
-        let lhs_dims = axis_sector_dims(rule, lhs.structure())?;
-        let rhs_dims = axis_sector_dims(rule, rhs.structure())?;
+        // Legs carry the complete sector -> degeneracy map (TensorKit
+        // GradedSpace parity), so every structural-zero shape is recoverable
+        // even for sectors no populated block of the operands uses (e.g.
+        // sparse product states, or factors of a truncated SVD that dropped
+        // a whole coupled sector).
         let lhs_open = axis_plan.lhs_open_axes.clone();
         let rhs_open = axis_plan.rhs_open_axes.clone();
+        let open_legs = lhs_open
+            .iter()
+            .map(|&axis| lhs.homspace().external_axis_leg(rule, axis))
+            .chain(
+                rhs_open
+                    .iter()
+                    .map(|&axis| rhs.homspace().external_axis_leg(rule, axis)),
+            )
+            .collect::<Vec<_>>();
         let keys = homspace.fusion_tree_keys(rule);
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
-        'keys: for key in keys {
+        for key in keys {
             let shape = match inferred_shapes.get(&key) {
                 Some(shape) => shape.clone(),
                 None => {
                     let sectors = key.external_sectors(rule);
-                    let mut shape = Vec::with_capacity(lhs_open.len() + rhs_open.len());
-                    for (out_axis, &sector) in sectors.iter().enumerate() {
-                        let dim = if out_axis < lhs_open.len() {
-                            lhs_dims[lhs_open[out_axis]].get(&sector).copied()
-                        } else {
-                            rhs_dims[rhs_open[out_axis - lhs_open.len()]]
-                                .get(&sector)
-                                .copied()
-                        };
-                        // A sector that never occurs on the operand axis has
-                        // no recoverable degeneracy (legs carry sector sets
-                        // only, degeneracies live in block shapes), so the
-                        // structural-zero block is omitted entirely. This
-                        // happens e.g. when a truncated SVD dropped a whole
-                        // coupled sector and the factors are recomposed:
-                        // TensorKit keeps a zero block there because its
-                        // spaces carry degeneracies. The skip is uniform per
-                        // codomain/domain tree, so each coupled grid stays
-                        // rectangular.
-                        match dim {
-                            Some(dim) => shape.push(dim),
-                            None => continue 'keys,
-                        }
-                    }
-                    shape
+                    sectors
+                        .iter()
+                        .zip(&open_legs)
+                        .map(|(&sector, leg)| {
+                            leg.degeneracy(sector)
+                                .ok_or(OperationError::StructureMismatch {
+                                    tensor: "contracted result",
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
                 }
             };
             blocks.push((BlockKey::from(key), shape));
@@ -596,45 +602,4 @@ fn invert_selected_shape(
         });
     }
     Ok(shape)
-}
-
-/// Per-axis map from placement-invariant external sector label to degeneracy,
-/// collected over all fusion-tree blocks of a structure. Errors if the same
-/// (axis, sector) pair appears with two different dims.
-fn axis_sector_dims<R>(
-    rule: &R,
-    structure: &BlockStructure,
-) -> Result<Vec<HashMap<SectorId, usize>>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let rank = structure.rank();
-    let mut dims = vec![HashMap::<SectorId, usize>::new(); rank];
-    for index in 0..structure.block_count() {
-        let block = structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "scratch source",
-                index,
-            });
-        };
-        let sectors = key.external_sectors(rule);
-        for (axis, (&sector, &dim)) in sectors.iter().zip(block.shape()).enumerate() {
-            match dims[axis].get(&sector) {
-                Some(&existing) if existing != dim => {
-                    return Err(OperationError::ShapeMismatch {
-                        dst: vec![existing],
-                        src: vec![dim],
-                    });
-                }
-                Some(_) => {}
-                None => {
-                    dims[axis].insert(sector, dim);
-                }
-            }
-        }
-    }
-    Ok(dims)
 }

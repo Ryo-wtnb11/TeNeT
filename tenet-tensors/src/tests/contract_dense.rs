@@ -1289,8 +1289,8 @@ fn plain_tensorcontract_rejects_one_block_fusion_tensor_instead_of_dense_contrac
     let odd = SectorId::new(1);
     let hom = || {
         FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([odd], false)]),
-            FusionProductSpace::new([SectorLeg::new([odd], false)]),
+            FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
         )
     };
     let space = || {

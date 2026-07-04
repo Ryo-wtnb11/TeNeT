@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn storage_direct_replay_runs_without_host_slice_contract() {
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
         let fusion_space = || {
             FusionTensorMapSpace::from_degeneracy_shapes(
                 TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -393,13 +393,15 @@ mod tests {
     #[test]
     fn storage_direct_replay_matches_host_execute_raw() {
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let leg = |dims: usize| {
+            SectorLeg::new([(SectorId::new(0), dims), (SectorId::new(1), dims)], false)
+        };
         let fusion_space = |dims: usize| {
             FusionTensorMapSpace::from_degeneracy_shapes_coupled(
                 TensorMapSpace::<1, 1>::from_dims([2 * dims], [2 * dims]).unwrap(),
                 FusionTreeHomSpace::new(
-                    FusionProductSpace::new([leg()]),
-                    FusionProductSpace::new([leg()]),
+                    FusionProductSpace::new([leg(dims)]),
+                    FusionProductSpace::new([leg(dims)]),
                 ),
                 &rule,
                 [vec![dims, dims], vec![dims, dims]],
@@ -467,7 +469,7 @@ mod tests {
         use tenet_operations::cuda::{CudaStorage, CudaStorageGemm};
 
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let leg = || SectorLeg::new([(SectorId::new(0), 3), (SectorId::new(1), 3)], false);
         let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
             TensorMapSpace::<1, 1>::from_dims([6], [6]).unwrap(),
             FusionTreeHomSpace::new(
@@ -527,7 +529,7 @@ mod tests {
     fn core_fusion_block_storage_workspace_allocates_pack_scratch_from_operands_and_output_from_destination(
     ) {
         let rule = Z2FusionRule;
-        let leg = || SectorLeg::new([SectorId::new(0), SectorId::new(1)], false);
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
         let fusion_space = || {
             FusionTensorMapSpace::from_degeneracy_shapes(
                 TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),

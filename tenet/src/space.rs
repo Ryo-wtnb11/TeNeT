@@ -278,8 +278,19 @@ impl Space {
         })
     }
 
-    /// Lowers this space to the expert-layer [`SectorLeg`].
+    /// Lowers this space to the expert-layer [`SectorLeg`] (sector,
+    /// degeneracy and dual content carried verbatim).
     pub(crate) fn sector_leg(&self) -> SectorLeg {
-        SectorLeg::new(self.sectors.iter().map(|&(sector, _)| sector), self.dual)
+        SectorLeg::new(self.sectors.iter().copied(), self.dual)
+    }
+
+    /// Reconstructs the user-facing space from an expert-layer leg, keyed by
+    /// the fusion rule it lives under. Inverse of [`Self::sector_leg`].
+    pub(crate) fn from_leg(rule: RuleKind, leg: &SectorLeg) -> Self {
+        Self {
+            rule,
+            sectors: leg.iter().collect(),
+            dual: leg.is_dual(),
+        }
     }
 }
