@@ -65,6 +65,9 @@ pub use facade::{
     tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
     tree_transform_into_with_context, tree_transform_structure,
 };
+/// CUDA storage and GEMM seams (flat device buffers, never host-readable).
+#[cfg(feature = "cuda")]
+pub use tenet_operations::cuda;
 pub use tenet_operations::OperationError;
 pub use tenet_operations::ReportsPlacement;
 pub use tenet_operations::TreeTransformReplayProfile;

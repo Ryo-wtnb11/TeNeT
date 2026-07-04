@@ -15,11 +15,15 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use num_complex::Complex64;
+#[cfg(feature = "cuda")]
+use tenet_core::TensorStorage;
 use tenet_core::{
     BlockKey, BlockStructure, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    SectorId,
+    Placement, SectorId,
 };
 use tenet_matrixalgebra::{DynFactor, FactorScalar, SectorSpectrum, Truncation};
+#[cfg(feature = "cuda")]
+use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     DynamicFusionMapSpace, RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
 };
@@ -37,11 +41,26 @@ pub enum Dtype {
     C64,
 }
 
-/// Dtype-erased flat storage in the coupled-sector matrix layout.
+/// Dtype-erased flat storage in the coupled-sector matrix layout. The
+/// device variant shares the immutable buffer behind an `Arc` (operations
+/// always write fresh destinations), keeping `Tensor: Clone` cheap and the
+/// host paths untouched.
 #[derive(Clone, Debug)]
 enum Data {
     F64(Vec<f64>),
     C64(Vec<Complex64>),
+    #[cfg(feature = "cuda")]
+    CudaF64(Arc<CudaStorage>),
+}
+
+/// Explicit "no device kernel yet" error; device tensors never fall back
+/// to host execution silently.
+#[cfg(feature = "cuda")]
+fn device_unsupported(what: &str) -> Error {
+    Error::UnsupportedOnDevice(format!(
+        "{what} has no device implementation yet; move the tensor to the \
+         host explicitly with to_host()"
+    ))
 }
 
 /// The scalar types the user layer stores: the expert-layer scalar machinery
@@ -89,6 +108,8 @@ macro_rules! with_data {
         match &$tensor.data {
             Data::F64($data) => $body,
             Data::C64($data) => $body,
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => return Err(device_unsupported("this operation")),
         }
     };
 }
@@ -517,7 +538,75 @@ impl Tensor {
         match self.data {
             Data::F64(_) => Dtype::F64,
             Data::C64(_) => Dtype::C64,
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Dtype::F64,
         }
+    }
+
+    /// Where this tensor's data lives: [`Placement::Host`] or
+    /// [`Placement::Cuda`] with the device ordinal. Transfers are always
+    /// explicit ([`Self::to_cuda`] / `to_host`).
+    pub fn placement(&self) -> Placement {
+        match &self.data {
+            Data::F64(_) | Data::C64(_) => Placement::Host,
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(storage) => storage.placement(),
+        }
+    }
+
+    /// Uploads an f64 host tensor to the runtime's CUDA device (built with
+    /// `Runtime::builder().cuda(device)`); a cheap clone when already
+    /// device-resident. Explicit errors: c64 tensors (no device c64 storage
+    /// yet) and runtimes built without a CUDA device.
+    #[cfg(feature = "cuda")]
+    pub fn to_cuda(&self) -> Result<Self, Error> {
+        let data = match &self.data {
+            Data::CudaF64(storage) => Data::CudaF64(Arc::clone(storage)),
+            Data::C64(_) => {
+                return Err(device_unsupported("uploading a c64 tensor"));
+            }
+            Data::F64(host) => {
+                let mut state = self.rt.lock();
+                let cuda = state.cuda.as_mut().ok_or_else(|| {
+                    Error::InvalidArgument(
+                        "this runtime was built without a CUDA device; use \
+                         Runtime::builder().cuda(device)"
+                            .to_string(),
+                    )
+                })?;
+                Data::CudaF64(Arc::new(CudaStorage::upload(cuda, host)?))
+            }
+        };
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data,
+        })
+    }
+
+    /// Downloads a device tensor back to host storage; a plain copy when
+    /// already host-resident.
+    #[cfg(feature = "cuda")]
+    pub fn to_host(&self) -> Result<Self, Error> {
+        let data = match &self.data {
+            Data::F64(_) | Data::C64(_) => self.data.clone(),
+            Data::CudaF64(storage) => {
+                let mut state = self.rt.lock();
+                let cuda = state.cuda.as_mut().ok_or_else(|| {
+                    Error::InvalidArgument(
+                        "this runtime was built without a CUDA device".to_string(),
+                    )
+                })?;
+                Data::F64(storage.download(cuda)?)
+            }
+        };
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data,
+        })
     }
 
     /// Number of codomain legs.
@@ -545,6 +634,8 @@ impl Tensor {
         match &self.data {
             Data::F64(data) => data,
             Data::C64(_) => panic!("data(): tensor stores c64 data; use data_c64()"),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => panic!("data(): tensor is device-resident; use to_host()"),
         }
     }
 
@@ -557,6 +648,8 @@ impl Tensor {
         match &self.data {
             Data::C64(data) => data,
             Data::F64(_) => panic!("data_c64(): tensor stores f64 data; use data()"),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => panic!("data_c64(): tensor is device-resident; use to_host()"),
         }
     }
 
@@ -570,6 +663,8 @@ impl Tensor {
                     .collect(),
             ),
             Data::C64(data) => Data::C64(data.clone()),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => panic!("to_c64(): tensor is device-resident; use to_host()"),
         };
         Self {
             rt: self.rt.clone(),
@@ -659,6 +754,8 @@ impl Tensor {
         match &self.data {
             Data::F64(data) => Ok(data.iter().sum()),
             Data::C64(_) => Err(Error::DtypeMismatch),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Err(device_unsupported("scalar()")),
         }
     }
 
@@ -669,6 +766,8 @@ impl Tensor {
         match &self.data {
             Data::F64(data) => Ok(Complex64::new(data.iter().sum(), 0.0)),
             Data::C64(data) => Ok(data.iter().sum()),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Err(device_unsupported("scalar_c64()")),
         }
     }
 
@@ -678,6 +777,9 @@ impl Tensor {
         }
         if !self.rt.same_runtime(&other.rt) {
             return Err(Error::RuntimeMismatch);
+        }
+        if self.placement() != other.placement() {
+            return Err(Error::PlacementMismatch);
         }
         if self.dtype() != other.dtype() {
             return Err(Error::DtypeMismatch);
@@ -723,6 +825,10 @@ impl Tensor {
         match (&self.data, &rhs.data) {
             (Data::F64(a), Data::F64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
             (Data::C64(a), Data::C64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(a), Data::CudaF64(b)) => {
+                self.contract_cuda_impl(rhs, a, b, lhs_axes, rhs_axes)
+            }
             _ => Err(Error::DtypeMismatch),
         }
     }
@@ -760,6 +866,59 @@ impl Tensor {
             Ok::<_, Error>((dst_space, D::lift(data)))
         })?;
         drop(state);
+        Ok(self.with(space, data))
+    }
+
+    /// Device contraction: same plan compilation and resolution cache as the
+    /// host path (spaces are host-side metadata), replayed directly on the
+    /// device buffers via one offset GEMM per coupled-sector matrix.
+    /// Phase-1 scope: only the canonical fully-direct route (exactly
+    /// `contract`'s `alpha = 1`, `beta = 0` semantics); contractions that
+    /// resolve to dynamic tree transforms return an explicit error.
+    #[cfg(feature = "cuda")]
+    fn contract_cuda_impl(
+        &self,
+        rhs: &Self,
+        lhs_data: &CudaStorage,
+        rhs_data: &CudaStorage,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, Error> {
+        let mut guard = self.rt.lock();
+        let state = &mut *guard;
+        let cuda = state.cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
+            let dst_space = DynamicFusionMapSpace::contracted(
+                rule,
+                &self.space,
+                &rhs.space,
+                lhs_axes,
+                rhs_axes,
+            )?;
+            // ponytail: destination allocated by uploading host zeros; a
+            // device-side alloc/memset seam replaces this if upload cost
+            // ever matters (the direct route overwrites every element).
+            let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.required_len()?])?;
+            ctxs.f64.tensorcontract_fusion_dyn_direct_on_storage(
+                rule,
+                &mut CudaStorageGemm::new(cuda),
+                &dst_space,
+                &mut dst,
+                &self.space,
+                lhs_data,
+                &rhs.space,
+                rhs_data,
+                TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
+            )?;
+            Ok::<_, Error>((dst_space, Data::CudaF64(Arc::new(dst))))
+        })?;
+        drop(guard);
         Ok(self.with(space, data))
     }
 
@@ -881,6 +1040,91 @@ impl Tensor {
         Ok(self.with(space, data))
     }
 
+    /// Partial trace over pairs of mutually dual legs (TensorKit
+    /// `tensortrace!` / TensorOperations `@tensor a[i, i; j]` semantics):
+    /// each `(lhs, rhs)` pair of flat leg indices is traced, the remaining
+    /// legs keep their order and codomain/domain sides. Symmetric fusion
+    /// rules apply the categorical trace coefficients (quantum-dimension
+    /// factors, and twists for fermionic rules: the supertrace).
+    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        let rank = self.rank();
+        let mut seen = vec![false; rank];
+        for &(lhs, rhs) in pairs {
+            for axis in [lhs, rhs] {
+                if axis >= rank || seen[axis] {
+                    return Err(Error::InvalidArgument(format!(
+                        "invalid trace pair list {pairs:?} for rank {rank} \
+                         (axes must be in range and distinct)"
+                    )));
+                }
+                seen[axis] = true;
+            }
+        }
+        let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
+        let dst_codomain_rank = output_axes
+            .iter()
+            .filter(|&&axis| axis < self.codomain_rank())
+            .count();
+        let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
+        let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
+        with_data!(self, data, {
+            self.trace_pairs_impl(
+                data,
+                &output_axes,
+                dst_codomain_rank,
+                &trace_lhs,
+                &trace_rhs,
+            )
+        })
+    }
+
+    fn trace_pairs_impl<D: UserScalar>(
+        &self,
+        src_data: &[D],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+        trace_lhs: &[usize],
+        trace_rhs: &[usize],
+    ) -> Result<Self, Error> {
+        let (space, data) = with_rule!(self.rule, rule, {
+            let hom = self.space.homspace().select(
+                rule,
+                &output_axes[..dst_codomain_rank],
+                &output_axes[dst_codomain_rank..],
+            )?;
+            let dst_space = build_space(rule, hom)?;
+            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
+            tenet_tensors::tensortrace_fusion_dyn_into(
+                rule,
+                &dst_space,
+                &mut data,
+                &self.space,
+                src_data,
+                tenet_tensors::TensorTraceAxisSpec::new(output_axes, trace_lhs, trace_rhs),
+                D::from_real(1.0),
+                D::from_real(0.0),
+            )?;
+            Ok::<_, Error>((dst_space, D::lift(data)))
+        })?;
+        Ok(self.with(space, data))
+    }
+
+    /// TensorKit `tr`: full trace of an endomorphism (`domain == codomain`)
+    /// to a scalar, pairing codomain leg `i` with domain leg `i`. Returned
+    /// as [`Complex64`] for both dtypes (f64 tensors give an exactly-real
+    /// result). Fermionic rules give the supertrace, matching TensorKit.
+    pub fn tr(&self) -> Result<Complex64, Error> {
+        let hom = self.space.homspace();
+        if hom.codomain().legs() != hom.domain().legs() {
+            return Err(Error::InvalidArgument(
+                "tr() requires an endomorphism (domain == codomain)".to_string(),
+            ));
+        }
+        let nout = self.codomain_rank();
+        let pairs: Vec<(usize, usize)> = (0..nout).map(|i| (i, nout + i)).collect();
+        self.trace_pairs(&pairs)?.scalar_c64()
+    }
+
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
     /// conjugate-transposes every block (real scalars: transpose only, c64:
     /// entries conjugated).
@@ -911,6 +1155,8 @@ impl Tensor {
         let data = match &self.data {
             Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
             Data::C64(data) => Data::C64(data.iter().map(|&value| value * factor).collect()),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => return Err(device_unsupported("scale()")),
         };
         Ok(Self {
             rt: self.rt.clone(),
@@ -932,6 +1178,8 @@ impl Tensor {
                 data: Data::C64(data.iter().map(|&value| value * factor).collect()),
             }),
             Data::F64(_) => Err(Error::DtypeMismatch),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Err(device_unsupported("scale_c64()")),
         }
     }
 
@@ -953,6 +1201,10 @@ impl Tensor {
                     .map(|(&x, &y)| x * alpha + y * beta)
                     .collect(),
             ),
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => {
+                return Err(device_unsupported("add()"))
+            }
             _ => return Err(Error::DtypeMismatch),
         };
         Ok(Self {
@@ -979,6 +1231,8 @@ impl Tensor {
                         .collect(),
                 ),
             }),
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(device_unsupported("add_c64()")),
             _ => Err(Error::DtypeMismatch),
         }
     }
@@ -998,6 +1252,8 @@ impl Tensor {
             (Data::C64(a), Data::C64(b)) => with_rule!(self.rule, rule, {
                 weighted_inner(rule, self.space.structure(), a, b)
             }),
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(device_unsupported("inner()")),
             _ => Err(Error::DtypeMismatch),
         }
     }

@@ -24,6 +24,14 @@ pub enum Error {
     /// The operands store different scalar types (f64 vs c64); convert
     /// explicitly with [`crate::prelude::Tensor::to_c64`] first.
     DtypeMismatch,
+    /// The operands live on different placements (host vs device, or
+    /// different devices); transfer explicitly with
+    /// [`crate::prelude::Tensor::to_cuda`] / `to_host` first.
+    PlacementMismatch,
+    /// The operation has no device implementation yet; the message says
+    /// which. Device tensors never fall back to host execution silently —
+    /// move the tensor explicitly with `to_host()`.
+    UnsupportedOnDevice(String),
     /// Invalid user input (axes, sectors, spaces); the message says what.
     InvalidArgument(String),
 }
@@ -36,6 +44,13 @@ impl fmt::Display for Error {
             Self::RuleMismatch => write!(f, "operands use different fusion rules"),
             Self::RuntimeMismatch => write!(f, "operands belong to different runtimes"),
             Self::DtypeMismatch => write!(f, "operands store different scalar types"),
+            Self::PlacementMismatch => write!(
+                f,
+                "operands live on different placements (transfer explicitly first)"
+            ),
+            Self::UnsupportedOnDevice(message) => {
+                write!(f, "unsupported on device: {message}")
+            }
             Self::InvalidArgument(message) => write!(f, "invalid argument: {message}"),
         }
     }

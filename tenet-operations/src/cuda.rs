@@ -14,6 +14,15 @@ use crate::OperationError;
 /// Flat f64 device buffer usable as replay storage.
 pub struct CudaStorage(pub CudaDenseStorage);
 
+impl std::fmt::Debug for CudaStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaStorage")
+            .field("len", &self.0.len())
+            .field("device", &self.0.device())
+            .finish()
+    }
+}
+
 impl CudaStorage {
     pub fn upload(ctx: &CudaDenseContext, data: &[f64]) -> Result<Self, OperationError> {
         CudaDenseStorage::upload_f64(ctx, data)

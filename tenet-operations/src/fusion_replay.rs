@@ -503,6 +503,27 @@ impl FusionBlockContractPlan {
                 message: "storage-direct replay requires full destination coverage",
             });
         }
+        self.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
+    }
+
+    /// [`Self::execute_direct_on_storage`] for a destination the caller
+    /// guarantees is zero-filled: destination blocks with no contributing
+    /// GEMM (the ones the host path scales by `beta = 0`) are left
+    /// untouched, which is exactly the overwrite semantics on a zeroed
+    /// buffer. The active blocks are still fully overwritten.
+    pub fn execute_direct_on_storage_prezeroed<G, D, DDst, DLhs, DRhs>(
+        &self,
+        gemm: &mut G,
+        dst: &mut DDst,
+        lhs: &DLhs,
+        rhs: &DRhs,
+    ) -> Result<(), OperationError>
+    where
+        G: StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
         for group in &self.groups {
             let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
                 group.lhs.direct_offset,

@@ -979,6 +979,78 @@ where
         )
     }
 
+    /// Dynamic-rank contraction replayed directly on opaque storages (the
+    /// device path): resolves through the same resolution cache and route /
+    /// twist gates as [`Self::tensorcontract_fusion_dyn_into`], but only the
+    /// canonical fully-direct coupled-layout route executes — one
+    /// [`StorageGemm`](tenet_operations::fusion_replay::StorageGemm) call
+    /// per coupled-sector matrix, `alpha = 1`, `beta = 0`. The caller must
+    /// pass a zero-filled destination: destination blocks without a
+    /// contributing GEMM stay untouched (overwrite-on-zero semantics).
+    /// Every other resolution (dynamic tree transforms, conjugate
+    /// structures) is an explicit
+    /// [`OperationError::UnsupportedTensorContractScope`]; there is no
+    /// silent host fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_direct_on_storage<R, G, DDst, DLhs, DRhs>(
+        &mut self,
+        rule: &R,
+        gemm: &mut G,
+        dst_space: &DynamicFusionMapSpace,
+        dst: &mut DDst,
+        lhs_space: &DynamicFusionMapSpace,
+        lhs: &DLhs,
+        rhs_space: &DynamicFusionMapSpace,
+        rhs: &DRhs,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        let resolution = self.resolution_cache.get_or_resolve(
+            rule,
+            dst_space,
+            lhs_space,
+            rhs_space,
+            axes,
+            || match super::fusion::tensorcontract_fusion_structure_dyn(
+                rule,
+                dst_space,
+                lhs_space,
+                rhs_space,
+                Arc::clone(lhs_space.structure()),
+                Arc::clone(rhs_space.structure()),
+                axes,
+            ) {
+                Ok(structure) => Ok(Some(Arc::new(structure))),
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => Ok(None),
+                Err(err) => Err(err),
+            },
+            || {
+                super::fusion::prepare_tensorcontract_fusion_plan_dyn(
+                    rule, dst_space, lhs_space, rhs_space, axes,
+                )
+                .map(Arc::new)
+            },
+        )?;
+        match resolution {
+            Resolution::Core(plan) => plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs),
+            Resolution::DynamicTree(_) | Resolution::Structure(_) => {
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: "storage-direct contraction supports only the canonical \
+                              fully-direct route; this contraction needs tree transforms \
+                              or conjugate structures, which have no device kernels yet",
+                })
+            }
+        }
+    }
+
     /// Executes a resolved contraction on dynamic spaces and raw slices.
     #[allow(clippy::too_many_arguments)]
     fn execute_resolution_dyn<R>(

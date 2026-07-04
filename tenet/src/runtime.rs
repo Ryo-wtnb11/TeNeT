@@ -51,6 +51,10 @@ pub(crate) struct RuntimeState {
     /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
     /// coupled-sector matrices), shared by all decomposition methods.
     pub(crate) dense: tenet_dense::DefaultDenseExecutor,
+    /// CUDA device context when the runtime was built with
+    /// [`RuntimeBuilder::cuda`]; `None` on CPU-only runtimes.
+    #[cfg(feature = "cuda")]
+    pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
 }
 
 /// Dispatches on a [`crate::space::RuleKind`], binding `$rule` to the
@@ -151,7 +155,7 @@ impl Runtime {
     /// only choice; the builder exists so device/cache options (e.g. CUDA)
     /// can land without breaking the construction pattern.
     pub fn builder() -> RuntimeBuilder {
-        RuntimeBuilder {}
+        RuntimeBuilder::default()
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, RuntimeState> {
@@ -183,16 +187,37 @@ impl std::fmt::Debug for Runtime {
 
 /// Builder for [`Runtime`]; see [`Runtime::builder`].
 #[derive(Clone, Debug, Default)]
-pub struct RuntimeBuilder {}
+pub struct RuntimeBuilder {
+    #[cfg(feature = "cuda")]
+    cuda_device: Option<usize>,
+}
 
 impl RuntimeBuilder {
-    /// Finishes the build. Infallible today; returns `Result` so backend
-    /// probing (GPU init, BLAS discovery) can fail here later without an
-    /// API break.
+    /// Attaches a CUDA device (by ordinal) to the runtime. Tensors stay on
+    /// the host until moved explicitly with
+    /// [`crate::prelude::Tensor::to_cuda`]; there are no implicit
+    /// transfers. Device initialization happens in [`Self::build`].
+    #[cfg(feature = "cuda")]
+    pub fn cuda(mut self, device: usize) -> Self {
+        self.cuda_device = Some(device);
+        self
+    }
+
+    /// Finishes the build; fails when a requested backend (e.g. the CUDA
+    /// device) cannot be initialized.
     pub fn build(self) -> Result<Runtime, Error> {
+        #[allow(unused_mut)]
+        let mut state = RuntimeState::default();
+        #[cfg(feature = "cuda")]
+        if let Some(device) = self.cuda_device {
+            state.cuda = Some(
+                tenet_dense::CudaDenseContext::new(device)
+                    .map_err(tenet_tensors::OperationError::Dense)?,
+            );
+        }
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
-                state: Mutex::new(RuntimeState::default()),
+                state: Mutex::new(state),
                 rand_counter: AtomicU64::new(0),
             }),
         })
