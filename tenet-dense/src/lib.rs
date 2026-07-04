@@ -25,7 +25,6 @@ pub enum DenseDType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DenseBackend {
     Tenferro,
-    Strided,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -507,22 +506,6 @@ pub trait DenseExecutor {
     }
 }
 
-/// Low-level dense matmul kernel boundary used by dense executors.
-///
-/// Implementations own the placement-specific rank-2 matmul path. The default
-/// host implementation wraps `strided-einsum2`; future BLAS/C++/CUDA kernels
-/// should implement this trait without changing TensorMap/fusion code.
-pub trait DenseKernelBackend {
-    fn supports_matmul(&self, dtype: DenseDType) -> bool;
-
-    fn matmul_into(
-        &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
-    ) -> Result<(), DenseError>;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DenseError {
     RankMismatch {
@@ -622,13 +605,7 @@ fn max_offset_delta(shape: &[usize], strides: &[usize]) -> Result<usize, DenseEr
 }
 
 #[cfg(feature = "tenferro")]
-pub use strided_adapter::StridedKernelBackend;
-
-#[cfg(feature = "tenferro")]
-pub use tenferro_adapter::{DefaultDenseExecutor, DenseExecutorWithKernel};
-
-#[cfg(feature = "tenferro")]
-mod strided_adapter;
+pub use tenferro_adapter::DefaultDenseExecutor;
 
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage};
@@ -640,7 +617,6 @@ mod cuda_adapter;
 mod tenferro_adapter {
     use super::*;
 
-    use super::strided_adapter::StridedKernelBackend;
     use tenferro_cpu::CpuBackend;
     use tenferro_linalg::LinalgBackend;
     use tenferro_tensor::{
@@ -649,30 +625,15 @@ mod tenferro_adapter {
     };
 
     #[derive(Debug)]
-    pub struct DenseExecutorWithKernel<K> {
-        backend: CpuBackend,
-        kernel: K,
-        matmul_config: DotGeneralConfig,
-    }
-
-    #[derive(Debug)]
     pub struct DefaultDenseExecutor {
-        inner: DenseExecutorWithKernel<StridedKernelBackend>,
+        backend: CpuBackend,
+        matmul_config: DotGeneralConfig,
     }
 
     impl DefaultDenseExecutor {
         pub fn new() -> Self {
             Self {
-                inner: DenseExecutorWithKernel::with_kernel_backend(StridedKernelBackend::new()),
-            }
-        }
-    }
-
-    impl<K> DenseExecutorWithKernel<K> {
-        pub fn with_kernel_backend(kernel: K) -> Self {
-            Self {
                 backend: CpuBackend::new(),
-                kernel,
                 matmul_config: DotGeneralConfig {
                     lhs_contracting_dims: vec![1],
                     rhs_contracting_dims: vec![0],
@@ -680,11 +641,6 @@ mod tenferro_adapter {
                     rhs_batch_dims: Vec::new(),
                 },
             }
-        }
-
-        #[cfg(test)]
-        pub(super) fn kernel_backend(&self) -> &K {
-            &self.kernel
         }
     }
 
@@ -695,57 +651,6 @@ mod tenferro_adapter {
     }
 
     impl DenseExecutor for DefaultDenseExecutor {
-        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.svd(input)
-        }
-
-        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.qr(input)
-        }
-
-        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.eigh(input)
-        }
-
-        fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.inner.eig(input)
-        }
-
-        fn dot_general_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-            config: &DenseDotConfig,
-        ) -> Result<(), DenseError> {
-            self.inner.dot_general_into(output, lhs, rhs, config)
-        }
-
-        fn matmul_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-        ) -> Result<(), DenseError> {
-            self.inner.matmul_into(output, lhs, rhs)
-        }
-
-        fn matmul_axpby_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-            alpha: DenseScalar,
-            beta: DenseScalar,
-        ) -> Result<(), DenseError> {
-            self.inner.matmul_axpby_into(output, lhs, rhs, alpha, beta)
-        }
-    }
-
-    impl<K> DenseExecutor for DenseExecutorWithKernel<K>
-    where
-        K: DenseKernelBackend,
-    {
         fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
             let input = tenferro_view(input)?;
             self.backend
@@ -799,12 +704,14 @@ mod tenferro_adapter {
             lhs: DenseRead<'_>,
             rhs: DenseRead<'_>,
         ) -> Result<(), DenseError> {
-            let dtype = output.dtype();
-            if dtype == lhs.dtype() && dtype == rhs.dtype() && self.kernel.supports_matmul(dtype) {
-                self.kernel.matmul_into(output, lhs, rhs)
-            } else {
-                self.tenferro_matmul_into(output, lhs, rhs)
-            }
+            // GEMM backend selection is owned by tenferro; this seam only
+            // lowers views and reuses the cached rank-2 contraction config.
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            self.backend
+                .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
+                .map_err(|err| tenferro_error("dot_general_read_into", err))
         }
 
         fn matmul_axpby_into(
@@ -815,7 +722,7 @@ mod tenferro_adapter {
             alpha: DenseScalar,
             beta: DenseScalar,
         ) -> Result<(), DenseError> {
-            // Overwrite case keeps the kernel-backend fast path.
+            // Overwrite case keeps the cached-config fast path.
             if alpha.is_one() && beta.is_zero() {
                 return self.matmul_into(output, lhs, rhs);
             }
@@ -840,25 +747,6 @@ mod tenferro_adapter {
             DenseScalar::F64(value) => tenferro_tensor::ContractionScalar::F64(value),
             DenseScalar::C32(value) => tenferro_tensor::ContractionScalar::C32(value),
             DenseScalar::C64(value) => tenferro_tensor::ContractionScalar::C64(value),
-        }
-    }
-
-    impl<K> DenseExecutorWithKernel<K>
-    where
-        K: DenseKernelBackend,
-    {
-        fn tenferro_matmul_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-        ) -> Result<(), DenseError> {
-            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
-            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
-            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
-            self.backend
-                .dot_general_read_into(lhs, rhs, &self.matmul_config, output)
-                .map_err(|err| tenferro_error("dot_general_read_into", err))
         }
     }
 
@@ -1159,60 +1047,6 @@ mod tests {
         let strides = [1, 4];
         let err = DenseView::new(&data, &shape, &strides, 0).unwrap_err();
         assert_eq!(err, DenseError::OutOfBounds);
-    }
-
-    #[cfg(feature = "tenferro")]
-    #[derive(Default)]
-    struct CountingKernelBackend {
-        matmul_calls: usize,
-    }
-
-    #[cfg(feature = "tenferro")]
-    impl DenseKernelBackend for CountingKernelBackend {
-        fn supports_matmul(&self, dtype: DenseDType) -> bool {
-            dtype == DenseDType::F64
-        }
-
-        fn matmul_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-        ) -> Result<(), DenseError> {
-            self.matmul_calls += 1;
-            match (output, lhs, rhs) {
-                (DenseWrite::F64(mut output), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
-                    assert_eq!(lhs.shape(), &[2, 2]);
-                    assert_eq!(rhs.shape(), &[2, 2]);
-                    output.data_mut().fill(7.0);
-                    Ok(())
-                }
-                _ => panic!("CountingKernelBackend should receive only supported F64 matmul"),
-            }
-        }
-    }
-
-    #[cfg(feature = "tenferro")]
-    #[test]
-    fn default_executor_routes_supported_matmul_to_kernel_backend() {
-        let lhs = [1.0, 2.0, 3.0, 4.0];
-        let rhs = [5.0, 6.0, 7.0, 8.0];
-        let mut output = [0.0; 4];
-        let shape = [2, 2];
-        let strides = [1, 2];
-
-        let mut executor =
-            DenseExecutorWithKernel::with_kernel_backend(CountingKernelBackend::default());
-        executor
-            .matmul_into(
-                DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
-                DenseRead::F64(DenseView::new(&lhs, &shape, &strides, 0).unwrap()),
-                DenseRead::F64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
-            )
-            .unwrap();
-
-        assert_eq!(executor.kernel_backend().matmul_calls, 1);
-        assert_eq!(output, [7.0; 4]);
     }
 
     #[cfg(feature = "tenferro")]

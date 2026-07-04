@@ -15,42 +15,34 @@ tenferro = [
     "dep:tenferro-cpu",
     "dep:tenferro-linalg",
     "dep:tenferro-tensor",
-    "dep:strided-einsum2",
 ]
 cpu-faer = [
     "tenferro",
     "tenferro-cpu/cpu-faer",
     "tenferro-linalg/cpu-faer",
-    "strided-einsum2/faer",
-    "strided-einsum2/parallel",
 ]
 cpu-blas-core = [
     "tenferro",
     "tenferro-cpu/cpu-blas",
     "tenferro-linalg/cpu-blas",
-    "strided-einsum2/parallel",
 ]
 cpu-blas = [
     "cpu-blas-core",
-    "strided-einsum2/blas",
 ]
 blas-accelerate = [
     "cpu-blas-core",
     "tenferro-cpu/blas-accelerate",
     "tenferro-linalg/blas-accelerate",
-    "strided-einsum2/blas-accelerate",
 ]
 blas-openblas = [
     "cpu-blas-core",
     "tenferro-cpu/blas-openblas",
     "tenferro-linalg/blas-openblas",
-    "strided-einsum2/blas-openblas",
 ]
 blas-mkl = [
     "cpu-blas-core",
     "tenferro-cpu/blas-mkl",
     "tenferro-linalg/blas-mkl",
-    "strided-einsum2/blas-mkl",
 ]
 cuda = [
     "tenferro",
@@ -61,13 +53,10 @@ provider-inject = [
     "cpu-blas-core",
     "tenferro-cpu/provider-inject",
     "tenferro-linalg/provider-inject",
-    "strided-einsum2/blas-inject",
 ]
 
 [dependencies]
 num-complex = "0.4"
-num-traits = "0.2"
-strided-einsum2 = { version = "0.3", default-features = false, optional = true }
 tenferro-cpu = { path = "../../tenferro-rs/crates/tenferro-cpu", default-features = false, optional = true }
 tenferro-linalg = { path = "../../tenferro-rs/crates/tenferro-linalg", default-features = false, optional = true }
 tenferro-tensor = { path = "../../tenferro-rs/crates/tenferro-tensor", default-features = false, optional = true }
