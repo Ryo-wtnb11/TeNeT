@@ -23,6 +23,6 @@ cuda = ["tenet-dense/cuda", "tenet-operations/cuda"]
 tenet-core = { path = "../tenet-core" }
 tenet-operations = { path = "../tenet-operations", default-features = false }
 tenet-dense = { path = "../tenet-dense", default-features = false }
-strided-kernel = { git = "https://github.com/tensor4all/strided-rs", rev = "4ea9acbaa1422efa2662ff4b25b17cdae28f093d", version = "0.1.0", features = ["parallel"] }
+strided-kernel = { version = "0.3", features = ["parallel"] }
 num-traits = "0.2"
 num-complex = "0.4"
