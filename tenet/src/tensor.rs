@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use num_complex::Complex64;
 use tenet_core::{
-    BlockKey, BlockStructure, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    Placement, SectorId,
+    BlockKey, BlockStructure, FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreeKey,
+    MultiplicityFreeRigidSymbols, Placement, SectorId,
 };
 #[cfg(feature = "cuda")]
-use tenet_core::{FusionTreeKey, SectorLeg, TensorStorage};
+use tenet_core::{SectorLeg, TensorStorage};
 #[cfg(feature = "cuda")]
 use tenet_dense::{
     cuda_eigh_region, cuda_gemm_region_into, cuda_qr_region, cuda_svd_region, CudaDenseContext,
@@ -532,6 +532,292 @@ impl Tensor {
         Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
     }
 
+    /// Shared core of [`Self::id`] / [`Self::isomorphism`] /
+    /// [`Self::isometry`]: checks that the domain fits in the codomain
+    /// (exactly for `embed == false`, isometric embedding for
+    /// `embed == true`) and fills every coupled-sector matrix with the
+    /// (partial) identity, exactly TensorKit's `one!` per coupled block
+    /// (`tensors/linalg.jl:102-158`).
+    fn structural(
+        rt: &Runtime,
+        codomain: Vec<&Space>,
+        domain: Vec<&Space>,
+        embed: bool,
+        what: &str,
+    ) -> Result<Self, Error> {
+        let fused_codomain = Space::fuse_all(&codomain)?;
+        let fused_domain = Space::fuse_all(&domain)?;
+        let fits = if embed {
+            // TensorKit `domain ≾ codomain`: sectorwise embeddable.
+            fused_domain.sectors.iter().all(|&(sector, deg)| {
+                fused_codomain
+                    .sectors
+                    .iter()
+                    .any(|&(s, d)| s == sector && d >= deg)
+            })
+        } else {
+            // TensorKit `domain ≅ codomain`: identical fused sector content.
+            fused_codomain.sectors == fused_domain.sectors
+        };
+        if !fits {
+            return Err(Error::InvalidArgument(format!(
+                "{what}: codomain and domain are not {} (fused sector content differs)",
+                if embed {
+                    "isometrically embeddable"
+                } else {
+                    "isomorphic"
+                }
+            )));
+        }
+        let mut t = Self::build::<_, _, f64>(rt, codomain, domain, Fill::Zeros)?;
+        let regions = sector_regions(t.space.structure(), t.space.nout())?;
+        let Data::F64(data) = &mut t.data else {
+            unreachable!("structural constructors build f64 host tensors");
+        };
+        for region in &regions {
+            for i in 0..region.rows.min(region.cols) {
+                data[region.offset + i * (region.rows + 1)] = 1.0;
+            }
+        }
+        Ok(t)
+    }
+
+    /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`,
+    /// `tensors/linalg.jl:75-82`): every coupled-sector block is the
+    /// identity matrix.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::u1([(0, 2), (1, 1)]);
+    /// let t = Tensor::rand(&rt, [&v], [&v])?;
+    /// let id = Tensor::id(&rt, [&v])?;
+    /// assert_eq!(id.compose(&t)?.data(), t.data());
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn id<'a, S>(rt: &Runtime, spaces: S) -> Result<Self, Error>
+    where
+        S: IntoIterator<Item = &'a Space>,
+    {
+        let spaces: Vec<&Space> = spaces.into_iter().collect();
+        Self::structural(rt, spaces.clone(), spaces, false, "id")
+    }
+
+    /// Complex (c64) [`Self::id`].
+    pub fn id_c64<'a, S>(rt: &Runtime, spaces: S) -> Result<Self, Error>
+    where
+        S: IntoIterator<Item = &'a Space>,
+    {
+        Ok(Self::id(rt, spaces)?.to_c64())
+    }
+
+    /// The canonical structural isomorphism `codomain <- domain` (TensorKit
+    /// `isomorphism(W ← V)`, `tensors/linalg.jl:102-109`): every
+    /// coupled-sector block is the identity matrix, which requires the fused
+    /// codomain and domain to carry identical sector content. The
+    /// finite-torus norm fuser is `isomorphism(fuse(dual(l) ⊗ l) ←
+    /// dual(l) ⊗ l)`.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::u1([(0, 1), (1, 1)]);
+    /// let fused = v.dual().fuse(&v)?;
+    /// let f = Tensor::isomorphism(&rt, [&fused], [&v.dual(), &v])?;
+    /// // Unitary: f† ∘ f is the identity on the product space.
+    /// let roundtrip = f.adjoint()?.compose(&f)?;
+    /// assert_eq!(roundtrip.data(), Tensor::id(&rt, [&v.dual(), &v])?.data());
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn isomorphism<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Self::structural(
+            rt,
+            codomain.into_iter().collect(),
+            domain.into_iter().collect(),
+            false,
+            "isomorphism",
+        )
+    }
+
+    /// Complex (c64) [`Self::isomorphism`].
+    pub fn isomorphism_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Ok(Self::isomorphism(rt, codomain, domain)?.to_c64())
+    }
+
+    /// TensorKit `unitary(W ← V)` (`tensors/linalg.jl:129-132`): identical
+    /// to [`Self::isomorphism`] — TensorKit only adds a Euclidean
+    /// inner-product check, which every tenet fusion rule satisfies.
+    pub fn unitary<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Self::structural(
+            rt,
+            codomain.into_iter().collect(),
+            domain.into_iter().collect(),
+            false,
+            "unitary",
+        )
+    }
+
+    /// Complex (c64) [`Self::unitary`].
+    pub fn unitary_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Ok(Self::unitary(rt, codomain, domain)?.to_c64())
+    }
+
+    /// The canonical isometry `codomain <- domain` (TensorKit
+    /// `isometry(W ← V)`, `tensors/linalg.jl:149-158`): each coupled-sector
+    /// block is the partial identity (the first `cols` columns of the
+    /// identity), so `t† ∘ t = id(domain)`. Requires the domain to embed
+    /// isometrically in the codomain (sectorwise `deg_domain <=
+    /// deg_codomain`).
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let small = Space::su2([(0, 1), (1, 1)]);
+    /// let big = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    /// let w = Tensor::isometry(&rt, [&big], [&small])?;
+    /// let id = Tensor::id(&rt, [&small])?;
+    /// assert_eq!(w.adjoint()?.compose(&w)?.data(), id.data());
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn isometry<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Self::structural(
+            rt,
+            codomain.into_iter().collect(),
+            domain.into_iter().collect(),
+            true,
+            "isometry",
+        )
+    }
+
+    /// Complex (c64) [`Self::isometry`].
+    pub fn isometry_c64<'a, C, D>(rt: &Runtime, codomain: C, domain: D) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Ok(Self::isometry(rt, codomain, domain)?.to_c64())
+    }
+
+    /// TensorKit `twist(t, inds)` (`tensors/indexmanipulations.jl:62-97`):
+    /// multiplies each fusion-tree block by the product over `legs` (flat
+    /// leg indices, codomain first) of the ribbon-twist eigenvalue θ of that
+    /// leg's uncoupled sector on the block's fusion tree. θ = −1 for odd
+    /// fermionic sectors and +1 for every bosonic sector, so this is a no-op
+    /// on purely bosonic legs and an involution on fermionic ones.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::fz2([(0, 1), (1, 1)]);
+    /// let t = Tensor::rand(&rt, [&v], [&v])?;
+    /// let twisted = t.twist(&[0])?;
+    /// assert_eq!(twisted.twist(&[0])?.data(), t.data()); // θ² = 1
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
+        let rank = self.rank();
+        if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+            return Err(Error::InvalidArgument(format!(
+                "twist leg {leg} out of range for rank {rank}"
+            )));
+        }
+        if legs.is_empty() {
+            return Ok(self.clone());
+        }
+        let data = match &self.data {
+            Data::F64(data) => {
+                let mut out = data.clone();
+                self.twist_impl(&mut out, legs)?;
+                Data::F64(out)
+            }
+            Data::C64(data) => {
+                let mut out = data.clone();
+                self.twist_impl(&mut out, legs)?;
+                Data::C64(out)
+            }
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => return Err(device_unsupported("twist")),
+        };
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data,
+        })
+    }
+
+    fn twist_impl<D: UserScalar>(&self, data: &mut [D], legs: &[usize]) -> Result<(), Error> {
+        let nout = self.codomain_rank();
+        let structure = self.space.structure();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let theta: f64 = match block.key() {
+                BlockKey::FusionTree(key) => with_rule!(self.rule, rule, {
+                    legs.iter()
+                        .map(|&leg| {
+                            rule.twist_scalar(if leg < nout {
+                                key.codomain_uncoupled()[leg]
+                            } else {
+                                key.domain_uncoupled()[leg - nout]
+                            })
+                        })
+                        .product()
+                }),
+                _ => 1.0,
+            };
+            if theta == 1.0 {
+                continue;
+            }
+            let factor = D::from_real(theta);
+            let shape = block.shape();
+            let strides = block.strides();
+            let offset = block.offset();
+            let count: usize = shape.iter().product();
+            let mut indices = vec![0usize; shape.len()];
+            for _ in 0..count {
+                let position = offset
+                    + indices
+                        .iter()
+                        .zip(strides)
+                        .map(|(&i, &s)| i * s)
+                        .sum::<usize>();
+                data[position] = data[position] * factor;
+                for axis in 0..shape.len() {
+                    indices[axis] += 1;
+                    if indices[axis] < shape[axis] {
+                        break;
+                    }
+                    indices[axis] = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Wraps a same-runtime, same-rule result of an expert-layer call.
     fn with(&self, space: DynamicFusionMapSpace, data: Data) -> Self {
         Self {
@@ -802,7 +1088,11 @@ impl Tensor {
     }
 
     /// Categorical composition `self * rhs`: contracts `self`'s domain with
-    /// `rhs`'s codomain, leg by leg. TensorKit `A * B`.
+    /// `rhs`'s codomain, leg by leg. TensorKit `A * B` (`mul!` on coupled
+    /// blocks), which — unlike [`Self::contract`] / TensorKit
+    /// `tensorcontract!` — never inserts the fermionic supertrace twist on
+    /// dual composed legs (TensorKit `tensoroperations.jl:388-420` twists
+    /// only in `blas_contract!`, never in `mul!`).
     pub fn compose(&self, rhs: &Self) -> Result<Self, Error> {
         if self.domain_rank() != rhs.codomain_rank() {
             return Err(Error::InvalidArgument(format!(
@@ -813,6 +1103,23 @@ impl Tensor {
         }
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..rhs.codomain_rank()).collect();
+        // `contract` twists the dual contracted rhs legs (tensorcontract!
+        // parity); the twist is involutive (θ = ±1), so pre-twisting those
+        // legs cancels it exactly and yields mul! semantics.
+        let fermionic = with_rule!(self.rule, rule, {
+            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
+        });
+        if fermionic {
+            let hom = rhs.space.homspace();
+            let dual_legs: Vec<usize> = rhs_axes
+                .iter()
+                .copied()
+                .filter(|&axis| hom.codomain().legs()[axis].is_dual())
+                .collect();
+            if !dual_legs.is_empty() {
+                return self.contract(&rhs.twist(&dual_legs)?, &lhs_axes, &rhs_axes);
+            }
+        }
         self.contract(rhs, &lhs_axes, &rhs_axes)
     }
 
@@ -1706,16 +2013,18 @@ impl Tensor {
 /// One coupled sector of the packed coupled-sector matrix layout: a
 /// contiguous column-major `rows x cols` region at `offset`, with the
 /// per-fusion-tree row/column extents needed for factor assembly.
-#[cfg(feature = "cuda")]
 struct SectorRegion {
     /// Coupled sector (`None` only for degenerate vacuum-coupled trees).
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     coupled: Option<SectorId>,
     rows: usize,
     cols: usize,
     offset: usize,
     /// `(codomain tree, row offset, row count)` in row order.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     row_trees: Vec<(FusionTreeKey, usize, usize)>,
     /// `(domain tree, column offset, column count)` in column order.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     col_trees: Vec<(FusionTreeKey, usize, usize)>,
 }
 
@@ -1735,18 +2044,17 @@ fn require_cuda(cuda: Option<&mut CudaDenseContext>) -> Result<&mut CudaDenseCon
     })
 }
 
-#[cfg(feature = "cuda")]
 fn internal_layout_error(what: &str) -> Error {
     Error::InvalidArgument(format!(
-        "internal device-layout invariant violated ({what}); please report this"
+        "internal coupled-layout invariant violated ({what}); please report this"
     ))
 }
 
 /// Enumerates the coupled-sector matrix regions of a coupled-layout block
 /// structure and verifies that every fusion-tree block addresses exactly the
-/// packed column-major sector matrix. Device paths rely on these offsets, so
-/// any other layout is an explicit error, never silent misaddressing.
-#[cfg(feature = "cuda")]
+/// packed column-major sector matrix. The structural constructors and the
+/// device paths rely on these offsets, so any other layout is an explicit
+/// error, never silent misaddressing.
 fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Vec<SectorRegion>, Error> {
     let mut regions: Vec<SectorRegion> = Vec::new();
     let mut block_index = 0usize;
@@ -1754,7 +2062,7 @@ fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Vec<SectorR
     while block_index < structure.block_count() {
         let first = structure.block(block_index)?;
         let BlockKey::FusionTree(first_key) = first.key() else {
-            return Err(device_unsupported("non-fusion-tree block layouts"));
+            return Err(internal_layout_error("non-fusion-tree block layout"));
         };
         let coupled = first_key.codomain_tree().coupled();
 
@@ -1767,7 +2075,7 @@ fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Vec<SectorR
         while end < structure.block_count() {
             let block = structure.block(end)?;
             let BlockKey::FusionTree(key) = block.key() else {
-                return Err(device_unsupported("non-fusion-tree block layouts"));
+                return Err(internal_layout_error("non-fusion-tree block layout"));
             };
             if key.codomain_tree().coupled() != coupled {
                 break;
@@ -1825,12 +2133,12 @@ fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Vec<SectorR
             if block.strides() != expected_strides.as_slice()
                 || block.offset() != offset + row_offset + rows * col_offset
             {
-                return Err(device_unsupported("non-packed coupled-sector layouts"));
+                return Err(internal_layout_error("non-packed coupled-sector layout"));
             }
             covered += shape.iter().product::<usize>();
         }
         if covered != rows * cols {
-            return Err(device_unsupported("coupled sectors with layout holes"));
+            return Err(internal_layout_error("coupled sector with layout holes"));
         }
 
         regions.push(SectorRegion {

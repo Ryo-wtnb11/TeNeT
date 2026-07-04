@@ -1159,6 +1159,30 @@ fn fuser_contraction_and_twist_match_tensorkit_fz2() {
         fuser_oracle_scalar(&rt, &l, &m, &[0], label),
         -2.02938887129e6,
     );
+
+    // compose is TensorKit `*` (mul!, no twist) while contract is
+    // TensorKit `tensorcontract!`, which twists the dual contracted legs
+    // (`tensoroperations.jl` blas_contract!): Julia verifies
+    // `@tensor F[f; a b] * t[a b; k] == twist(F, 2) * t` exactly, so the
+    // contract route must land on the tw[2] oracle instead.
+    let fill = |key: &BlockKey, indices: &[usize]| -> f64 {
+        let BlockKey::FusionTree(key) = key else {
+            panic!("expected fusion-tree block keys");
+        };
+        let labels: Vec<f64> = key
+            .codomain_uncoupled()
+            .iter()
+            .chain(key.domain_uncoupled())
+            .map(|&sector| label(sector))
+            .collect();
+        oracle_entry(&labels, indices)
+    };
+    let fused = l.dual().fuse(&l).unwrap();
+    let f = Tensor::isomorphism(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    let t = Tensor::from_block_fn(&rt, [&l.dual(), &l], [&m], fill).unwrap();
+    let w = Tensor::from_block_fn(&rt, [&fused], [&m], fill).unwrap();
+    let contracted = f.contract(&t, &[1, 2], &[0, 1]).unwrap();
+    assert_rel(w.inner(&contracted).unwrap().re, -2.01748090133e6);
 }
 
 #[test]

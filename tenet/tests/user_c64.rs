@@ -329,3 +329,39 @@ fn mixed_dtype_operations_are_rejected() {
     assert!(widened.compose(&b).is_ok());
     assert!((widened.norm().unwrap() - a.norm().unwrap()).abs() <= 1e-15);
 }
+
+#[test]
+fn structural_constructors_c64_and_twist_on_c64_data() {
+    let rt = Runtime::builder().build().unwrap();
+    let l = Space::fz2([(0, 1), (1, 2)]);
+    let fused = l.dual().fuse(&l).unwrap();
+
+    // c64 structural constructors are the widened f64 ones.
+    let id = Tensor::id_c64(&rt, [&l]).unwrap();
+    assert_eq!(id.dtype(), Dtype::C64);
+    assert_eq!(
+        id.data_c64(),
+        Tensor::id(&rt, [&l]).unwrap().to_c64().data_c64()
+    );
+    let f = Tensor::isomorphism_c64(&rt, [&fused], [&l.dual(), &l]).unwrap();
+    assert_eq!(f.dtype(), Dtype::C64);
+    assert_eq!(
+        Tensor::unitary_c64(&rt, [&fused], [&l.dual(), &l])
+            .unwrap()
+            .data_c64(),
+        f.data_c64()
+    );
+    let big = Space::fz2([(0, 2), (1, 3)]);
+    let w = Tensor::isometry_c64(&rt, [&big], [&l]).unwrap();
+    assert_eq!(
+        w.adjoint().unwrap().compose(&w).unwrap().data_c64(),
+        id.data_c64()
+    );
+
+    // twist preserves the c64 dtype and stays an involution.
+    let t = Tensor::rand_with_seed_c64(&rt, [&l.dual()], [&l], 11).unwrap();
+    let twisted = t.twist(&[0]).unwrap();
+    assert_eq!(twisted.dtype(), Dtype::C64);
+    assert_ne!(twisted.data_c64(), t.data_c64());
+    assert_eq!(twisted.twist(&[0]).unwrap().data_c64(), t.data_c64());
+}
