@@ -18,6 +18,9 @@ blas-openblas = ["tenet-dense/blas-openblas", "tenet-tensors/blas-openblas", "te
 blas-mkl = ["tenet-dense/blas-mkl", "tenet-tensors/blas-mkl", "tenet-matrixalgebra/blas-mkl"]
 provider-inject = ["tenet-dense/provider-inject", "tenet-tensors/provider-inject"]
 cuda = ["tenet-dense/cuda", "tenet-tensors/cuda"]
+# Marker only: adds the Optimizer::Optimal variant; the search itself lives
+# in tenet-network (whose opt-path feature enables this one).
+opt-path = []
 
 [dependencies]
 num-complex = "0.4"

@@ -1,5 +1,5 @@
 //! The topology-keyed plan cache behind `tensor!` / `Network::contract`.
-//! The cache is thread-local and every #[test] runs on its own thread, so
+//! The cache is per-Runtime and every #[test] builds its own runtime, so
 //! counters start from zero in each test.
 
 use tenet::prelude::*;
@@ -27,18 +27,21 @@ fn chain(rt: &Runtime, dim: usize, seed: u64) -> (Tensor, Tensor) {
 
 #[test]
 fn second_identical_call_hits() {
-    clear_plan_cache();
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 2, 301);
 
     let first = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (0, 1, 1));
 
     let second = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (1, 1, 1));
     assert_close(first.data(), second.data(), 0.0);
+
+    clear_plan_cache(&rt);
+    let stats = plan_cache_stats(&rt);
+    assert_eq!((stats.hits, stats.misses, stats.entries), (0, 0, 0));
 }
 
 /// Same topology, mildly drifted dims (well under the drift factor): the
@@ -46,15 +49,14 @@ fn second_identical_call_hits() {
 /// topology key exists for — and the result is still correct.
 #[test]
 fn same_topology_different_dims_hits_and_stays_correct() {
-    clear_plan_cache();
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 4, 311);
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats().misses, 1);
+    assert_eq!(plan_cache_stats(&rt).misses, 1);
 
     let (c, d) = chain(&rt, 5, 312); // ratio 5/4 = 1.25 < 2.0 default
     let cached = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!(
         (stats.hits, stats.misses, stats.replans, stats.entries),
         (1, 1, 0, 1)
@@ -69,14 +71,13 @@ fn same_topology_different_dims_hits_and_stays_correct() {
 /// the snapshot, still one entry per topology.
 #[test]
 fn drift_beyond_factor_replans() {
-    clear_plan_cache();
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 2, 321);
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
 
     let (c, d) = chain(&rt, 8, 322); // ratio 4 > 2.0 default
     let result = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!(
         (stats.hits, stats.misses, stats.replans, stats.entries),
         (0, 1, 1, 1)
@@ -86,22 +87,23 @@ fn drift_beyond_factor_replans() {
 
     // The snapshot was refreshed: repeating the large shape now hits.
     let _ = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats().hits, 1);
+    assert_eq!(plan_cache_stats(&rt).hits, 1);
 }
 
 #[test]
 fn always_reuse_policy_never_replans() {
-    clear_plan_cache();
-    configure_plan_cache(PlanCacheConfig {
-        replan: ReplanPolicy::AlwaysReuse,
-        ..PlanCacheConfig::default()
-    });
-    let rt = Runtime::builder().build().unwrap();
+    let rt = Runtime::builder()
+        .plan_cache(PlanCacheConfig {
+            replan: ReplanPolicy::AlwaysReuse,
+            ..PlanCacheConfig::default()
+        })
+        .build()
+        .unwrap();
     let (a, b) = chain(&rt, 2, 331);
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
     let (c, d) = chain(&rt, 16, 332); // ratio 8, reused anyway
     let result = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.replans), (1, 0));
     let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
     assert_close(result.data(), expected.data(), 1e-12);
@@ -109,7 +111,6 @@ fn always_reuse_policy_never_replans() {
 
 #[test]
 fn different_topologies_get_separate_entries() {
-    clear_plan_cache();
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 2, 341);
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
@@ -117,7 +118,7 @@ fn different_topologies_get_separate_entries() {
     let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
     // conj marker changes the topology too.
     let _ = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (0, 3, 3));
 }
 
@@ -125,72 +126,76 @@ fn different_topologies_get_separate_entries() {
 /// entry, not the whole cache.
 #[test]
 fn eviction_drops_least_recently_used_topology() {
-    clear_plan_cache();
-    configure_plan_cache(PlanCacheConfig {
-        capacity: 2,
-        ..PlanCacheConfig::default()
-    });
-    let rt = Runtime::builder().build().unwrap();
+    let rt = Runtime::builder()
+        .plan_cache(PlanCacheConfig {
+            capacity: 2,
+            ..PlanCacheConfig::default()
+        })
+        .build()
+        .unwrap();
     let (a, b) = chain(&rt, 2, 371);
 
     // Three distinct topologies (different output orders).
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T1
     let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T2
     let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T3 evicts T1
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.misses, stats.entries), (3, 2));
 
     // T2 and T3 survived (hits), T1 was evicted (miss again).
     let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
     let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats().hits, 2);
+    assert_eq!(plan_cache_stats(&rt).hits, 2);
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (2, 4, 2));
 }
 
 /// A hit refreshes recency: the touched entry survives the next eviction.
 #[test]
 fn touched_entry_survives_eviction() {
-    clear_plan_cache();
-    configure_plan_cache(PlanCacheConfig {
-        capacity: 2,
-        ..PlanCacheConfig::default()
-    });
-    let rt = Runtime::builder().build().unwrap();
+    let rt = Runtime::builder()
+        .plan_cache(PlanCacheConfig {
+            capacity: 2,
+            ..PlanCacheConfig::default()
+        })
+        .build()
+        .unwrap();
     let (a, b) = chain(&rt, 2, 381);
 
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T1
     let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T2
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // touch T1
     let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T3 evicts T2
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (1, 3, 2));
 
     // T1 was touched, so it survived; T2 is gone.
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats().hits, 2);
+    assert_eq!(plan_cache_stats(&rt).hits, 2);
     let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (2, 4, 2));
 }
 
 #[test]
 fn disabled_cache_plans_fresh_every_call() {
-    clear_plan_cache();
-    configure_plan_cache(PlanCacheConfig {
-        enabled: false,
-        ..PlanCacheConfig::default()
-    });
     let rt = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &rt,
+        PlanCacheConfig {
+            enabled: false,
+            ..PlanCacheConfig::default()
+        },
+    );
     let (a, b) = chain(&rt, 2, 351);
     let first = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
     let second = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (0, 0, 0));
     assert_close(first.data(), second.data(), 0.0);
     // Default config really is enabled + greedy.
-    assert!(plan_cache_config().enabled == false);
+    assert!(plan_cache_config(&rt).enabled == false);
 }
 
 /// Per-call optimizer override through the Network API keys separately.
@@ -198,7 +203,6 @@ fn disabled_cache_plans_fresh_every_call() {
 #[test]
 fn optimizer_override_keys_separately() {
     use tenet_network::{NetOperand, Network};
-    clear_plan_cache();
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 2, 361);
     let operands = [
@@ -222,12 +226,12 @@ fn optimizer_override_keys_separately() {
     let optimal = network
         .contract_with(&tensors, &Optimizer::Optimal)
         .unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.misses, stats.entries), (2, 2)); // separate keys
     let _ = network
         .contract_with(&tensors, &Optimizer::Optimal)
         .unwrap();
-    assert_eq!(plan_cache_stats().hits, 1);
+    assert_eq!(plan_cache_stats(&rt).hits, 1);
     assert_close(greedy.data(), optimal.data(), 1e-12);
 }
 
@@ -235,7 +239,6 @@ fn optimizer_override_keys_separately() {
 #[test]
 fn contract_with_explicit_greedy_shares_the_default_key() {
     use tenet_network::{NetOperand, Network};
-    clear_plan_cache();
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 2, 361);
     let operands = [
@@ -257,7 +260,7 @@ fn contract_with_explicit_greedy_shares_the_default_key() {
 
     let via_default = network.contract(&tensors).unwrap();
     let via_explicit = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
-    let stats = plan_cache_stats();
+    let stats = plan_cache_stats(&rt);
     assert_eq!((stats.hits, stats.misses, stats.entries), (1, 1, 1));
     assert_close(via_default.data(), via_explicit.data(), 0.0);
 }

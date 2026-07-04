@@ -609,6 +609,11 @@ impl Tensor {
         })
     }
 
+    /// The [`Runtime`] this tensor was created from (a shared handle).
+    pub fn runtime(&self) -> &Runtime {
+        &self.rt
+    }
+
     /// Number of codomain legs.
     pub fn codomain_rank(&self) -> usize {
         self.space.nout()

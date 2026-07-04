@@ -8,117 +8,30 @@
 //! truncation drifts bond dimensions every sweep — an exact-dims key would
 //! miss every iteration. Each entry stores the dimensions it was planned
 //! under and its estimated cost; the [`ReplanPolicy`] decides when drift has
-//! grown enough to re-plan.
+//! grown enough to re-plan. Eviction is LRU (same mechanism as the
+//! resolution cache in `tenet-tensors`).
 //!
-//! Storage is thread-local. The preferred owner is the user-layer `Runtime`
-//! (one cache per runtime, configured on `Runtime::builder()`), but the plan
-//! types live in this crate and `tenet` cannot depend on it; a thread-local
-//! in this crate gives the same behavior for the user layer's documented
-//! single-threaded driving model. Moving ownership onto the `Runtime`
-//! builder is a follow-up once a type-erased cache slot lands there.
+//! Storage is per-[`Runtime`]: the configuration value types live in
+//! `tenet::plancache` (set them on `Runtime::builder()` or with
+//! [`configure_plan_cache`]), and the cache state sits in the runtime's
+//! type-erased plan-cache slot, claimed and downcast by this crate. The
+//! operands' runtime is resolved per call, so different runtimes never share
+//! plans or counters.
 
-use std::cell::RefCell;
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use tenet::prelude::{Error, Tensor};
+use tenet::prelude::{Error, Runtime, Tensor};
+
+pub use tenet::plancache::{
+    Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
+    DEFAULT_REPLAN_DRIFT_FACTOR,
+};
 
 use crate::labels::TemporaryLabel;
 use crate::network::{Network, PlannedNetwork};
 use crate::optimizer::GreedyDenseOptimizer;
-
-/// Which contraction-order search to run: a hashable value type (usable as
-/// a cache-key component and as a process-wide default) rather than a trait
-/// object. `#[non_exhaustive]` so future external searches (e.g. a
-/// cotengrust adapter variant carrying its config) slot in without a
-/// breaking change.
-#[non_exhaustive]
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Optimizer {
-    /// Greedy pairwise search ([`GreedyDenseOptimizer`]); the default.
-    #[default]
-    Greedy,
-    /// Exhaustive optimal search (opt_einsum `"optimal"`; small networks
-    /// only).
-    #[cfg(feature = "opt-path")]
-    Optimal,
-}
-
-/// When to re-plan a topology-matched cache entry whose leg dimensions have
-/// drifted from the snapshot it was planned under. Reusing is always
-/// *correct* (a pairwise order is dimension-independent); re-planning only
-/// restores *optimality*.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ReplanPolicy {
-    /// Always reuse the cached order, whatever the current dimensions.
-    AlwaysReuse,
-    /// Re-plan when any leg dimension differs from the snapshot by more
-    /// than this factor (as a ratio, in either direction).
-    DriftFactor(f64),
-}
-
-/// Default [`ReplanPolicy::DriftFactor`].
-///
-/// Rationale: truncation moves bond dimensions by a few percent per sweep,
-/// which never changes which pairwise order wins, so those calls must hit.
-/// Once some leg has grown or shrunk past 2x its planning-time value the
-/// network's cost balance has changed qualitatively and a fresh (cheap for
-/// greedy, expensive for exhaustive — which is exactly when hits matter)
-/// search is worth it.
-pub const DEFAULT_REPLAN_DRIFT_FACTOR: f64 = 2.0;
-
-impl Default for ReplanPolicy {
-    fn default() -> Self {
-        Self::DriftFactor(DEFAULT_REPLAN_DRIFT_FACTOR)
-    }
-}
-
-/// Default maximum number of cached plans (per thread).
-///
-/// Rationale: an entry is plan metadata only (label lists, a step list and
-/// a dims snapshot — well under a kilobyte for realistic networks), so 256
-/// bounds the cache to a few hundred kilobytes while covering drivers that
-/// cycle through many distinct expressions (e.g. every bond of a large
-/// unit cell) without eviction thrash.
-pub const DEFAULT_PLAN_CACHE_CAPACITY: usize = 256;
-
-/// Plan-cache behavior; set with [`configure_plan_cache`].
-#[derive(Clone, Debug)]
-pub struct PlanCacheConfig {
-    /// Master switch; `false` makes every [`Network::contract`] plan fresh.
-    pub enabled: bool,
-    /// Maximum cached entries before eviction.
-    pub capacity: usize,
-    /// When to re-plan on dimension drift.
-    pub replan: ReplanPolicy,
-    /// Default optimizer for [`Network::contract`] (the `tensor!` path).
-    pub optimizer: Optimizer,
-}
-
-impl Default for PlanCacheConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            capacity: DEFAULT_PLAN_CACHE_CAPACITY,
-            replan: ReplanPolicy::default(),
-            optimizer: Optimizer::default(),
-        }
-    }
-}
-
-/// Counters for tests and diagnostics; see [`plan_cache_stats`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PlanCacheStats {
-    /// Topology hits that reused the cached order.
-    pub hits: u64,
-    /// Topology misses (planned and inserted fresh).
-    pub misses: u64,
-    /// Topology hits re-planned because dimension drift exceeded the
-    /// [`ReplanPolicy`].
-    pub replans: u64,
-    /// Current number of cached plans.
-    pub entries: usize,
-}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct OperandTopology {
@@ -150,7 +63,6 @@ struct CacheEntry {
 
 #[derive(Default)]
 struct PlanCache {
-    config: PlanCacheConfig,
     hits: u64,
     misses: u64,
     replans: u64,
@@ -161,6 +73,13 @@ struct PlanCache {
     lru_order: VecDeque<NetworkTopology>,
 }
 
+// The cache lives in the runtime's `dyn Any + Send` slot; plans are
+// step lists + label vectors, so this holds by construction.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<PlanCache>();
+};
+
 /// Move `key` to the most-recently-used end of `order`.
 fn touch_lru_key(order: &mut VecDeque<NetworkTopology>, key: &NetworkTopology) {
     if let Some(position) = order.iter().position(|stored| stored == key) {
@@ -169,24 +88,28 @@ fn touch_lru_key(order: &mut VecDeque<NetworkTopology>, key: &NetworkTopology) {
     order.push_back(key.clone());
 }
 
-thread_local! {
-    static PLAN_CACHE: RefCell<PlanCache> = RefCell::new(PlanCache::default());
+/// The runtime slot's cache, claimed (created) on first use.
+fn cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> &mut PlanCache {
+    slot.get_or_insert_with(|| Box::new(PlanCache::default()))
+        .downcast_mut::<PlanCache>()
+        .expect("runtime plan-cache slot claimed by another type")
 }
 
-/// Replaces the plan-cache configuration (thread-local, like the cache).
-pub fn configure_plan_cache(config: PlanCacheConfig) {
-    PLAN_CACHE.with(|cache| cache.borrow_mut().config = config);
+/// Replaces the runtime's plan-cache configuration (the builder-time
+/// equivalent is `Runtime::builder().plan_cache(config)`).
+pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
+    runtime.set_plan_cache_config(config);
 }
 
-/// The current plan-cache configuration.
-pub fn plan_cache_config() -> PlanCacheConfig {
-    PLAN_CACHE.with(|cache| cache.borrow().config.clone())
+/// The runtime's current plan-cache configuration.
+pub fn plan_cache_config(runtime: &Runtime) -> PlanCacheConfig {
+    runtime.plan_cache_config()
 }
 
 /// Hit/miss/re-plan counters and the current entry count.
-pub fn plan_cache_stats() -> PlanCacheStats {
-    PLAN_CACHE.with(|cache| {
-        let cache = cache.borrow();
+pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
+    runtime.with_plan_cache_slot(|slot| {
+        let cache = cache_mut(slot);
         PlanCacheStats {
             hits: cache.hits,
             misses: cache.misses,
@@ -197,9 +120,9 @@ pub fn plan_cache_stats() -> PlanCacheStats {
 }
 
 /// Drops every cached plan and resets the counters (not the configuration).
-pub fn clear_plan_cache() {
-    PLAN_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+pub fn clear_plan_cache(runtime: &Runtime) {
+    runtime.with_plan_cache_slot(|slot| {
+        let cache = cache_mut(slot);
         cache.map.clear();
         cache.lru_order.clear();
         cache.hits = 0;
@@ -240,17 +163,32 @@ fn plan_fresh(
             tensors,
             &crate::pathopt::OptEinsumPathOptimizer::new(crate::pathopt::PathStrategy::Optimal),
         ),
+        // `Optimizer` is #[non_exhaustive] and defined in `tenet`; variants
+        // this build has no search for (e.g. Optimal without `opt-path`)
+        // are an explicit error rather than a silent greedy fallback.
+        #[allow(unreachable_patterns)]
+        other => Err(Error::InvalidArgument(format!(
+            "optimizer {other:?} is not available in this build \
+             (is the `opt-path` feature enabled?)"
+        ))),
     }
 }
 
 /// Cache-aware planning for [`Network::contract`]: reuse a topology-matched
-/// plan (subject to the drift policy), otherwise plan fresh and cache.
+/// plan from the operands' runtime (subject to the drift policy), otherwise
+/// plan fresh and cache.
 pub(crate) fn get_or_plan(
     network: &Network,
     tensors: &[&Tensor],
     optimizer: &Optimizer,
 ) -> Result<Arc<PlannedNetwork>, Error> {
-    if !PLAN_CACHE.with(|cache| cache.borrow().config.enabled) {
+    // The cache lives on the operands' runtime; step execution would reject
+    // mixed-runtime operands anyway, so the first operand's runtime is it.
+    let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
+        return Ok(Arc::new(plan_fresh(network, tensors, optimizer)?));
+    };
+    let config = runtime.plan_cache_config();
+    if !config.enabled {
         return Ok(Arc::new(plan_fresh(network, tensors, optimizer)?));
     }
 
@@ -284,11 +222,10 @@ pub(crate) fn get_or_plan(
         Replan,
         Miss,
     }
-    let outcome = PLAN_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let policy = cache.config.replan;
+    let outcome = runtime.with_plan_cache_slot(|slot| {
+        let cache = cache_mut(slot);
         match cache.map.get(&topology) {
-            Some(entry) if !drifted(policy, &entry.dims_snapshot, &dims) => {
+            Some(entry) if !drifted(config.replan, &entry.dims_snapshot, &dims) => {
                 let planned = Arc::clone(&entry.planned);
                 cache.hits += 1;
                 touch_lru_key(&mut cache.lru_order, &topology);
@@ -304,8 +241,8 @@ pub(crate) fn get_or_plan(
 
     let planned = Arc::new(plan_fresh(network, tensors, optimizer)?);
     let cost = planned.plan().total_cost();
-    PLAN_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    runtime.with_plan_cache_slot(|slot| {
+        let cache = cache_mut(slot);
         match outcome {
             Outcome::Replan => cache.replans += 1,
             _ => cache.misses += 1,
@@ -319,7 +256,7 @@ pub(crate) fn get_or_plan(
             },
         );
         touch_lru_key(&mut cache.lru_order, &topology);
-        while cache.map.len() > cache.config.capacity {
+        while cache.map.len() > config.capacity {
             let Some(oldest) = cache.lru_order.pop_front() else {
                 break;
             };

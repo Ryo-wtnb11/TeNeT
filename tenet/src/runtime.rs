@@ -1,6 +1,7 @@
 //! User-layer runtime: owns the per-rule execution/cache state so everyday
 //! tensor code never passes explicit contexts around.
 
+use std::any::Any;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -12,6 +13,7 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
+use crate::plancache::{Optimizer, PlanCacheConfig};
 
 pub(crate) type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
@@ -55,6 +57,14 @@ pub(crate) struct RuntimeState {
     /// [`RuntimeBuilder::cuda`]; `None` on CPU-only runtimes.
     #[cfg(feature = "cuda")]
     pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
+    /// Contraction-plan cache configuration (the cache state itself lives
+    /// in `plan_cache_slot`).
+    pub(crate) plan_cache_config: PlanCacheConfig,
+    /// Type-erased contraction-plan cache. The cache and plan types live in
+    /// `tenet-network`, which depends on this crate, so the runtime can only
+    /// hold them behind `dyn Any`; `tenet-network` claims and downcasts the
+    /// slot on first use.
+    pub(crate) plan_cache_slot: Option<Box<dyn Any + Send>>,
 }
 
 /// Dispatches on a [`crate::space::RuleKind`], binding `$rule` to the
@@ -171,6 +181,29 @@ impl Runtime {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// Snapshot of this runtime's contraction-plan-cache configuration.
+    pub fn plan_cache_config(&self) -> PlanCacheConfig {
+        self.lock().plan_cache_config.clone()
+    }
+
+    /// Replaces the contraction-plan-cache configuration.
+    pub fn set_plan_cache_config(&self, config: PlanCacheConfig) {
+        self.lock().plan_cache_config = config;
+    }
+
+    /// Locked access to the type-erased contraction-plan-cache slot (the
+    /// cache type lives in `tenet-network`, which claims and downcasts the
+    /// slot on first use). Expert seam for `tenet-network`;
+    /// do not hold tensors' operations inside `f` (the runtime state mutex
+    /// is held for its duration).
+    #[doc(hidden)]
+    pub fn with_plan_cache_slot<R>(
+        &self,
+        f: impl FnOnce(&mut Option<Box<dyn Any + Send>>) -> R,
+    ) -> R {
+        f(&mut self.lock().plan_cache_slot)
+    }
+
     /// Deterministic per-runtime stream position for [`crate::prelude::Tensor::rand`].
     pub(crate) fn next_rand_seed(&self) -> u64 {
         // Fixed base seed: runs are reproducible, consecutive `rand` calls
@@ -190,6 +223,7 @@ impl std::fmt::Debug for Runtime {
 pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
+    plan_cache: PlanCacheConfig,
 }
 
 impl RuntimeBuilder {
@@ -203,11 +237,26 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the contraction-plan-cache configuration (capacity, replan
+    /// policy, default optimizer) for this runtime.
+    pub fn plan_cache(mut self, config: PlanCacheConfig) -> Self {
+        self.plan_cache = config;
+        self
+    }
+
+    /// Sets the default contraction-order [`Optimizer`] for network
+    /// contractions (`tensor!`); shorthand for setting it on
+    /// [`Self::plan_cache`]'s config.
+    pub fn optimizer(mut self, optimizer: Optimizer) -> Self {
+        self.plan_cache.optimizer = optimizer;
+        self
+    }
+
     /// Finishes the build; fails when a requested backend (e.g. the CUDA
     /// device) cannot be initialized.
     pub fn build(self) -> Result<Runtime, Error> {
-        #[allow(unused_mut)]
         let mut state = RuntimeState::default();
+        state.plan_cache_config = self.plan_cache;
         #[cfg(feature = "cuda")]
         if let Some(device) = self.cuda_device {
             state.cuda = Some(

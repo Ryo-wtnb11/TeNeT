@@ -5,6 +5,7 @@
 #![doc = include_str!("tutorial.md")]
 
 mod error;
+pub mod plancache;
 mod runtime;
 pub(crate) mod space;
 pub(crate) mod tensor;
@@ -16,6 +17,7 @@ pub(crate) mod tensor;
 /// [`core`], [`operations`], [`dense`], and [`matrixalgebra`] modules.
 pub mod prelude {
     pub use crate::error::Error;
+    pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::space::Space;
     pub use crate::tensor::{Dtype, EigTrunc, EighTrunc, SvdTrunc, Tensor};

@@ -187,12 +187,16 @@ impl Network {
         })
     }
 
-    /// One-shot contraction with the configured default [`Optimizer`]
-    /// (greedy unless changed via [`crate::configure_plan_cache`]), going
-    /// through the topology-keyed plan cache. This is what the `tensor!`
-    /// macro path runs.
+    /// One-shot contraction with the operands' runtime's default
+    /// [`Optimizer`] (greedy unless changed on `Runtime::builder()` or via
+    /// [`crate::configure_plan_cache`]), going through that runtime's
+    /// topology-keyed plan cache. This is what the `tensor!` macro path
+    /// runs.
     pub fn contract(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
-        let optimizer = crate::plancache::plan_cache_config().optimizer;
+        let optimizer = tensors
+            .first()
+            .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
+            .unwrap_or_default();
         self.contract_with(tensors, &optimizer)
     }
 
