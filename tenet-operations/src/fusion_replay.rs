@@ -807,7 +807,8 @@ where
 
 /// Lowers the group list to batch jobs. A non-direct group yields `None`
 /// (route-decision-only plan); a direct batch additionally enforces pairwise
-/// disjoint destination ranges so backends may execute jobs in any order.
+/// disjoint destination ranges so the structural lowering may order jobs into
+/// same-shape strided runs before handing them to the dense backend.
 fn compile_direct_batch(
     groups: &[FusionBlockContractGroupPlan],
 ) -> Result<Option<Vec<Rank2GemmBatchJob>>, OperationError> {
@@ -845,6 +846,16 @@ fn compile_direct_batch(
             });
         }
     }
+    jobs.sort_by_key(|job| {
+        (
+            job.rows,
+            job.contracted,
+            job.cols,
+            job.dst_offset,
+            job.lhs_offset,
+            job.rhs_offset,
+        )
+    });
     Ok(Some(jobs))
 }
 
@@ -909,6 +920,26 @@ mod tests {
         assert_eq!(batch[0].rows * batch[0].cols, 8);
         assert_eq!(batch[1].dst_offset, 8);
         assert_eq!(batch[1].contracted, 2);
+    }
+
+    #[test]
+    fn direct_batch_orders_same_shape_groups_as_strided_runs() {
+        let groups = [2usize, 0, 4, 1, 3]
+            .into_iter()
+            .map(|block| {
+                let base = block * 4;
+                group_plan((2, 2, 2), (base, base, base))
+            })
+            .collect::<Vec<_>>();
+        let batch = compile_direct_batch(&groups).unwrap().unwrap();
+        let offsets = batch
+            .iter()
+            .map(|job| (job.dst_offset, job.lhs_offset, job.rhs_offset))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            offsets,
+            vec![(0, 0, 0), (4, 4, 4), (8, 8, 8), (12, 12, 12), (16, 16, 16)]
+        );
     }
 
     #[test]

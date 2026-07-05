@@ -806,6 +806,18 @@ fn strided_batch_run_len(jobs: &[DenseGemmBatchJob], start: usize) -> usize {
     len
 }
 
+fn has_eligible_strided_batch_run(jobs: &[DenseGemmBatchJob]) -> bool {
+    let mut start = 0usize;
+    while start < jobs.len() {
+        let run_len = strided_batch_run_len(jobs, start);
+        if run_len >= STRIDED_BATCH_MIN_JOBS {
+            return true;
+        }
+        start += run_len;
+    }
+    false
+}
+
 /// Serial fallback for [`DenseExecutor::matmul_batch_axpby_into`]: one
 /// `matmul_axpby_into` per job over rank-2 sub-views of the shared buffers.
 #[allow(clippy::too_many_arguments)]
@@ -986,6 +998,8 @@ mod tenferro_adapter {
         strided_batch_matmul_config: DotGeneralConfig,
         grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache,
         grouped_jobs: Vec<GroupedGemmJob>,
+        #[cfg(test)]
+        logical_gemm_dispatches: usize,
     }
 
     impl DefaultDenseExecutor {
@@ -1006,7 +1020,19 @@ mod tenferro_adapter {
                 },
                 grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache::default(),
                 grouped_jobs: Vec::new(),
+                #[cfg(test)]
+                logical_gemm_dispatches: 0,
             }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn reset_logical_gemm_dispatches(&mut self) {
+            self.logical_gemm_dispatches = 0;
+        }
+
+        #[cfg(test)]
+        pub(crate) fn logical_gemm_dispatches(&self) -> usize {
+            self.logical_gemm_dispatches
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -1019,6 +1045,10 @@ mod tenferro_adapter {
             alpha: DenseScalar,
             beta: DenseScalar,
         ) -> Result<(), DenseError> {
+            #[cfg(test)]
+            {
+                self.logical_gemm_dispatches += jobs.len();
+            }
             let lhs = TensorRead::from_view(tenferro_view(lhs)?);
             let rhs = TensorRead::from_view(tenferro_view(rhs)?);
             let output = TensorWrite::from_view(tenferro_view_mut(output)?);
@@ -1069,23 +1099,38 @@ mod tenferro_adapter {
             W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
             R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
         {
-            if jobs.len() < 2 {
-                return Ok(false);
-            }
-            let mut has_batched_run = false;
-            let mut start = 0usize;
-            while start < jobs.len() {
-                let run_len = strided_batch_run_len(jobs, start);
-                if run_len >= STRIDED_BATCH_MIN_JOBS {
-                    has_batched_run = true;
-                    break;
-                }
-                start += run_len;
-            }
-            if !has_batched_run {
+            if jobs.len() < STRIDED_BATCH_MIN_JOBS {
                 return Ok(false);
             }
 
+            if has_eligible_strided_batch_run(jobs) {
+                self.matmul_batch_axpby_strided_eligible_runs_typed(
+                    output, lhs, rhs, jobs, 0, alpha, beta, wrap_write, wrap_read,
+                )?;
+                return Ok(true);
+            }
+
+            Ok(false)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_batch_axpby_strided_eligible_runs_typed<T, W, R>(
+            &mut self,
+            output: &mut DenseViewMut<'_, T>,
+            lhs: DenseView<'_, T>,
+            rhs: DenseView<'_, T>,
+            jobs: &[DenseGemmBatchJob],
+            cache_slot_base: usize,
+            alpha: DenseScalar,
+            beta: DenseScalar,
+            wrap_write: W,
+            wrap_read: R,
+        ) -> Result<(), DenseError>
+        where
+            T: 'static,
+            W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
+            R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
+        {
             let mut start = 0usize;
             while start < jobs.len() {
                 let run_len = strided_batch_run_len(jobs, start);
@@ -1094,7 +1139,7 @@ mod tenferro_adapter {
                     lhs,
                     rhs,
                     &jobs[start..start + run_len],
-                    start,
+                    cache_slot_base + start,
                     alpha,
                     beta,
                     wrap_write,
@@ -1102,7 +1147,7 @@ mod tenferro_adapter {
                 )?;
                 start += run_len;
             }
-            Ok(true)
+            Ok(())
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -1123,6 +1168,10 @@ mod tenferro_adapter {
             W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
             R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
         {
+            #[cfg(test)]
+            {
+                self.logical_gemm_dispatches += 1;
+            }
             let first = &run[0];
             let run_len = run.len();
             let (lhs_batch_stride, rhs_batch_stride, dst_batch_stride) = if run_len > 1 {
@@ -1817,6 +1866,171 @@ mod tests {
                 Complex64::new(-1.0, -2.0),
             ]
         );
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
+        let mut lhs = Vec::new();
+        let mut rhs = Vec::new();
+        for block in 0..5 {
+            let base = block as f64;
+            lhs.extend_from_slice(&[1.0 + base, 2.0 + base, 3.0 + base, 4.0 + base]);
+            rhs.extend_from_slice(&[5.0 + base, 6.0 + base, 7.0 + base, 8.0 + base]);
+        }
+        let mut output = vec![-99.0; 5 * 4];
+        let jobs = [0usize, 1, 2, 3, 4]
+            .into_iter()
+            .map(|block| DenseGemmBatchJob {
+                dst_offset: block * 4,
+                lhs_offset: block * 4,
+                rhs_offset: block * 4,
+                rows: 2,
+                contracted: 2,
+                cols: 2,
+            })
+            .collect::<Vec<_>>();
+        let flat_shape = [5 * 4];
+        let flat_strides = [1usize];
+
+        let mut executor = DefaultDenseExecutor::new();
+        executor.reset_logical_gemm_dispatches();
+        executor
+            .matmul_batch_axpby_into(
+                DenseWrite::F64(
+                    DenseViewMut::new(&mut output, &flat_shape, &flat_strides, 0).unwrap(),
+                ),
+                DenseRead::F64(DenseView::new(&lhs, &flat_shape, &flat_strides, 0).unwrap()),
+                DenseRead::F64(DenseView::new(&rhs, &flat_shape, &flat_strides, 0).unwrap()),
+                &jobs,
+                DenseScalar::F64(1.0),
+                DenseScalar::F64(0.0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            executor.logical_gemm_dispatches(),
+            1,
+            "same-shape strided batch submitted {} logical GEMM dispatches for {} jobs",
+            executor.logical_gemm_dispatches(),
+            jobs.len()
+        );
+        assert!(
+            executor.logical_gemm_dispatches() < jobs.len(),
+            "batched GEMM logical dispatch count must not scale with same-shape job count"
+        );
+        for block in 0..5 {
+            let start = block * 4;
+            let expected = matmul_f64(&lhs[start..start + 4], &rhs[start..start + 4], 2, 2, 2);
+            for (actual, expected) in output[start..start + 4].iter().zip(expected) {
+                assert_f64_close(*actual, expected, 1.0e-12);
+            }
+        }
+
+        let lhs_f32 = lhs.iter().map(|&value| value as f32).collect::<Vec<_>>();
+        let rhs_f32 = rhs.iter().map(|&value| value as f32).collect::<Vec<_>>();
+        let mut output_f32 = vec![-99.0_f32; 5 * 4];
+        let mut executor = DefaultDenseExecutor::new();
+        executor
+            .matmul_batch_axpby_into(
+                DenseWrite::F32(
+                    DenseViewMut::new(&mut output_f32, &flat_shape, &flat_strides, 0).unwrap(),
+                ),
+                DenseRead::F32(DenseView::new(&lhs_f32, &flat_shape, &flat_strides, 0).unwrap()),
+                DenseRead::F32(DenseView::new(&rhs_f32, &flat_shape, &flat_strides, 0).unwrap()),
+                &jobs,
+                DenseScalar::F32(1.0),
+                DenseScalar::F32(0.0),
+            )
+            .unwrap();
+        assert_eq!(executor.logical_gemm_dispatches(), 1);
+        for block in 0..5 {
+            let start = block * 4;
+            let expected = matmul_f32(
+                &lhs_f32[start..start + 4],
+                &rhs_f32[start..start + 4],
+                2,
+                2,
+                2,
+            );
+            for (actual, expected) in output_f32[start..start + 4].iter().zip(expected) {
+                assert_f32_close(*actual, expected, 1.0e-4);
+            }
+        }
+
+        let lhs_c32 = lhs_f32
+            .iter()
+            .map(|&value| Complex32::new(value, 0.25 * value))
+            .collect::<Vec<_>>();
+        let rhs_c32 = rhs_f32
+            .iter()
+            .map(|&value| Complex32::new(value, -0.125 * value))
+            .collect::<Vec<_>>();
+        let mut output_c32 = vec![Complex32::new(-99.0, -99.0); 5 * 4];
+        let mut executor = DefaultDenseExecutor::new();
+        executor
+            .matmul_batch_axpby_into(
+                DenseWrite::C32(
+                    DenseViewMut::new(&mut output_c32, &flat_shape, &flat_strides, 0).unwrap(),
+                ),
+                DenseRead::C32(DenseView::new(&lhs_c32, &flat_shape, &flat_strides, 0).unwrap()),
+                DenseRead::C32(DenseView::new(&rhs_c32, &flat_shape, &flat_strides, 0).unwrap()),
+                &jobs,
+                DenseScalar::C32(Complex32::new(1.0, 0.0)),
+                DenseScalar::C32(Complex32::new(0.0, 0.0)),
+            )
+            .unwrap();
+        assert_eq!(executor.logical_gemm_dispatches(), 1);
+        for block in 0..5 {
+            let start = block * 4;
+            let expected = matmul_c32(
+                &lhs_c32[start..start + 4],
+                &rhs_c32[start..start + 4],
+                2,
+                2,
+                2,
+            );
+            for (actual, expected) in output_c32[start..start + 4].iter().zip(expected) {
+                assert_c32_close(*actual, expected, 1.0e-3);
+            }
+        }
+
+        let lhs_c64 = lhs
+            .iter()
+            .map(|&value| Complex64::new(value, 0.25 * value))
+            .collect::<Vec<_>>();
+        let rhs_c64 = rhs
+            .iter()
+            .map(|&value| Complex64::new(value, -0.125 * value))
+            .collect::<Vec<_>>();
+        let mut output_c64 = vec![Complex64::new(-99.0, -99.0); 5 * 4];
+        let mut executor = DefaultDenseExecutor::new();
+        executor
+            .matmul_batch_axpby_into(
+                DenseWrite::C64(
+                    DenseViewMut::new(&mut output_c64, &flat_shape, &flat_strides, 0).unwrap(),
+                ),
+                DenseRead::C64(DenseView::new(&lhs_c64, &flat_shape, &flat_strides, 0).unwrap()),
+                DenseRead::C64(DenseView::new(&rhs_c64, &flat_shape, &flat_strides, 0).unwrap()),
+                &jobs,
+                DenseScalar::C64(Complex64::new(1.0, 0.0)),
+                DenseScalar::C64(Complex64::new(0.0, 0.0)),
+            )
+            .unwrap();
+        assert_eq!(executor.logical_gemm_dispatches(), 1);
+        for block in 0..5 {
+            let start = block * 4;
+            let expected = matmul_c64(
+                &lhs_c64[start..start + 4],
+                &rhs_c64[start..start + 4],
+                2,
+                2,
+                2,
+            );
+            for (actual, expected) in output_c64[start..start + 4].iter().zip(expected) {
+                assert_c64_close(*actual, expected, 1.0e-12);
+            }
+        }
     }
 
     #[cfg(feature = "tenferro")]

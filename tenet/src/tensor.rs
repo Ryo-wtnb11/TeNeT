@@ -146,7 +146,9 @@ impl TensorScalar for Complex64 {}
 /// sealing [`TensorScalar`].
 pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
     fn lift(data: Vec<Self>) -> Data;
-    fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key>;
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> &mut Ctx<Self, Key>;
     fn rand_unit(state: &mut u64) -> Self;
 }
 
@@ -155,7 +157,9 @@ impl UserScalar for f64 {
         Data::F64(data)
     }
 
-    fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key> {
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> &mut Ctx<Self, Key> {
         &mut ctxs.f64
     }
 
@@ -169,7 +173,9 @@ impl UserScalar for Complex64 {
         Data::C64(data)
     }
 
-    fn ctx_of<Key: Clone + Eq + Hash>(ctxs: &mut Ctxs<Key>) -> &mut Ctx<Self, Key> {
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> &mut Ctx<Self, Key> {
         &mut ctxs.c64
     }
 
