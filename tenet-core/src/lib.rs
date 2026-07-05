@@ -9,7 +9,8 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Add, Mul};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
+use std::hash::Hash;
 use std::sync::{Arc, OnceLock, RwLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3398,20 +3399,16 @@ where
     let mut current_levels = levels.to_vec();
     for swap in swaps {
         let inverse = current_levels[swap] > current_levels[swap + 1];
-        let mut next_terms = Vec::new();
+        let mut next_terms = FusionTermAccumulator::new();
         for (tree, coefficient) in current {
             for (next_tree, step_coefficient) in
                 multiplicity_free_artin_braid_at_with_inverse(rule, &tree, swap, inverse)?
             {
-                push_or_accumulate_tree_term(
-                    &mut next_terms,
-                    next_tree,
-                    coefficient.clone() * step_coefficient,
-                );
+                next_terms.push(next_tree, coefficient.clone() * step_coefficient);
             }
         }
         current_levels.swap(swap, swap + 1);
-        current = next_terms;
+        current = next_terms.into_vec();
     }
     Ok(current)
 }
@@ -3610,37 +3607,91 @@ where
     Ok(current)
 }
 
-fn push_or_accumulate_tree_term<S>(
-    terms: &mut Vec<(FusionTreeKey, S)>,
-    tree: FusionTreeKey,
-    coefficient: S,
-) where
-    S: Clone + Add<Output = S>,
-{
-    if let Some((_, existing)) = terms
-        .iter_mut()
-        .find(|(existing_tree, _)| existing_tree == &tree)
-    {
-        *existing = existing.clone() + coefficient;
-    } else {
-        terms.push((tree, coefficient));
-    }
+enum FusionTermAccumulator<K, S> {
+    Empty,
+    Singleton(K, S),
+    Map {
+        order: Vec<K>,
+        coefficients: HashMap<K, S>,
+    },
 }
 
-fn push_or_accumulate_tree_pair_term<S>(
-    terms: &mut Vec<(FusionTreeBlockKey, S)>,
-    key: FusionTreeBlockKey,
-    coefficient: S,
-) where
+impl<K, S> FusionTermAccumulator<K, S>
+where
+    K: Clone + Eq + Hash,
     S: Clone + Add<Output = S>,
 {
-    if let Some((_, existing)) = terms
-        .iter_mut()
-        .find(|(existing_key, _)| existing_key == &key)
-    {
-        *existing = existing.clone() + coefficient;
-    } else {
-        terms.push((key, coefficient));
+    fn new() -> Self {
+        Self::Empty
+    }
+
+    fn push(&mut self, key: K, coefficient: S) {
+        match self {
+            Self::Empty => {
+                *self = Self::Singleton(key, coefficient);
+            }
+            Self::Singleton(existing_key, existing) if existing_key == &key => {
+                *existing = existing.clone() + coefficient;
+            }
+            Self::Singleton(_, _) => {
+                let previous = std::mem::replace(self, Self::Empty);
+                let Self::Singleton(existing_key, existing_coefficient) = previous else {
+                    unreachable!("matched singleton state");
+                };
+                let mut order = Vec::with_capacity(2);
+                let mut coefficients = HashMap::with_capacity(2);
+                Self::push_map_term(
+                    &mut order,
+                    &mut coefficients,
+                    existing_key,
+                    existing_coefficient,
+                );
+                Self::push_map_term(&mut order, &mut coefficients, key, coefficient);
+                *self = Self::Map {
+                    order,
+                    coefficients,
+                };
+            }
+            Self::Map {
+                order,
+                coefficients,
+            } => {
+                Self::push_map_term(order, coefficients, key, coefficient);
+            }
+        }
+    }
+
+    fn push_map_term(order: &mut Vec<K>, coefficients: &mut HashMap<K, S>, key: K, coefficient: S) {
+        match coefficients.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let existing = entry.get_mut();
+                *existing = existing.clone() + coefficient;
+            }
+            Entry::Vacant(entry) => {
+                order.push(entry.key().clone());
+                entry.insert(coefficient);
+            }
+        }
+    }
+
+    fn into_vec(self) -> Vec<(K, S)> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Singleton(key, coefficient) => vec![(key, coefficient)],
+            Self::Map {
+                order,
+                mut coefficients,
+            } => {
+                let mut terms = Vec::with_capacity(order.len());
+                for key in order {
+                    let coefficient = coefficients
+                        .remove(&key)
+                        .expect("accumulator order only contains inserted keys");
+                    terms.push((key, coefficient));
+                }
+                terms
+            }
+        }
     }
 }
 
@@ -3654,17 +3705,13 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
     F: FnMut(&R, &FusionTreeBlockKey) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>,
 {
-    let mut output = Vec::new();
+    let mut output = FusionTermAccumulator::new();
     for (key, coefficient) in terms {
         for (next_key, next_coefficient) in transform(rule, &key)? {
-            push_or_accumulate_tree_pair_term(
-                &mut output,
-                next_key,
-                coefficient.clone() * next_coefficient,
-            );
+            output.push(next_key, coefficient.clone() * next_coefficient);
         }
     }
-    Ok(output)
+    Ok(output.into_vec())
 }
 
 fn multiplicity_free_repartition_terms<R>(
@@ -4303,7 +4350,7 @@ where
     let kappa = rule.frobenius_schur_phase_scalar(a);
     let c = coupled_or_vacuum(rule, codomain);
 
-    let mut terms = Vec::new();
+    let mut terms = FusionTermAccumulator::new();
     for (codomain_prime, coeff1) in multiplicity_free_multi_fmove_tree(rule, codomain)? {
         let b = coupled_or_vacuum(rule, &codomain_prime);
         let a_symbol = rule.a_symbol_scalar(a, b, c);
@@ -4320,14 +4367,13 @@ where
             if is_dual_a {
                 coefficient = coefficient * kappa.clone();
             }
-            push_or_accumulate_tree_pair_term(
-                &mut terms,
+            terms.push(
                 FusionTreeBlockKey::pair(codomain_prime.clone(), domain_prime),
                 coefficient,
             );
         }
     }
-    Ok(terms)
+    Ok(terms.into_vec())
 }
 
 fn multiplicity_free_foldleft_tree_pair<R>(
@@ -8598,6 +8644,73 @@ mod tests {
         assert_eq!(rule.r_symbol_scalar(s(1), s(1), s(0)), -1.0);
         assert_eq!(rule.r_symbol_scalar(s(1), s(1), s(2)), 1.0);
         assert_eq!(rule.r_symbol_scalar(s(1), s(2), s(0)), 0.0);
+    }
+
+    #[derive(Clone, Debug)]
+    struct ProbeTreeKey(usize);
+
+    static PROBE_TREE_KEY_EQ_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static PROBE_TREE_KEY_HASH_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    impl PartialEq for ProbeTreeKey {
+        fn eq(&self, other: &Self) -> bool {
+            PROBE_TREE_KEY_EQ_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0 == other.0
+        }
+    }
+
+    impl Eq for ProbeTreeKey {}
+
+    impl std::hash::Hash for ProbeTreeKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            PROBE_TREE_KEY_HASH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::hash::Hash::hash(&self.0, state);
+        }
+    }
+
+    #[test]
+    fn fusion_term_accumulator_keeps_singleton_path_and_hashes_multi_terms() {
+        PROBE_TREE_KEY_EQ_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        PROBE_TREE_KEY_HASH_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut singleton = FusionTermAccumulator::new();
+        singleton.push(ProbeTreeKey(7), 3usize);
+        let singleton_terms = singleton.into_vec();
+        assert_eq!(singleton_terms.len(), 1);
+        let (singleton_key, singleton_coefficient) = &singleton_terms[0];
+        assert_eq!(singleton_key.0, 7);
+        assert_eq!(*singleton_coefficient, 3);
+        assert_eq!(
+            PROBE_TREE_KEY_HASH_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        const DISTINCT: usize = 512;
+        const ROUNDS: usize = 4;
+        PROBE_TREE_KEY_EQ_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        PROBE_TREE_KEY_HASH_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut accumulator = FusionTermAccumulator::new();
+        for _ in 0..ROUNDS {
+            for key in 0..DISTINCT {
+                accumulator.push(ProbeTreeKey(key), 1usize);
+            }
+        }
+        let terms = accumulator.into_vec();
+        assert_eq!(terms.len(), DISTINCT);
+        for (index, (key, coefficient)) in terms.iter().enumerate() {
+            assert_eq!(key.0, index);
+            assert_eq!(*coefficient, ROUNDS);
+        }
+        let eq_calls = PROBE_TREE_KEY_EQ_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            eq_calls < DISTINCT * ROUNDS * 8,
+            "HashMap-backed accumulation should stay linear; saw {eq_calls} equality checks"
+        );
+        assert!(
+            PROBE_TREE_KEY_HASH_CALLS.load(std::sync::atomic::Ordering::Relaxed) > DISTINCT,
+            "multi-term accumulation should use the hash path"
+        );
     }
 
     #[test]
