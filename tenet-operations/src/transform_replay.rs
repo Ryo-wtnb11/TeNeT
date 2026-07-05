@@ -111,7 +111,8 @@ where
     workspace
         .coefficient_scratch
         .reserve(plan.coefficient_len());
-    for block in &structure.blocks {
+    for (block_index, _) in plan.entries() {
+        let block = recoupling_multi_block(structure, block_index)?;
         let TreeTransformBlock::Multi {
             dst_count,
             src_count,
@@ -148,6 +149,28 @@ where
     }
     workspace.coefficient_structure_identity = Some(Arc::downgrade(structure.identity_marker()));
     Ok(true)
+}
+
+fn recoupling_multi_block<C>(
+    structure: &TreeTransformStructure<C>,
+    block_index: usize,
+) -> Result<&TreeTransformBlock, OperationError> {
+    let block = structure
+        .blocks
+        .get(block_index)
+        .ok_or(OperationError::BlockIndexOutOfBounds {
+            tensor: "recoupling block",
+            index: block_index,
+            count: structure.blocks.len(),
+        })?;
+    match block {
+        TreeTransformBlock::Multi { .. } => Ok(block),
+        TreeTransformBlock::Single { .. } => Err(OperationError::BlockIndexOutOfBounds {
+            tensor: "recoupling block",
+            index: block_index,
+            count: structure.blocks.len(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -722,73 +745,71 @@ where
         }
     }
 
-    // Singles apply directly; Multi blocks pack their source columns and
-    // use the compile-time batched GEMM plan for scratch offsets.
-    let mut multi_job_index = 0usize;
+    // Singles apply directly in replay order. Multi blocks are packed through
+    // the compile-time recoupling entries, whose order is chosen to form
+    // same-shape strided GEMM runs.
     for block in &structure.blocks {
-        match *block {
-            TreeTransformBlock::Single {
-                dst_layout,
-                src_layout,
-                coefficient,
-            } => {
-                // Timestamps only under profiling: the per-block clock reads
-                // are measurable against microsecond replays.
-                let start = profile.as_ref().map(|_| std::time::Instant::now());
-                tree_transform_single_with_strided_kernel(
-                    kernels,
-                    &mut workspace.zero_strides,
-                    layouts,
-                    layouts.entry(dst_layout),
-                    layouts.entry(src_layout),
-                    structure.coefficient(coefficient),
-                    structure.storage_conjugate(),
-                    dst_data,
-                    src_data,
-                    alpha,
-                    beta,
-                )?;
-                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-                    let elapsed = start.elapsed();
-                    profile.single_blocks += 1;
-                    profile.single_total += elapsed;
-                    profile.strided_kernel += elapsed;
-                }
-            }
-            TreeTransformBlock::Multi {
-                dst_layout_start: _,
-                src_layout_start,
-                src_count,
-                element_count,
-                ..
-            } => {
-                let job = recoupling_plan.jobs().get(multi_job_index).ok_or(
-                    OperationError::BlockIndexOutOfBounds {
-                        tensor: "recoupling job",
-                        index: multi_job_index,
-                        count: recoupling_plan.jobs().len(),
-                    },
-                )?;
-                let start = profile.as_ref().map(|_| std::time::Instant::now());
-                for src_index in 0..src_count {
-                    let layout = layouts.entry(src_layout_start + src_index);
-                    pack_layout_into_column(
-                        kernels,
-                        layouts,
-                        layout,
-                        src_data,
-                        workspace.packed.source_mut().as_mut_slice(),
-                        job.lhs_offset + src_index * element_count,
-                        structure.storage_conjugate(),
-                    )?;
-                }
-                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-                    profile.multi_blocks += 1;
-                    profile.packed_columns += src_count;
-                    profile.multi_pack += start.elapsed();
-                }
-                multi_job_index += 1;
-            }
+        let TreeTransformBlock::Single {
+            dst_layout,
+            src_layout,
+            coefficient,
+        } = *block
+        else {
+            continue;
+        };
+        // Timestamps only under profiling: the per-block clock reads are
+        // measurable against microsecond replays.
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        tree_transform_single_with_strided_kernel(
+            kernels,
+            &mut workspace.zero_strides,
+            layouts,
+            layouts.entry(dst_layout),
+            layouts.entry(src_layout),
+            structure.coefficient(coefficient),
+            structure.storage_conjugate(),
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )?;
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            let elapsed = start.elapsed();
+            profile.single_blocks += 1;
+            profile.single_total += elapsed;
+            profile.strided_kernel += elapsed;
+        }
+    }
+
+    for (block_index, job) in recoupling_plan.entries() {
+        let TreeTransformBlock::Multi {
+            src_layout_start,
+            src_count,
+            element_count,
+            ..
+        } = *recoupling_multi_block(structure, block_index)?
+        else {
+            unreachable!("recoupling_multi_block only returns Multi blocks");
+        };
+        debug_assert_eq!(job.rows, element_count);
+        debug_assert_eq!(job.contracted, src_count);
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        for src_index in 0..src_count {
+            let layout = layouts.entry(src_layout_start + src_index);
+            pack_layout_into_column(
+                kernels,
+                layouts,
+                layout,
+                src_data,
+                workspace.packed.source_mut().as_mut_slice(),
+                job.lhs_offset + src_index * element_count,
+                structure.storage_conjugate(),
+            )?;
+        }
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.multi_blocks += 1;
+            profile.packed_columns += src_count;
+            profile.multi_pack += start.elapsed();
         }
     }
 
@@ -813,23 +834,17 @@ where
 
     // Scatter each Multi block's destination columns back out.
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut multi_job_index = 0usize;
     let mut scattered_columns = 0usize;
-    for block in &structure.blocks {
+    for (block_index, job) in recoupling_plan.entries() {
         if let TreeTransformBlock::Multi {
             dst_layout_start,
             dst_count,
             element_count,
             ..
-        } = *block
+        } = *recoupling_multi_block(structure, block_index)?
         {
-            let job = recoupling_plan.jobs().get(multi_job_index).ok_or(
-                OperationError::BlockIndexOutOfBounds {
-                    tensor: "recoupling job",
-                    index: multi_job_index,
-                    count: recoupling_plan.jobs().len(),
-                },
-            )?;
+            debug_assert_eq!(job.rows, element_count);
+            debug_assert_eq!(job.cols, dst_count);
             for dst_index in 0..dst_count {
                 let layout = layouts.entry(dst_layout_start + dst_index);
                 scatter_column_into_layout(
@@ -845,7 +860,6 @@ where
                 )?;
             }
             scattered_columns += dst_count;
-            multi_job_index += 1;
         }
     }
     if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
@@ -982,45 +996,49 @@ where
 
     // (dst_layout, src_layout, coefficient index) per Single block.
     let mut singles: Vec<(usize, usize, usize)> = Vec::new();
-    // (source layout, column length) per Multi pack column, in scratch order.
-    let mut pack_columns: Vec<(usize, usize)> = Vec::new();
+    // (source layout, packed source offset, column length) per Multi pack column.
+    let mut pack_columns: Vec<(usize, usize, usize)> = Vec::new();
     // (dst layout, packed destination offset) per Multi scatter column.
     let mut scatter_columns: Vec<(usize, usize)> = Vec::new();
 
-    let mut multi_job_index = 0usize;
     for block in &structure.blocks {
-        match *block {
-            TreeTransformBlock::Single {
-                dst_layout,
-                src_layout,
-                coefficient,
-            } => singles.push((dst_layout, src_layout, coefficient)),
-            TreeTransformBlock::Multi {
-                dst_layout_start,
-                dst_count,
-                src_layout_start,
-                src_count,
+        let TreeTransformBlock::Single {
+            dst_layout,
+            src_layout,
+            coefficient,
+        } = *block
+        else {
+            continue;
+        };
+        singles.push((dst_layout, src_layout, coefficient));
+    }
+    for (block_index, job) in recoupling_plan.entries() {
+        let TreeTransformBlock::Multi {
+            dst_layout_start,
+            dst_count,
+            src_layout_start,
+            src_count,
+            element_count,
+            ..
+        } = *recoupling_multi_block(structure, block_index)?
+        else {
+            unreachable!("recoupling_multi_block only returns Multi blocks");
+        };
+        debug_assert_eq!(job.rows, element_count);
+        debug_assert_eq!(job.contracted, src_count);
+        debug_assert_eq!(job.cols, dst_count);
+        for src_index in 0..src_count {
+            pack_columns.push((
+                src_layout_start + src_index,
+                job.lhs_offset + src_index * element_count,
                 element_count,
-                ..
-            } => {
-                let job = recoupling_plan.jobs().get(multi_job_index).ok_or(
-                    OperationError::BlockIndexOutOfBounds {
-                        tensor: "recoupling job",
-                        index: multi_job_index,
-                        count: recoupling_plan.jobs().len(),
-                    },
-                )?;
-                for src_index in 0..src_count {
-                    pack_columns.push((src_layout_start + src_index, element_count));
-                }
-                for dst_index in 0..dst_count {
-                    scatter_columns.push((
-                        dst_layout_start + dst_index,
-                        job.dst_offset + dst_index * element_count,
-                    ));
-                }
-                multi_job_index += 1;
-            }
+            ));
+        }
+        for dst_index in 0..dst_count {
+            scatter_columns.push((
+                dst_layout_start + dst_index,
+                job.dst_offset + dst_index * element_count,
+            ));
         }
     }
     let single_count = singles.len();
@@ -1046,23 +1064,35 @@ where
     {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
 
-        // Pack columns are contiguous consecutive ranges of the source
-        // scratch, so the buffer splits sequentially into per-column &mut
-        // regions (pack offsets rebase to 0).
-        let mut column_regions: Vec<(usize, &mut [D])> = Vec::with_capacity(pack_columns.len());
-        let mut rest = workspace.packed.source_mut().as_mut_slice();
-        for &(layout, len) in &pack_columns {
-            let (column, tail) = std::mem::take(&mut rest).split_at_mut(len);
-            column_regions.push((layout, column));
-            rest = tail;
+        let mut source_items: Vec<(usize, isize, isize)> = Vec::with_capacity(pack_columns.len());
+        for &(layout, offset, len) in &pack_columns {
+            if len == 0 {
+                return Err(OperationError::ElementCountOverflow);
+            }
+            let hi_offset = offset
+                .checked_add(len)
+                .and_then(|end| end.checked_sub(1))
+                .ok_or(OperationError::ElementCountOverflow)?;
+            source_items.push((
+                layout,
+                offset_to_isize(offset)?,
+                offset_to_isize(hi_offset)?,
+            ));
         }
+        source_items.sort_unstable_by_key(|&(_, lo, _)| lo);
+        let column_regions =
+            split_regions(workspace.packed.source_mut().as_mut_slice(), &source_items).ok_or_else(
+                || OperationError::StridedKernel {
+                    message: "recoupling source scratch ranges are not disjoint".to_string(),
+                },
+            )?;
         let pack_chunk = min_len(column_regions.len());
         column_regions
             .into_par_iter()
             .with_min_len(pack_chunk)
             .try_for_each_init(
                 || kernels.clone(),
-                |kernels, (layout, column)| {
+                |kernels, (layout, column, _)| {
                     pack_layout_into_column(
                         kernels,
                         layouts,

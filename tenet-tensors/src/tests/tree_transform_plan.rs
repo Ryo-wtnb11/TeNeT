@@ -534,6 +534,38 @@ fn tree_transform_structure_sorts_replay_blocks_by_tensorkit_weight() {
 }
 
 #[test]
+fn tree_transform_recoupling_plan_groups_same_shape_multi_blocks() {
+    let dst_structure = BlockStructure::packed_column_major(
+        1,
+        [vec![2], vec![2], vec![1], vec![1], vec![1], vec![1]],
+    )
+    .unwrap();
+    let src_structure = dst_structure.clone();
+    let structure = TreeTransformStructure::compile_structures(
+        &dst_structure,
+        &src_structure,
+        &[
+            TreeTransformBlockSpec::multi(vec![2, 3], vec![2, 3], vec![1.0, 0.0, 0.0, 1.0]),
+            TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0, 0.0, 0.0, 1.0]),
+            TreeTransformBlockSpec::multi(vec![4, 5], vec![4, 5], vec![1.0, 0.0, 0.0, 1.0]),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(structure.replay_weights(), vec![8, 4, 4]);
+    let plan = structure.recoupling_plan();
+    assert_eq!(plan.block_indices(), &[1, 2, 0]);
+    let jobs = plan.jobs();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!((jobs[0].rows, jobs[0].contracted, jobs[0].cols), (1, 2, 2));
+    assert_eq!((jobs[1].rows, jobs[1].contracted, jobs[1].cols), (1, 2, 2));
+    assert_eq!((jobs[2].rows, jobs[2].contracted, jobs[2].cols), (2, 2, 2));
+    assert_eq!(jobs[1].lhs_offset - jobs[0].lhs_offset, 2);
+    assert_eq!(jobs[1].rhs_offset - jobs[0].rhs_offset, 4);
+    assert_eq!(jobs[1].dst_offset - jobs[0].dst_offset, 2);
+}
+
+#[test]
 fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],

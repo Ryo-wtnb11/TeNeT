@@ -35,6 +35,7 @@ pub struct TreeTransformRecouplingPlan {
     source_len: usize,
     destination_len: usize,
     coefficient_len: usize,
+    block_indices: Vec<usize>,
     jobs: Vec<DenseGemmBatchJob>,
 }
 
@@ -57,6 +58,16 @@ impl TreeTransformRecouplingPlan {
     #[inline]
     pub fn jobs(&self) -> &[DenseGemmBatchJob] {
         &self.jobs
+    }
+
+    #[inline]
+    pub fn block_indices(&self) -> &[usize] {
+        &self.block_indices
+    }
+
+    #[inline]
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = (usize, &DenseGemmBatchJob)> + '_ {
+        self.block_indices.iter().copied().zip(self.jobs.iter())
     }
 
     #[inline]
@@ -481,11 +492,16 @@ impl<T: Copy> TreeTransformStructure<T> {
 fn compile_recoupling_plan(
     blocks: &[TreeTransformBlock],
 ) -> Result<TreeTransformRecouplingPlan, OperationError> {
-    let mut source_len = 0usize;
-    let mut destination_len = 0usize;
-    let mut coefficient_len = 0usize;
-    let mut jobs = Vec::new();
-    for block in blocks {
+    #[derive(Clone, Copy)]
+    struct MultiEntry {
+        block_index: usize,
+        element_count: usize,
+        src_count: usize,
+        dst_count: usize,
+    }
+
+    let mut entries = Vec::new();
+    for (block_index, block) in blocks.iter().enumerate() {
         if let TreeTransformBlock::Multi {
             dst_count,
             src_count,
@@ -493,38 +509,65 @@ fn compile_recoupling_plan(
             ..
         } = *block
         {
-            let block_source_len = element_count
-                .checked_mul(src_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            let block_destination_len = element_count
-                .checked_mul(dst_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            let block_coefficient_len = src_count
-                .checked_mul(dst_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            jobs.push(DenseGemmBatchJob {
-                dst_offset: destination_len,
-                lhs_offset: source_len,
-                rhs_offset: coefficient_len,
-                rows: element_count,
-                contracted: src_count,
-                cols: dst_count,
+            entries.push(MultiEntry {
+                block_index,
+                element_count,
+                src_count,
+                dst_count,
             });
-            source_len = source_len
-                .checked_add(block_source_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            destination_len = destination_len
-                .checked_add(block_destination_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            coefficient_len = coefficient_len
-                .checked_add(block_coefficient_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
         }
+    }
+    entries.sort_by_key(|entry| {
+        (
+            entry.element_count,
+            entry.src_count,
+            entry.dst_count,
+            entry.block_index,
+        )
+    });
+
+    let mut source_len = 0usize;
+    let mut destination_len = 0usize;
+    let mut coefficient_len = 0usize;
+    let mut block_indices = Vec::with_capacity(entries.len());
+    let mut jobs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let block_source_len = entry
+            .element_count
+            .checked_mul(entry.src_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let block_destination_len = entry
+            .element_count
+            .checked_mul(entry.dst_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let block_coefficient_len = entry
+            .src_count
+            .checked_mul(entry.dst_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        block_indices.push(entry.block_index);
+        jobs.push(DenseGemmBatchJob {
+            dst_offset: destination_len,
+            lhs_offset: source_len,
+            rhs_offset: coefficient_len,
+            rows: entry.element_count,
+            contracted: entry.src_count,
+            cols: entry.dst_count,
+        });
+        source_len = source_len
+            .checked_add(block_source_len)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        destination_len = destination_len
+            .checked_add(block_destination_len)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        coefficient_len = coefficient_len
+            .checked_add(block_coefficient_len)
+            .ok_or(OperationError::ElementCountOverflow)?;
     }
     Ok(TreeTransformRecouplingPlan {
         source_len,
         destination_len,
         coefficient_len,
+        block_indices,
         jobs,
     })
 }
