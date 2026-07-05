@@ -491,3 +491,79 @@ fn tree_transform_dense_backend_routes_multi_tree_recoupling_through_one_gemm() 
     assert_eq!(backend.dense().dot_general_into_calls, 1);
     assert_eq!(dst.data(), &[10623.0, 12843.0, 21243.0, 25683.0]);
 }
+
+#[test]
+fn tree_transform_recoupling_replay_uses_sorted_plan_offsets() {
+    let src_space = TensorMapSpace::<2, 0>::from_dims([8, 1], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([8, 1], []).unwrap();
+    let structure = BlockStructure::packed_column_major(
+        2,
+        [
+            vec![2, 1],
+            vec![2, 1],
+            vec![1, 1],
+            vec![1, 1],
+            vec![1, 1],
+            vec![1, 1],
+        ],
+    )
+    .unwrap();
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        src_space,
+        structure.clone(),
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0; 8], dst_space, structure)
+            .unwrap();
+    let transform = TreeTransformStructure::compile(
+        &dst,
+        &src,
+        &[
+            TreeTransformBlockSpec::multi(vec![2, 3], vec![2, 3], vec![11.0, 13.0, 17.0, 19.0]),
+            TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![2.0, 3.0, 5.0, 7.0]),
+            TreeTransformBlockSpec::multi(vec![4, 5], vec![4, 5], vec![23.0, 29.0, 31.0, 37.0]),
+        ],
+    )
+    .unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &transform,
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst.data(),
+        &[11.0, 16.0, 26.0, 38.0, 133.0, 199.0, 393.0, 513.0]
+    );
+
+    dst.data_mut().fill(0.0);
+    let mut backend = DenseTreeTransformOperations::default();
+    backend.set_recoupling_threads(4);
+    backend.set_transform_parallel_min_len(0);
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &transform,
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst.data(),
+        &[11.0, 16.0, 26.0, 38.0, 133.0, 199.0, 393.0, 513.0]
+    );
+}

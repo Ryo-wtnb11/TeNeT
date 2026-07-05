@@ -764,8 +764,6 @@ fn same_gemm_shape(lhs: &DenseGemmBatchJob, rhs: &DenseGemmBatchJob) -> bool {
     lhs.rows == rhs.rows && lhs.contracted == rhs.contracted && lhs.cols == rhs.cols
 }
 
-const STRIDED_BATCH_MIN_JOBS: usize = 4;
-
 fn strided_batch_run_len(jobs: &[DenseGemmBatchJob], start: usize) -> usize {
     let Some(first) = jobs.get(start) else {
         return 0;
@@ -806,11 +804,11 @@ fn strided_batch_run_len(jobs: &[DenseGemmBatchJob], start: usize) -> usize {
     len
 }
 
-fn has_eligible_strided_batch_run(jobs: &[DenseGemmBatchJob]) -> bool {
+fn has_strided_batch_run(jobs: &[DenseGemmBatchJob]) -> bool {
     let mut start = 0usize;
     while start < jobs.len() {
         let run_len = strided_batch_run_len(jobs, start);
-        if run_len >= STRIDED_BATCH_MIN_JOBS {
+        if run_len > 1 {
             return true;
         }
         start += run_len;
@@ -1099,12 +1097,12 @@ mod tenferro_adapter {
             W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
             R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
         {
-            if jobs.len() < STRIDED_BATCH_MIN_JOBS {
+            if jobs.len() < 2 {
                 return Ok(false);
             }
 
-            if has_eligible_strided_batch_run(jobs) {
-                self.matmul_batch_axpby_strided_eligible_runs_typed(
+            if has_strided_batch_run(jobs) {
+                self.matmul_batch_axpby_strided_runs_typed(
                     output, lhs, rhs, jobs, 0, alpha, beta, wrap_write, wrap_read,
                 )?;
                 return Ok(true);
@@ -1114,7 +1112,7 @@ mod tenferro_adapter {
         }
 
         #[allow(clippy::too_many_arguments)]
-        fn matmul_batch_axpby_strided_eligible_runs_typed<T, W, R>(
+        fn matmul_batch_axpby_strided_runs_typed<T, W, R>(
             &mut self,
             output: &mut DenseViewMut<'_, T>,
             lhs: DenseView<'_, T>,
@@ -1873,13 +1871,13 @@ mod tests {
     fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
         let mut lhs = Vec::new();
         let mut rhs = Vec::new();
-        for block in 0..5 {
+        for block in 0..2 {
             let base = block as f64;
             lhs.extend_from_slice(&[1.0 + base, 2.0 + base, 3.0 + base, 4.0 + base]);
             rhs.extend_from_slice(&[5.0 + base, 6.0 + base, 7.0 + base, 8.0 + base]);
         }
-        let mut output = vec![-99.0; 5 * 4];
-        let jobs = [0usize, 1, 2, 3, 4]
+        let mut output = vec![-99.0; 2 * 4];
+        let jobs = [0usize, 1]
             .into_iter()
             .map(|block| DenseGemmBatchJob {
                 dst_offset: block * 4,
@@ -1890,7 +1888,7 @@ mod tests {
                 cols: 2,
             })
             .collect::<Vec<_>>();
-        let flat_shape = [5 * 4];
+        let flat_shape = [2 * 4];
         let flat_strides = [1usize];
 
         let mut executor = DefaultDenseExecutor::new();
@@ -1919,7 +1917,7 @@ mod tests {
             executor.logical_gemm_dispatches() < jobs.len(),
             "batched GEMM logical dispatch count must not scale with same-shape job count"
         );
-        for block in 0..5 {
+        for block in 0..2 {
             let start = block * 4;
             let expected = matmul_f64(&lhs[start..start + 4], &rhs[start..start + 4], 2, 2, 2);
             for (actual, expected) in output[start..start + 4].iter().zip(expected) {
@@ -1929,7 +1927,7 @@ mod tests {
 
         let lhs_f32 = lhs.iter().map(|&value| value as f32).collect::<Vec<_>>();
         let rhs_f32 = rhs.iter().map(|&value| value as f32).collect::<Vec<_>>();
-        let mut output_f32 = vec![-99.0_f32; 5 * 4];
+        let mut output_f32 = vec![-99.0_f32; 2 * 4];
         let mut executor = DefaultDenseExecutor::new();
         executor
             .matmul_batch_axpby_into(
@@ -1944,7 +1942,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(executor.logical_gemm_dispatches(), 1);
-        for block in 0..5 {
+        for block in 0..2 {
             let start = block * 4;
             let expected = matmul_f32(
                 &lhs_f32[start..start + 4],
@@ -1966,7 +1964,7 @@ mod tests {
             .iter()
             .map(|&value| Complex32::new(value, -0.125 * value))
             .collect::<Vec<_>>();
-        let mut output_c32 = vec![Complex32::new(-99.0, -99.0); 5 * 4];
+        let mut output_c32 = vec![Complex32::new(-99.0, -99.0); 2 * 4];
         let mut executor = DefaultDenseExecutor::new();
         executor
             .matmul_batch_axpby_into(
@@ -1981,7 +1979,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(executor.logical_gemm_dispatches(), 1);
-        for block in 0..5 {
+        for block in 0..2 {
             let start = block * 4;
             let expected = matmul_c32(
                 &lhs_c32[start..start + 4],
@@ -2003,7 +2001,7 @@ mod tests {
             .iter()
             .map(|&value| Complex64::new(value, -0.125 * value))
             .collect::<Vec<_>>();
-        let mut output_c64 = vec![Complex64::new(-99.0, -99.0); 5 * 4];
+        let mut output_c64 = vec![Complex64::new(-99.0, -99.0); 2 * 4];
         let mut executor = DefaultDenseExecutor::new();
         executor
             .matmul_batch_axpby_into(
@@ -2018,7 +2016,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(executor.logical_gemm_dispatches(), 1);
-        for block in 0..5 {
+        for block in 0..2 {
             let start = block * 4;
             let expected = matmul_c64(
                 &lhs_c64[start..start + 4],
