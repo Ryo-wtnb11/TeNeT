@@ -145,6 +145,11 @@ impl<T> TreeTransformKeyBlockSpec<T> {
     pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
         &self.recoupling_coefficients_dst_src
     }
+
+    #[inline]
+    pub fn source_axes(&self) -> Option<&[usize]> {
+        self.source_axes.as_deref()
+    }
 }
 
 impl<T: Copy> TreeTransformKeyBlockSpec<T> {
@@ -270,6 +275,11 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     #[inline]
     pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
         &self.recoupling_coefficients_dst_src
+    }
+
+    #[inline]
+    pub fn source_axes(&self) -> Option<&[usize]> {
+        self.source_axes.as_deref()
     }
 }
 

@@ -369,8 +369,15 @@ pub fn tensoradd_fusion_into_with_context<
 where
     B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
-    RuleKey: Clone + Eq + Hash,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
     D: TreeTransformScalar,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -850,8 +857,15 @@ pub fn tree_transform_into_with_context<
 where
     B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
-    RuleKey: Clone + Eq + Hash,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
     D: TreeTransformScalar,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -978,8 +992,15 @@ pub fn permute_into_with_context<
 where
     B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
-    RuleKey: Clone + Eq + Hash,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
     D: TreeTransformScalar,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -1130,8 +1151,15 @@ pub fn braid_into_with_context<
 where
     B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
-    RuleKey: Clone + Eq + Hash,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
     D: TreeTransformScalar,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -1271,8 +1299,15 @@ pub fn transpose_into_with_context<
 where
     B: TreeTransformBackend<D, R::Scalar>,
     R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
-    RuleKey: Clone + Eq + Hash,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
     D: TreeTransformScalar,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,

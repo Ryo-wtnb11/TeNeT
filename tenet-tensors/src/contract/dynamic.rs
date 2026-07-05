@@ -272,7 +272,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -347,7 +347,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
     profile: &mut TensorContractFusionProfile,
 ) -> Result<(), OperationError>
 where
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -425,7 +425,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -500,7 +500,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
     beta: D,
 ) -> Result<(), OperationError>
 where
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -683,7 +683,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
     beta: D,
 ) -> Result<(), OperationError>
 where
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -883,7 +883,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context_profiled<
     profile: &mut TensorContractFusionProfile,
 ) -> Result<(), OperationError>
 where
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1242,7 +1242,7 @@ impl DynamicFusionLastSpaceKey {
 
 impl<RuleKey> DynamicFusionSpaceCache<RuleKey>
 where
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
     #[inline]
     pub(crate) fn len(&self) -> usize {

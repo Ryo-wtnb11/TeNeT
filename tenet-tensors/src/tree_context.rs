@@ -146,8 +146,8 @@ where
 impl<D, RuleKey, C, B> TreeTransformExecutionContext<D, RuleKey, C, B>
 where
     D: TreeTransformScalar,
-    C: Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero,
-    RuleKey: Clone + Eq + Hash,
+    C: 'static + Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero + Send + Sync,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     B: TreeTransformBackend<D, C>,
 {
     pub fn tree_transform_into<
