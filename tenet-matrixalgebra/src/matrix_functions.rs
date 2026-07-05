@@ -26,7 +26,7 @@ pub fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
 ) -> Result<TensorMap<D, N, N>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -46,7 +46,7 @@ pub fn exp_dyn<E, RuleKey, BT, BC, R, D>(
 ) -> Result<DynFactor<D>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -67,7 +67,7 @@ fn spectral_function_dyn<E, RuleKey, BT, BC, R, D>(
 ) -> Result<DynFactor<D>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -104,7 +104,7 @@ pub fn pinv<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
 ) -> Result<TensorMap<D, NIN, NOUT>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -132,7 +132,7 @@ pub fn pinv_dyn<E, RuleKey, BT, BC, R, D>(
 ) -> Result<DynFactor<D>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -174,7 +174,7 @@ pub fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
 ) -> Result<TensorMap<D, N, N>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -194,7 +194,7 @@ pub fn inv_dyn<E, RuleKey, BT, BC, R, D>(
 ) -> Result<DynFactor<D>, OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,

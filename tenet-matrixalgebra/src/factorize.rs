@@ -1202,64 +1202,84 @@ where
     }
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
-    let mut pairs = Vec::with_capacity(matricizations.len());
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows,
+        })
+        .collect::<Vec<_>>();
+    let (v_space, _) = build_left_right_spaces(rule, space.homspace(), &matricizations, &ranks)?;
+    let v_len = v_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut v_data = vec![D::zero(); v_len];
+    let max_n = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let mut values_workspace = vec![D::Real::zero(); max_n];
+    let mut vectors_workspace = vec![D::zero(); max_n * max_n];
+    let mut sorted_vectors = vec![D::zero(); max_n * max_n];
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
         let view =
             DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .eigh(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense eigh must return exactly (values, vectors)",
-            });
-        }
         let n = matrix.rows;
-        validate_dense_shape(outputs[0].shape(), &[n])?;
-        validate_dense_shape(outputs[1].shape(), &[n, n])?;
-        let values = D::real_spectrum(&outputs[0]).map_err(OperationError::Dense)?;
-        let vectors = D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?;
+        let values_shape = [n];
+        let values_strides = [1usize];
+        let vectors_shape = [n, n];
+        let vectors_strides = [1usize, max_n];
+        let values_view =
+            DenseViewMut::new(&mut values_workspace, &values_shape, &values_strides, 0)
+                .map_err(OperationError::Dense)?;
+        let vectors_view =
+            DenseViewMut::new(&mut vectors_workspace, &vectors_shape, &vectors_strides, 0)
+                .map_err(OperationError::Dense)?;
+        dense
+            .eigh_into(
+                D::dense_read(view),
+                D::Real::dense_write(values_view),
+                D::dense_write(vectors_view),
+            )
+            .map_err(OperationError::Dense)?;
 
         // Reorder bond states descending by |eigenvalue| (stable on ties).
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
-            values[b]
+            let a_value: f64 = values_workspace[a].into();
+            let b_value: f64 = values_workspace[b].into();
+            b_value
                 .abs()
-                .partial_cmp(&values[a].abs())
+                .partial_cmp(&a_value.abs())
                 .expect("finite eigenvalues")
                 .then(a.cmp(&b))
         });
-        let sorted_values: Vec<f64> = order.iter().map(|&index| values[index]).collect();
-        let mut sorted_vectors = vec![D::zero(); n * n];
+        let sorted_values: Vec<f64> = order
+            .iter()
+            .map(|&index| values_workspace[index].into())
+            .collect();
         for (position, &index) in order.iter().enumerate() {
-            sorted_vectors[position * n..(position + 1) * n]
-                .copy_from_slice(&vectors[index * n..(index + 1) * n]);
+            let dst_start = position * n;
+            let src_start = index * max_n;
+            sorted_vectors[dst_start..dst_start + n]
+                .copy_from_slice(&vectors_workspace[src_start..src_start + n]);
         }
 
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
         });
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: n,
-            // Discarded placeholder; only the left factor (V) is kept.
-            right: vec![D::zero(); n * n],
-            left: sorted_vectors,
-            left_rows: n,
-            right_leading: n,
-        });
+        scatter_left_sector_blocks(rule, &v_space, &mut v_data, matrix, &sorted_vectors, n)?;
     }
 
-    let (v_factor, _vh_factor) =
-        build_left_right_pair(rule, space.homspace(), &matricizations, &pairs)?;
     let d_factor = diagonal_bond_tensor_dyn(rule, &eigenvalues, &D::from_real)?;
     Ok(EighFullDyn {
         d: d_factor,
-        v: v_factor,
+        v: (v_space, v_data),
         eigenvalues,
     })
 }
@@ -1403,31 +1423,78 @@ where
     let mut pairs = Vec::with_capacity(matricizations.len());
     let mut singular_values = Vec::with_capacity(matricizations.len());
     let mut col_dims: Vec<(SectorId, usize)> = Vec::new();
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = matricizations
+        .iter()
+        .map(|matrix| matrix.rows.min(matrix.cols))
+        .max()
+        .unwrap_or(0);
+    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut s_workspace = vec![D::Real::zero(); max_rank];
+    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
     for matrix in &matricizations {
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
         let view =
             DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .svd(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 3 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense SVD must return exactly (U, S, Vt)",
-            });
-        }
         let rank = matrix.rows.min(matrix.cols);
-        validate_dense_shape(outputs[0].shape(), &[matrix.rows, rank])?;
-        validate_dense_shape(outputs[1].shape(), &[rank])?;
-        validate_dense_shape(outputs[2].shape(), &[rank, matrix.cols])?;
-        let u_thin = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
-        let s_values = D::real_spectrum(&outputs[1]).map_err(OperationError::Dense)?;
-        let vt_thin = D::dense_slice(&outputs[2]).map_err(OperationError::Dense)?;
+        let u_shape = [matrix.rows, rank];
+        let u_strides = [1usize, max_rows];
+        let s_shape = [rank];
+        let s_strides = [1usize];
+        let vt_shape = [rank, matrix.cols];
+        let vt_strides = [1usize, max_rank];
+        let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
+            .map_err(OperationError::Dense)?;
+        dense
+            .svd_into(
+                D::dense_read(view),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vt_view),
+            )
+            .map_err(OperationError::Dense)?;
+        let s_values = s_workspace[..rank]
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let mut u_thin = vec![D::zero(); matrix.rows * rank];
+        let mut vt_thin = vec![D::zero(); rank * matrix.cols];
+        copy_col_major_strided(
+            &u_workspace,
+            matrix.rows,
+            rank,
+            max_rows,
+            &mut u_thin,
+            matrix.rows,
+        );
+        copy_col_major_strided(
+            &vt_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+            &mut vt_thin,
+            rank,
+        );
 
-        let u_full = orthonormal_completion(dense, u_thin, matrix.rows, rank)?;
+        let u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
         // V columns are the adjoint rows of Vh; complete V (n x rank) to
         // n x n, then store Vh = V^H.
-        let v_thin = adjoint_col_major(vt_thin, rank, matrix.cols);
+        let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
         let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
         let vh_full = adjoint_col_major(&v_full, matrix.cols, matrix.cols);
 
@@ -1524,19 +1591,23 @@ where
     for row in 0..rows {
         augmented[rows * rank + row * rows + row] = D::one();
     }
-    let shape = [rows, rank + rows];
-    let strides = [1usize, rows];
-    let view = DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
-    let outputs = dense
-        .qr(D::dense_read(view))
-        .map_err(OperationError::Dense)?;
-    if outputs.len() != 2 {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "dense QR must return exactly (Q, R)",
-        });
-    }
-    validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
-    let q = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
+    let mut q = vec![D::zero(); rows * rows];
+    let mut r = vec![D::zero(); rows * (rank + rows)];
+    qr_into_workspace(
+        dense,
+        &augmented,
+        rows,
+        rank + rows,
+        rows,
+        &mut q,
+        rows,
+        rows,
+        rows,
+        &mut r,
+        rows,
+        rank + rows,
+        rows,
+    )?;
     let mut full = vec![D::zero(); rows * rows];
     full[..rows * rank].copy_from_slice(thin);
     full[rows * rank..].copy_from_slice(&q[rows * rank..rows * rows]);
@@ -1630,19 +1701,33 @@ pub(crate) fn positive_diagonal_gauge<D: FactorScalar>(
     r_rows: usize,
     r_cols: usize,
 ) {
+    positive_diagonal_gauge_strided(q, q_rows, q_rows, r, r_rows, r_rows, r_cols);
+}
+
+fn positive_diagonal_gauge_strided<D: FactorScalar>(
+    q: &mut [D],
+    q_rows: usize,
+    q_leading: usize,
+    r: &mut [D],
+    r_rows: usize,
+    r_leading: usize,
+    r_cols: usize,
+) {
     for j in 0..r_rows.min(r_cols) {
-        let z = r[j + r_rows * j].widen_complex();
+        let z = r[j + r_leading * j].widen_complex();
         let norm = z.norm();
         if norm == 0.0 {
             continue; // phase 1: nothing to scale
         }
         let phase = D::from_complex64(z / norm);
         let conj_phase = FactorScalar::adjoint(phase);
-        for value in &mut q[q_rows * j..q_rows * (j + 1)] {
-            *value = *value * phase;
+        for row in 0..q_rows {
+            let index = row + q_leading * j;
+            q[index] = q[index] * phase;
         }
         for col in 0..r_cols {
-            r[j + r_rows * col] = conj_phase * r[j + r_rows * col];
+            let index = j + r_leading * col;
+            r[index] = conj_phase * r[index];
         }
     }
 }
@@ -1680,6 +1765,18 @@ where
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
     let mut pairs = Vec::with_capacity(matricizations.len());
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let mut q_workspace = vec![D::zero(); max_rows * max_rows];
+    let mut r_workspace = vec![D::zero(); max_rows * (max_rows + max_cols)];
     for matrix in &matricizations {
         let rows = matrix.rows;
         let cols = matrix.cols;
@@ -1688,25 +1785,25 @@ where
         for row in 0..rows {
             augmented[rows * cols + row * rows + row] = D::one();
         }
-        let shape = [rows, cols + rows];
-        let strides = [1usize, rows];
-        let view =
-            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .qr(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense QR must return exactly (Q, R)",
-            });
-        }
-        validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
-        validate_dense_shape(outputs[1].shape(), &[rows, cols + rows])?;
-        let mut q = D::dense_slice(&outputs[0])
-            .map_err(OperationError::Dense)?
-            .to_vec();
-        let mut r =
-            D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?[..rows * cols].to_vec();
+        qr_into_workspace(
+            dense,
+            &augmented,
+            rows,
+            cols + rows,
+            rows,
+            &mut q_workspace,
+            rows,
+            rows,
+            max_rows,
+            &mut r_workspace,
+            rows,
+            cols + rows,
+            max_rows,
+        )?;
+        let mut q = vec![D::zero(); rows * rows];
+        let mut r = vec![D::zero(); rows * cols];
+        copy_col_major_strided(&q_workspace, rows, rows, max_rows, &mut q, rows);
+        copy_col_major_strided(&r_workspace, rows, cols, max_rows, &mut r, rows);
         positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
         pairs.push(FactorPair {
             sector: matrix.sector,
@@ -1754,6 +1851,18 @@ where
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
     let mut pairs = Vec::with_capacity(matricizations.len());
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let mut q_prime_workspace = vec![D::zero(); max_cols * max_cols];
+    let mut r_prime_workspace = vec![D::zero(); max_cols * (max_rows + max_cols)];
     for matrix in &matricizations {
         let rows = matrix.rows;
         let cols = matrix.cols;
@@ -1763,25 +1872,25 @@ where
         for row in 0..cols {
             augmented[cols * rows + row * cols + row] = D::one();
         }
-        let shape = [cols, rows + cols];
-        let strides = [1usize, cols];
-        let view =
-            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .qr(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense QR must return exactly (Q, R)",
-            });
-        }
-        validate_dense_shape(outputs[0].shape(), &[cols, cols])?;
-        validate_dense_shape(outputs[1].shape(), &[cols, rows + cols])?;
-        let mut q_prime = D::dense_slice(&outputs[0])
-            .map_err(OperationError::Dense)?
-            .to_vec();
-        let mut r_prime =
-            D::dense_slice(&outputs[1]).map_err(OperationError::Dense)?[..cols * rows].to_vec();
+        qr_into_workspace(
+            dense,
+            &augmented,
+            cols,
+            rows + cols,
+            cols,
+            &mut q_prime_workspace,
+            cols,
+            cols,
+            max_cols,
+            &mut r_prime_workspace,
+            cols,
+            rows + cols,
+            max_cols,
+        )?;
+        let mut q_prime = vec![D::zero(); cols * cols];
+        let mut r_prime = vec![D::zero(); cols * rows];
+        copy_col_major_strided(&q_prime_workspace, cols, cols, max_cols, &mut q_prime, cols);
+        copy_col_major_strided(&r_prime_workspace, cols, rows, max_cols, &mut r_prime, cols);
         // Gauge the QR of t^H; L = R'^H then has a real non-negative diagonal.
         positive_diagonal_gauge(&mut q_prime, cols, &mut r_prime, cols, rows);
         pairs.push(FactorPair {
@@ -2129,6 +2238,18 @@ where
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
     let mut pairs = Vec::new();
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let mut q_workspace = vec![D::zero(); max_rows * max_rows];
+    let mut r_workspace = vec![D::zero(); max_rows * (max_rows + max_cols)];
     for matrix in &matricizations {
         let rows = matrix.rows;
         let cols = matrix.cols;
@@ -2141,27 +2262,37 @@ where
         for row in 0..rows {
             augmented[rows * cols + row * rows + row] = D::one();
         }
-        let shape = [rows, cols + rows];
-        let strides = [1usize, rows];
-        let view =
-            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .qr(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense QR must return exactly (Q, R)",
-            });
-        }
-        validate_dense_shape(outputs[0].shape(), &[rows, rows])?;
-        let q = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
+        qr_into_workspace(
+            dense,
+            &augmented,
+            rows,
+            cols + rows,
+            rows,
+            &mut q_workspace,
+            rows,
+            rows,
+            max_rows,
+            &mut r_workspace,
+            rows,
+            cols + rows,
+            max_rows,
+        )?;
         let null_dim = rows - rank;
+        let mut left = vec![D::zero(); rows * null_dim];
+        copy_col_major_strided(
+            &q_workspace[max_rows * rank..],
+            rows,
+            null_dim,
+            max_rows,
+            &mut left,
+            rows,
+        );
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: null_dim,
             // Null columns are the trailing full-Q columns (contiguous in the
             // column-major layout).
-            left: q[rows * rank..rows * rows].to_vec(),
+            left,
             left_rows: rows,
             // Discarded placeholder for the pair builder.
             right: vec![D::zero(); null_dim * cols],
@@ -2205,6 +2336,18 @@ where
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
     let mut pairs = Vec::new();
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let mut q_prime_workspace = vec![D::zero(); max_cols * max_cols];
+    let mut r_prime_workspace = vec![D::zero(); max_cols * (max_rows + max_cols)];
     for matrix in &matricizations {
         let rows = matrix.rows;
         let cols = matrix.cols;
@@ -2218,21 +2361,31 @@ where
         for row in 0..cols {
             augmented[cols * rows + row * cols + row] = D::one();
         }
-        let shape = [cols, rows + cols];
-        let strides = [1usize, cols];
-        let view =
-            DenseView::new(&augmented, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .qr(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense QR must return exactly (Q, R)",
-            });
-        }
-        validate_dense_shape(outputs[0].shape(), &[cols, cols])?;
-        let q_prime = D::dense_slice(&outputs[0]).map_err(OperationError::Dense)?;
+        qr_into_workspace(
+            dense,
+            &augmented,
+            cols,
+            rows + cols,
+            cols,
+            &mut q_prime_workspace,
+            cols,
+            cols,
+            max_cols,
+            &mut r_prime_workspace,
+            cols,
+            rows + cols,
+            max_cols,
+        )?;
         let null_dim = cols - rank;
+        let mut right = vec![D::zero(); null_dim * cols];
+        adjoint_col_major_strided_into(
+            &q_prime_workspace[max_cols * rank..],
+            cols,
+            null_dim,
+            max_cols,
+            &mut right,
+            null_dim,
+        );
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: null_dim,
@@ -2240,7 +2393,7 @@ where
             left: vec![D::zero(); rows * null_dim],
             left_rows: rows,
             // Null rows are the adjoints of the trailing Q' columns.
-            right: adjoint_col_major(&q_prime[cols * rank..cols * cols], cols, null_dim),
+            right,
             right_leading: null_dim,
         });
     }
@@ -2260,7 +2413,7 @@ pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>
 ) -> Result<(TensorMap<D, NOUT, NIN>, TensorMap<D, NIN, NIN>), OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -2281,7 +2434,7 @@ pub fn left_polar_dyn<E, RuleKey, BT, BC, R, D>(
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -2308,7 +2461,7 @@ pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize
 ) -> Result<(TensorMap<D, NOUT, NOUT>, TensorMap<D, NOUT, NIN>), OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -2329,7 +2482,7 @@ pub fn right_polar_dyn<E, RuleKey, BT, BC, R, D>(
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
     E: DenseExecutor,
-    RuleKey: Clone + Eq + std::hash::Hash,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -2379,41 +2532,67 @@ where
 {
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
-    let mut pairs = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view =
-            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .qr(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense QR must return exactly (Q, R)",
-            });
-        }
-        let rank = matrix.rows.min(matrix.cols);
-        validate_dense_shape(outputs[0].shape(), &[matrix.rows, rank])?;
-        validate_dense_shape(outputs[1].shape(), &[rank, matrix.cols])?;
-        let mut q = D::dense_slice(&outputs[0])
-            .map_err(OperationError::Dense)?
-            .to_vec();
-        let mut r = D::dense_slice(&outputs[1])
-            .map_err(OperationError::Dense)?
-            .to_vec();
-        positive_diagonal_gauge(&mut q, matrix.rows, &mut r, rank, matrix.cols);
-        pairs.push(FactorPair {
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
             sector: matrix.sector,
-            kept: rank,
-            left: q,
-            left_rows: matrix.rows,
-            right: r,
-            right_leading: rank,
-        });
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let (q_space, r_space) =
+        build_left_right_spaces(rule, space.homspace(), &matricizations, &ranks)?;
+    let q_len = q_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut q_data = vec![D::zero(); q_len];
+    let r_len = r_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut r_data = vec![D::zero(); r_len];
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut q_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut r_workspace = vec![D::zero(); max_rank * max_cols];
+    for matrix in &matricizations {
+        let rank = matrix.rows.min(matrix.cols);
+        qr_into_workspace(
+            dense,
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            matrix.rows,
+            &mut q_workspace,
+            matrix.rows,
+            rank,
+            max_rows,
+            &mut r_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+        )?;
+        positive_diagonal_gauge_strided(
+            &mut q_workspace,
+            matrix.rows,
+            max_rows,
+            &mut r_workspace,
+            rank,
+            max_rank,
+            matrix.cols,
+        );
+        scatter_left_sector_blocks(rule, &q_space, &mut q_data, matrix, &q_workspace, max_rows)?;
+        scatter_right_sector_blocks(rule, &r_space, &mut r_data, matrix, &r_workspace, max_rank)?;
     }
 
-    build_left_right_pair(rule, space.homspace(), &matricizations, &pairs)
+    Ok(((q_space, q_data), (r_space, r_data)))
 }
 
 /// Compact LQ `t = L * Q` (MatrixAlgebraKit `lq_compact`, via the QR of the
@@ -2449,46 +2628,97 @@ where
 {
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
-    let mut pairs = Vec::with_capacity(matricizations.len());
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let (l_space, q_space) =
+        build_left_right_spaces(rule, space.homspace(), &matricizations, &ranks)?;
+    let l_len = l_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut l_data = vec![D::zero(); l_len];
+    let q_len = q_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut q_data = vec![D::zero(); q_len];
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut transposed_workspace = vec![D::zero(); max_cols * max_rows];
+    let mut q_prime_workspace = vec![D::zero(); max_cols * max_rank];
+    let mut r_prime_workspace = vec![D::zero(); max_rank * max_rows];
+    let mut l_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut q_workspace = vec![D::zero(); max_rank * max_cols];
     for matrix in &matricizations {
         // QR of the adjoint: t^H = Q' R'  =>  t = R'^H Q'^H = L Q.
-        let transposed = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
-        let shape = [matrix.cols, matrix.rows];
-        let strides = [1usize, matrix.cols];
-        let view =
-            DenseView::new(&transposed, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .qr(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 2 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense QR must return exactly (Q, R)",
-            });
-        }
         let rank = matrix.rows.min(matrix.cols);
-        validate_dense_shape(outputs[0].shape(), &[matrix.cols, rank])?;
-        validate_dense_shape(outputs[1].shape(), &[rank, matrix.rows])?;
-        let mut q_prime = D::dense_slice(&outputs[0])
-            .map_err(OperationError::Dense)?
-            .to_vec();
-        let mut r_prime = D::dense_slice(&outputs[1])
-            .map_err(OperationError::Dense)?
-            .to_vec();
+        adjoint_col_major_strided_into(
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            matrix.rows,
+            &mut transposed_workspace,
+            max_cols,
+        );
+        qr_into_workspace(
+            dense,
+            &transposed_workspace,
+            matrix.cols,
+            matrix.rows,
+            max_cols,
+            &mut q_prime_workspace,
+            matrix.cols,
+            rank,
+            max_cols,
+            &mut r_prime_workspace,
+            rank,
+            matrix.rows,
+            max_rank,
+        )?;
         // Gauge the QR of t^H; L = R'^H then has a real non-negative diagonal.
-        positive_diagonal_gauge(&mut q_prime, matrix.cols, &mut r_prime, rank, matrix.rows);
-        pairs.push(FactorPair {
-            sector: matrix.sector,
-            kept: rank,
-            // L = R'^H : rows x rank.
-            left: adjoint_col_major(&r_prime, rank, matrix.rows),
-            left_rows: matrix.rows,
-            // Q = Q'^H : rank x cols.
-            right: adjoint_col_major(&q_prime, matrix.cols, rank),
-            right_leading: rank,
-        });
+        positive_diagonal_gauge_strided(
+            &mut q_prime_workspace,
+            matrix.cols,
+            max_cols,
+            &mut r_prime_workspace,
+            rank,
+            max_rank,
+            matrix.rows,
+        );
+        // L = R'^H : rows x rank; Q = Q'^H : rank x cols.
+        adjoint_col_major_strided_into(
+            &r_prime_workspace,
+            rank,
+            matrix.rows,
+            max_rank,
+            &mut l_workspace,
+            max_rows,
+        );
+        adjoint_col_major_strided_into(
+            &q_prime_workspace,
+            matrix.cols,
+            rank,
+            max_cols,
+            &mut q_workspace,
+            max_rank,
+        );
+        scatter_left_sector_blocks(rule, &l_space, &mut l_data, matrix, &l_workspace, max_rows)?;
+        scatter_right_sector_blocks(rule, &q_space, &mut q_data, matrix, &q_workspace, max_rank)?;
     }
 
-    build_left_right_pair(rule, space.homspace(), &matricizations, &pairs)
+    Ok(((l_space, l_data), (q_space, q_data)))
 }
 
 /// Left isometry factorization `t = V * C` (TensorKit 0.17 / MatrixAlgebraKit
@@ -2569,6 +2799,77 @@ fn adjoint_col_major<D: FactorScalar>(data: &[D], rows: usize, cols: usize) -> V
         }
     }
     adjoint
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qr_into_workspace<E, D>(
+    dense: &mut E,
+    input: &[D],
+    input_rows: usize,
+    input_cols: usize,
+    input_leading: usize,
+    q: &mut [D],
+    q_rows: usize,
+    q_cols: usize,
+    q_leading: usize,
+    r: &mut [D],
+    r_rows: usize,
+    r_cols: usize,
+    r_leading: usize,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor,
+    D: FactorScalar,
+{
+    let input_shape = [input_rows, input_cols];
+    let input_strides = [1usize, input_leading];
+    let q_shape = [q_rows, q_cols];
+    let q_strides = [1usize, q_leading];
+    let r_shape = [r_rows, r_cols];
+    let r_strides = [1usize, r_leading];
+    let input_view =
+        DenseView::new(input, &input_shape, &input_strides, 0).map_err(OperationError::Dense)?;
+    let q_view = DenseViewMut::new(q, &q_shape, &q_strides, 0).map_err(OperationError::Dense)?;
+    let r_view = DenseViewMut::new(r, &r_shape, &r_strides, 0).map_err(OperationError::Dense)?;
+    dense
+        .qr_into(
+            D::dense_read(input_view),
+            D::dense_write(q_view),
+            D::dense_write(r_view),
+        )
+        .map_err(OperationError::Dense)
+}
+
+fn copy_col_major_strided<D: Copy>(
+    source: &[D],
+    rows: usize,
+    cols: usize,
+    source_leading: usize,
+    destination: &mut [D],
+    destination_leading: usize,
+) {
+    for col in 0..cols {
+        let src_start = source_leading * col;
+        let dst_start = destination_leading * col;
+        destination[dst_start..dst_start + rows]
+            .copy_from_slice(&source[src_start..src_start + rows]);
+    }
+}
+
+fn adjoint_col_major_strided_into<D: FactorScalar>(
+    source: &[D],
+    rows: usize,
+    cols: usize,
+    source_leading: usize,
+    destination: &mut [D],
+    destination_leading: usize,
+) {
+    for col in 0..cols {
+        for row in 0..rows {
+            destination[col + destination_leading * row] =
+                FactorScalar::adjoint(source[row + source_leading * col]);
+        }
+    }
 }
 
 fn advance_outer_index(index: &mut [usize], shape: &[usize]) {

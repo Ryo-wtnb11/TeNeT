@@ -487,9 +487,45 @@ pub trait DenseExecutor {
                 message: "dense SVD must return exactly (U, S, Vt)".to_string(),
             });
         }
-        copy_dense_tensor_into(&outputs[0], u)?;
-        copy_dense_tensor_into(&outputs[1], s)?;
-        copy_dense_tensor_into(&outputs[2], vt)
+        copy_dense_tensor_into(&outputs[0], u, "svd_into")?;
+        copy_dense_tensor_into(&outputs[1], s, "svd_into")?;
+        copy_dense_tensor_into(&outputs[2], vt, "svd_into")
+    }
+
+    fn qr_into(
+        &mut self,
+        input: DenseRead<'_>,
+        q: DenseWrite<'_>,
+        r: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let outputs = self.qr(input)?;
+        if outputs.len() != 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "qr_into",
+                message: "dense QR must return exactly (Q, R)".to_string(),
+            });
+        }
+        copy_dense_tensor_into(&outputs[0], q, "qr_into")?;
+        copy_dense_tensor_into(&outputs[1], r, "qr_into")
+    }
+
+    fn eigh_into(
+        &mut self,
+        input: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let outputs = self.eigh(input)?;
+        if outputs.len() != 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "eigh_into",
+                message: "dense EIGH must return exactly (values, vectors)".to_string(),
+            });
+        }
+        copy_dense_tensor_into(&outputs[0], values, "eigh_into")?;
+        copy_dense_tensor_into(&outputs[1], vectors, "eigh_into")
     }
 
     /// General (non-Hermitian) eigendecomposition `(values, vectors)`; both
@@ -617,36 +653,28 @@ pub trait DenseExecutor {
     }
 }
 
-fn copy_dense_tensor_into(tensor: &DenseTensor, output: DenseWrite<'_>) -> Result<(), DenseError> {
+fn copy_dense_tensor_into(
+    tensor: &DenseTensor,
+    output: DenseWrite<'_>,
+    op: &'static str,
+) -> Result<(), DenseError> {
     match output {
-        DenseWrite::F32(output) => copy_contiguous_tensor_into_view(
-            tensor.as_f32_slice()?,
-            tensor.shape(),
-            output,
-            "svd_into",
-        ),
-        DenseWrite::F64(output) => copy_contiguous_tensor_into_view(
-            tensor.as_f64_slice()?,
-            tensor.shape(),
-            output,
-            "svd_into",
-        ),
-        DenseWrite::C32(output) => copy_contiguous_tensor_into_view(
-            tensor.as_c32_slice()?,
-            tensor.shape(),
-            output,
-            "svd_into",
-        ),
-        DenseWrite::C64(output) => copy_contiguous_tensor_into_view(
-            tensor.as_c64_slice()?,
-            tensor.shape(),
-            output,
-            "svd_into",
-        ),
+        DenseWrite::F32(output) => {
+            copy_contiguous_tensor_into_view(tensor.as_f32_slice()?, tensor.shape(), output, op)
+        }
+        DenseWrite::F64(output) => {
+            copy_contiguous_tensor_into_view(tensor.as_f64_slice()?, tensor.shape(), output, op)
+        }
+        DenseWrite::C32(output) => {
+            copy_contiguous_tensor_into_view(tensor.as_c32_slice()?, tensor.shape(), output, op)
+        }
+        DenseWrite::C64(output) => {
+            copy_contiguous_tensor_into_view(tensor.as_c64_slice()?, tensor.shape(), output, op)
+        }
         DenseWrite::I32(_) | DenseWrite::I64(_) | DenseWrite::Bool(_) => Err(DenseError::Backend {
             backend: DenseBackend::Tenferro,
-            op: "svd_into",
-            message: "SVD outputs require f32/f64/c32/c64 destination views".to_string(),
+            op,
+            message: format!("{op} outputs require f32/f64/c32/c64 destination views"),
         }),
     }
 }
@@ -662,7 +690,7 @@ fn copy_contiguous_tensor_into_view<T: Copy>(
             backend: DenseBackend::Tenferro,
             op,
             message: format!(
-                "SVD output shape mismatch: source {:?}, destination {:?}",
+                "{op} output shape mismatch: source {:?}, destination {:?}",
                 source_shape,
                 output.shape()
             ),
@@ -676,7 +704,7 @@ fn copy_contiguous_tensor_into_view<T: Copy>(
             backend: DenseBackend::Tenferro,
             op,
             message: format!(
-                "SVD output storage length mismatch: source {}, expected {}",
+                "{op} output storage length mismatch: source {}, expected {}",
                 source.len(),
                 expected
             ),
@@ -2089,6 +2117,100 @@ mod tests {
         }
         for index in 0..2 {
             assert_f64_close(s[2 * index], expected_s[index], 1e-12);
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_qr_into_writes_strided_destination_views() {
+        let data = [
+            Complex64::new(1.0, 0.5),
+            Complex64::new(-2.0, 1.0),
+            Complex64::new(0.5, -0.25),
+            Complex64::new(4.0, 1.5),
+        ];
+        let input_shape = [2, 2];
+        let input_strides = [1, 2];
+        let input = DenseRead::C64(DenseView::new(&data, &input_shape, &input_strides, 0).unwrap());
+
+        let mut executor = DefaultDenseExecutor::new();
+        let expected = executor.qr(input).unwrap();
+
+        let sentinel = Complex64::new(-99.0, 0.0);
+        let mut q = vec![sentinel; 8];
+        let mut r = vec![sentinel; 8];
+        let matrix_shape = [2, 2];
+        let matrix_strides = [1, 3];
+        executor
+            .qr_into(
+                input,
+                DenseWrite::C64(
+                    DenseViewMut::new(&mut q, &matrix_shape, &matrix_strides, 1).unwrap(),
+                ),
+                DenseWrite::C64(
+                    DenseViewMut::new(&mut r, &matrix_shape, &matrix_strides, 1).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let expected_q = expected[0].as_c64_slice().unwrap();
+        let expected_r = expected[1].as_c64_slice().unwrap();
+        for col in 0..2 {
+            for row in 0..2 {
+                assert_c64_close(q[1 + row + 3 * col], expected_q[row + 2 * col], 1e-12);
+                assert_c64_close(r[1 + row + 3 * col], expected_r[row + 2 * col], 1e-12);
+            }
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_eigh_into_writes_strided_destination_views() {
+        let data = [
+            Complex64::new(4.0, 0.0),
+            Complex64::new(1.0, 0.5),
+            Complex64::new(1.0, -0.5),
+            Complex64::new(3.0, 0.0),
+        ];
+        let input_shape = [2, 2];
+        let input_strides = [1, 2];
+        let input = DenseRead::C64(DenseView::new(&data, &input_shape, &input_strides, 0).unwrap());
+
+        let mut executor = DefaultDenseExecutor::new();
+        let expected = executor.eigh(input).unwrap();
+
+        let mut values = vec![-99.0; 4];
+        let sentinel = Complex64::new(-99.0, 0.0);
+        let mut vectors = vec![sentinel; 8];
+        let values_shape = [2];
+        let values_strides = [2];
+        let matrix_shape = [2, 2];
+        let matrix_strides = [1, 3];
+        executor
+            .eigh_into(
+                input,
+                DenseWrite::F64(
+                    DenseViewMut::new(&mut values, &values_shape, &values_strides, 1).unwrap(),
+                ),
+                DenseWrite::C64(
+                    DenseViewMut::new(&mut vectors, &matrix_shape, &matrix_strides, 1).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let expected_values = expected[0].as_f64_slice().unwrap();
+        let expected_vectors = expected[1].as_c64_slice().unwrap();
+        for index in 0..2 {
+            assert_f64_close(values[1 + 2 * index], expected_values[index], 1e-12);
+        }
+        for col in 0..2 {
+            for row in 0..2 {
+                assert_c64_close(
+                    vectors[1 + row + 3 * col],
+                    expected_vectors[row + 2 * col],
+                    1e-12,
+                );
+            }
         }
     }
 
