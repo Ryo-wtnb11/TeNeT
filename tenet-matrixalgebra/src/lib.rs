@@ -35,5 +35,9 @@ pub use factorize::{
 pub use matrix_functions::{exp, exp_dyn, inv, inv_dyn, pinv, pinv_dyn};
 pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
 
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
+pub use factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
+
 #[cfg(test)]
 mod tests;

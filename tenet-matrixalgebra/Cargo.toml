@@ -19,3 +19,8 @@ cpu-blas = ["tenet-dense/cpu-blas", "tenet-tensors/cpu-blas"]
 blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-tensors/blas-accelerate"]
 blas-openblas = ["tenet-dense/blas-openblas", "tenet-tensors/blas-openblas"]
 blas-mkl = ["tenet-dense/blas-mkl", "tenet-tensors/blas-mkl"]
+diagnostics = []
+
+[[example]]
+name = "issue19_block_sparse_diag"
+required-features = ["diagnostics"]

@@ -472,6 +472,26 @@ pub trait DenseExecutor {
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
 
+    fn svd_into(
+        &mut self,
+        input: DenseRead<'_>,
+        u: DenseWrite<'_>,
+        s: DenseWrite<'_>,
+        vt: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let outputs = self.svd(input)?;
+        if outputs.len() != 3 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_into",
+                message: "dense SVD must return exactly (U, S, Vt)".to_string(),
+            });
+        }
+        copy_dense_tensor_into(&outputs[0], u)?;
+        copy_dense_tensor_into(&outputs[1], s)?;
+        copy_dense_tensor_into(&outputs[2], vt)
+    }
+
     /// General (non-Hermitian) eigendecomposition `(values, vectors)`; both
     /// outputs are complex regardless of the input scalar.
     fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -595,6 +615,111 @@ pub trait DenseExecutor {
             }),
         }
     }
+}
+
+fn copy_dense_tensor_into(tensor: &DenseTensor, output: DenseWrite<'_>) -> Result<(), DenseError> {
+    match output {
+        DenseWrite::F32(output) => copy_contiguous_tensor_into_view(
+            tensor.as_f32_slice()?,
+            tensor.shape(),
+            output,
+            "svd_into",
+        ),
+        DenseWrite::F64(output) => copy_contiguous_tensor_into_view(
+            tensor.as_f64_slice()?,
+            tensor.shape(),
+            output,
+            "svd_into",
+        ),
+        DenseWrite::C32(output) => copy_contiguous_tensor_into_view(
+            tensor.as_c32_slice()?,
+            tensor.shape(),
+            output,
+            "svd_into",
+        ),
+        DenseWrite::C64(output) => copy_contiguous_tensor_into_view(
+            tensor.as_c64_slice()?,
+            tensor.shape(),
+            output,
+            "svd_into",
+        ),
+        DenseWrite::I32(_) | DenseWrite::I64(_) | DenseWrite::Bool(_) => Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: "SVD outputs require f32/f64/c32/c64 destination views".to_string(),
+        }),
+    }
+}
+
+fn copy_contiguous_tensor_into_view<T: Copy>(
+    source: &[T],
+    source_shape: &[usize],
+    mut output: DenseViewMut<'_, T>,
+    op: &'static str,
+) -> Result<(), DenseError> {
+    if source_shape != output.shape() {
+        return Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op,
+            message: format!(
+                "SVD output shape mismatch: source {:?}, destination {:?}",
+                source_shape,
+                output.shape()
+            ),
+        });
+    }
+    let expected = source_shape.iter().try_fold(1usize, |acc, &dim| {
+        acc.checked_mul(dim).ok_or(DenseError::ElementCountOverflow)
+    })?;
+    if source.len() != expected {
+        return Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op,
+            message: format!(
+                "SVD output storage length mismatch: source {}, expected {}",
+                source.len(),
+                expected
+            ),
+        });
+    }
+    if expected == 0 {
+        return Ok(());
+    }
+    if source_shape.is_empty() {
+        let offset = output.offset();
+        output.data_mut()[offset] = source[0];
+        return Ok(());
+    }
+
+    let shape = output.shape().to_vec();
+    let strides = output.strides().to_vec();
+    let offset = output.offset();
+    let run = shape[0];
+    let outer_count = shape[1..].iter().product::<usize>();
+    let mut index = vec![0usize; shape.len()];
+    let data = output.data_mut();
+    for outer in 0..outer_count {
+        let src_start = outer * run;
+        let mut dst_start = offset;
+        for axis in 1..shape.len() {
+            dst_start += index[axis] * strides[axis];
+        }
+        if strides[0] == 1 {
+            data[dst_start..dst_start + run].copy_from_slice(&source[src_start..src_start + run]);
+        } else {
+            for lane in 0..run {
+                data[dst_start + lane * strides[0]] = source[src_start + lane];
+            }
+        }
+        for axis in 1..shape.len() {
+            index[axis] += 1;
+            if index[axis] < shape[axis] {
+                break;
+            }
+            index[axis] = 0;
+        }
+    }
+    Ok(())
 }
 
 fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseError> {
@@ -1919,6 +2044,51 @@ mod tests {
                     | (DenseDType::C64, DenseDType::F64)
             ));
             assert_eq!(outputs[2].dtype(), dtype);
+        }
+    }
+
+    #[cfg(feature = "tenferro")]
+    #[test]
+    fn default_executor_svd_into_writes_strided_destination_views() {
+        let data = [1.0_f64, -2.0, 0.5, 4.0];
+        let input_shape = [2, 2];
+        let input_strides = [1, 2];
+        let input = DenseRead::F64(DenseView::new(&data, &input_shape, &input_strides, 0).unwrap());
+
+        let mut executor = DefaultDenseExecutor::new();
+        let expected = executor.svd(input).unwrap();
+
+        let mut u = vec![-99.0; 8];
+        let mut s = vec![-99.0; 4];
+        let mut vt = vec![-99.0; 8];
+        let matrix_shape = [2, 2];
+        let matrix_strides = [1, 3];
+        let s_shape = [2];
+        let s_strides = [2];
+        executor
+            .svd_into(
+                input,
+                DenseWrite::F64(
+                    DenseViewMut::new(&mut u, &matrix_shape, &matrix_strides, 1).unwrap(),
+                ),
+                DenseWrite::F64(DenseViewMut::new(&mut s, &s_shape, &s_strides, 0).unwrap()),
+                DenseWrite::F64(
+                    DenseViewMut::new(&mut vt, &matrix_shape, &matrix_strides, 1).unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let expected_u = expected[0].as_f64_slice().unwrap();
+        let expected_s = expected[1].as_f64_slice().unwrap();
+        let expected_vt = expected[2].as_f64_slice().unwrap();
+        for col in 0..2 {
+            for row in 0..2 {
+                assert_f64_close(u[1 + row + 3 * col], expected_u[row + 2 * col], 1e-12);
+                assert_f64_close(vt[1 + row + 3 * col], expected_vt[row + 2 * col], 1e-12);
+            }
+        }
+        for index in 0..2 {
+            assert_f64_close(s[2 * index], expected_s[index], 1e-12);
         }
     }
 
