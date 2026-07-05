@@ -4,7 +4,7 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage,
     SimilarStorage, TensorMap,
 };
-use tenet_dense::{DenseExecutor, DenseGemmBatchJob, DenseView, DenseViewMut};
+use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 use tenet_operations::fusion_replay::{direct_slice, direct_slice_mut, Rank2GemmBatchJob};
 
 use crate::host_scratch::HostScratchBuffer;
@@ -425,23 +425,12 @@ where
             &flat_strides,
             0,
         ));
-        let dense_jobs: Vec<DenseGemmBatchJob> = jobs
-            .iter()
-            .map(|job| DenseGemmBatchJob {
-                dst_offset: job.dst_offset,
-                lhs_offset: job.lhs_offset,
-                rhs_offset: job.rhs_offset,
-                rows: job.rows,
-                contracted: job.contracted,
-                cols: job.cols,
-            })
-            .collect();
         self.dense_mut()
             .matmul_batch_axpby_into(
                 output,
                 lhs,
                 rhs,
-                &dense_jobs,
+                jobs,
                 alpha.dense_scalar(),
                 beta.dense_scalar(),
             )

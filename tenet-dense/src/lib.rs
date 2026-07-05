@@ -597,6 +597,62 @@ pub trait DenseExecutor {
     }
 }
 
+fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseError> {
+    base.checked_add(offset)
+        .ok_or(DenseError::OffsetOverflow { value: offset })
+}
+
+fn matrix_len(rows: usize, cols: usize) -> Result<usize, DenseError> {
+    rows.checked_mul(cols)
+        .ok_or(DenseError::ElementCountOverflow)
+}
+
+fn same_gemm_shape(lhs: &DenseGemmBatchJob, rhs: &DenseGemmBatchJob) -> bool {
+    lhs.rows == rhs.rows && lhs.contracted == rhs.contracted && lhs.cols == rhs.cols
+}
+
+const STRIDED_BATCH_MIN_JOBS: usize = 4;
+
+fn strided_batch_run_len(jobs: &[DenseGemmBatchJob], start: usize) -> usize {
+    let Some(first) = jobs.get(start) else {
+        return 0;
+    };
+    let Some(second) = jobs.get(start + 1) else {
+        return 1;
+    };
+    if !same_gemm_shape(first, second) {
+        return 1;
+    }
+    let Some(dst_stride) = second.dst_offset.checked_sub(first.dst_offset) else {
+        return 1;
+    };
+    if dst_stride == 0 {
+        return 1;
+    }
+    let Some(lhs_stride) = second.lhs_offset.checked_sub(first.lhs_offset) else {
+        return 1;
+    };
+    let Some(rhs_stride) = second.rhs_offset.checked_sub(first.rhs_offset) else {
+        return 1;
+    };
+
+    let mut len = 2usize;
+    while let Some(next) = jobs.get(start + len) {
+        let prev = &jobs[start + len - 1];
+        if !same_gemm_shape(first, next) {
+            break;
+        }
+        if prev.dst_offset.checked_add(dst_stride) != Some(next.dst_offset)
+            || prev.lhs_offset.checked_add(lhs_stride) != Some(next.lhs_offset)
+            || prev.rhs_offset.checked_add(rhs_stride) != Some(next.rhs_offset)
+        {
+            break;
+        }
+        len += 1;
+    }
+    len
+}
+
 /// Serial fallback for [`DenseExecutor::matmul_batch_axpby_into`]: one
 /// `matmul_axpby_into` per job over rank-2 sub-views of the shared buffers.
 #[allow(clippy::too_many_arguments)]
@@ -616,11 +672,6 @@ where
     W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
     R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
 {
-    fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseError> {
-        base.checked_add(offset)
-            .ok_or(DenseError::OffsetOverflow { value: offset })
-    }
-
     for job in jobs {
         let lhs_shape = [job.rows, job.contracted];
         let lhs_strides = [1, job.rows];
@@ -779,6 +830,9 @@ mod tenferro_adapter {
     pub struct DefaultDenseExecutor {
         backend: CpuBackend,
         matmul_config: DotGeneralConfig,
+        strided_batch_matmul_config: DotGeneralConfig,
+        grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache,
+        grouped_jobs: Vec<GroupedGemmJob>,
     }
 
     impl DefaultDenseExecutor {
@@ -791,7 +845,200 @@ mod tenferro_adapter {
                     lhs_batch_dims: Vec::new(),
                     rhs_batch_dims: Vec::new(),
                 },
+                strided_batch_matmul_config: DotGeneralConfig {
+                    lhs_contracting_dims: vec![1],
+                    rhs_contracting_dims: vec![0],
+                    lhs_batch_dims: vec![2],
+                    rhs_batch_dims: vec![2],
+                },
+                grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache::default(),
+                grouped_jobs: Vec::new(),
             }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_batch_axpby_grouped(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            jobs: &[DenseGemmBatchJob],
+            alpha: DenseScalar,
+            beta: DenseScalar,
+        ) -> Result<(), DenseError> {
+            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
+            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
+            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
+            self.grouped_jobs.clear();
+            self.grouped_jobs.extend(jobs.iter().map(|job| {
+                GroupedGemmJob::new(
+                    job.dst_offset,
+                    job.lhs_offset,
+                    job.rhs_offset,
+                    job.rows,
+                    job.contracted,
+                    job.cols,
+                )
+            }));
+            let accumulation = tenferro_tensor::DotGeneralAccumulation {
+                lhs_conj: false,
+                rhs_conj: false,
+                alpha: tenferro_scalar(alpha),
+                beta: tenferro_scalar(beta),
+            };
+            let config = GroupedGemmConfig::new(&self.grouped_jobs, accumulation);
+            BackendCachedDot::grouped_gemm_cached(
+                &mut self.backend,
+                &mut self.grouped_cache,
+                None,
+                lhs,
+                rhs,
+                &config,
+                output,
+            )
+            .map_err(|err| tenferro_error("grouped_gemm", err))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_batch_axpby_strided_typed<T, W, R>(
+            &mut self,
+            output: &mut DenseViewMut<'_, T>,
+            lhs: DenseView<'_, T>,
+            rhs: DenseView<'_, T>,
+            jobs: &[DenseGemmBatchJob],
+            alpha: DenseScalar,
+            beta: DenseScalar,
+            wrap_write: W,
+            wrap_read: R,
+        ) -> Result<bool, DenseError>
+        where
+            T: 'static,
+            W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
+            R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
+        {
+            if jobs.len() < 2 {
+                return Ok(false);
+            }
+            let mut has_batched_run = false;
+            let mut start = 0usize;
+            while start < jobs.len() {
+                let run_len = strided_batch_run_len(jobs, start);
+                if run_len >= STRIDED_BATCH_MIN_JOBS {
+                    has_batched_run = true;
+                    break;
+                }
+                start += run_len;
+            }
+            if !has_batched_run {
+                return Ok(false);
+            }
+
+            let mut start = 0usize;
+            while start < jobs.len() {
+                let run_len = strided_batch_run_len(jobs, start);
+                self.matmul_strided_batch_run_typed(
+                    output,
+                    lhs,
+                    rhs,
+                    &jobs[start..start + run_len],
+                    start,
+                    alpha,
+                    beta,
+                    wrap_write,
+                    wrap_read,
+                )?;
+                start += run_len;
+            }
+            Ok(true)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_strided_batch_run_typed<T, W, R>(
+            &mut self,
+            output: &mut DenseViewMut<'_, T>,
+            lhs: DenseView<'_, T>,
+            rhs: DenseView<'_, T>,
+            run: &[DenseGemmBatchJob],
+            cache_slot: usize,
+            alpha: DenseScalar,
+            beta: DenseScalar,
+            wrap_write: W,
+            wrap_read: R,
+        ) -> Result<(), DenseError>
+        where
+            T: 'static,
+            W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
+            R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
+        {
+            let first = &run[0];
+            let run_len = run.len();
+            let (lhs_batch_stride, rhs_batch_stride, dst_batch_stride) = if run_len > 1 {
+                let next = &run[1];
+                (
+                    next.lhs_offset.checked_sub(first.lhs_offset).ok_or(
+                        DenseError::OffsetOverflow {
+                            value: first.lhs_offset,
+                        },
+                    )?,
+                    next.rhs_offset.checked_sub(first.rhs_offset).ok_or(
+                        DenseError::OffsetOverflow {
+                            value: first.rhs_offset,
+                        },
+                    )?,
+                    next.dst_offset.checked_sub(first.dst_offset).ok_or(
+                        DenseError::OffsetOverflow {
+                            value: first.dst_offset,
+                        },
+                    )?,
+                )
+            } else {
+                (
+                    matrix_len(first.rows, first.contracted)?,
+                    matrix_len(first.contracted, first.cols)?,
+                    matrix_len(first.rows, first.cols)?,
+                )
+            };
+            let lhs_shape = [first.rows, first.contracted, run_len];
+            let lhs_strides = [1, first.rows, lhs_batch_stride];
+            let rhs_shape = [first.contracted, first.cols, run_len];
+            let rhs_strides = [1, first.contracted, rhs_batch_stride];
+            let dst_shape = [first.rows, first.cols, run_len];
+            let dst_strides = [1, first.rows, dst_batch_stride];
+            let lhs_view = DenseView::new(
+                lhs.data(),
+                &lhs_shape,
+                &lhs_strides,
+                batch_offset(lhs.offset(), first.lhs_offset)?,
+            )?;
+            let rhs_view = DenseView::new(
+                rhs.data(),
+                &rhs_shape,
+                &rhs_strides,
+                batch_offset(rhs.offset(), first.rhs_offset)?,
+            )?;
+            let dst_offset = batch_offset(output.offset(), first.dst_offset)?;
+            let dst_view =
+                DenseViewMut::new(output.data_mut(), &dst_shape, &dst_strides, dst_offset)?;
+            let lhs = TensorRead::from_view(tenferro_view(wrap_read(lhs_view))?);
+            let rhs = TensorRead::from_view(tenferro_view(wrap_read(rhs_view))?);
+            let output = TensorWrite::from_view(tenferro_view_mut(wrap_write(dst_view))?);
+            let accumulation = tenferro_tensor::DotGeneralAccumulation {
+                lhs_conj: false,
+                rhs_conj: false,
+                alpha: tenferro_scalar(alpha),
+                beta: tenferro_scalar(beta),
+            };
+            BackendCachedDot::dot_general_read_into_accum_cached(
+                &mut self.backend,
+                &mut self.grouped_cache,
+                Some(cache_slot),
+                lhs,
+                rhs,
+                &self.strided_batch_matmul_config,
+                accumulation,
+                output,
+            )
+            .map_err(|err| tenferro_error("strided_batch_gemm", err))
         }
     }
 
@@ -900,42 +1147,102 @@ mod tenferro_adapter {
             alpha: DenseScalar,
             beta: DenseScalar,
         ) -> Result<(), DenseError> {
-            let lhs = TensorRead::from_view(tenferro_view(lhs)?);
-            let rhs = TensorRead::from_view(tenferro_view(rhs)?);
-            let output = TensorWrite::from_view(tenferro_view_mut(output)?);
-            let grouped_jobs: Vec<GroupedGemmJob> = jobs
-                .iter()
-                .map(|job| {
-                    GroupedGemmJob::new(
-                        job.dst_offset,
-                        job.lhs_offset,
-                        job.rhs_offset,
-                        job.rows,
-                        job.contracted,
-                        job.cols,
+            match (output, lhs, rhs) {
+                (DenseWrite::F32(mut out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
+                    if self.matmul_batch_axpby_strided_typed(
+                        &mut out,
+                        lhs,
+                        rhs,
+                        jobs,
+                        alpha,
+                        beta,
+                        |view: DenseViewMut<'_, f32>| DenseWrite::F32(view),
+                        |view: DenseView<'_, f32>| DenseRead::F32(view),
+                    )? {
+                        return Ok(());
+                    }
+                    self.matmul_batch_axpby_grouped(
+                        DenseWrite::F32(out),
+                        DenseRead::F32(lhs),
+                        DenseRead::F32(rhs),
+                        jobs,
+                        alpha,
+                        beta,
                     )
-                })
-                .collect();
-            let accumulation = tenferro_tensor::DotGeneralAccumulation {
-                lhs_conj: false,
-                rhs_conj: false,
-                alpha: tenferro_scalar(alpha),
-                beta: tenferro_scalar(beta),
-            };
-            let config = GroupedGemmConfig::new(&grouped_jobs, accumulation);
-            // The grouped path ignores the analysis cache today; a fresh
-            // default keeps the call self-contained.
-            let mut cache = <CpuBackend as BackendRuntimeCache>::RuntimeCache::default();
-            BackendCachedDot::grouped_gemm_cached(
-                &mut self.backend,
-                &mut cache,
-                None,
-                lhs,
-                rhs,
-                &config,
-                output,
-            )
-            .map_err(|err| tenferro_error("grouped_gemm", err))
+                }
+                (DenseWrite::F64(mut out), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
+                    if self.matmul_batch_axpby_strided_typed(
+                        &mut out,
+                        lhs,
+                        rhs,
+                        jobs,
+                        alpha,
+                        beta,
+                        |view: DenseViewMut<'_, f64>| DenseWrite::F64(view),
+                        |view: DenseView<'_, f64>| DenseRead::F64(view),
+                    )? {
+                        return Ok(());
+                    }
+                    self.matmul_batch_axpby_grouped(
+                        DenseWrite::F64(out),
+                        DenseRead::F64(lhs),
+                        DenseRead::F64(rhs),
+                        jobs,
+                        alpha,
+                        beta,
+                    )
+                }
+                (DenseWrite::C32(mut out), DenseRead::C32(lhs), DenseRead::C32(rhs)) => {
+                    if self.matmul_batch_axpby_strided_typed(
+                        &mut out,
+                        lhs,
+                        rhs,
+                        jobs,
+                        alpha,
+                        beta,
+                        |view: DenseViewMut<'_, Complex32>| DenseWrite::C32(view),
+                        |view: DenseView<'_, Complex32>| DenseRead::C32(view),
+                    )? {
+                        return Ok(());
+                    }
+                    self.matmul_batch_axpby_grouped(
+                        DenseWrite::C32(out),
+                        DenseRead::C32(lhs),
+                        DenseRead::C32(rhs),
+                        jobs,
+                        alpha,
+                        beta,
+                    )
+                }
+                (DenseWrite::C64(mut out), DenseRead::C64(lhs), DenseRead::C64(rhs)) => {
+                    if self.matmul_batch_axpby_strided_typed(
+                        &mut out,
+                        lhs,
+                        rhs,
+                        jobs,
+                        alpha,
+                        beta,
+                        |view: DenseViewMut<'_, Complex64>| DenseWrite::C64(view),
+                        |view: DenseView<'_, Complex64>| DenseRead::C64(view),
+                    )? {
+                        return Ok(());
+                    }
+                    self.matmul_batch_axpby_grouped(
+                        DenseWrite::C64(out),
+                        DenseRead::C64(lhs),
+                        DenseRead::C64(rhs),
+                        jobs,
+                        alpha,
+                        beta,
+                    )
+                }
+                _ => Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "matmul_batch_axpby_into",
+                    message: "batched matmul requires matching f32/f64/c32/c64 operands"
+                        .to_string(),
+                }),
+            }
         }
     }
 

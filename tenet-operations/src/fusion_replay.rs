@@ -11,6 +11,7 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
     SimilarStorage, TensorStorage,
 };
+use tenet_dense::DenseGemmBatchJob;
 
 use crate::placement::ReportsPlacement;
 use crate::profile::TensorContractFusionProfile;
@@ -84,15 +85,7 @@ pub trait Rank2Gemm<D> {
 /// One GEMM of a fully-direct core batch. Offsets address coupled-sector
 /// matrices inside the operands' storage buffers; a batch's destination
 /// ranges never overlap (validated when the plan is assembled).
-#[derive(Clone, Copy, Debug)]
-pub struct Rank2GemmBatchJob {
-    pub dst_offset: usize,
-    pub lhs_offset: usize,
-    pub rhs_offset: usize,
-    pub rows: usize,
-    pub contracted: usize,
-    pub cols: usize,
-}
+pub type Rank2GemmBatchJob = DenseGemmBatchJob;
 
 pub struct HostFusionBlockContractWorkspace<T> {
     _scalar: std::marker::PhantomData<T>,
@@ -202,6 +195,101 @@ impl FusionBlockContractPlan {
         Ok(())
     }
 
+    /// Replays a valid **non-direct** core-form contraction without falling
+    /// back to the general dynamic-tree route.
+    ///
+    /// Each group already carries the coupled-sector matrix layout of its
+    /// operand subblocks (`matrix_offset` / `matrix_strides` / per-subblock
+    /// `coefficient`). This packs every operand group into a contiguous
+    /// column-major scratch matrix (one strided copy per subblock, recoupling
+    /// coefficient folded in), runs the groups as one batched GEMM, then
+    /// scatters the results back. The plan guarantees the destination ranges
+    /// are pairwise disjoint, so every `dst` element is written exactly once
+    /// and `beta` composes correctly per scatter.
+    ///
+    /// This is the "copy into core storage, then mul!" route (TensorKit
+    /// parity) for operands that need only a repartition/permute plus scalar
+    /// recoupling, avoiding the dynamic route's 2–3 tree transforms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_packed<A, G, D>(
+        &self,
+        kernels: &mut A,
+        gemm: &mut G,
+        dst_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_data: &[D],
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        A: HostKernelAdapter<D>,
+        G: Rank2Gemm<D>,
+        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.validate_replay_inputs(
+            dst_structure,
+            dst_data.len(),
+            lhs_structure,
+            lhs_data.len(),
+            rhs_structure,
+            rhs_data.len(),
+        )?;
+        // Scale the dst blocks that no group writes; active blocks are scaled
+        // by `beta` inside the scatter below (each element written once).
+        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
+
+        // Lay out contiguous column-major scratch for every group.
+        let mut lhs_len = 0usize;
+        let mut rhs_len = 0usize;
+        let mut dst_len = 0usize;
+        let mut bases = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            let lhs_base = lhs_len;
+            let rhs_base = rhs_len;
+            let dst_base = dst_len;
+            lhs_len += group.lhs.rows * group.lhs.cols;
+            rhs_len += group.rhs.rows * group.rhs.cols;
+            dst_len += group.dst.rows * group.dst.cols;
+            bases.push((lhs_base, rhs_base, dst_base));
+        }
+        // Zero-initialised so sparse (non-covering) fusion layouts leave no
+        // stale data in the packed matrices handed to the GEMM.
+        let mut lhs_scratch = vec![D::zero(); lhs_len];
+        let mut rhs_scratch = vec![D::zero(); rhs_len];
+        let mut dst_scratch = vec![D::zero(); dst_len];
+
+        let mut jobs = Vec::with_capacity(self.groups.len());
+        for (group, &(lhs_base, rhs_base, dst_base)) in self.groups.iter().zip(&bases) {
+            pack_group_matrix(kernels, &group.lhs, lhs_data, &mut lhs_scratch, lhs_base)?;
+            pack_group_matrix(kernels, &group.rhs, rhs_data, &mut rhs_scratch, rhs_base)?;
+            jobs.push(Rank2GemmBatchJob {
+                dst_offset: dst_base,
+                lhs_offset: lhs_base,
+                rhs_offset: rhs_base,
+                rows: group.dst.rows,
+                contracted: group.lhs.cols,
+                cols: group.dst.cols,
+            });
+        }
+        // Fresh scratch destination: alpha carried here, beta = 0.
+        gemm.matmul_rank2_batch(
+            &mut dst_scratch,
+            &lhs_scratch,
+            &rhs_scratch,
+            &jobs,
+            alpha,
+            D::zero(),
+        )?;
+
+        for (group, &(_, _, dst_base)) in self.groups.iter().zip(&bases) {
+            scatter_group_matrix(kernels, &group.dst, &dst_scratch, dst_base, dst_data, beta)?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn execute_raw_profiled<A, G, D>(
         &self,
@@ -241,13 +329,12 @@ impl FusionBlockContractPlan {
         profile.core_scale += start.elapsed();
 
         let _ = fusion_workspace;
-        for group in &self.groups {
-            profile.core_contract_groups += 1;
-            let start = std::time::Instant::now();
-            execute_group_direct(gemm, group, dst_data, lhs_data, rhs_data, alpha, beta)?;
-            profile.core_direct_gemm_groups += 1;
-            profile.core_matmul += start.elapsed();
-        }
+        let batch = self.direct_batch()?;
+        profile.core_contract_groups += batch.len();
+        let start = std::time::Instant::now();
+        gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, alpha, beta)?;
+        profile.core_direct_gemm_groups += batch.len();
+        profile.core_matmul += start.elapsed();
 
         profile.core_contract_total += total_start.elapsed();
         Ok(())
@@ -813,6 +900,72 @@ where
     Ok(())
 }
 
+/// Packs one operand group's subblocks into its contiguous column-major
+/// scratch matrix at `base`, folding each subblock's recoupling coefficient
+/// into the copy. Zero-initialised scratch covers any uncovered entries.
+fn pack_group_matrix<A, D>(
+    kernels: &mut A,
+    group: &FusionBlockMatrixGroup,
+    src_data: &[D],
+    scratch: &mut [D],
+    base: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
+    let base = offset_to_isize(base)?;
+    for subblock in &group.subblocks {
+        let coefficient = D::coefficient_as_data(subblock.coefficient);
+        kernels.copy_scale_strided(
+            scratch,
+            src_data,
+            &subblock.block.shape,
+            &subblock.matrix_strides,
+            &subblock.block.strides,
+            base + subblock.matrix_offset,
+            subblock.block.offset,
+            false,
+            coefficient,
+        )?;
+    }
+    Ok(())
+}
+
+/// Scatters a group's packed result matrix (at `base` in `scratch`) back into
+/// the destination blocks, applying each subblock's recoupling coefficient as
+/// `alpha` and `beta` to the pre-existing destination. Destination ranges are
+/// pairwise disjoint, so each element is written exactly once.
+fn scatter_group_matrix<A, D>(
+    kernels: &mut A,
+    group: &FusionBlockMatrixGroup,
+    scratch: &[D],
+    base: usize,
+    dst_data: &mut [D],
+    beta: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
+    let base = offset_to_isize(base)?;
+    for subblock in &group.subblocks {
+        let coefficient = D::coefficient_as_data(subblock.coefficient);
+        kernels.axpby_strided(
+            dst_data,
+            scratch,
+            &subblock.block.shape,
+            &subblock.block.strides,
+            &subblock.matrix_strides,
+            subblock.block.offset,
+            base + subblock.matrix_offset,
+            coefficient,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
 /// Lowers the group list to batch jobs. A non-direct group yields `None`
 /// (route-decision-only plan); a direct batch additionally enforces pairwise
 /// disjoint destination ranges so backends may execute jobs in any order.
@@ -856,38 +1009,6 @@ fn compile_direct_batch(
     Ok(Some(jobs))
 }
 
-/// Direct-only group execution: every operand's coupled-sector matrix sits
-/// in storage, so the group is a single GEMM with alpha/beta applied by the
-/// kernel. Non-direct layouts are a plan-construction bug (the compile layer
-/// only produces coupled operands), reported as an explicit error.
-fn execute_group_direct<G, D>(
-    gemm: &mut G,
-    group: &FusionBlockContractGroupPlan,
-    dst_data: &mut [D],
-    lhs_data: &[D],
-    rhs_data: &[D],
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    G: Rank2Gemm<D>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-{
-    let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
-        group.lhs.direct_offset,
-        group.rhs.direct_offset,
-        group.dst.direct_offset,
-    ) else {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: NON_COUPLED_OPERAND_MESSAGE,
-        });
-    };
-    let lhs_slice = direct_slice(lhs_data, lhs_base, group.lhs.rows, group.lhs.cols)?;
-    let rhs_slice = direct_slice(rhs_data, rhs_base, group.rhs.rows, group.rhs.cols)?;
-    let dst_slice = direct_slice_mut(dst_data, dst_base, group.dst.rows, group.dst.cols)?;
-    matmul_group_plan(gemm, group, lhs_slice, rhs_slice, dst_slice, alpha, beta)
-}
-
 /// Checked shared `rows x cols` column-major matrix slice at `base`; the
 /// bounds-checking counterpart of the batch-job offset addressing.
 pub fn direct_slice<T>(
@@ -905,31 +1026,6 @@ pub fn direct_slice<T>(
             expected: end,
             actual: data.len(),
         })
-}
-
-fn matmul_group_plan<G, D>(
-    gemm: &mut G,
-    group: &FusionBlockContractGroupPlan,
-    lhs: &[D],
-    rhs: &[D],
-    dst: &mut [D],
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    G: Rank2Gemm<D>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-{
-    gemm.matmul_rank2(
-        dst,
-        lhs,
-        rhs,
-        group.lhs.rows,
-        group.lhs.cols,
-        group.rhs.cols,
-        alpha,
-        beta,
-    )
 }
 
 #[cfg(test)]
@@ -999,5 +1095,89 @@ mod tests {
         )
         .unwrap();
         assert!(compile_direct_batch(&[plan]).unwrap().is_none());
+    }
+
+    #[derive(Default)]
+    struct CountingBatchGemm {
+        rank2_calls: usize,
+        batch_calls: usize,
+        last_batch_len: usize,
+    }
+
+    impl Rank2Gemm<f64> for CountingBatchGemm {
+        fn matmul_rank2(
+            &mut self,
+            _dst: &mut [f64],
+            _lhs: &[f64],
+            _rhs: &[f64],
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+            _alpha: f64,
+            _beta: f64,
+        ) -> Result<(), OperationError> {
+            self.rank2_calls += 1;
+            Ok(())
+        }
+
+        fn matmul_rank2_batch(
+            &mut self,
+            _dst: &mut [f64],
+            _lhs: &[f64],
+            _rhs: &[f64],
+            jobs: &[Rank2GemmBatchJob],
+            _alpha: f64,
+            _beta: f64,
+        ) -> Result<(), OperationError> {
+            self.batch_calls += 1;
+            self.last_batch_len = jobs.len();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn profiled_direct_replay_uses_one_batched_gemm_call() {
+        let groups = vec![
+            group_plan((2, 3, 4), (0, 0, 0)),
+            group_plan((3, 2, 5), (6, 12, 8)),
+        ];
+        let structure = Arc::new(BlockStructure::trivial(&[23]).unwrap());
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            groups,
+        )
+        .unwrap();
+        let mut kernels = crate::StridedHostKernelAdapter;
+        let mut gemm = CountingBatchGemm::default();
+        let mut workspace = FusionBlockContractWorkspace::<f64>::default();
+        let mut profile = TensorContractFusionProfile::default();
+        let lhs = vec![0.0; 23];
+        let rhs = vec![0.0; 23];
+        let mut dst = vec![0.0; 23];
+
+        plan.execute_raw_profiled(
+            &mut kernels,
+            &mut gemm,
+            &mut workspace,
+            &structure,
+            &mut dst,
+            &structure,
+            &lhs,
+            &structure,
+            &rhs,
+            1.0,
+            0.0,
+            &mut profile,
+        )
+        .unwrap();
+
+        assert_eq!(gemm.batch_calls, 1);
+        assert_eq!(gemm.rank2_calls, 0);
+        assert_eq!(gemm.last_batch_len, 2);
+        assert_eq!(profile.core_contract_groups, 2);
+        assert_eq!(profile.core_direct_gemm_groups, 2);
     }
 }

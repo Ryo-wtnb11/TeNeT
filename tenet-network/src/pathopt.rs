@@ -327,7 +327,12 @@ impl DenseContractionOptimizer for OptEinsumPathOptimizer {
             strategy.as_ref(),
             self.memory_limit.as_size_limit_type(),
         )
-        .map_err(|e| ContractError::InvalidContractionPlan(format!("opt-einsum-path: {e}")))?;
+        .map_err(|e| {
+            ContractError::InvalidContractionPlan(format!(
+                "opt-einsum-path: {e} (subscripts={} shapes={:?})",
+                built.subscripts, built.shapes
+            ))
+        })?;
 
         let pairs = path_to_active_pairs(&path)?;
         dense_steps_from_active_pair_path(ir, &pairs, cost_model)

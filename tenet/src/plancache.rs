@@ -27,6 +27,14 @@ pub enum Optimizer {
     /// only). Requires `tenet-network`'s `opt-path` feature at execution.
     #[cfg(feature = "opt-path")]
     Optimal,
+    /// The legacy `EinsumPlan::compile` default: opt_einsum `"auto-hq"`
+    /// with fallback to `"auto"`, then `"dp"`, then greedy when a driver
+    /// errors (upstream `opt-einsum-path` rejects some all-dim-1 networks).
+    /// Near-optimal orders for the large gram / environment-body networks
+    /// where plain greedy picks memory-exploding orders. Requires
+    /// `tenet-network`'s `opt-path` feature at execution.
+    #[cfg(feature = "opt-path")]
+    AutoHq,
 }
 
 /// When to re-plan a topology-matched cache entry whose leg dimensions have
