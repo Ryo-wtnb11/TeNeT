@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
+use tenet_dense::DenseGemmBatchJob;
 
 use crate::strided::{column_major_strides_isize, element_count, offset_to_isize};
 use crate::structure_identity::validate_structure_identity;
@@ -20,11 +21,48 @@ use crate::OperationError;
 pub struct TreeTransformStructure<T> {
     rank: usize,
     storage_conjugate: bool,
+    identity: Arc<()>,
     pub blocks: Vec<TreeTransformBlock>,
     pub layouts: TreeTransformLayoutTable,
     pub recoupling_coefficients_dst_src: Vec<T>,
+    recoupling_plan: TreeTransformRecouplingPlan,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TreeTransformRecouplingPlan {
+    source_len: usize,
+    destination_len: usize,
+    coefficient_len: usize,
+    jobs: Vec<DenseGemmBatchJob>,
+}
+
+impl TreeTransformRecouplingPlan {
+    #[inline]
+    pub fn source_len(&self) -> usize {
+        self.source_len
+    }
+
+    #[inline]
+    pub fn destination_len(&self) -> usize {
+        self.destination_len
+    }
+
+    #[inline]
+    pub fn coefficient_len(&self) -> usize {
+        self.coefficient_len
+    }
+
+    #[inline]
+    pub fn jobs(&self) -> &[DenseGemmBatchJob] {
+        &self.jobs
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
 }
 
 impl<T: Copy> TreeTransformStructure<T> {
@@ -351,13 +389,16 @@ impl<T: Copy> TreeTransformStructure<T> {
             tree_transform_block_weight(rhs, &layouts)
                 .cmp(&tree_transform_block_weight(lhs, &layouts))
         });
+        let recoupling_plan = compile_recoupling_plan(&blocks)?;
 
         Ok(Self {
             rank,
             storage_conjugate,
+            identity: Arc::new(()),
             blocks,
             layouts,
             recoupling_coefficients_dst_src,
+            recoupling_plan,
             dst_structure,
             src_structure,
         })
@@ -396,9 +437,17 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     pub fn has_pack_gemm_scatter_blocks(&self) -> bool {
-        self.blocks
-            .iter()
-            .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
+        !self.recoupling_plan.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn identity_marker(&self) -> &Arc<()> {
+        &self.identity
+    }
+
+    #[inline]
+    pub fn recoupling_plan(&self) -> &TreeTransformRecouplingPlan {
+        &self.recoupling_plan
     }
 
     /// Test/diagnostic helper: per-block replay weights.
@@ -427,6 +476,57 @@ impl<T: Copy> TreeTransformStructure<T> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
         validate_structure_identity("src", &self.src_structure, src_structure)
     }
+}
+
+fn compile_recoupling_plan(
+    blocks: &[TreeTransformBlock],
+) -> Result<TreeTransformRecouplingPlan, OperationError> {
+    let mut source_len = 0usize;
+    let mut destination_len = 0usize;
+    let mut coefficient_len = 0usize;
+    let mut jobs = Vec::new();
+    for block in blocks {
+        if let TreeTransformBlock::Multi {
+            dst_count,
+            src_count,
+            element_count,
+            ..
+        } = *block
+        {
+            let block_source_len = element_count
+                .checked_mul(src_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            let block_destination_len = element_count
+                .checked_mul(dst_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            let block_coefficient_len = src_count
+                .checked_mul(dst_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            jobs.push(DenseGemmBatchJob {
+                dst_offset: destination_len,
+                lhs_offset: source_len,
+                rhs_offset: coefficient_len,
+                rows: element_count,
+                contracted: src_count,
+                cols: dst_count,
+            });
+            source_len = source_len
+                .checked_add(block_source_len)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            destination_len = destination_len
+                .checked_add(block_destination_len)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            coefficient_len = coefficient_len
+                .checked_add(block_coefficient_len)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+    }
+    Ok(TreeTransformRecouplingPlan {
+        source_len,
+        destination_len,
+        coefficient_len,
+        jobs,
+    })
 }
 
 fn tree_transform_block_weight(

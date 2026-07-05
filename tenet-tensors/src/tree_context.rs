@@ -407,7 +407,9 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeFusionSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeFusionSymbols<Scalar = C>
+            + TreeTransformRuleCacheKey<Key = RuleKey>
+            + Sync,
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {

@@ -23,8 +23,7 @@ use super::operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use super::plan::{
-    build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    build_tree_pair_transform_group_plan, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -245,6 +244,9 @@ pub struct TreeTransformCache<T, RuleKey> {
     // Shape-independent row front for this context. Miss compiles prefill it
     // from the process-global row memo, then publish new rows back.
     tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
+    // Same row-granular memo for all-codomain transforms, keyed only by the
+    // codomain tree because the domain is unchanged by this scope.
+    all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo<T, RuleKey>,
     // Worker count for plan compilation (missing tree-row computation).
     // Not a second knob: the execution context propagates the backend's
     // `recoupling_threads` here, so one setting drives replay and compile.
@@ -261,6 +263,8 @@ type GlobalTreeTransformStructureMap<T, RuleKey> = RwLock<
 >;
 type GlobalTreePairRowMemo<T, RuleKey> =
     RwLock<crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>>;
+type GlobalAllCodomainRowMemo<T, RuleKey> =
+    RwLock<crate::tree_transform::plan::AllCodomainRowMemo<T, RuleKey>>;
 
 fn global_tree_transform_plans<T, RuleKey>() -> Arc<GlobalTreeTransformPlanMap<T, RuleKey>>
 where
@@ -279,6 +283,14 @@ where
 }
 
 fn global_tree_pair_rows<T, RuleKey>() -> Arc<GlobalTreePairRowMemo<T, RuleKey>>
+where
+    T: 'static + Send + Sync,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+{
+    typed_global_map(operation_global_registry())
+}
+
+fn global_all_codomain_rows<T, RuleKey>() -> Arc<GlobalAllCodomainRowMemo<T, RuleKey>>
 where
     T: 'static + Send + Sync,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
@@ -853,7 +865,7 @@ impl TreeTransformCacheStats {
     }
 
     /// Shape-independent recoupling-row memo hits (TensorKit
-    /// fstranspose/fsbraid @cached analog): rows reused across degeneracy changes.
+    /// fstranspose/fsbraid @cached analog): rows reused across structure changes.
     #[inline]
     pub fn tree_row_hits(self) -> usize {
         self.tree_row_hits
@@ -903,6 +915,7 @@ impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
             policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
+            all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo::default(),
             recoupling_threads: 1,
         }
     }
@@ -925,6 +938,7 @@ where
             policy,
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
+            all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo::default(),
             recoupling_threads: 1,
         }
     }
@@ -1127,6 +1141,71 @@ where
                 .write()
                 .expect("global tree-pair row cache poisoned");
             for (key, value) in self.tree_rows.iter() {
+                rows.entry(key.clone()).or_insert_with(|| Arc::clone(value));
+            }
+        }
+
+        let plan = Arc::new(plan);
+        global_plans
+            .write()
+            .expect("global tree-transform plan cache poisoned")
+            .entry(plan_key.clone())
+            .or_insert_with(|| Arc::clone(&plan));
+        persist_builtin_tree_plans_if_enabled();
+        Ok(plan)
+    }
+
+    fn get_or_compile_global_all_codomain_plan<R>(
+        &mut self,
+        rule: &R,
+        rule_key: &RuleKey,
+        operation: TreeTransformOperation,
+        src_structure: &BlockStructure,
+        plan_key: &TreeTransformSectorPlanKey<RuleKey>,
+    ) -> Result<Arc<TreeTransformGroupPlan<T>>, OperationError>
+    where
+        R: MultiplicityFreeFusionSymbols<Scalar = T> + Sync,
+        T: 'static + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    {
+        load_persistent_builtin_tree_plans_if_needed();
+        let global_plans = global_tree_transform_plans::<T, RuleKey>();
+        if let Some(plan) = global_plans
+            .read()
+            .expect("global tree-transform plan cache poisoned")
+            .get(plan_key)
+            .cloned()
+        {
+            return Ok(plan);
+        }
+
+        let global_rows = global_all_codomain_rows::<T, RuleKey>();
+        {
+            let rows = global_rows
+                .read()
+                .expect("global all-codomain row cache poisoned");
+            for (key, value) in rows.iter() {
+                self.all_codomain_rows
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::clone(value));
+            }
+        }
+        let plan =
+            crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+            rule,
+            rule_key,
+            operation,
+            src_structure,
+            &mut self.all_codomain_rows,
+            &mut self.stats.tree_row_hits,
+            &mut self.stats.tree_row_misses,
+            self.recoupling_threads,
+        )?;
+        {
+            let mut rows = global_rows
+                .write()
+                .expect("global all-codomain row cache poisoned");
+            for (key, value) in self.all_codomain_rows.iter() {
                 rows.entry(key.clone()).or_insert_with(|| Arc::clone(value));
             }
         }
@@ -1369,7 +1448,9 @@ where
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
-        R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeFusionSymbols<Scalar = T>
+            + TreeTransformRuleCacheKey<Key = RuleKey>
+            + Sync,
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
         DDst: TensorStorage<TDst>,
@@ -1395,7 +1476,7 @@ where
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
-            let plan = build_all_codomain_tree_transform_group_plan(
+            let plan = crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan(
                 rule,
                 operation.clone(),
                 src.structure(),
@@ -1407,29 +1488,14 @@ where
             self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
-            load_persistent_builtin_tree_plans_if_needed();
-            let global_plans = global_tree_transform_plans::<T, RuleKey>();
-            let plan = global_plans
-                .read()
-                .expect("global tree-transform plan cache poisoned")
-                .get(&plan_key)
-                .cloned();
-            if let Some(plan) = plan {
-                self.insert_plan_arc(plan_key.clone(), plan);
-            } else {
-                let plan = Arc::new(build_all_codomain_tree_transform_group_plan(
-                    rule,
-                    operation.clone(),
-                    src.structure(),
-                )?);
-                global_plans
-                    .write()
-                    .expect("global tree-transform plan cache poisoned")
-                    .entry(plan_key.clone())
-                    .or_insert_with(|| Arc::clone(&plan));
-                persist_builtin_tree_plans_if_enabled();
-                self.insert_plan_arc(plan_key.clone(), plan);
-            }
+            let plan = self.get_or_compile_global_all_codomain_plan(
+                rule,
+                &rule_key,
+                operation.clone(),
+                src.structure(),
+                &plan_key,
+            )?;
+            self.insert_plan_arc(plan_key.clone(), plan);
         }
         self.get_or_compile_structure(
             rule_key,
