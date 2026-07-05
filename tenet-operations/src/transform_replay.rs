@@ -1,5 +1,5 @@
 use core::ops::{Add, Mul};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use num_traits::{One, Zero};
 use tenet_core::{
@@ -34,7 +34,7 @@ pub struct HostTreeTransformWorkspace<T> {
     // Multi block's matrix into this one buffer so the recoupling GEMMs
     // submit as a single batch.
     coefficient_scratch: Vec<T>,
-    coefficient_structure_token: Option<usize>,
+    coefficient_structure_identity: Option<Weak<()>>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -45,7 +45,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             zero_strides: Vec::new(),
             packed: TreeTransformScratchBuffers::default(),
             coefficient_scratch: Vec::new(),
-            coefficient_structure_token: None,
+            coefficient_structure_identity: None,
         }
     }
 }
@@ -98,10 +98,12 @@ where
     C: Copy,
 {
     let plan = structure.recoupling_plan();
-    let token = structure.identity_token();
-    if workspace.coefficient_structure_token == Some(token)
-        && workspace.coefficient_scratch.len() == plan.coefficient_len()
-    {
+    let same_structure = workspace
+        .coefficient_structure_identity
+        .as_ref()
+        .and_then(Weak::upgrade)
+        .is_some_and(|identity| Arc::ptr_eq(&identity, structure.identity_marker()));
+    if same_structure && workspace.coefficient_scratch.len() == plan.coefficient_len() {
         return Ok(false);
     }
 
@@ -144,8 +146,47 @@ where
             actual: workspace.coefficient_scratch.len(),
         });
     }
-    workspace.coefficient_structure_token = Some(token);
+    workspace.coefficient_structure_identity = Some(Arc::downgrade(structure.identity_marker()));
     Ok(true)
+}
+
+#[cfg(test)]
+mod coefficient_cache_tests {
+    use super::*;
+    use crate::TreeTransformBlockSpec;
+
+    fn multi_recoupling_structure(coefficients: [f64; 4]) -> TreeTransformStructure<f64> {
+        let block_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+        TreeTransformStructure::compile_structures(
+            &block_structure,
+            &block_structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                coefficients.to_vec(),
+            )],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn recoupling_coefficients_cache_uses_live_structure_identity() {
+        let structure = multi_recoupling_structure([1.0, 2.0, 3.0, 4.0]);
+        let mut workspace = TreeTransformWorkspace::<f64>::default();
+
+        assert!(ensure_recoupling_coefficients(&mut workspace, &structure).unwrap());
+        assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(!ensure_recoupling_coefficients(&mut workspace, &structure).unwrap());
+
+        let structure_clone = structure.clone();
+        assert!(!ensure_recoupling_coefficients(&mut workspace, &structure_clone).unwrap());
+
+        let equal_but_distinct = multi_recoupling_structure([1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(structure, equal_but_distinct);
+        workspace.coefficient_scratch.fill(-1.0);
+        assert!(ensure_recoupling_coefficients(&mut workspace, &equal_but_distinct).unwrap());
+        assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
+    }
 }
 
 pub fn tensoradd_structure_with_strided_kernel<

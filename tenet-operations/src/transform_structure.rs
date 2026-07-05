@@ -441,8 +441,8 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     #[inline]
-    pub(crate) fn identity_token(&self) -> usize {
-        Arc::as_ptr(&self.identity) as usize
+    pub(crate) fn identity_marker(&self) -> &Arc<()> {
+        &self.identity
     }
 
     #[inline]
