@@ -10,7 +10,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Add, Mul};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Trivial;
@@ -484,6 +484,120 @@ pub struct FusionTreeHomSpace {
     domain: FusionProductSpace,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct FusionTreeLegSetSignature {
+    sectors: Vec<SectorId>,
+    is_dual: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct FusionTreeHomSpaceCacheKey {
+    rule_type: &'static str,
+    codomain: Vec<FusionTreeLegSetSignature>,
+    domain: Vec<FusionTreeLegSetSignature>,
+}
+
+impl FusionTreeHomSpaceCacheKey {
+    fn new<R>(homspace: &FusionTreeHomSpace) -> Self
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        Self {
+            rule_type: std::any::type_name::<R>(),
+            codomain: fusion_product_space_signature(homspace.codomain()),
+            domain: fusion_product_space_signature(homspace.domain()),
+        }
+    }
+}
+
+fn fusion_product_space_signature(space: &FusionProductSpace) -> Vec<FusionTreeLegSetSignature> {
+    space
+        .legs()
+        .iter()
+        .map(|leg| FusionTreeLegSetSignature {
+            sectors: leg.sectors().to_vec(),
+            is_dual: leg.is_dual(),
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeBlockLayoutEntry {
+    row: usize,
+    col: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeCoupledSectorLayout {
+    start: usize,
+    row_count: usize,
+    col_count: usize,
+    entries: Vec<FusionTreeBlockLayoutEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeHomSpaceLayout {
+    keys: Arc<[FusionTreeBlockKey]>,
+    sectors: Vec<FusionTreeCoupledSectorLayout>,
+}
+
+fn fusion_tree_layout_cache(
+) -> &'static RwLock<HashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>> {
+    static CACHE: OnceLock<
+        RwLock<HashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn fusion_tree_layout_from_keys<R>(
+    rule: &R,
+    keys: Vec<FusionTreeBlockKey>,
+) -> FusionTreeHomSpaceLayout
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let keys = Arc::<[FusionTreeBlockKey]>::from(keys);
+    let mut sectors = Vec::new();
+    let mut run_start = 0usize;
+    while run_start < keys.len() {
+        let coupled = coupled_or_vacuum(rule, keys[run_start].codomain_tree());
+        let mut run_end = run_start;
+        let mut row_indices = HashMap::<FusionTreeKey, usize>::new();
+        let mut col_indices = HashMap::<FusionTreeKey, usize>::new();
+        let mut entries = Vec::new();
+        while run_end < keys.len()
+            && coupled_or_vacuum(rule, keys[run_end].codomain_tree()) == coupled
+        {
+            let row = match row_indices.get(keys[run_end].codomain_tree()) {
+                Some(&index) => index,
+                None => {
+                    let index = row_indices.len();
+                    row_indices.insert(keys[run_end].codomain_tree().clone(), index);
+                    index
+                }
+            };
+            let col = match col_indices.get(keys[run_end].domain_tree()) {
+                Some(&index) => index,
+                None => {
+                    let index = col_indices.len();
+                    col_indices.insert(keys[run_end].domain_tree().clone(), index);
+                    index
+                }
+            };
+            entries.push(FusionTreeBlockLayoutEntry { row, col });
+            run_end += 1;
+        }
+        sectors.push(FusionTreeCoupledSectorLayout {
+            start: run_start,
+            row_count: row_indices.len(),
+            col_count: col_indices.len(),
+            entries,
+        });
+        run_start = run_end;
+    }
+    FusionTreeHomSpaceLayout { keys, sectors }
+}
+
 impl FusionTreeHomSpace {
     /// Builds a fusion-tree hom space from codomain and domain product spaces.
     ///
@@ -688,6 +802,35 @@ impl FusionTreeHomSpace {
     }
 
     pub fn fusion_tree_keys<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        self.cached_fusion_tree_layout(rule).keys.as_ref().to_vec()
+    }
+
+    fn cached_fusion_tree_layout<R>(&self, rule: &R) -> Arc<FusionTreeHomSpaceLayout>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let key = FusionTreeHomSpaceCacheKey::new::<R>(self);
+        let cache = fusion_tree_layout_cache();
+        if let Ok(read) = cache.read() {
+            if let Some(layout) = read.get(&key) {
+                return Arc::clone(layout);
+            }
+        }
+
+        let computed = Arc::new(fusion_tree_layout_from_keys(
+            rule,
+            self.fusion_tree_keys_uncached(rule),
+        ));
+        if let Ok(mut write) = cache.write() {
+            return Arc::clone(write.entry(key).or_insert_with(|| Arc::clone(&computed)));
+        }
+        computed
+    }
+
+    fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1114,6 +1257,143 @@ where
     Ok(specs)
 }
 
+fn coupled_sector_matrix_block_specs_from_layout(
+    nout: usize,
+    rank: usize,
+    layout: &FusionTreeHomSpaceLayout,
+    shapes: &[Vec<usize>],
+) -> Result<Vec<BlockSpec>, CoreError> {
+    let keys = layout.keys.as_ref();
+    if keys.len() != shapes.len() {
+        return Err(CoreError::BlockCountMismatch {
+            expected: keys.len(),
+            actual: shapes.len(),
+        });
+    }
+    for shape in shapes {
+        if shape.len() != rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: rank,
+                actual: shape.len(),
+            });
+        }
+    }
+
+    let mut specs = Vec::with_capacity(keys.len());
+    let mut sector_offset = 0usize;
+    for sector in &layout.sectors {
+        if sector.entries.len() != sector.row_count * sector.col_count {
+            return Err(CoreError::BlockCountMismatch {
+                expected: sector.row_count * sector.col_count,
+                actual: sector.entries.len(),
+            });
+        }
+
+        let mut row_dims = vec![None; sector.row_count];
+        let mut col_dims = vec![None; sector.col_count];
+        for (local_index, entry) in sector.entries.iter().enumerate() {
+            let shape = &shapes[sector.start + local_index];
+            register_layout_dim(&mut row_dims[entry.row], shape[..nout].iter().product())?;
+            register_layout_dim(&mut col_dims[entry.col], shape[nout..].iter().product())?;
+        }
+
+        let row_dims = row_dims
+            .into_iter()
+            .map(|dim| {
+                dim.ok_or(CoreError::MalformedFusionTree {
+                    message: "cached fusion tree layout has an empty row",
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let col_dims = col_dims
+            .into_iter()
+            .map(|dim| {
+                dim.ok_or(CoreError::MalformedFusionTree {
+                    message: "cached fusion tree layout has an empty column",
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let row_offsets = prefix_offsets(&row_dims)?;
+        let col_offsets = prefix_offsets(&col_dims)?;
+        let matrix_rows = row_offsets
+            .last()
+            .zip(row_dims.last())
+            .map(|(&offset, &dim)| offset + dim)
+            .unwrap_or(0);
+        let matrix_cols = col_offsets
+            .last()
+            .zip(col_dims.last())
+            .map(|(&offset, &dim)| offset + dim)
+            .unwrap_or(0);
+
+        for (local_index, entry) in sector.entries.iter().enumerate() {
+            let index = sector.start + local_index;
+            let shape = &shapes[index];
+            let mut strides = Vec::with_capacity(rank);
+            let mut stride = 1usize;
+            for &dim in &shape[..nout] {
+                strides.push(stride);
+                stride = stride
+                    .checked_mul(dim)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            }
+            let mut stride = matrix_rows;
+            for &dim in &shape[nout..] {
+                strides.push(stride);
+                stride = stride
+                    .checked_mul(dim)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            }
+            let offset = sector_offset
+                + row_offsets[entry.row]
+                + matrix_rows
+                    .checked_mul(col_offsets[entry.col])
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            specs.push(BlockSpec::with_key(
+                BlockKey::FusionTree(keys[index].clone()),
+                shape.clone(),
+                strides,
+                offset,
+            )?);
+        }
+
+        sector_offset = sector_offset
+            .checked_add(
+                matrix_rows
+                    .checked_mul(matrix_cols)
+                    .ok_or(CoreError::ElementCountOverflow)?,
+            )
+            .ok_or(CoreError::ElementCountOverflow)?;
+    }
+    Ok(specs)
+}
+
+fn register_layout_dim(slot: &mut Option<usize>, dim: usize) -> Result<(), CoreError> {
+    match slot {
+        Some(existing) if *existing != dim => Err(CoreError::DimensionMismatch {
+            expected: *existing,
+            actual: dim,
+        }),
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(dim);
+            Ok(())
+        }
+    }
+}
+
+fn prefix_offsets(dims: &[usize]) -> Result<Vec<usize>, CoreError> {
+    let mut offsets = Vec::with_capacity(dims.len());
+    let mut offset = 0usize;
+    for &dim in dims {
+        offsets.push(offset);
+        offset = offset
+            .checked_add(dim)
+            .ok_or(CoreError::ElementCountOverflow)?;
+    }
+    Ok(offsets)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
     dense_space: TensorMapSpace<NOUT, NIN>,
@@ -1253,7 +1533,8 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         Shapes::Item: Into<Vec<usize>>,
     {
         Self::validate_homspace_rank(&homspace)?;
-        let keys = homspace.fusion_tree_keys(rule);
+        let layout = homspace.cached_fusion_tree_layout(rule);
+        let keys = layout.keys.as_ref();
         let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
         if keys.len() != shapes.len() {
             return Err(CoreError::BlockCountMismatch {
@@ -1262,8 +1543,8 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             });
         }
         let rank = NOUT + NIN;
-        homspace.validate_degeneracy_shapes(&keys, &shapes)?;
-        let specs = coupled_sector_matrix_block_specs(rule, NOUT, rank, &keys, &shapes)?;
+        homspace.validate_degeneracy_shapes(keys, &shapes)?;
+        let specs = coupled_sector_matrix_block_specs_from_layout(NOUT, rank, &layout, &shapes)?;
         let subblock_structure = BlockStructure::from_blocks_with_rank(rank, specs)?;
         Self::new(dense_space, homspace, subblock_structure)
     }
@@ -9233,6 +9514,41 @@ mod tests {
         for (index, group) in groups.iter().enumerate() {
             assert_eq!(group.block_indices(), &[index]);
         }
+    }
+
+    #[test]
+    fn fusion_tree_key_cache_hits_across_degeneracy_and_keeps_dual_signature() {
+        let rule = SU2FusionRule;
+        let mk_leg = |degeneracy| {
+            SectorLeg::new(
+                [
+                    (SU2Irrep::from_twice_spin(0).sector_id(), degeneracy),
+                    (SU2Irrep::from_twice_spin(1).sector_id(), degeneracy + 1),
+                ],
+                false,
+            )
+        };
+        let hom_small = FusionTreeHomSpace::new(
+            FusionProductSpace::new([mk_leg(1), mk_leg(1)]),
+            FusionProductSpace::new([mk_leg(1)]),
+        );
+        let hom_large = FusionTreeHomSpace::new(
+            FusionProductSpace::new([mk_leg(4), mk_leg(4)]),
+            FusionProductSpace::new([mk_leg(4)]),
+        );
+
+        let small_layout = hom_small.cached_fusion_tree_layout(&rule);
+        let large_layout = hom_large.cached_fusion_tree_layout(&rule);
+        assert!(Arc::ptr_eq(&small_layout, &large_layout));
+        assert_eq!(small_layout.keys.as_ref(), large_layout.keys.as_ref());
+
+        let dual_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([mk_leg(1).dual(&rule), mk_leg(1)]),
+            FusionProductSpace::new([mk_leg(1)]),
+        );
+        let dual_layout = dual_hom.cached_fusion_tree_layout(&rule);
+        assert!(!Arc::ptr_eq(&small_layout, &dual_layout));
+        assert_ne!(small_layout.keys.as_ref(), dual_layout.keys.as_ref());
     }
 
     #[test]
