@@ -19,10 +19,7 @@ use super::helpers::fusion_tree_group_block_keys;
 use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 #[cfg(test)]
 use super::plan::TreeTransformGroupBlockSpec;
-use super::plan::{
-    build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    TreeTransformGroupPlan,
-};
+use super::plan::{build_tree_pair_transform_group_plan, TreeTransformGroupPlan};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TreeTransformPlanScope {
@@ -243,6 +240,9 @@ pub struct TreeTransformCache<T, RuleKey> {
     // survives degeneracy changes, so chi sweeps recompile plans without
     // recomputing F/R-symbol contractions (TensorKit @cached fstranspose/fsbraid).
     tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
+    // Same row-granular memo for all-codomain transforms, keyed only by the
+    // codomain tree because the domain is unchanged by this scope.
+    all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo<T, RuleKey>,
     // Worker count for plan compilation (missing tree-row computation).
     // Not a second knob: the execution context propagates the backend's
     // `recoupling_threads` here, so one setting drives replay and compile.
@@ -268,7 +268,7 @@ impl TreeTransformCacheStats {
     }
 
     /// Shape-independent recoupling-row memo hits (TensorKit
-    /// fstranspose/fsbraid @cached analog): rows reused across degeneracy changes.
+    /// fstranspose/fsbraid @cached analog): rows reused across structure changes.
     #[inline]
     pub fn tree_row_hits(self) -> usize {
         self.tree_row_hits
@@ -318,6 +318,7 @@ impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
             policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
+            all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo::default(),
             recoupling_threads: 1,
         }
     }
@@ -340,6 +341,7 @@ where
             policy,
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
+            all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo::default(),
             recoupling_threads: 1,
         }
     }
@@ -728,7 +730,9 @@ where
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
-        R: MultiplicityFreeFusionSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeFusionSymbols<Scalar = T>
+            + TreeTransformRuleCacheKey<Key = RuleKey>
+            + Sync,
         T: Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero,
         DDst: TensorStorage<TDst>,
         DSrc: TensorStorage<TSrc>,
@@ -753,7 +757,7 @@ where
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
-            let plan = build_all_codomain_tree_transform_group_plan(
+            let plan = crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan(
                 rule,
                 operation.clone(),
                 src.structure(),
@@ -765,10 +769,16 @@ where
             self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
-            let plan = build_all_codomain_tree_transform_group_plan(
+            let plan =
+                crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
                 rule,
+                &rule_key,
                 operation.clone(),
                 src.structure(),
+                &mut self.all_codomain_rows,
+                &mut self.stats.tree_row_hits,
+                &mut self.stats.tree_row_misses,
+                self.recoupling_threads,
             )?;
             self.insert_plan(plan_key.clone(), plan);
         }

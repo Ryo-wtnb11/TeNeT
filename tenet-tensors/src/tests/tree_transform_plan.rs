@@ -943,6 +943,108 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
 }
 
 #[test]
+fn all_codomain_row_memo_reuses_codomain_rows_across_plan_misses() {
+    let key = |coupled: usize, inner: [usize; 2]| {
+        all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(coupled),
+            [false, false, false, false],
+            inner,
+            [1, 1, 1],
+        )
+    };
+    let keys = [
+        key(0, [0, 1]),
+        key(0, [2, 1]),
+        key(2, [2, 1]),
+        key(2, [2, 3]),
+    ];
+    let dst_keys = [
+        key(0, [0, 1]),
+        key(0, [2, 1]),
+        key(2, [0, 1]),
+        key(2, [2, 1]),
+        key(2, [2, 3]),
+    ];
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let make = |keys: &[BlockKey], data: Vec<f64>| {
+        let structure = packed_fixture_structure(
+            4,
+            keys.iter().map(|key| (key.clone(), vec![1usize, 1, 1, 1])),
+        )
+        .unwrap();
+        let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(data, space, structure).unwrap()
+    };
+
+    let src_small = make(&keys[..2], vec![10.0, 20.0]);
+    let dst_small = make(&keys[..2], vec![0.0, 0.0]);
+    let src_big = make(&keys, vec![1.0, 2.0, 3.0, 4.0]);
+    let mut dst_cached = make(&dst_keys, vec![0.0; dst_keys.len()]);
+    let mut dst_uncached = make(&dst_keys, vec![0.0; dst_keys.len()]);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    cache
+        .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst_small, &src_small)
+        .unwrap();
+    assert_eq!(cache.stats().tree_row_hits(), 0);
+    assert_eq!(cache.stats().tree_row_misses(), 2);
+
+    let cached_structure = cache
+        .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst_cached, &src_big)
+        .unwrap();
+    assert_eq!(cache.stats().plan_misses(), 2);
+    assert_eq!(cache.stats().tree_row_hits(), 2);
+    assert_eq!(cache.stats().tree_row_misses(), 4);
+
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &cached_structure,
+        &mut dst_cached,
+        &src_big,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    let uncached_plan = build_all_codomain_tree_transform_group_plan(
+        &SU2FusionRule,
+        operation,
+        src_big.structure(),
+    )
+    .unwrap();
+    let uncached_structure = uncached_plan.compile(&dst_uncached, &src_big).unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &uncached_structure,
+        &mut dst_uncached,
+        &src_big,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        dst_cached
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        dst_uncached
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn tree_transform_execution_context_reuses_all_codomain_cache() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],

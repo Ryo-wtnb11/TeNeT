@@ -7,7 +7,7 @@ use tenet_core::{
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
     multiplicity_free_transpose_tree_pair, BlockKey, BlockStructure, FusionRule,
-    FusionTreeBlockGroup, FusionTreeBlockKey, MultiplicityFreeFusionSymbols,
+    FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols,
 };
 #[cfg(test)]
@@ -256,6 +256,30 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
+    build_multiplicity_free_all_codomain_tree_transform_group_plan_with_rows(
+        rule,
+        operation,
+        src_structure,
+        |operation, codomain_tree| {
+            transformed_all_codomain_rows(rule, operation, codomain_tree).map(Arc::new)
+        },
+    )
+}
+
+fn build_multiplicity_free_all_codomain_tree_transform_group_plan_with_rows<R, F>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+    mut rows_for: F,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    F: FnMut(
+        &TreeTransformOperation,
+        &FusionTreeKey,
+    ) -> Result<Arc<Vec<(FusionTreeKey, R::Scalar)>>, OperationError>,
+{
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
             operation,
@@ -268,13 +292,133 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        let src_block_indices = group.block_indices();
-        let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
-        let mut dst_keys = Vec::<BlockKey>::new();
-        let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
-        let mut rows = Vec::<Vec<R::Scalar>>::new();
+        specs.push(assemble_all_codomain_group_spec(
+            rule,
+            src_structure,
+            &group,
+            &source_axes,
+            &mut |codomain_tree| rows_for(&operation, codomain_tree),
+        )?);
+    }
 
-        for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
+pub(crate) type AllCodomainRowMemo<T, RuleKey> =
+    HashMap<(RuleKey, TreeTransformOperation, FusionTreeKey), Arc<Vec<(FusionTreeKey, T)>>>;
+
+fn transformed_all_codomain_rows<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    codomain_tree: &FusionTreeKey,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rows = match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            ..
+        } => multiplicity_free_permute_tree(rule, codomain_tree, codomain_permutation),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            codomain_levels,
+            ..
+        } => {
+            multiplicity_free_braid_tree(rule, codomain_tree, codomain_permutation, codomain_levels)
+        }
+        TreeTransformOperation::Transpose { .. } => {
+            unreachable!("all-codomain operation scope validation rejected transpose")
+        }
+    };
+    rows.map_err(OperationError::from_core_preserving_context)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized<R, RuleKey>(
+    rule: &R,
+    rule_key: &RuleKey,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+    memo: &mut AllCodomainRowMemo<R::Scalar, RuleKey>,
+    memo_hits: &mut usize,
+    memo_misses: &mut usize,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols + Sync,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: Clone + Eq + std::hash::Hash,
+{
+    if threads > 1 {
+        return build_all_codomain_tree_transform_group_plan_parallel(
+            rule,
+            rule_key,
+            operation,
+            src_structure,
+            memo,
+            memo_hits,
+            memo_misses,
+            threads,
+        );
+    }
+    build_multiplicity_free_all_codomain_tree_transform_group_plan_with_rows(
+        rule,
+        operation,
+        src_structure,
+        |operation, codomain_tree| {
+            let memo_key = (rule_key.clone(), operation.clone(), codomain_tree.clone());
+            if let Some(rows) = memo.get(&memo_key) {
+                *memo_hits += 1;
+                return Ok(Arc::clone(rows));
+            }
+            *memo_misses += 1;
+            let rows = Arc::new(transformed_all_codomain_rows(
+                rule,
+                operation,
+                codomain_tree,
+            )?);
+            memo.insert(memo_key, Arc::clone(&rows));
+            Ok(rows)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_all_codomain_tree_transform_group_plan_parallel<R, RuleKey>(
+    rule: &R,
+    rule_key: &RuleKey,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+    memo: &mut AllCodomainRowMemo<R::Scalar, RuleKey>,
+    memo_hits: &mut usize,
+    memo_misses: &mut usize,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols + Sync,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: Clone + Eq + std::hash::Hash,
+{
+    use rayon::prelude::*;
+
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    validate_all_codomain_operation_scope(&operation)?;
+    let source_axes = operation_source_axes(&operation);
+    let groups = src_structure.fusion_tree_groups();
+
+    let mut missing = Vec::new();
+    let mut rows_by_codomain =
+        HashMap::<FusionTreeKey, Arc<Vec<(FusionTreeKey, R::Scalar)>>>::new();
+    for group in &groups {
+        for &src_block_index in group.block_indices() {
             let block = src_structure.block(src_block_index)?;
             let BlockKey::FusionTree(src_key) = block.key() else {
                 return Err(OperationError::ExpectedFusionTreeBlock {
@@ -283,70 +427,121 @@ where
                 });
             };
             validate_all_codomain_fusion_tree_block(rule, src_block_index, src_key)?;
-            src_keys.push(BlockKey::from(src_key.clone()));
-
-            let transformed = match &operation {
-                TreeTransformOperation::Permute {
-                    codomain_permutation,
-                    ..
-                } => multiplicity_free_permute_tree(
-                    rule,
-                    src_key.codomain_tree(),
-                    codomain_permutation,
-                )?,
-                TreeTransformOperation::Braid {
-                    codomain_permutation,
-                    codomain_levels,
-                    ..
-                } => multiplicity_free_braid_tree(
-                    rule,
-                    src_key.codomain_tree(),
-                    codomain_permutation,
-                    codomain_levels,
-                )?,
-                TreeTransformOperation::Transpose { .. } => {
-                    unreachable!("all-codomain operation scope validation rejected transpose")
-                }
-            };
-
-            for row in &mut rows {
-                row.push(R::Scalar::zero());
-            }
-            for (dst_codomain_tree, coefficient) in transformed {
-                let dst_key = BlockKey::from(FusionTreeBlockKey::pair(
-                    dst_codomain_tree,
-                    src_key.domain_tree().clone(),
-                ));
-                let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
-                    dst_row
-                } else {
-                    let dst_row = dst_keys.len();
-                    dst_index_by_key.insert(dst_key.clone(), dst_row);
-                    dst_keys.push(dst_key);
-                    rows.push(vec![R::Scalar::zero(); src_column + 1]);
-                    dst_row
-                };
-                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
+            let codomain_tree = src_key.codomain_tree().clone();
+            let memo_key = (rule_key.clone(), operation.clone(), codomain_tree.clone());
+            if let Some(rows) = memo.get(&memo_key) {
+                *memo_hits += 1;
+                rows_by_codomain.insert(codomain_tree, Arc::clone(rows));
+            } else {
+                *memo_misses += 1;
+                missing.push((memo_key, codomain_tree));
             }
         }
-
-        let src_count = src_keys.len();
-        let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
-        for row in rows {
-            recoupling_coefficients_dst_src.extend(row);
-        }
-        specs.push(
-            TreeTransformGroupBlockSpec::multi(
-                group.group_key().clone(),
-                dst_keys,
-                src_keys,
-                recoupling_coefficients_dst_src,
-            )
-            .with_source_axes(source_axes.clone()),
-        );
     }
 
+    let (memo_keys, missing_codomain_trees): (Vec<_>, Vec<_>) = missing.into_iter().unzip();
+    let chunk = missing_codomain_trees.len().div_ceil(threads).max(1);
+    let computed: Vec<(FusionTreeKey, Arc<Vec<(FusionTreeKey, R::Scalar)>>)> =
+        missing_codomain_trees
+            .into_par_iter()
+            .with_min_len(chunk)
+            .map(|codomain_tree| {
+                let rows = transformed_all_codomain_rows(rule, &operation, &codomain_tree)?;
+                Ok((codomain_tree, Arc::new(rows)))
+            })
+            .collect::<Result<_, OperationError>>()?;
+
+    for (memo_key, (codomain_tree, rows)) in memo_keys.into_iter().zip(computed) {
+        rows_by_codomain.insert(codomain_tree, Arc::clone(&rows));
+        memo.insert(memo_key, rows);
+    }
+
+    let group_chunk = groups.len().div_ceil(threads).max(1);
+    let specs = groups
+        .into_par_iter()
+        .with_min_len(group_chunk)
+        .map(|group| {
+            assemble_all_codomain_group_spec(
+                rule,
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |codomain_tree| match rows_by_codomain.get(codomain_tree) {
+                    Some(rows) => Ok(Arc::clone(rows)),
+                    None => {
+                        transformed_all_codomain_rows(rule, &operation, codomain_tree).map(Arc::new)
+                    }
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+fn assemble_all_codomain_group_spec<R, T, F>(
+    rule: &R,
+    src_structure: &BlockStructure,
+    group: &FusionTreeBlockGroup,
+    source_axes: &[usize],
+    rows_for: &mut F,
+) -> Result<TreeTransformGroupBlockSpec<T>, OperationError>
+where
+    R: FusionRule,
+    T: Clone + Add<Output = T> + Zero,
+    F: FnMut(&FusionTreeKey) -> Result<Arc<Vec<(FusionTreeKey, T)>>, OperationError>,
+{
+    let src_block_indices = group.block_indices();
+    let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
+    let mut dst_keys = Vec::<BlockKey>::new();
+    let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+    let mut rows = Vec::<Vec<T>>::new();
+
+    for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
+        let block = src_structure.block(src_block_index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index: src_block_index,
+            });
+        };
+        validate_all_codomain_fusion_tree_block(rule, src_block_index, src_key)?;
+        src_keys.push(BlockKey::from(src_key.clone()));
+
+        let transformed = rows_for(src_key.codomain_tree())?;
+        for row in &mut rows {
+            row.push(T::zero());
+        }
+        for (dst_codomain_tree, coefficient) in transformed.iter() {
+            let dst_key = BlockKey::from(FusionTreeBlockKey::pair(
+                dst_codomain_tree.clone(),
+                src_key.domain_tree().clone(),
+            ));
+            let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
+                dst_row
+            } else {
+                let dst_row = dst_keys.len();
+                dst_index_by_key.insert(dst_key.clone(), dst_row);
+                dst_keys.push(dst_key);
+                rows.push(vec![T::zero(); src_column + 1]);
+                dst_row
+            };
+            rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
+        }
+    }
+
+    let src_count = src_keys.len();
+    let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
+    for row in rows {
+        recoupling_coefficients_dst_src.extend(row);
+    }
+    Ok(TreeTransformGroupBlockSpec::multi(
+        group.group_key().clone(),
+        dst_keys,
+        src_keys,
+        recoupling_coefficients_dst_src,
+    )
+    .with_source_axes(source_axes.to_vec()))
 }
 
 /// Shape-independent recoupling rows for one source tree under one

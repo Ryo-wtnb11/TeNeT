@@ -34,8 +34,7 @@ pub struct HostTreeTransformWorkspace<T> {
     // Multi block's matrix into this one buffer so the recoupling GEMMs
     // submit as a single batch.
     coefficient_scratch: Vec<T>,
-    // Reused job list for the batched recoupling GEMM.
-    batch_jobs: Vec<DenseGemmBatchJob>,
+    coefficient_structure_token: Option<usize>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -46,7 +45,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             zero_strides: Vec::new(),
             packed: TreeTransformScratchBuffers::default(),
             coefficient_scratch: Vec::new(),
-            batch_jobs: Vec::new(),
+            coefficient_structure_token: None,
         }
     }
 }
@@ -88,6 +87,65 @@ impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
     fn placement(&self) -> Placement {
         Placement::Host
     }
+}
+
+fn ensure_recoupling_coefficients<D, C>(
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+) -> Result<bool, OperationError>
+where
+    D: RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    let plan = structure.recoupling_plan();
+    let token = structure.identity_token();
+    if workspace.coefficient_structure_token == Some(token)
+        && workspace.coefficient_scratch.len() == plan.coefficient_len()
+    {
+        return Ok(false);
+    }
+
+    workspace.coefficient_scratch.clear();
+    workspace
+        .coefficient_scratch
+        .reserve(plan.coefficient_len());
+    for block in &structure.blocks {
+        let TreeTransformBlock::Multi {
+            dst_count,
+            src_count,
+            coefficient_start,
+            ..
+        } = *block
+        else {
+            continue;
+        };
+        let coefficient_len = src_count
+            .checked_mul(dst_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let coefficient_end = coefficient_start
+            .checked_add(coefficient_len)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let coefficients = structure
+            .recoupling_coefficients_dst_src
+            .get(coefficient_start..coefficient_end)
+            .ok_or(OperationError::CoefficientCountMismatch {
+                expected: coefficient_end,
+                actual: structure.recoupling_coefficients_dst_src.len(),
+            })?;
+        workspace.coefficient_scratch.extend(
+            coefficients
+                .iter()
+                .map(|&coefficient| D::coefficient_as_data(coefficient)),
+        );
+    }
+    if workspace.coefficient_scratch.len() != plan.coefficient_len() {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: plan.coefficient_len(),
+            actual: workspace.coefficient_scratch.len(),
+        });
+    }
+    workspace.coefficient_structure_token = Some(token);
+    Ok(true)
 }
 
 pub fn tensoradd_structure_with_strided_kernel<
@@ -566,14 +624,11 @@ where
     C: Copy,
 {
     let layouts = &structure.layouts;
+    let recoupling_plan = structure.recoupling_plan();
 
     // All-Single structures (abelian recoupling is diagonal) skip the batch
     // machinery entirely: no pack scratch, no job list, no scatter pass.
-    if !structure
-        .blocks
-        .iter()
-        .any(|block| matches!(block, TreeTransformBlock::Multi { .. }))
-    {
+    if recoupling_plan.is_empty() {
         for block in &structure.blocks {
             let TreeTransformBlock::Single {
                 dst_layout,
@@ -607,44 +662,28 @@ where
         return Ok(());
     }
 
-    // Size the shared pack scratch over every Multi block.
+    // Size the shared pack scratch from the compile-time recoupling plan.
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut total_source_len = 0usize;
-    let mut total_destination_len = 0usize;
-    for block in &structure.blocks {
-        if let TreeTransformBlock::Multi {
-            dst_count,
-            src_count,
-            element_count,
-            ..
-        } = *block
-        {
-            let source_len = element_count
-                .checked_mul(src_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            let destination_len = element_count
-                .checked_mul(dst_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            total_source_len = total_source_len
-                .checked_add(source_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            total_destination_len = total_destination_len
-                .checked_add(destination_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-        }
-    }
-    workspace.prepare_packed_buffers(total_source_len, total_destination_len, D::zero());
-    workspace.coefficient_scratch.clear();
-    let mut jobs = std::mem::take(&mut workspace.batch_jobs);
-    jobs.clear();
+    workspace.prepare_packed_buffers(
+        recoupling_plan.source_len(),
+        recoupling_plan.destination_len(),
+        D::zero(),
+    );
     if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
         profile.multi_workspace_prepare += start.elapsed();
     }
 
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    let converted = ensure_recoupling_coefficients(workspace, structure)?;
+    if converted {
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.multi_coefficient_prepare += start.elapsed();
+        }
+    }
+
     // Singles apply directly; Multi blocks pack their source columns and
-    // convert their recoupling matrix into the shared coefficient buffer.
-    let mut source_base = 0usize;
-    let mut destination_base = 0usize;
+    // use the compile-time batched GEMM plan for scratch offsets.
+    let mut multi_job_index = 0usize;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -677,12 +716,18 @@ where
             }
             TreeTransformBlock::Multi {
                 dst_layout_start: _,
-                dst_count,
                 src_layout_start,
                 src_count,
-                coefficient_start,
                 element_count,
+                ..
             } => {
+                let job = recoupling_plan.jobs().get(multi_job_index).ok_or(
+                    OperationError::BlockIndexOutOfBounds {
+                        tensor: "recoupling job",
+                        index: multi_job_index,
+                        count: recoupling_plan.jobs().len(),
+                    },
+                )?;
                 let start = profile.as_ref().map(|_| std::time::Instant::now());
                 for src_index in 0..src_count {
                     let layout = layouts.entry(src_layout_start + src_index);
@@ -692,7 +737,7 @@ where
                         layout,
                         src_data,
                         workspace.packed.source_mut().as_mut_slice(),
-                        source_base + src_index * element_count,
+                        job.lhs_offset + src_index * element_count,
                         structure.storage_conjugate(),
                     )?;
                 }
@@ -701,47 +746,14 @@ where
                     profile.packed_columns += src_count;
                     profile.multi_pack += start.elapsed();
                 }
-
-                let start = profile.as_ref().map(|_| std::time::Instant::now());
-                let coefficient_len = src_count
-                    .checked_mul(dst_count)
-                    .ok_or(OperationError::ElementCountOverflow)?;
-                let coefficient_end = coefficient_start
-                    .checked_add(coefficient_len)
-                    .ok_or(OperationError::ElementCountOverflow)?;
-                let coefficients = structure
-                    .recoupling_coefficients_dst_src
-                    .get(coefficient_start..coefficient_end)
-                    .ok_or(OperationError::CoefficientCountMismatch {
-                        expected: coefficient_end,
-                        actual: structure.recoupling_coefficients_dst_src.len(),
-                    })?;
-                let rhs_offset = workspace.coefficient_scratch.len();
-                workspace.coefficient_scratch.extend(
-                    coefficients
-                        .iter()
-                        .map(|&coefficient| D::coefficient_as_data(coefficient)),
-                );
-                jobs.push(DenseGemmBatchJob {
-                    dst_offset: destination_base,
-                    lhs_offset: source_base,
-                    rhs_offset,
-                    rows: element_count,
-                    contracted: src_count,
-                    cols: dst_count,
-                });
-                source_base += element_count * src_count;
-                destination_base += element_count * dst_count;
-                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-                    profile.multi_coefficient_prepare += start.elapsed();
-                }
+                multi_job_index += 1;
             }
         }
     }
 
     // One batched recoupling GEMM across all Multi blocks (TensorKit's
     // `_add_transform_multi!` `mul!` step, grouped).
-    if !jobs.is_empty() {
+    if !recoupling_plan.jobs().is_empty() {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         let (source, destination) = workspace.packed.source_and_destination_mut();
         recoupling_gemm_batch(
@@ -749,7 +761,7 @@ where
             destination.as_mut_slice(),
             source.as_slice(),
             &workspace.coefficient_scratch,
-            &jobs,
+            recoupling_plan.jobs(),
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
@@ -757,11 +769,10 @@ where
             profile.multi_matmul_total += elapsed;
         }
     }
-    workspace.batch_jobs = jobs;
 
     // Scatter each Multi block's destination columns back out.
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut destination_base = 0usize;
+    let mut multi_job_index = 0usize;
     let mut scattered_columns = 0usize;
     for block in &structure.blocks {
         if let TreeTransformBlock::Multi {
@@ -771,6 +782,13 @@ where
             ..
         } = *block
         {
+            let job = recoupling_plan.jobs().get(multi_job_index).ok_or(
+                OperationError::BlockIndexOutOfBounds {
+                    tensor: "recoupling job",
+                    index: multi_job_index,
+                    count: recoupling_plan.jobs().len(),
+                },
+            )?;
             for dst_index in 0..dst_count {
                 let layout = layouts.entry(dst_layout_start + dst_index);
                 scatter_column_into_layout(
@@ -779,14 +797,14 @@ where
                     layouts,
                     layout,
                     workspace.packed.destination().as_slice(),
-                    destination_base + dst_index * element_count,
+                    job.dst_offset + dst_index * element_count,
                     dst_data,
                     alpha,
                     beta,
                 )?;
             }
             scattered_columns += dst_count;
-            destination_base += element_count * dst_count;
+            multi_job_index += 1;
         }
     }
     if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
@@ -907,38 +925,19 @@ where
     use rayon::prelude::*;
 
     let layouts = &structure.layouts;
+    let recoupling_plan = structure.recoupling_plan();
 
-    // Build phase (serial): size the pack scratch, convert coefficients,
-    // build GEMM jobs, and collect the parallel work items.
+    // Build phase (serial): size the pack scratch from the compile-time plan,
+    // ensure converted coefficients, and collect the parallel work items.
     let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut total_source_len = 0usize;
-    let mut total_destination_len = 0usize;
-    for block in &structure.blocks {
-        if let TreeTransformBlock::Multi {
-            dst_count,
-            src_count,
-            element_count,
-            ..
-        } = *block
-        {
-            let source_len = element_count
-                .checked_mul(src_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            let destination_len = element_count
-                .checked_mul(dst_count)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            total_source_len = total_source_len
-                .checked_add(source_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-            total_destination_len = total_destination_len
-                .checked_add(destination_len)
-                .ok_or(OperationError::ElementCountOverflow)?;
-        }
+    workspace.prepare_packed_buffers(
+        recoupling_plan.source_len(),
+        recoupling_plan.destination_len(),
+        D::zero(),
+    );
+    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+        profile.multi_workspace_prepare += start.elapsed();
     }
-    workspace.prepare_packed_buffers(total_source_len, total_destination_len, D::zero());
-    workspace.coefficient_scratch.clear();
-    let mut jobs = std::mem::take(&mut workspace.batch_jobs);
-    jobs.clear();
 
     // (dst_layout, src_layout, coefficient index) per Single block.
     let mut singles: Vec<(usize, usize, usize)> = Vec::new();
@@ -947,8 +946,7 @@ where
     // (dst layout, packed destination offset) per Multi scatter column.
     let mut scatter_columns: Vec<(usize, usize)> = Vec::new();
 
-    let mut source_base = 0usize;
-    let mut destination_base = 0usize;
+    let mut multi_job_index = 0usize;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -961,54 +959,39 @@ where
                 dst_count,
                 src_layout_start,
                 src_count,
-                coefficient_start,
                 element_count,
+                ..
             } => {
+                let job = recoupling_plan.jobs().get(multi_job_index).ok_or(
+                    OperationError::BlockIndexOutOfBounds {
+                        tensor: "recoupling job",
+                        index: multi_job_index,
+                        count: recoupling_plan.jobs().len(),
+                    },
+                )?;
                 for src_index in 0..src_count {
                     pack_columns.push((src_layout_start + src_index, element_count));
                 }
                 for dst_index in 0..dst_count {
                     scatter_columns.push((
                         dst_layout_start + dst_index,
-                        destination_base + dst_index * element_count,
+                        job.dst_offset + dst_index * element_count,
                     ));
                 }
-                let coefficient_len = src_count
-                    .checked_mul(dst_count)
-                    .ok_or(OperationError::ElementCountOverflow)?;
-                let coefficient_end = coefficient_start
-                    .checked_add(coefficient_len)
-                    .ok_or(OperationError::ElementCountOverflow)?;
-                let coefficients = structure
-                    .recoupling_coefficients_dst_src
-                    .get(coefficient_start..coefficient_end)
-                    .ok_or(OperationError::CoefficientCountMismatch {
-                        expected: coefficient_end,
-                        actual: structure.recoupling_coefficients_dst_src.len(),
-                    })?;
-                let rhs_offset = workspace.coefficient_scratch.len();
-                workspace.coefficient_scratch.extend(
-                    coefficients
-                        .iter()
-                        .map(|&coefficient| D::coefficient_as_data(coefficient)),
-                );
-                jobs.push(DenseGemmBatchJob {
-                    dst_offset: destination_base,
-                    lhs_offset: source_base,
-                    rhs_offset,
-                    rows: element_count,
-                    contracted: src_count,
-                    cols: dst_count,
-                });
-                source_base += element_count * src_count;
-                destination_base += element_count * dst_count;
+                multi_job_index += 1;
             }
         }
     }
     let single_count = singles.len();
-    let multi_count = jobs.len();
-    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-        profile.multi_workspace_prepare += start.elapsed();
+    let multi_count = recoupling_plan.jobs().len();
+    let start = profile.as_ref().map(|_| std::time::Instant::now());
+    let converted = ensure_recoupling_coefficients(workspace, structure)?;
+    if converted {
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.multi_coefficient_prepare += start.elapsed();
+        }
+    }
+    if let Some(profile) = profile.as_deref_mut() {
         profile.single_blocks += single_count;
         profile.multi_blocks += multi_count;
     }
@@ -1121,7 +1104,7 @@ where
 
     // One batched recoupling GEMM across all Multi blocks, outside both
     // parallel regions (the dense executor owns its parallelism).
-    if !jobs.is_empty() {
+    if !recoupling_plan.jobs().is_empty() {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         let (source, destination) = workspace.packed.source_and_destination_mut();
         recoupling_gemm_batch(
@@ -1129,7 +1112,7 @@ where
             destination.as_mut_slice(),
             source.as_slice(),
             &workspace.coefficient_scratch,
-            &jobs,
+            recoupling_plan.jobs(),
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
@@ -1137,7 +1120,6 @@ where
             profile.multi_matmul_total += elapsed;
         }
     }
-    workspace.batch_jobs = jobs;
 
     // Phase B: scatter destination columns in parallel (disjoint destination
     // subblocks, same compile guarantee as the Singles).
