@@ -23,12 +23,12 @@ pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, Builtin
 
 /// The pair of per-scalar execution contexts for one fusion rule: tensor
 /// operations dispatch on the stored dtype once per call and pick one side.
-pub struct Ctxs<Key: Clone + Eq + Hash> {
+pub struct Ctxs<Key: Clone + Eq + Hash + Send + Sync + 'static> {
     pub(crate) f64: Ctx<f64, Key>,
     pub(crate) c64: Ctx<Complex64, Key>,
 }
 
-impl<Key: Clone + Eq + Hash> Default for Ctxs<Key> {
+impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
     fn default() -> Self {
         Self {
             f64: Ctx::default(),
@@ -73,7 +73,10 @@ impl RuntimeState {
     /// execution context (parallelism is a property of the backend, so the
     /// setting lives on each context's transform backend).
     fn set_recoupling_threads(&mut self, threads: usize) {
-        fn apply<Key: Clone + Eq + std::hash::Hash>(ctxs: &mut Ctxs<Key>, threads: usize) {
+        fn apply<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+            ctxs: &mut Ctxs<Key>,
+            threads: usize,
+        ) {
             ctxs.f64
                 .tree_context_mut()
                 .backend_mut()
