@@ -11,6 +11,7 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
     SimilarStorage, TensorStorage,
 };
+use tenet_dense::DenseGemmBatchJob;
 
 use crate::placement::ReportsPlacement;
 use crate::profile::TensorContractFusionProfile;
@@ -84,15 +85,7 @@ pub trait Rank2Gemm<D> {
 /// One GEMM of a fully-direct core batch. Offsets address coupled-sector
 /// matrices inside the operands' storage buffers; a batch's destination
 /// ranges never overlap (validated when the plan is assembled).
-#[derive(Clone, Copy, Debug)]
-pub struct Rank2GemmBatchJob {
-    pub dst_offset: usize,
-    pub lhs_offset: usize,
-    pub rhs_offset: usize,
-    pub rows: usize,
-    pub contracted: usize,
-    pub cols: usize,
-}
+pub type Rank2GemmBatchJob = DenseGemmBatchJob;
 
 pub struct HostFusionBlockContractWorkspace<T> {
     _scalar: std::marker::PhantomData<T>,
