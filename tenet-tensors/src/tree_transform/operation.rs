@@ -41,7 +41,7 @@ impl ValidateBraidingSupport for TreeTransformOperation {
 /// solely from this key plus the operand structures, so custom rules must
 /// include every parameter that can change those coefficients.
 pub trait TreeTransformRuleCacheKey {
-    type Key: Clone + Eq + Hash;
+    type Key: 'static + Clone + Eq + Hash + Send + Sync;
 
     fn tree_transform_rule_cache_key(&self) -> Self::Key;
 }

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tenet_core::{
     BlockStructure, CoreError, HostReadableStorage, HostWritableStorage,
@@ -8,7 +9,8 @@ use tenet_core::{
 };
 
 use crate::cache::{
-    OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
+    operation_global_registry, typed_global_map, OperationCachePolicy,
+    TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::lowering::adjoint_fusion_space_view;
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -36,6 +38,16 @@ use super::resolution::{ContractionResolutionCache, Resolution};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
+
+type GlobalTensorContractStructureMap<PlanKey> =
+    RwLock<HashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<f64>>>>;
+
+fn global_tensor_contract_structures<PlanKey>() -> Arc<GlobalTensorContractStructureMap<PlanKey>>
+where
+    PlanKey: 'static + Clone + Eq + Hash + Send + Sync,
+{
+    typed_global_map(operation_global_registry())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractPlanKey {
@@ -288,9 +300,29 @@ impl TensorContractCache<TensorContractPlanKey> {
             self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
-            let structure =
-                TensorContractStructure::compile(dst, lhs, rhs, plan_key.axes().as_spec())?;
-            self.structures.insert(structure_key.clone(), structure);
+            let global = global_tensor_contract_structures::<TensorContractPlanKey>();
+            let structure = global
+                .read()
+                .expect("global tensor contract structure cache poisoned")
+                .get(&structure_key)
+                .cloned();
+            if let Some(structure) = structure {
+                self.structures
+                    .insert_arc(structure_key.clone(), Arc::clone(&structure));
+            } else {
+                let structure = Arc::new(TensorContractStructure::compile(
+                    dst,
+                    lhs,
+                    rhs,
+                    plan_key.axes().as_spec(),
+                )?);
+                global
+                    .write()
+                    .expect("global tensor contract structure cache poisoned")
+                    .entry(structure_key.clone())
+                    .or_insert_with(|| Arc::clone(&structure));
+                self.structures.insert_arc(structure_key.clone(), structure);
+            }
         }
         Ok(self
             .structures
@@ -363,14 +395,30 @@ impl TensorContractCache<TensorContractBlockPlanKey> {
             self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
-            let structure = TensorContractStructure::compile_with_block_specs(
-                dst,
-                lhs,
-                rhs,
-                plan_key.axes().as_spec(),
-                block_specs,
-            )?;
-            self.structures.insert(structure_key.clone(), structure);
+            let global = global_tensor_contract_structures::<TensorContractBlockPlanKey>();
+            let structure = global
+                .read()
+                .expect("global tensor contract structure cache poisoned")
+                .get(&structure_key)
+                .cloned();
+            if let Some(structure) = structure {
+                self.structures
+                    .insert_arc(structure_key.clone(), Arc::clone(&structure));
+            } else {
+                let structure = Arc::new(TensorContractStructure::compile_with_block_specs(
+                    dst,
+                    lhs,
+                    rhs,
+                    plan_key.axes().as_spec(),
+                    block_specs,
+                )?);
+                global
+                    .write()
+                    .expect("global tensor contract structure cache poisoned")
+                    .entry(structure_key.clone())
+                    .or_insert_with(|| Arc::clone(&structure));
+                self.structures.insert_arc(structure_key.clone(), structure);
+            }
         }
         Ok(self
             .structures
@@ -604,7 +652,7 @@ pub struct TensorContractFusionExecutionContext<
     BC = DenseTreeTransformOperations,
 > where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
 {
@@ -631,7 +679,7 @@ pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecut
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
 {
@@ -762,7 +810,7 @@ where
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64> + ReportsPlacement,
     BT::Workspace: ReportsPlacement,
     BC: TensorContractBackend<D, f64> + ReportsPlacement,
@@ -811,7 +859,7 @@ where
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
     BT::Workspace: Default,
@@ -830,7 +878,7 @@ where
 impl<D, RuleKey, BT, BC> Default for TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64> + Default,
     BC: TensorContractBackend<D, f64> + Default,
     BT::Workspace: Default,
@@ -844,7 +892,7 @@ where
 impl<D, RuleKey, BT, BC> TensorContractFusionExecutionContext<D, RuleKey, BT, BC>
 where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
 {

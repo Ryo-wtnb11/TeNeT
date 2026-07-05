@@ -1,10 +1,54 @@
+use std::any::{Any, TypeId};
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use tenet_core::{BlockKey, BlockStructure};
 
 use crate::{OperationError, TensorContractStructure, TreeTransformStructure};
+
+type ErasedGlobalCache = Arc<dyn Any + Send + Sync>;
+type GlobalCacheRegistry = RwLock<HashMap<TypeId, ErasedGlobalCache>>;
+
+pub(crate) fn operation_global_registry() -> &'static GlobalCacheRegistry {
+    static REGISTRY: OnceLock<GlobalCacheRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub(crate) fn typed_global_map<K, V>(
+    registry: &'static GlobalCacheRegistry,
+) -> Arc<RwLock<HashMap<K, V>>>
+where
+    K: 'static + Eq + Hash + Send + Sync,
+    V: 'static + Send + Sync,
+{
+    let type_id = TypeId::of::<(K, V)>();
+    if let Some(cache) = registry
+        .read()
+        .expect("global cache registry poisoned")
+        .get(&type_id)
+    {
+        return Arc::downcast::<RwLock<HashMap<K, V>>>(Arc::clone(cache))
+            .expect("global cache registry type id collision");
+    }
+
+    let mut caches = registry.write().expect("global cache registry poisoned");
+    if let Some(cache) = caches.get(&type_id) {
+        return Arc::downcast::<RwLock<HashMap<K, V>>>(Arc::clone(cache))
+            .expect("global cache registry type id collision");
+    }
+    let cache = Arc::new(RwLock::new(HashMap::<K, V>::new()));
+    caches.insert(type_id, Arc::clone(&cache) as ErasedGlobalCache);
+    cache
+}
+
+pub fn reset_global_operation_caches() {
+    operation_global_registry()
+        .write()
+        .expect("global cache registry poisoned")
+        .clear();
+    crate::tree_transform::reset_tree_transform_persistent_cache_state();
+}
 
 /// Cache policy for TensorKit-style replay caches.
 ///
@@ -274,7 +318,7 @@ where
 
 #[derive(Clone, Debug)]
 pub struct TensorContractStructureCache<C, PlanKey> {
-    structures: HashMap<TensorContractStructureCacheKey<PlanKey>, TensorContractStructure<C>>,
+    structures: HashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<C>>>,
     lru_order: VecDeque<TensorContractStructureCacheKey<PlanKey>>,
     policy: OperationCachePolicy,
 }
@@ -335,7 +379,14 @@ where
         &self,
         key: &TensorContractStructureCacheKey<PlanKey>,
     ) -> Option<&TensorContractStructure<C>> {
-        self.structures.get(key)
+        self.structures.get(key).map(Arc::as_ref)
+    }
+
+    pub fn get_arc(
+        &self,
+        key: &TensorContractStructureCacheKey<PlanKey>,
+    ) -> Option<Arc<TensorContractStructure<C>>> {
+        self.structures.get(key).map(Arc::clone)
     }
 
     pub fn touch(&mut self, key: &TensorContractStructureCacheKey<PlanKey>) {
@@ -348,7 +399,15 @@ where
         &mut self,
         key: TensorContractStructureCacheKey<PlanKey>,
         structure: TensorContractStructure<C>,
-    ) -> Option<TensorContractStructure<C>> {
+    ) -> Option<Arc<TensorContractStructure<C>>> {
+        self.insert_arc(key, Arc::new(structure))
+    }
+
+    pub fn insert_arc(
+        &mut self,
+        key: TensorContractStructureCacheKey<PlanKey>,
+        structure: Arc<TensorContractStructure<C>>,
+    ) -> Option<Arc<TensorContractStructure<C>>> {
         if !self.policy.stores_entries() {
             return None;
         }
@@ -430,10 +489,18 @@ where
         key: TreeTransformStructureCacheKey<PlanKey>,
         structure: TreeTransformStructure<T>,
     ) -> Option<Arc<TreeTransformStructure<T>>> {
+        self.insert_arc(key, Arc::new(structure))
+    }
+
+    pub fn insert_arc(
+        &mut self,
+        key: TreeTransformStructureCacheKey<PlanKey>,
+        structure: Arc<TreeTransformStructure<T>>,
+    ) -> Option<Arc<TreeTransformStructure<T>>> {
         if !self.policy.stores_entries() {
             return None;
         }
-        let old = self.structures.insert(key.clone(), Arc::new(structure));
+        let old = self.structures.insert(key.clone(), structure);
         if self.policy.max_entries().is_some() {
             touch_lru_key(&mut self.lru_order, &key);
         }
