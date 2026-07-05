@@ -13,6 +13,9 @@
 //! kept value of an SU(2) spin-j sector consumes `2j + 1` of a rank budget
 //! and contributes `(2j + 1) * value^2` to the 2-norm.
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
 /// Truncation policy over per-sector descending spectra.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Truncation {
@@ -180,19 +183,62 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
 /// Candidates as `(sector, index)` sorted by descending value; ties keep the
 /// input sector order so the decision is deterministic.
 fn descending_candidates(spectra: &[WeightedSpectrum<'_>]) -> Vec<(usize, usize)> {
-    let mut candidates: Vec<(usize, usize)> = spectra
-        .iter()
-        .enumerate()
-        .flat_map(|(sector, spectrum)| (0..spectrum.values.len()).map(move |index| (sector, index)))
-        .collect();
-    candidates.sort_by(|&(ls, li), &(rs, ri)| {
-        spectra[rs].values[ri]
-            .partial_cmp(&spectra[ls].values[li])
-            .expect("finite spectrum values")
-            .then(ls.cmp(&rs))
-            .then(li.cmp(&ri))
-    });
+    let total = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
+    let mut heap = BinaryHeap::with_capacity(spectra.len());
+    for (sector, spectrum) in spectra.iter().enumerate() {
+        if let Some(&value) = spectrum.values.first() {
+            heap.push(DescendingCandidate {
+                value,
+                sector,
+                index: 0,
+            });
+        }
+    }
+
+    let mut candidates = Vec::with_capacity(total);
+    while let Some(candidate) = heap.pop() {
+        candidates.push((candidate.sector, candidate.index));
+        let next_index = candidate.index + 1;
+        if let Some(&value) = spectra[candidate.sector].values.get(next_index) {
+            heap.push(DescendingCandidate {
+                value,
+                sector: candidate.sector,
+                index: next_index,
+            });
+        }
+    }
     candidates
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DescendingCandidate {
+    value: f64,
+    sector: usize,
+    index: usize,
+}
+
+impl PartialEq for DescendingCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.sector == other.sector && self.index == other.index
+    }
+}
+
+impl Eq for DescendingCandidate {}
+
+impl PartialOrd for DescendingCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DescendingCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.value
+            .partial_cmp(&other.value)
+            .expect("finite spectrum values")
+            .then_with(|| other.sector.cmp(&self.sector))
+            .then_with(|| other.index.cmp(&self.index))
+    }
 }
 
 fn full_norm(spectra: &[WeightedSpectrum<'_>]) -> f64 {
@@ -251,6 +297,17 @@ mod tests {
         assert_eq!(decision.kept, vec![2, 1]);
         // Budget 6: 0.5 has weight 3 and does not fit.
         let decision = select_truncation(&spectra, &Truncation::rank(6));
+        assert_eq!(decision.kept, vec![2, 1]);
+    }
+
+    #[test]
+    fn rank_ties_keep_input_sector_order() {
+        let entries = [(1.0, vec![2.0, 1.0]), (1.0, vec![2.0, 1.0])];
+        let spectra = spectra(&entries);
+        let decision = select_truncation(&spectra, &Truncation::rank(1));
+        assert_eq!(decision.kept, vec![1, 0]);
+
+        let decision = select_truncation(&spectra, &Truncation::rank(3));
         assert_eq!(decision.kept, vec![2, 1]);
     }
 

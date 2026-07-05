@@ -706,7 +706,7 @@ fn tree_row_memo_survives_structure_change() {
         [2, 1],
         [1, 1, 1],
     );
-    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [11, 13, 17, 19], []);
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
     let make = |keys: &[BlockKey]| {
@@ -759,6 +759,68 @@ fn tree_row_memo_survives_structure_change() {
     assert_eq!(cache.stats().plan_misses(), 2);
     assert!(cache.stats().tree_row_hits() >= misses_after_first);
     assert!(cache.stats().tree_row_misses() > misses_after_first);
+}
+
+#[test]
+fn process_global_tree_transform_cache_warms_independent_contexts() {
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let block_structure = packed_fixture_structure(
+        4,
+        [
+            (src_key0.clone(), vec![1, 1, 1, 1]),
+            (src_key1.clone(), vec![1, 1, 1, 1]),
+        ],
+    )
+    .unwrap();
+    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![3.0, -4.0],
+        space.clone(),
+        block_structure.clone(),
+    )
+    .unwrap();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [23, 29, 31, 37], []);
+
+    let run =
+        |context: &mut TreeTransformExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>| {
+            let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+                vec![1.0, 2.0],
+                space.clone(),
+                block_structure.clone(),
+            )
+            .unwrap();
+            context
+                .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 2.0, -1.0)
+                .unwrap();
+            dst.data().to_vec()
+        };
+
+    let mut first =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let first_data = run(&mut first);
+    assert_eq!(first.cache().stats().plan_misses(), 1);
+    assert!(first.cache().stats().tree_row_misses() > 0);
+
+    let mut second =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let second_data = run(&mut second);
+    assert_eq!(second.cache().stats().plan_misses(), 1);
+    assert_eq!(second.cache().stats().tree_row_misses(), 0);
+    assert_eq!(second.cache().stats().tree_row_hits(), 0);
+    assert_eq!(second_data, first_data);
 }
 
 #[test]

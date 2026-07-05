@@ -13,12 +13,14 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tenet_core::{BlockStructure, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
 use super::structure::TensorContractStructure;
-use crate::cache::{BlockStructureCacheKey, OperationCachePolicy};
+use crate::cache::{
+    operation_global_registry, typed_global_map, BlockStructureCacheKey, OperationCachePolicy,
+};
 use crate::OperationError;
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
@@ -27,6 +29,15 @@ use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
 use super::fusion_block::{compile_fusion_block_contract_plan, is_core_form_fusion_block_contract};
 use super::structure::TensorContractAxisPlan;
+
+type GlobalContractionResolutionMap<RuleKey> = RwLock<HashMap<FullKey<RuleKey>, Resolution>>;
+
+fn global_contraction_resolutions<RuleKey>() -> Arc<GlobalContractionResolutionMap<RuleKey>>
+where
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+{
+    typed_global_map(operation_global_registry())
+}
 
 /// Resolved execution artifact for one contraction key: the route decision
 /// and its compiled plan are one value, never cached separately.
@@ -284,6 +295,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
+        RuleKey: 'static + Send + Sync,
     {
         self.get_or_resolve_with(rule, dst, lhs, rhs, axes, false, || {
             resolve(
@@ -312,6 +324,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
+        RuleKey: 'static + Send + Sync,
     {
         let resolution = self.get_or_resolve_with(rule, dst, lhs, rhs, axes, true, || {
             compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)
@@ -339,6 +352,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
+        RuleKey: 'static + Send + Sync,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
         if self.policy.stores_entries() {
@@ -426,7 +440,37 @@ where
             }
 
             self.stats.misses += 1;
+            let global = global_contraction_resolutions::<RuleKey>();
+            if let Some(resolution) = global
+                .read()
+                .expect("global contraction resolution cache poisoned")
+                .get(&full_key)
+                .cloned()
+            {
+                self.resolved.insert(full_key.clone(), resolution.clone());
+                if let Some(max_entries) = self.policy.max_entries() {
+                    self.lru_order.push_back(full_key.clone());
+                    self.enforce_lru_limit(max_entries);
+                }
+                self.fast.insert(fast_key, resolution.clone());
+                self.remember_last(
+                    &rule_key,
+                    dst,
+                    lhs,
+                    rhs,
+                    axes,
+                    core_only,
+                    Some(full_key),
+                    &resolution,
+                );
+                return Ok(resolution);
+            }
             let resolution = resolve_cold()?;
+            global
+                .write()
+                .expect("global contraction resolution cache poisoned")
+                .entry(full_key.clone())
+                .or_insert_with(|| resolution.clone());
             self.resolved.insert(full_key.clone(), resolution.clone());
             if let Some(max_entries) = self.policy.max_entries() {
                 self.lru_order.push_back(full_key.clone());

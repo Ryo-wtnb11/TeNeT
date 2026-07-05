@@ -22,9 +22,9 @@ mod tree_transform;
 pub use adjoint::{adjoint, adjoint_dyn};
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{
-    BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
-    TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCache,
-    TreeTransformStructureCacheKey,
+    reset_global_operation_caches, BlockStructureCacheBlockKey, BlockStructureCacheKey,
+    OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
+    TreeTransformStructureCache, TreeTransformStructureCacheKey,
 };
 pub use contract::DynamicFusionMapSpace;
 #[cfg(test)]
