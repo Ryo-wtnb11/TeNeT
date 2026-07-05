@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use num_complex::Complex64;
+use num_traits::Zero;
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, FusionProductSpace, FusionTensorMapSpace,
     FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeRigidSymbols, SectorId, SectorLeg,
     TensorMap, TensorMapSpace,
 };
-use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView};
+use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
 
-use tenet_tensors::{DenseRecouplingScalar, DynamicFusionMapSpace};
+use tenet_tensors::{DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace};
 
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
 use tenet_tensors::OperationError;
@@ -20,6 +21,8 @@ use tenet_tensors::OperationError;
 pub trait FactorScalar: DenseRecouplingScalar {
     /// Output scalar of the general (non-Hermitian) eigendecomposition.
     type Eig: FactorScalar;
+    /// Real scalar used by singular-value/eigenvalue outputs.
+    type Real: DenseRecouplingScalar + Into<f64>;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError>;
     /// Real spectrum output (singular values, Hermitian eigenvalues) widened
@@ -35,6 +38,7 @@ pub trait FactorScalar: DenseRecouplingScalar {
 
 impl FactorScalar for f32 {
     type Eig = num_complex::Complex32;
+    type Real = f32;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
         tensor.as_f32_slice()
@@ -67,6 +71,7 @@ impl FactorScalar for f32 {
 
 impl FactorScalar for f64 {
     type Eig = Complex64;
+    type Real = f64;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
         tensor.as_f64_slice()
@@ -95,6 +100,7 @@ impl FactorScalar for f64 {
 
 impl FactorScalar for num_complex::Complex32 {
     type Eig = num_complex::Complex32;
+    type Real = f32;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
         tensor.as_c32_slice()
@@ -127,6 +133,7 @@ impl FactorScalar for num_complex::Complex32 {
 
 impl FactorScalar for Complex64 {
     type Eig = Complex64;
+    type Real = f64;
 
     fn dense_slice(tensor: &DenseTensor) -> Result<&[Self], DenseError> {
         tensor.as_c64_slice()
@@ -355,9 +362,13 @@ where
         let strides = block.strides();
         let offset = block.offset();
         let count = block.shape()[0].min(block.shape()[1]);
-        for position in 0..count {
-            data[offset + position * (strides[0] + strides[1])] = to_scalar(entry.values[position]);
-        }
+        copy_mapped_to_strided_diagonal(
+            &mut data,
+            offset,
+            strides[0] + strides[1],
+            &entry.values[..count],
+            to_scalar,
+        );
     }
     Ok((space, data))
 }
@@ -374,15 +385,38 @@ struct SectorMatricization<D> {
     data: Vec<D>,
 }
 
-struct SectorFactors<D> {
-    sector: SectorId,
-    /// Full rank of the dense factorization (leading dimension of `vt`).
-    rank: usize,
-    /// Kept singular values after truncation.
-    kept: usize,
-    rows: usize,
-    u: Vec<D>,
-    vt: Vec<D>,
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SectorMatricizationDiagnostic {
+    pub sector: SectorId,
+    pub rows: usize,
+    pub cols: usize,
+    pub elements: usize,
+}
+
+#[cfg(feature = "diagnostics")]
+#[doc(hidden)]
+pub fn sector_matricization_diagnostic<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> Result<Vec<SectorMatricizationDiagnostic>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = dyn_space_of(tensor)?;
+    Ok(
+        sector_matricizations(rule, space.structure(), tensor.data(), space.nout())?
+            .into_iter()
+            .map(|matrix| SectorMatricizationDiagnostic {
+                sector: matrix.sector,
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix.data.len(),
+            })
+            .collect(),
+    )
 }
 
 /// All singular values per coupled sector, descending (MatrixAlgebraKit
@@ -500,64 +534,91 @@ where
 {
     let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
 
-    let mut factors = Vec::with_capacity(matricizations.len());
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let (u_space, vt_space) =
+        build_left_right_spaces(rule, space.homspace(), &matricizations, &ranks)?;
+    let u_len = u_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut u_data = vec![D::zero(); u_len];
+    let vt_len = vt_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut vt_data = vec![D::zero(); vt_len];
+
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut s_workspace = vec![D::Real::zero(); max_rank];
+    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
     let mut singular_values = Vec::with_capacity(matricizations.len());
 
     for matrix in &matricizations {
-        let shape = [matrix.rows, matrix.cols];
-        let strides = [1usize, matrix.rows];
-        let view =
-            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
-        let outputs = dense
-            .svd(D::dense_read(view))
-            .map_err(OperationError::Dense)?;
-        if outputs.len() != 3 {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "dense SVD must return exactly (U, S, Vt)",
-            });
-        }
         let rank = matrix.rows.min(matrix.cols);
-        validate_dense_shape(outputs[0].shape(), &[matrix.rows, rank])?;
-        validate_dense_shape(outputs[1].shape(), &[rank])?;
-        validate_dense_shape(outputs[2].shape(), &[rank, matrix.cols])?;
+        let input_shape = [matrix.rows, matrix.cols];
+        let input_strides = [1usize, matrix.rows];
+        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let u_shape = [matrix.rows, rank];
+        let u_strides = [1usize, max_rows];
+        let s_shape = [rank];
+        let s_strides = [1usize];
+        let vt_shape = [rank, matrix.cols];
+        let vt_strides = [1usize, max_rank];
+        let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
+            .map_err(OperationError::Dense)?;
+        dense
+            .svd_into(
+                D::dense_read(input),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vt_view),
+            )
+            .map_err(OperationError::Dense)?;
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
-            values: D::real_spectrum(&outputs[1]).map_err(OperationError::Dense)?,
+            values: s_workspace[..rank]
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect(),
         });
-        factors.push(SectorFactors {
-            sector: matrix.sector,
-            rank,
-            kept: rank,
-            rows: matrix.rows,
-            u: D::dense_slice(&outputs[0])
-                .map_err(OperationError::Dense)?
-                .to_vec(),
-            vt: D::dense_slice(&outputs[2])
-                .map_err(OperationError::Dense)?
-                .to_vec(),
-        });
+        scatter_left_sector_blocks(rule, &u_space, &mut u_data, matrix, &u_workspace, max_rows)?;
+        scatter_right_sector_blocks(
+            rule,
+            &vt_space,
+            &mut vt_data,
+            matrix,
+            &vt_workspace,
+            max_rank,
+        )?;
     }
-
-    let pairs = factors
-        .into_iter()
-        .map(|factor| FactorPair {
-            sector: factor.sector,
-            kept: factor.kept,
-            left: factor.u,
-            left_rows: factor.rows,
-            right: factor.vt,
-            right_leading: factor.rank,
-        })
-        .collect::<Vec<_>>();
-    let (u_factor, vt_factor) =
-        build_left_right_pair(rule, space.homspace(), &matricizations, &pairs)?;
 
     let s_factor = diagonal_bond_tensor_dyn(rule, &singular_values, &D::from_real)?;
     Ok(SvdCompactDyn {
-        u: u_factor,
+        u: (u_space, u_data),
         s: s_factor,
-        vh: vt_factor,
+        vh: (vt_space, vt_data),
         singular_values,
     })
 }
@@ -774,30 +835,15 @@ where
         let new_offset = new_block.offset();
         let old_strides = old_block.strides().to_vec();
         let old_offset = old_block.offset();
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let new_position = new_offset
-                + indices
-                    .iter()
-                    .zip(&new_strides)
-                    .map(|(&i, &stride)| i * stride)
-                    .sum::<usize>();
-            let old_position = old_offset
-                + indices
-                    .iter()
-                    .zip(&old_strides)
-                    .map(|(&i, &stride)| i * stride)
-                    .sum::<usize>();
-            data[new_position] = source_data[old_position];
-            for axis_index in 0..shape.len() {
-                indices[axis_index] += 1;
-                if indices[axis_index] < shape[axis_index] {
-                    break;
-                }
-                indices[axis_index] = 0;
-            }
-        }
+        copy_matching_block_prefix(
+            source_data,
+            &old_strides,
+            old_offset,
+            &mut data,
+            &new_strides,
+            new_offset,
+            &shape,
+        );
     }
     Ok((space, data))
 }
@@ -814,27 +860,30 @@ struct FactorPair<D> {
     right_leading: usize,
 }
 
-/// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
-/// the orthogonal factorizations, in the coupled-sector matrix layout.
-fn build_left_right_pair<R, D>(
+struct SectorRank {
+    sector: SectorId,
+    kept: usize,
+}
+
+fn build_left_right_spaces<R, D>(
     rule: &R,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
-    pairs: &[FactorPair<D>],
-) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
+    ranks: &[SectorRank],
+) -> Result<(DynamicFusionMapSpace, DynamicFusionMapSpace), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let sector_rank = |sector: SectorId| -> usize {
-        pairs
+        ranks
             .iter()
-            .find(|pair| pair.sector == sector)
-            .map(|pair| pair.kept)
+            .find(|rank| rank.sector == sector)
+            .map(|rank| rank.kept)
             .unwrap_or(0)
     };
 
-    let new_leg = SectorLeg::new(pairs.iter().map(|pair| (pair.sector, pair.kept)), false);
+    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
 
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
@@ -867,6 +916,31 @@ where
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
     let right_space = DynamicFusionMapSpace::from_degeneracy_shapes(rule, right_hom, right_shapes)?;
+
+    Ok((left_space, right_space))
+}
+
+/// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
+/// the orthogonal factorizations, in the coupled-sector matrix layout.
+fn build_left_right_pair<R, D>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let ranks = pairs
+        .iter()
+        .map(|pair| SectorRank {
+            sector: pair.sector,
+            kept: pair.kept,
+        })
+        .collect::<Vec<_>>();
+    let (left_space, right_space) =
+        build_left_right_spaces(rule, homspace, matricizations, &ranks)?;
 
     let left_len = left_space
         .required_len()
@@ -940,6 +1014,82 @@ where
     }
 
     Ok(((left_space, left_data), (right_space, right_data)))
+}
+
+fn scatter_left_sector_blocks<R, D>(
+    rule: &R,
+    left_space: &DynamicFusionMapSpace,
+    left_data: &mut [D],
+    matrix: &SectorMatricization<D>,
+    factor: &[D],
+    factor_rows: usize,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let left_structure = Arc::clone(left_space.structure());
+    for index in 0..left_structure.block_count() {
+        let block = left_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        if coupled_of(rule, key.codomain_tree()) != matrix.sector {
+            continue;
+        }
+        let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
+        scatter_matrix_block(
+            left_data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            block.shape().len() - 1,
+            factor,
+            factor_rows,
+            row_offset,
+        );
+    }
+    Ok(())
+}
+
+fn scatter_right_sector_blocks<R, D>(
+    rule: &R,
+    right_space: &DynamicFusionMapSpace,
+    right_data: &mut [D],
+    matrix: &SectorMatricization<D>,
+    factor: &[D],
+    factor_rows: usize,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let right_structure = Arc::clone(right_space.structure());
+    for index in 0..right_structure.block_count() {
+        let block = right_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        if coupled_of(rule, key.domain_tree()) != matrix.sector {
+            continue;
+        }
+        let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
+        scatter_matrix_block(
+            right_data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            0,
+            factor,
+            factor_rows,
+            col_offset,
+        );
+    }
+    Ok(())
 }
 
 /// Full (untruncated) Hermitian eigendecomposition `t = V * D * Vh`.
@@ -2398,6 +2548,118 @@ fn adjoint_col_major<D: FactorScalar>(data: &[D], rows: usize, cols: usize) -> V
     adjoint
 }
 
+fn advance_outer_index(index: &mut [usize], shape: &[usize]) {
+    for axis in 1..shape.len() {
+        index[axis] += 1;
+        if index[axis] < shape[axis] {
+            break;
+        }
+        index[axis] = 0;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_tensor_block_to_matrix<D: Copy>(
+    source: &[D],
+    shape: &[usize],
+    strides: &[usize],
+    offset: usize,
+    nout: usize,
+    matrix: &mut [D],
+    matrix_rows: usize,
+    row_offset: usize,
+    col_offset: usize,
+) {
+    if shape.is_empty() {
+        matrix[row_offset + matrix_rows * col_offset] = source[offset];
+        return;
+    }
+    let run = shape[0];
+    let src_lane_stride = strides[0];
+    let dst_lane_stride = if nout > 0 { 1 } else { matrix_rows };
+    let outer_count: usize = shape[1..].iter().product();
+    let mut index = vec![0usize; shape.len()];
+    for _ in 0..outer_count {
+        let mut src_start = offset;
+        let mut row = 0usize;
+        let mut row_stride = if nout > 0 { shape[0] } else { 1 };
+        let mut col = 0usize;
+        let mut col_stride = if nout == 0 { shape[0] } else { 1 };
+        for axis in 1..shape.len() {
+            src_start += index[axis] * strides[axis];
+            if axis < nout {
+                row += index[axis] * row_stride;
+                row_stride *= shape[axis];
+            } else {
+                col += index[axis] * col_stride;
+                col_stride *= shape[axis];
+            }
+        }
+        let dst_start = (row_offset + row) + matrix_rows * (col_offset + col);
+        if src_lane_stride == 1 && dst_lane_stride == 1 {
+            matrix[dst_start..dst_start + run].copy_from_slice(&source[src_start..src_start + run]);
+        } else {
+            for lane in 0..run {
+                matrix[dst_start + lane * dst_lane_stride] =
+                    source[src_start + lane * src_lane_stride];
+            }
+        }
+        advance_outer_index(&mut index, shape);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_matching_block_prefix<D: Copy>(
+    source: &[D],
+    source_strides: &[usize],
+    source_offset: usize,
+    destination: &mut [D],
+    destination_strides: &[usize],
+    destination_offset: usize,
+    shape: &[usize],
+) {
+    if shape.is_empty() {
+        destination[destination_offset] = source[source_offset];
+        return;
+    }
+    let run = shape[0];
+    let outer_count: usize = shape[1..].iter().product();
+    let mut index = vec![0usize; shape.len()];
+    for _ in 0..outer_count {
+        let mut src_start = source_offset;
+        let mut dst_start = destination_offset;
+        for axis in 1..shape.len() {
+            src_start += index[axis] * source_strides[axis];
+            dst_start += index[axis] * destination_strides[axis];
+        }
+        if source_strides[0] == 1 && destination_strides[0] == 1 {
+            destination[dst_start..dst_start + run]
+                .copy_from_slice(&source[src_start..src_start + run]);
+        } else {
+            for lane in 0..run {
+                destination[dst_start + lane * destination_strides[0]] =
+                    source[src_start + lane * source_strides[0]];
+            }
+        }
+        advance_outer_index(&mut index, shape);
+    }
+}
+
+fn copy_mapped_to_strided_diagonal<D, V, F>(
+    data: &mut [D],
+    offset: usize,
+    diagonal_stride: usize,
+    values: &[V],
+    to_scalar: &F,
+) where
+    V: Copy,
+    F: Fn(V) -> D + ?Sized,
+{
+    for (position, &value) in values.iter().enumerate() {
+        data[offset + position * diagonal_stride] = to_scalar(value);
+    }
+}
+
 /// Copies a dense column-major matrix region into one fusion-tree subblock.
 ///
 /// `matrix_axis` names the block axis that walks the matrix's own leading
@@ -2416,16 +2678,22 @@ fn scatter_matrix_block<D: Copy>(
     matrix_rows: usize,
     side_offset: usize,
 ) {
+    if shape.is_empty() {
+        data[offset] = matrix[side_offset];
+        return;
+    }
     let rank = shape.len();
+    let run = shape[0];
+    let dst_lane_stride = strides[0];
+    let outer_count: usize = shape[1..].iter().product();
     let mut index = vec![0usize; rank];
-    let count: usize = shape.iter().product();
-    for _ in 0..count {
-        let mut position = offset;
+    for _ in 0..outer_count {
+        let mut dst_start = offset;
         let mut side = 0usize;
-        let mut side_stride = 1usize;
+        let mut side_stride = if matrix_axis == 0 { 1 } else { shape[0] };
         let mut matrix_index = 0usize;
-        for axis in 0..rank {
-            position += index[axis] * strides[axis];
+        for axis in 1..rank {
+            dst_start += index[axis] * strides[axis];
             if axis == matrix_axis {
                 matrix_index = index[axis];
             } else {
@@ -2433,19 +2701,29 @@ fn scatter_matrix_block<D: Copy>(
                 side_stride *= shape[axis];
             }
         }
-        let (row, col) = if matrix_axis == rank - 1 {
-            (side_offset + side, matrix_index)
-        } else {
-            (matrix_index, side_offset + side)
-        };
-        data[position] = matrix[row + matrix_rows * col];
-        for axis in 0..rank {
-            index[axis] += 1;
-            if index[axis] < shape[axis] {
-                break;
+        let (src_start, src_lane_stride) = if matrix_axis == 0 {
+            if matrix_axis == rank - 1 {
+                (side_offset + side, matrix_rows)
+            } else {
+                (matrix_rows * (side_offset + side), 1)
             }
-            index[axis] = 0;
+        } else if matrix_axis == rank - 1 {
+            ((side_offset + side) + matrix_rows * matrix_index, 1)
+        } else {
+            (
+                matrix_index + matrix_rows * (side_offset + side),
+                matrix_rows,
+            )
+        };
+        if src_lane_stride == 1 && dst_lane_stride == 1 {
+            data[dst_start..dst_start + run].copy_from_slice(&matrix[src_start..src_start + run]);
+        } else {
+            for lane in 0..run {
+                data[dst_start + lane * dst_lane_stride] =
+                    matrix[src_start + lane * src_lane_stride];
+            }
         }
+        advance_outer_index(&mut index, shape);
     }
 }
 
@@ -2623,35 +2901,18 @@ where
         let shape = block.shape();
         let strides = block.strides();
         let offset = block.offset();
-        let rank = shape.len();
-        let count: usize = shape.iter().product();
-        let mut index = vec![0usize; rank];
         let rows = matrix.rows;
-        for _ in 0..count {
-            let mut position = offset;
-            let mut row = 0usize;
-            let mut row_stride = 1usize;
-            let mut col = 0usize;
-            let mut col_stride = 1usize;
-            for axis in 0..rank {
-                position += index[axis] * strides[axis];
-                if axis < nout {
-                    row += index[axis] * row_stride;
-                    row_stride *= shape[axis];
-                } else {
-                    col += index[axis] * col_stride;
-                    col_stride *= shape[axis];
-                }
-            }
-            matrix.data[(row_offset + row) + rows * (col_offset + col)] = data[position];
-            for axis in 0..rank {
-                index[axis] += 1;
-                if index[axis] < shape[axis] {
-                    break;
-                }
-                index[axis] = 0;
-            }
-        }
+        copy_tensor_block_to_matrix(
+            data,
+            shape,
+            strides,
+            offset,
+            nout,
+            &mut matrix.data,
+            rows,
+            row_offset,
+            col_offset,
+        );
     }
     Ok(matricizations)
 }
