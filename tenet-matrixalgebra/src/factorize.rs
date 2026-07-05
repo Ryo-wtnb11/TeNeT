@@ -163,11 +163,18 @@ impl FactorScalar for Complex64 {
 /// Magnitude used by the truncation selection over a spectrum.
 pub trait SpectrumMagnitude: Copy {
     fn magnitude(self) -> f64;
+    fn nonnegative_f64_slice(_values: &[Self]) -> Option<&[f64]> {
+        None
+    }
 }
 
 impl SpectrumMagnitude for f64 {
     fn magnitude(self) -> f64 {
         self.abs()
+    }
+
+    fn nonnegative_f64_slice(values: &[Self]) -> Option<&[f64]> {
+        Some(values)
     }
 }
 
@@ -326,14 +333,17 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> = singular_values
+        .iter()
+        .map(|entry| (entry.sector, entry))
+        .collect();
     let keys = homspace.fusion_tree_keys(rule);
     let shapes = keys
         .iter()
         .map(|key| {
             let sector = coupled_of(rule, key.codomain_tree());
-            let count = singular_values
-                .iter()
-                .find(|entry| entry.sector == sector)
+            let count = spectrum_by_sector
+                .get(&sector)
                 .map(|entry| entry.values.len())
                 .unwrap_or(0);
             vec![count, count]
@@ -356,7 +366,7 @@ where
             .codomain_tree()
             .coupled()
             .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
-        let Some(entry) = singular_values.iter().find(|entry| entry.sector == sector) else {
+        let Some(&entry) = spectrum_by_sector.get(&sector) else {
             continue;
         };
         let strides = block.strides();
@@ -631,21 +641,43 @@ fn decide_bond_truncation<R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
+    values_are_nonnegative: bool,
 ) -> crate::truncation::TruncationDecision
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: SpectrumMagnitude,
 {
-    let magnitudes: Vec<Vec<f64>> = spectra
+    enum MagnitudeValues<'a> {
+        Borrowed(&'a [f64]),
+        Owned(Vec<f64>),
+    }
+
+    impl<'a> MagnitudeValues<'a> {
+        fn as_slice(&self) -> &[f64] {
+            match self {
+                MagnitudeValues::Borrowed(values) => values,
+                MagnitudeValues::Owned(values) => values,
+            }
+        }
+    }
+
+    let magnitudes: Vec<MagnitudeValues<'_>> = spectra
         .iter()
-        .map(|entry| entry.values.iter().map(|value| value.magnitude()).collect())
+        .map(|entry| {
+            if values_are_nonnegative {
+                if let Some(values) = V::nonnegative_f64_slice(&entry.values) {
+                    return MagnitudeValues::Borrowed(values);
+                }
+            }
+            MagnitudeValues::Owned(entry.values.iter().map(|value| value.magnitude()).collect())
+        })
         .collect();
     let weighted: Vec<WeightedSpectrum<'_>> = spectra
         .iter()
         .zip(&magnitudes)
         .map(|(entry, values)| WeightedSpectrum {
             weight: rule.dim_scalar(entry.sector),
-            values,
+            values: values.as_slice(),
         })
         .collect();
     select_truncation(&weighted, truncation)
@@ -693,7 +725,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let decision = decide_bond_truncation(rule, &full.singular_values, truncation);
+    let decision = decide_bond_truncation(rule, &full.singular_values, truncation, true);
     if full
         .singular_values
         .iter()
@@ -714,14 +746,12 @@ where
         entry.values.truncate(count);
     }
     singular_values.retain(|entry| !entry.values.is_empty());
+    let kept_by_sector: HashMap<SectorId, usize> = singular_values
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
 
-    let kept_of = |sector: SectorId| -> usize {
-        singular_values
-            .iter()
-            .find(|entry| entry.sector == sector)
-            .map(|entry| entry.values.len())
-            .unwrap_or(0)
-    };
+    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
 
     let bond_axis = full.u.0.nout();
     let u_factor = sliced_bond_tensor(rule, &full.u.0, &full.u.1, bond_axis, &kept_of)?;
@@ -875,13 +905,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let sector_rank = |sector: SectorId| -> usize {
-        ranks
-            .iter()
-            .find(|rank| rank.sector == sector)
-            .map(|rank| rank.kept)
-            .unwrap_or(0)
-    };
+    let rank_by_sector: HashMap<SectorId, usize> =
+        ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
+    let matrix_by_sector = matricization_map(matricizations);
+    let sector_rank =
+        |sector: SectorId| -> usize { rank_by_sector.get(&sector).copied().unwrap_or(0) };
 
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
 
@@ -894,7 +922,7 @@ where
         .iter()
         .map(|key| {
             let sector = coupled_of(rule, key.codomain_tree());
-            let mut shape = row_shape_of(matricizations, sector, key.codomain_tree())?;
+            let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
             shape.push(sector_rank(sector));
             Ok(shape)
         })
@@ -911,7 +939,7 @@ where
         .map(|key| {
             let sector = coupled_of(rule, key.domain_tree());
             let mut shape = vec![sector_rank(sector)];
-            shape.extend(col_shape_of(matricizations, sector, key.domain_tree())?);
+            shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
             Ok(shape)
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
@@ -941,6 +969,9 @@ where
         .collect::<Vec<_>>();
     let (left_space, right_space) =
         build_left_right_spaces(rule, homspace, matricizations, &ranks)?;
+    let matrix_by_sector = matricization_map(matricizations);
+    let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
+        pairs.iter().map(|pair| (pair.sector, pair)).collect();
 
     let left_len = left_space
         .required_len()
@@ -961,10 +992,10 @@ where
             continue;
         };
         let sector = coupled_of(rule, key.codomain_tree());
-        let matrix = matricization_of(matricizations, sector)?;
-        let pair = pairs
-            .iter()
-            .find(|pair| pair.sector == sector)
+        let matrix = matricization_of(&matrix_by_sector, sector)?;
+        let pair = pair_by_sector
+            .get(&sector)
+            .copied()
             .expect("factor pair exists for every matricized sector");
         let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
         let shape = block.shape().to_vec();
@@ -992,10 +1023,10 @@ where
             continue;
         };
         let sector = coupled_of(rule, key.domain_tree());
-        let matrix = matricization_of(matricizations, sector)?;
-        let pair = pairs
-            .iter()
-            .find(|pair| pair.sector == sector)
+        let matrix = matricization_of(&matrix_by_sector, sector)?;
+        let pair = pair_by_sector
+            .get(&sector)
+            .copied()
             .expect("factor pair exists for every matricized sector");
         let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
         let shape = block.shape().to_vec();
@@ -1275,7 +1306,7 @@ where
     D: FactorScalar,
 {
     let full = eigh_full_dyn(dense, rule, space, data)?;
-    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation);
+    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false);
     if full
         .eigenvalues
         .iter()
@@ -1294,13 +1325,11 @@ where
         entry.values.truncate(count);
     }
     eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept_of = |sector: SectorId| -> usize {
-        eigenvalues
-            .iter()
-            .find(|entry| entry.sector == sector)
-            .map(|entry| entry.values.len())
-            .unwrap_or(0)
-    };
+    let kept_by_sector: HashMap<SectorId, usize> = eigenvalues
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
+    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
     let bond_axis = full.v.0.nout();
     let v_factor = sliced_bond_tensor(rule, &full.v.0, &full.v.1, bond_axis, &kept_of)?;
     let d_factor = diagonal_bond_tensor_dyn(rule, &eigenvalues, &D::from_real)?;
@@ -1417,11 +1446,11 @@ where
         });
     }
 
+    let cols_by_sector: HashMap<SectorId, usize> = col_dims.into_iter().collect();
     let cols_of = |sector: SectorId| {
-        col_dims
-            .iter()
-            .find(|(candidate, _)| *candidate == sector)
-            .map(|(_, cols)| *cols)
+        cols_by_sector
+            .get(&sector)
+            .copied()
             .expect("column dimension recorded per sector")
     };
     // The left/right bond legs differ in the full SVD (rows vs columns), so
@@ -1460,18 +1489,12 @@ where
             })
             .collect::<Vec<_>>(),
     )?;
-    let s_factor = rectangular_diagonal_bond_tensor(
-        rule,
-        &singular_values,
-        &|sector| {
-            pairs
-                .iter()
-                .find(|pair| pair.sector == sector)
-                .map(|pair| pair.left_rows)
-                .unwrap_or(0)
-        },
-        &cols_of,
-    )?;
+    let rows_by_sector: HashMap<SectorId, usize> = pairs
+        .iter()
+        .map(|pair| (pair.sector, pair.left_rows))
+        .collect();
+    let rows_of = |sector: SectorId| rows_by_sector.get(&sector).copied().unwrap_or(0);
+    let s_factor = rectangular_diagonal_bond_tensor(rule, &singular_values, &rows_of, &cols_of)?;
     Ok(SvdFullDyn {
         u: u_factor,
         s: s_factor,
@@ -1562,6 +1585,8 @@ where
         .map_err(OperationError::from_core_preserving_context)?;
     let mut data = vec![D::zero(); len];
     let structure = Arc::clone(space.structure());
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
+        spectra.iter().map(|entry| (entry.sector, entry)).collect();
     for index in 0..structure.block_count() {
         let block = structure
             .block(index)
@@ -1573,7 +1598,7 @@ where
             .codomain_tree()
             .coupled()
             .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
-        let Some(entry) = spectra.iter().find(|entry| entry.sector == sector) else {
+        let Some(&entry) = spectrum_by_sector.get(&sector) else {
             continue;
         };
         let strides = block.strides();
@@ -1973,7 +1998,7 @@ where
     D: FactorScalar,
 {
     let full = eig_full_dyn::<E, R, D>(dense, rule, space, data)?;
-    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation);
+    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false);
     if full
         .eigenvalues
         .iter()
@@ -1992,13 +2017,11 @@ where
         entry.values.truncate(count);
     }
     eigenvalues.retain(|entry| !entry.values.is_empty());
-    let kept_of = |sector: SectorId| -> usize {
-        eigenvalues
-            .iter()
-            .find(|entry| entry.sector == sector)
-            .map(|entry| entry.values.len())
-            .unwrap_or(0)
-    };
+    let kept_by_sector: HashMap<SectorId, usize> = eigenvalues
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
+    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
     let bond_axis = full.v.0.nout();
     let v_factor = sliced_bond_tensor(rule, &full.v.0, &full.v.1, bond_axis, &kept_of)?;
     let d_factor = diagonal_bond_tensor_dyn(
@@ -2734,13 +2757,22 @@ where
     tree.coupled().unwrap_or_else(|| rule.vacuum())
 }
 
-fn matricization_of<D>(
+fn matricization_map<D>(
     matricizations: &[SectorMatricization<D>],
-    sector: SectorId,
-) -> Result<&SectorMatricization<D>, OperationError> {
+) -> HashMap<SectorId, &SectorMatricization<D>> {
     matricizations
         .iter()
-        .find(|matrix| matrix.sector == sector)
+        .map(|matrix| (matrix.sector, matrix))
+        .collect()
+}
+
+fn matricization_of<'a, D>(
+    matricizations: &'a HashMap<SectorId, &'a SectorMatricization<D>>,
+    sector: SectorId,
+) -> Result<&'a SectorMatricization<D>, OperationError> {
+    matricizations
+        .get(&sector)
+        .copied()
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "factor tree references a coupled sector absent from the source tensor",
         })
@@ -2775,7 +2807,7 @@ fn col_placement<'a, D>(
 }
 
 fn row_shape_of<D>(
-    matricizations: &[SectorMatricization<D>],
+    matricizations: &HashMap<SectorId, &SectorMatricization<D>>,
     sector: SectorId,
     tree: &FusionTreeKey,
 ) -> Result<Vec<usize>, OperationError> {
@@ -2783,7 +2815,7 @@ fn row_shape_of<D>(
 }
 
 fn col_shape_of<D>(
-    matricizations: &[SectorMatricization<D>],
+    matricizations: &HashMap<SectorId, &SectorMatricization<D>>,
     sector: SectorId,
     tree: &FusionTreeKey,
 ) -> Result<Vec<usize>, OperationError> {
