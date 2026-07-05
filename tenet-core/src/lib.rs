@@ -2338,7 +2338,38 @@ fn su2_f_symbol_from_doubled_spins(
     phase * dimension_factor * wigner_6j_doubled(j1, j2, j5, j3, j4, j6)
 }
 
+/// SU(2) 6j symbol (arguments as doubled spins), memoized in a process-global
+/// cache keyed by the six doubled spins — the analogue of TensorKit's
+/// `WignerSymbols.Wigner6j` LRU. Each distinct symbol's exact summation is
+/// evaluated once; every later occurrence (across braids, permutes, and
+/// contractions) is a hash lookup. The cached value is bit-identical to the
+/// direct computation, so this changes cold compile cost only.
 fn wigner_6j_doubled(j1: usize, j2: usize, j3: usize, j4: usize, j5: usize, j6: usize) -> f64 {
+    static CACHE: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<[usize; 6], f64>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    let key = [j1, j2, j3, j4, j5, j6];
+    if let Ok(read) = cache.read() {
+        if let Some(&value) = read.get(&key) {
+            return value;
+        }
+    }
+    let value = wigner_6j_doubled_uncached(j1, j2, j3, j4, j5, j6);
+    if let Ok(mut write) = cache.write() {
+        write.insert(key, value);
+    }
+    value
+}
+
+fn wigner_6j_doubled_uncached(
+    j1: usize,
+    j2: usize,
+    j3: usize,
+    j4: usize,
+    j5: usize,
+    j6: usize,
+) -> f64 {
     let Some(delta_ln) = su2_delta_ln(j1, j2, j3)
         .and_then(|value| su2_delta_ln(j1, j5, j6).map(|next| value + next))
         .and_then(|value| su2_delta_ln(j4, j2, j6).map(|next| value + next))
@@ -2392,8 +2423,28 @@ fn su2_delta_ln(j1: usize, j2: usize, j3: usize) -> Option<f64> {
     )
 }
 
+/// `ln(n!)`, memoized in a process-global lazily-extended table.
+///
+/// `ln(n!) = ln((n-1)!) + ln(n)` is monotone, so the table is filled once and
+/// every later call is an O(1) lookup. Recoupling-coefficient evaluation
+/// (6j symbols) calls this ~7x per summation term, so cold structure compile
+/// dominated by the previous naive `(1..=n)` recomputation. The values are
+/// identical; this only removes the recomputation.
 fn ln_factorial(n: usize) -> f64 {
-    (1..=n).map(|value| (value as f64).ln()).sum()
+    static TABLE: std::sync::OnceLock<std::sync::RwLock<Vec<f64>>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| std::sync::RwLock::new(vec![0.0]));
+    if let Ok(read) = table.read() {
+        if let Some(&value) = read.get(n) {
+            return value;
+        }
+    }
+    let mut write = table.write().expect("ln_factorial table poisoned");
+    while write.len() <= n {
+        let previous = *write.last().expect("table seeded with ln(0!) = 0");
+        let next = write.len();
+        write.push(previous + (next as f64).ln());
+    }
+    write[n]
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

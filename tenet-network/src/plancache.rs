@@ -163,6 +163,26 @@ fn plan_fresh(
             tensors,
             &crate::pathopt::OptEinsumPathOptimizer::new(crate::pathopt::PathStrategy::Optimal),
         ),
+        // Legacy `default_dense_plan` fallback chain: auto-hq -> auto -> dp
+        // -> greedy. Upstream `opt-einsum-path` errors on some all-dim-1
+        // networks, so each failed driver falls through to the next.
+        #[cfg(feature = "opt-path")]
+        Optimizer::AutoHq => {
+            use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
+            let mut last_error = None;
+            for strategy in [
+                PathStrategy::AutoHq,
+                PathStrategy::Auto,
+                PathStrategy::DynamicProgramming,
+            ] {
+                match network.plan(tensors, &OptEinsumPathOptimizer::new(strategy)) {
+                    Ok(plan) => return Ok(plan),
+                    Err(err) => last_error = Some(err),
+                }
+            }
+            let _ = last_error;
+            network.plan(tensors, &GreedyDenseOptimizer)
+        }
         // `Optimizer` is #[non_exhaustive] and defined in `tenet`; variants
         // this build has no search for (e.g. Optimal without `opt-path`)
         // are an explicit error rather than a silent greedy fallback.
