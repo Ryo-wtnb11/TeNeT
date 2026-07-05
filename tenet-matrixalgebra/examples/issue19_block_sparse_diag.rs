@@ -7,7 +7,9 @@ use tenet_core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, SU2Irrep,
     SectorId, SectorLeg, TensorMap, TensorMapSpace,
 };
-use tenet_matrixalgebra::{sector_matricization_diagnostic, svd_compact_dyn};
+use tenet_matrixalgebra::{
+    eigh_full_dyn, qr_compact_dyn, sector_matricization_diagnostic, svd_compact_dyn,
+};
 use tenet_tensors::DynamicFusionMapSpace;
 
 struct CountingAllocator;
@@ -41,6 +43,8 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 fn main() {
     let mat_iters = env_usize("ISSUE19_MAT_ITERS", 200);
     let svd_iters = env_usize("ISSUE19_SVD_ITERS", 5);
+    let qr_iters = env_usize("ISSUE19_QR_ITERS", svd_iters);
+    let eigh_iters = env_usize("ISSUE19_EIGH_ITERS", svd_iters);
     let rule = SU2FusionRule;
     let tensor = synthetic_su2_tensor();
     let dyn_space =
@@ -94,6 +98,40 @@ fn main() {
         elapsed.as_secs_f64() * 1.0e6 / svd_iters as f64,
         allocations,
         allocations as f64 / svd_iters as f64
+    );
+
+    black_box(qr_compact_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    for _ in 0..qr_iters {
+        black_box(qr_compact_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    }
+    let elapsed = start.elapsed();
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    println!(
+        "qr_compact_dyn iters={} total_ms={:.3} avg_us={:.3} allocations={} allocs_per_iter={:.2}",
+        qr_iters,
+        elapsed.as_secs_f64() * 1.0e3,
+        elapsed.as_secs_f64() * 1.0e6 / qr_iters as f64,
+        allocations,
+        allocations as f64 / qr_iters as f64
+    );
+
+    black_box(eigh_full_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    let start = Instant::now();
+    for _ in 0..eigh_iters {
+        black_box(eigh_full_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    }
+    let elapsed = start.elapsed();
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    println!(
+        "eigh_full_dyn iters={} total_ms={:.3} avg_us={:.3} allocations={} allocs_per_iter={:.2}",
+        eigh_iters,
+        elapsed.as_secs_f64() * 1.0e3,
+        elapsed.as_secs_f64() * 1.0e6 / eigh_iters as f64,
+        allocations,
+        allocations as f64 / eigh_iters as f64
     );
 }
 

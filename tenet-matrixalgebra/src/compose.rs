@@ -20,7 +20,7 @@ pub(crate) fn compose_dyn<RuleKey, BT, BC, R, D>(
     (rhs_space, rhs_data): (&DynamicFusionMapSpace, &[D]),
 ) -> Result<DynFactor<D>, OperationError>
 where
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -67,7 +67,7 @@ pub(crate) fn compose<RuleKey, BT, BC, R, D, const A: usize, const B: usize, con
     rhs: &tenet_core::TensorMap<D, B, C>,
 ) -> Result<tenet_core::TensorMap<D, A, C>, OperationError>
 where
-    RuleKey: Clone + Eq + Hash,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
