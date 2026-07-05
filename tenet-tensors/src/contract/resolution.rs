@@ -542,14 +542,9 @@ where
             && !rhs_contract_requires_twist(rule, rhs, axes)?
         {
             let plan = compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)?;
-            // Direct layout replays as the batched core GEMM. A valid core
-            // form on a non-direct layout is kept as a `Core` plan too: the
-            // host route packs its operands into coupled scratch and runs the
-            // same batched GEMM ("copy into core storage, then mul!",
-            // TensorKit parity) via `execute_packed`, instead of the general
-            // dynamic-tree route with its 2-3 tree transforms. `is_fully_direct`
-            // on the plan selects the executor at replay time.
-            return Ok(Resolution::Core(Arc::new(plan)));
+            if plan.is_fully_direct() {
+                return Ok(Resolution::Core(Arc::new(plan)));
+            }
         }
         return Ok(Resolution::DynamicTree(compile_dynamic()?));
     }
