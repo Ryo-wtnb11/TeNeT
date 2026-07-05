@@ -1096,9 +1096,8 @@ where
             Resolution::Core(_) | Resolution::DynamicTree(_) | Resolution::Structure(_) => {
                 Err(OperationError::UnsupportedTensorContractScope {
                     message: "storage-direct contraction supports only the canonical \
-                              fully-direct route; this contraction needs packed core \
-                              materialization, tree transforms, or conjugate structures, \
-                              which have no device kernels yet",
+                              fully-direct route; this contraction needs tree transforms \
+                              or conjugate structures, which have no device kernels yet",
                 })
             }
         }
@@ -1149,34 +1148,19 @@ where
                     backend: contract_backend,
                     workspace: contract_workspace,
                 };
-                if block_plan.is_fully_direct() {
-                    block_plan.execute_raw(
-                        &mut kernels,
-                        &mut gemm,
-                        fusion_block_workspace,
-                        dst_structure,
-                        dst_data,
-                        lhs_structure,
-                        lhs_data,
-                        rhs_structure,
-                        rhs_data,
-                        alpha,
-                        beta,
-                    )
-                } else {
-                    block_plan.execute_packed(
-                        &mut kernels,
-                        &mut gemm,
-                        dst_structure,
-                        dst_data,
-                        lhs_structure,
-                        lhs_data,
-                        rhs_structure,
-                        rhs_data,
-                        alpha,
-                        beta,
-                    )
-                }
+                block_plan.execute_raw(
+                    &mut kernels,
+                    &mut gemm,
+                    fusion_block_workspace,
+                    dst_structure,
+                    dst_data,
+                    lhs_structure,
+                    lhs_data,
+                    rhs_structure,
+                    rhs_data,
+                    alpha,
+                    beta,
+                )
             }
             Resolution::DynamicTree(plan) => {
                 let missing = || OperationError::Core(CoreError::MissingFusionSpace);
@@ -1504,37 +1488,21 @@ where
                     backend: contract_backend,
                     workspace: contract_workspace,
                 };
-                let result = if block_plan.is_fully_direct() {
-                    profile.route = TensorContractFusionRoute::CoreFusionBlocks;
-                    block_plan.execute_raw_profiled(
-                        &mut kernels,
-                        &mut gemm,
-                        fusion_block_workspace,
-                        &dst_structure,
-                        dst.data_mut(),
-                        &lhs_structure,
-                        lhs.data(),
-                        &rhs_structure,
-                        rhs.data(),
-                        alpha,
-                        beta,
-                        profile,
-                    )
-                } else {
-                    profile.route = TensorContractFusionRoute::CoreFusionBlocks;
-                    block_plan.execute_packed(
-                        &mut kernels,
-                        &mut gemm,
-                        &dst_structure,
-                        dst.data_mut(),
-                        &lhs_structure,
-                        lhs.data(),
-                        &rhs_structure,
-                        rhs.data(),
-                        alpha,
-                        beta,
-                    )
-                };
+                profile.route = TensorContractFusionRoute::CoreFusionBlocks;
+                let result = block_plan.execute_raw_profiled(
+                    &mut kernels,
+                    &mut gemm,
+                    fusion_block_workspace,
+                    &dst_structure,
+                    dst.data_mut(),
+                    &lhs_structure,
+                    lhs.data(),
+                    &rhs_structure,
+                    rhs.data(),
+                    alpha,
+                    beta,
+                    profile,
+                );
                 profile.total += total_start.elapsed();
                 result
             }

@@ -1,7 +1,7 @@
 //! Symmetry-free replay half of the core fusion-block contraction:
-//! plan data (offsets, strides, coefficients), pack/GEMM/scatter execution,
-//! workspaces, and the storage-direct device seam. The symmetric compile
-//! layer builds these plans; nothing here consumes fusion rules.
+//! plan data (offsets, strides, coefficients), direct batched-GEMM execution,
+//! workspaces, and the storage-direct device seam. The symmetric compile layer
+//! builds these plans; nothing here consumes fusion rules.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -192,101 +192,6 @@ impl FusionBlockContractPlan {
             alpha,
             beta,
         )?;
-        Ok(())
-    }
-
-    /// Replays a valid **non-direct** core-form contraction without falling
-    /// back to the general dynamic-tree route.
-    ///
-    /// Each group already carries the coupled-sector matrix layout of its
-    /// operand subblocks (`matrix_offset` / `matrix_strides` / per-subblock
-    /// `coefficient`). This packs every operand group into a contiguous
-    /// column-major scratch matrix (one strided copy per subblock, recoupling
-    /// coefficient folded in), runs the groups as one batched GEMM, then
-    /// scatters the results back. The plan guarantees the destination ranges
-    /// are pairwise disjoint, so every `dst` element is written exactly once
-    /// and `beta` composes correctly per scatter.
-    ///
-    /// This is the "copy into core storage, then mul!" route (TensorKit
-    /// parity) for operands that need only a repartition/permute plus scalar
-    /// recoupling, avoiding the dynamic route's 2–3 tree transforms.
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_packed<A, G, D>(
-        &self,
-        kernels: &mut A,
-        gemm: &mut G,
-        dst_structure: &Arc<BlockStructure>,
-        dst_data: &mut [D],
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_data: &[D],
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_data: &[D],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        A: HostKernelAdapter<D>,
-        G: Rank2Gemm<D>,
-        D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-    {
-        self.validate_replay_inputs(
-            dst_structure,
-            dst_data.len(),
-            lhs_structure,
-            lhs_data.len(),
-            rhs_structure,
-            rhs_data.len(),
-        )?;
-        // Scale the dst blocks that no group writes; active blocks are scaled
-        // by `beta` inside the scatter below (each element written once).
-        scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
-
-        // Lay out contiguous column-major scratch for every group.
-        let mut lhs_len = 0usize;
-        let mut rhs_len = 0usize;
-        let mut dst_len = 0usize;
-        let mut bases = Vec::with_capacity(self.groups.len());
-        for group in &self.groups {
-            let lhs_base = lhs_len;
-            let rhs_base = rhs_len;
-            let dst_base = dst_len;
-            lhs_len += group.lhs.rows * group.lhs.cols;
-            rhs_len += group.rhs.rows * group.rhs.cols;
-            dst_len += group.dst.rows * group.dst.cols;
-            bases.push((lhs_base, rhs_base, dst_base));
-        }
-        // Zero-initialised so sparse (non-covering) fusion layouts leave no
-        // stale data in the packed matrices handed to the GEMM.
-        let mut lhs_scratch = vec![D::zero(); lhs_len];
-        let mut rhs_scratch = vec![D::zero(); rhs_len];
-        let mut dst_scratch = vec![D::zero(); dst_len];
-
-        let mut jobs = Vec::with_capacity(self.groups.len());
-        for (group, &(lhs_base, rhs_base, dst_base)) in self.groups.iter().zip(&bases) {
-            pack_group_matrix(kernels, &group.lhs, lhs_data, &mut lhs_scratch, lhs_base)?;
-            pack_group_matrix(kernels, &group.rhs, rhs_data, &mut rhs_scratch, rhs_base)?;
-            jobs.push(Rank2GemmBatchJob {
-                dst_offset: dst_base,
-                lhs_offset: lhs_base,
-                rhs_offset: rhs_base,
-                rows: group.dst.rows,
-                contracted: group.lhs.cols,
-                cols: group.dst.cols,
-            });
-        }
-        // Fresh scratch destination: alpha carried here, beta = 0.
-        gemm.matmul_rank2_batch(
-            &mut dst_scratch,
-            &lhs_scratch,
-            &rhs_scratch,
-            &jobs,
-            alpha,
-            D::zero(),
-        )?;
-
-        for (group, &(_, _, dst_base)) in self.groups.iter().zip(&bases) {
-            scatter_group_matrix(kernels, &group.dst, &dst_scratch, dst_base, dst_data, beta)?;
-        }
         Ok(())
     }
 
@@ -894,72 +799,6 @@ where
             &layout.block.shape,
             &layout.block.strides,
             layout.block.offset,
-            beta,
-        )?;
-    }
-    Ok(())
-}
-
-/// Packs one operand group's subblocks into its contiguous column-major
-/// scratch matrix at `base`, folding each subblock's recoupling coefficient
-/// into the copy. Zero-initialised scratch covers any uncovered entries.
-fn pack_group_matrix<A, D>(
-    kernels: &mut A,
-    group: &FusionBlockMatrixGroup,
-    src_data: &[D],
-    scratch: &mut [D],
-    base: usize,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-{
-    let base = offset_to_isize(base)?;
-    for subblock in &group.subblocks {
-        let coefficient = D::coefficient_as_data(subblock.coefficient);
-        kernels.copy_scale_strided(
-            scratch,
-            src_data,
-            &subblock.block.shape,
-            &subblock.matrix_strides,
-            &subblock.block.strides,
-            base + subblock.matrix_offset,
-            subblock.block.offset,
-            false,
-            coefficient,
-        )?;
-    }
-    Ok(())
-}
-
-/// Scatters a group's packed result matrix (at `base` in `scratch`) back into
-/// the destination blocks, applying each subblock's recoupling coefficient as
-/// `alpha` and `beta` to the pre-existing destination. Destination ranges are
-/// pairwise disjoint, so each element is written exactly once.
-fn scatter_group_matrix<A, D>(
-    kernels: &mut A,
-    group: &FusionBlockMatrixGroup,
-    scratch: &[D],
-    base: usize,
-    dst_data: &mut [D],
-    beta: D,
-) -> Result<(), OperationError>
-where
-    A: HostKernelAdapter<D>,
-    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
-{
-    let base = offset_to_isize(base)?;
-    for subblock in &group.subblocks {
-        let coefficient = D::coefficient_as_data(subblock.coefficient);
-        kernels.axpby_strided(
-            dst_data,
-            scratch,
-            &subblock.block.shape,
-            &subblock.block.strides,
-            &subblock.matrix_strides,
-            subblock.block.offset,
-            base + subblock.matrix_offset,
-            coefficient,
             beta,
         )?;
     }
