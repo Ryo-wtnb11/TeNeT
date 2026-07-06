@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use num_complex::Complex64;
 use tenet_tensors::{
-    TensorContractFusionExecutionContext, TreeTransformBuiltinRuleCacheKey,
-    TreeTransformProductRuleCacheKey,
+    DenseTreeTransformOperations, TensorContractFusionExecutionContext,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformProductRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -37,12 +37,41 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
     }
 }
 
+impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
+    fn with_dense_threads(threads: usize) -> Result<Self, Error> {
+        Ok(Self {
+            f64:
+                Ctx::with_parts(
+                    tenet_tensors::TreeTransformExecutionContext::new(
+                        DenseTreeTransformOperations::with_threads(threads)?,
+                    ),
+                    DenseTreeTransformOperations::with_threads(threads)?,
+                    <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
+                        f64,
+                        f64,
+                    >>::Workspace::default(),
+                    tenet_tensors::TensorContractCache::new(),
+                ),
+            c64: Ctx::with_parts(
+                tenet_tensors::TreeTransformExecutionContext::new(
+                    DenseTreeTransformOperations::with_threads(threads)?,
+                ),
+                DenseTreeTransformOperations::with_threads(threads)?,
+                <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
+                    Complex64,
+                    f64,
+                >>::Workspace::default(),
+                tenet_tensors::TensorContractCache::new(),
+            ),
+        })
+    }
+}
+
 /// Per-rule expert-layer execution contexts (contraction resolution caches,
 /// tree-transform replay caches, dense backends and workspaces).
 ///
 /// One field per supported rule; each context is created eagerly because the
 /// empty contexts are cheap, and filled lazily by use.
-#[derive(Default)]
 pub(crate) struct RuntimeState {
     pub(crate) u1: Ctxs<BuiltinKey>,
     pub(crate) z2: Ctxs<BuiltinKey>,
@@ -69,6 +98,39 @@ pub(crate) struct RuntimeState {
 }
 
 impl RuntimeState {
+    fn new(dense: tenet_dense::DefaultDenseExecutor) -> Self {
+        Self {
+            u1: Ctxs::default(),
+            z2: Ctxs::default(),
+            fz2: Ctxs::default(),
+            su2: Ctxs::default(),
+            u1_fz2: Ctxs::default(),
+            fz2_u1_su2: Ctxs::default(),
+            dense,
+            #[cfg(feature = "cuda")]
+            cuda: None,
+            plan_cache_config: PlanCacheConfig::default(),
+            extension_slot: None,
+        }
+    }
+
+    fn with_dense_threads(threads: usize) -> Result<Self, Error> {
+        Ok(Self {
+            u1: Ctxs::with_dense_threads(threads)?,
+            z2: Ctxs::with_dense_threads(threads)?,
+            fz2: Ctxs::with_dense_threads(threads)?,
+            su2: Ctxs::with_dense_threads(threads)?,
+            u1_fz2: Ctxs::with_dense_threads(threads)?,
+            fz2_u1_su2: Ctxs::with_dense_threads(threads)?,
+            dense: tenet_dense::DefaultDenseExecutor::with_threads(threads)
+                .map_err(tenet_tensors::OperationError::Dense)?,
+            #[cfg(feature = "cuda")]
+            cuda: None,
+            plan_cache_config: PlanCacheConfig::default(),
+            extension_slot: None,
+        })
+    }
+
     /// Applies the tree-transform replay worker count to every per-rule
     /// execution context (parallelism is a property of the backend, so the
     /// setting lives on each context's transform backend).
@@ -92,6 +154,12 @@ impl RuntimeState {
         apply(&mut self.su2, threads);
         apply(&mut self.u1_fz2, threads);
         apply(&mut self.fz2_u1_su2, threads);
+    }
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self::new(tenet_dense::DefaultDenseExecutor::default())
     }
 }
 
@@ -252,6 +320,7 @@ pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
     plan_cache: PlanCacheConfig,
+    dense_threads: Option<usize>,
     recoupling_threads: Option<usize>,
 }
 
@@ -281,6 +350,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the global CPU worker count used by dense/strided kernels that
+    /// run on rayon's global pool. This must be configured before any rayon
+    /// work has initialized the pool; later calls are best-effort no-ops.
+    ///
+    /// If unset, [`Self::build`] also checks `TENET_DENSE_THREADS`. A value
+    /// of 1 keeps tiny-block workloads serial while still allowing outer
+    /// application-level parallelism.
+    pub fn dense_threads(mut self, threads: usize) -> Self {
+        self.dense_threads = Some(threads.max(1));
+        self
+    }
+
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
@@ -294,7 +375,20 @@ impl RuntimeBuilder {
     /// Finishes the build; fails when a requested backend (e.g. the CUDA
     /// device) cannot be initialized.
     pub fn build(self) -> Result<Runtime, Error> {
-        let mut state = RuntimeState::default();
+        let dense_threads = self.dense_threads.or_else(dense_threads_from_env);
+        if let Some(threads) = dense_threads {
+            // rayon's global pool can be initialized only once per process.
+            // Runtime construction is often repeated in tests/examples, so
+            // keep this knob best-effort after the first user.
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads.max(1))
+                .build_global();
+        }
+        let mut state = if let Some(threads) = dense_threads {
+            RuntimeState::with_dense_threads(threads)?
+        } else {
+            RuntimeState::default()
+        };
         state.plan_cache_config = self.plan_cache;
         if let Some(threads) = self.recoupling_threads {
             state.set_recoupling_threads(threads);
@@ -313,4 +407,11 @@ impl RuntimeBuilder {
             }),
         })
     }
+}
+
+fn dense_threads_from_env() -> Option<usize> {
+    std::env::var("TENET_DENSE_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|threads| threads.max(1))
 }

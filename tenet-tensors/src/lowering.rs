@@ -1,5 +1,4 @@
 use std::array;
-use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockSpec, BlockStructure, FusionTensorMapSpace, FusionTreeBlockKey,
@@ -350,11 +349,8 @@ pub(crate) fn adjoint_fusion_space_view<const NOUT: usize, const NIN: usize>(
         source.homspace().domain().clone(),
         source.homspace().codomain().clone(),
     );
-    let structure = Arc::new(adjoint_block_structure_view(
-        NOUT,
-        NIN,
-        source.subblock_structure(),
-    )?);
+    let structure =
+        adjoint_block_structure_view(NOUT, NIN, source.subblock_structure())?.into_shared();
     FusionTensorMapSpace::from_shared_subblock_structure(dense_space, homspace, structure)
         .map_err(OperationError::from_core_preserving_context)
 }

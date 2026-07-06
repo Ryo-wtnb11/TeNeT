@@ -1,5 +1,7 @@
 use core::ops::{Add, Mul};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap;
 use std::fs;
 use std::hash::Hash;
 use std::path::PathBuf;
@@ -198,14 +200,14 @@ impl TreeTransformCachedGroupKey {
 #[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct TreeTransformGroupPlanCache<T> {
-    plans: HashMap<TreeTransformGroupPlanKey, TreeTransformGroupPlan<T>>,
+    plans: FxHashMap<TreeTransformGroupPlanKey, TreeTransformGroupPlan<T>>,
 }
 
 #[cfg(test)]
 impl<T> Default for TreeTransformGroupPlanCache<T> {
     fn default() -> Self {
         Self {
-            plans: HashMap::new(),
+            plans: FxHashMap::default(),
         }
     }
 }
@@ -235,10 +237,12 @@ impl<T> TreeTransformGroupPlanCache<T> {
 
 #[derive(Clone, Debug)]
 pub struct TreeTransformCache<T, RuleKey> {
-    plans: HashMap<TreeTransformSectorPlanKey<RuleKey>, Arc<TreeTransformGroupPlan<T>>>,
+    plans: FxHashMap<TreeTransformSectorPlanKey<RuleKey>, Arc<TreeTransformGroupPlan<T>>>,
     plan_lru_order: VecDeque<TreeTransformSectorPlanKey<RuleKey>>,
     structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
     last_structure: Option<TreeTransformLastStructure<T, RuleKey>>,
+    fast_structures:
+        FxHashMap<TreeTransformFastStructureKey<RuleKey>, Arc<TreeTransformStructure<T>>>,
     policy: OperationCachePolicy,
     stats: TreeTransformCacheStats,
     // Shape-independent row front for this context. Miss compiles prefill it
@@ -254,9 +258,9 @@ pub struct TreeTransformCache<T, RuleKey> {
 }
 
 type GlobalTreeTransformPlanMap<T, RuleKey> =
-    RwLock<HashMap<TreeTransformSectorPlanKey<RuleKey>, Arc<TreeTransformGroupPlan<T>>>>;
+    RwLock<FxHashMap<TreeTransformSectorPlanKey<RuleKey>, Arc<TreeTransformGroupPlan<T>>>>;
 type GlobalTreeTransformStructureMap<T, RuleKey> = RwLock<
-    HashMap<
+    FxHashMap<
         TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
         Arc<TreeTransformStructure<T>>,
     >,
@@ -386,7 +390,7 @@ fn persist_builtin_tree_plans_if_enabled() {
 }
 
 fn encode_builtin_tree_plan_cache(
-    plans: &HashMap<
+    plans: &FxHashMap<
         TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>,
         Arc<TreeTransformGroupPlan<f64>>,
     >,
@@ -834,7 +838,7 @@ mod persistence_tests {
             )
             .with_source_axes([0, 1]),
         ]));
-        let mut plans = HashMap::new();
+        let mut plans = FxHashMap::default();
         plans.insert(key.clone(), Arc::clone(&plan));
 
         let mut bytes = encode_builtin_tree_plan_cache(&plans);
@@ -899,19 +903,30 @@ struct TreeTransformLastStructure<T, RuleKey> {
     rule: RuleKey,
     scope: TreeTransformPlanScope,
     operation: TreeTransformOperation,
-    dst_ptr: *const BlockStructure,
-    src_ptr: *const BlockStructure,
+    dst_ptr: usize,
+    src_ptr: usize,
     storage_conjugate: bool,
     structure: Arc<TreeTransformStructure<T>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct TreeTransformFastStructureKey<RuleKey> {
+    rule: RuleKey,
+    scope: TreeTransformPlanScope,
+    operation: TreeTransformOperation,
+    dst_structure_id: usize,
+    src_structure_id: usize,
+    storage_conjugate: bool,
 }
 
 impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
     fn default() -> Self {
         Self {
-            plans: HashMap::new(),
+            plans: FxHashMap::default(),
             plan_lru_order: VecDeque::new(),
             structures: TreeTransformStructureCache::default(),
             last_structure: None,
+            fast_structures: FxHashMap::default(),
             policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
@@ -931,10 +946,11 @@ where
 
     pub fn with_policy(policy: OperationCachePolicy) -> Self {
         Self {
-            plans: HashMap::new(),
+            plans: FxHashMap::default(),
             plan_lru_order: VecDeque::new(),
             structures: TreeTransformStructureCache::with_policy(policy),
             last_structure: None,
+            fast_structures: FxHashMap::default(),
             policy,
             stats: TreeTransformCacheStats::default(),
             tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
@@ -965,6 +981,7 @@ where
         self.policy = policy;
         self.structures.set_policy(policy);
         self.last_structure = None;
+        self.fast_structures.clear();
         if !policy.stores_entries() {
             self.plans.clear();
             self.plan_lru_order.clear();
@@ -1014,8 +1031,8 @@ where
         if &last.rule == rule_key
             && last.scope == scope
             && &last.operation == operation
-            && last.dst_ptr == Arc::as_ptr(dst_structure)
-            && last.src_ptr == Arc::as_ptr(src_structure)
+            && last.dst_ptr == Arc::as_ptr(dst_structure) as usize
+            && last.src_ptr == Arc::as_ptr(src_structure) as usize
             && last.storage_conjugate == storage_conjugate
         {
             let structure = Arc::clone(&last.structure);
@@ -1029,7 +1046,21 @@ where
             }
             Some(structure)
         } else {
-            None
+            if self.policy.max_entries().is_some() {
+                return None;
+            }
+            let key = TreeTransformFastStructureKey {
+                rule: rule_key.clone(),
+                scope,
+                operation: operation.clone(),
+                dst_structure_id: dst_structure.content_id(),
+                src_structure_id: src_structure.content_id(),
+                storage_conjugate,
+            };
+            let structure = self.fast_structures.get(&key)?;
+            self.stats.plan_hits += 1;
+            self.stats.structure_hits += 1;
+            Some(Arc::clone(structure))
         }
     }
 
@@ -1045,14 +1076,27 @@ where
         storage_conjugate: bool,
         structure: Arc<TreeTransformStructure<T>>,
     ) {
+        if self.policy.stores_entries() && self.policy.max_entries().is_none() {
+            self.fast_structures.insert(
+                TreeTransformFastStructureKey {
+                    rule: rule.clone(),
+                    scope,
+                    operation: operation.clone(),
+                    dst_structure_id: dst_structure.content_id(),
+                    src_structure_id: src_structure.content_id(),
+                    storage_conjugate,
+                },
+                Arc::clone(&structure),
+            );
+        }
         self.last_structure = Some(TreeTransformLastStructure {
             plan_key,
             structure_key,
             rule,
             scope,
             operation,
-            dst_ptr: Arc::as_ptr(dst_structure),
-            src_ptr: Arc::as_ptr(src_structure),
+            dst_ptr: Arc::as_ptr(dst_structure) as usize,
+            src_ptr: Arc::as_ptr(src_structure) as usize,
             storage_conjugate,
             structure,
         });

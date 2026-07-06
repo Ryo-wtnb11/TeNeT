@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use num_traits::One;
@@ -743,7 +744,7 @@ where
             .workspace_strides
             .reserve(terms.len() * output_rank);
 
-        let mut seen_dst_blocks = Vec::<usize>::new();
+        let mut seen_dst_blocks = HashSet::<usize>::new();
         for term in terms {
             let lhs_block = lhs_structure.block(term.lhs_block())?;
             let rhs_block = rhs_structure.block(term.rhs_block())?;
@@ -831,10 +832,9 @@ where
                     })?,
                 );
             }
-            let apply_beta = !seen_dst_blocks.contains(&term.dst_block());
-            if apply_beta {
-                seen_dst_blocks.push(term.dst_block());
-            }
+            // First write into a dst block overwrites (beta=0); subsequent
+            // writes accumulate. `insert` returns true exactly on first sight.
+            let apply_beta = seen_dst_blocks.insert(term.dst_block());
             descriptor.terms.push(TensorContractDescriptorTerm {
                 dst_block: term.dst_block(),
                 lhs_block: term.lhs_block(),

@@ -68,10 +68,18 @@ fn same_topology_different_dims_hits_and_stays_correct() {
 }
 
 /// Dims drifting beyond the factor re-plan (counted separately) and refresh
-/// the snapshot, still one entry per topology.
+/// the snapshot, still one entry per topology. `DriftFactor` is opt-in (the
+/// default is `BakeOnce`, which freezes instead — see
+/// `bake_once_default_freezes_after_real_dims`).
 #[test]
 fn drift_beyond_factor_replans() {
-    let rt = Runtime::builder().build().unwrap();
+    let rt = Runtime::builder()
+        .plan_cache(PlanCacheConfig {
+            replan: ReplanPolicy::DriftFactor(2.0),
+            ..PlanCacheConfig::default()
+        })
+        .build()
+        .unwrap();
     let (a, b) = chain(&rt, 2, 321);
     let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
 
@@ -88,6 +96,35 @@ fn drift_beyond_factor_replans() {
     // The snapshot was refreshed: repeating the large shape now hits.
     let _ = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
     assert_eq!(plan_cache_stats(&rt).hits, 1);
+}
+
+/// The default policy `BakeOnce`: a plan seeded at degenerate dims (some leg
+/// trivial) is replaced once real dims arrive, then frozen — a later large
+/// drift at real dims reuses the path instead of re-searching (the
+/// cotengra/@tensoropt "find once, reuse regardless of rank" design).
+#[test]
+fn bake_once_default_freezes_after_real_dims() {
+    let rt = Runtime::builder().build().unwrap(); // default = BakeOnce
+                                                  // Seed at degenerate dims (every leg dim 1).
+    let t = Space::u1([(0, 1)]);
+    let a0 = Tensor::rand_with_seed(&rt, Dtype::F64, [&t, &t], [&t, &t], 401).unwrap();
+    let b0 = Tensor::rand_with_seed(&rt, Dtype::F64, [&t, &t], [&t, &t], 402).unwrap();
+    let _ = tensor!([i, j; m, n] = a0[i, j; k, l] * b0[k, l; m, n]).unwrap();
+    assert_eq!(plan_cache_stats(&rt).misses, 1);
+
+    // Real dims arrive: the degenerate seed is replaced once (bake-once replan).
+    let (c, d) = chain(&rt, 4, 403);
+    let _ = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
+    let s = plan_cache_stats(&rt);
+    assert_eq!((s.replans, s.misses, s.entries), (1, 1, 1));
+
+    // Frozen: a 4x drift at real dims now HITS (no re-search), unlike DriftFactor.
+    let (e, f) = chain(&rt, 16, 404);
+    let result = tensor!([i, j; m, n] = e[i, j; k, l] * f[k, l; m, n]).unwrap();
+    let s = plan_cache_stats(&rt);
+    assert_eq!((s.hits, s.replans), (1, 1));
+    let expected = e.contract(&f, &[2, 3], &[0, 1]).unwrap();
+    assert_close(result.data(), expected.data(), 1e-12);
 }
 
 #[test]
@@ -107,6 +144,37 @@ fn always_reuse_policy_never_replans() {
     assert_eq!((stats.hits, stats.replans), (1, 0));
     let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
     assert_close(result.data(), expected.data(), 1e-12);
+}
+
+/// Persist searched orders and restore them in a fresh runtime: the reloaded
+/// order is reused (at drifted dims) and computes the same result, and a blob
+/// with a mismatched version header is rejected rather than trusted.
+#[test]
+fn persisted_orders_round_trip_and_reject_stale() {
+    use tenet_network::{load_plan_cache, save_plan_cache};
+
+    // Search once at real dims, then serialize.
+    let rt1 = Runtime::builder().build().unwrap();
+    assert_eq!(load_plan_cache(&rt1, ""), 0);
+    let (a, b) = chain(&rt1, 4, 501);
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let blob = save_plan_cache(&rt1);
+    assert!(blob.starts_with("TENET_PLANCACHE 1"));
+    assert!(blob.contains("TOPO "));
+
+    // A fresh runtime loads the order and reuses it at different dims.
+    let rt2 = Runtime::builder().build().unwrap();
+    assert_eq!(load_plan_cache(&rt2, &blob), 1);
+    let (c, d) = chain(&rt2, 7, 502);
+    let result = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
+    let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
+    assert_close(result.data(), expected.data(), 1e-12);
+
+    // A stale/foreign version header is ignored (returns 0): a mismatched file
+    // must not replay a now-suboptimal order.
+    let rt3 = Runtime::builder().build().unwrap();
+    let stale = blob.replacen("TENET_PLANCACHE 1", "TENET_PLANCACHE 0", 1);
+    assert_eq!(load_plan_cache(&rt3, &stale), 0);
 }
 
 #[test]

@@ -1,11 +1,12 @@
 use core::ops::{Add, Mul};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
-    multiplicity_free_permute_tree, multiplicity_free_permute_tree_pair,
+    multiplicity_free_braid_tree_pair_block, multiplicity_free_permute_tree,
+    multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
     multiplicity_free_transpose_tree_pair, BlockKey, BlockStructure, FusionRule,
     FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols,
@@ -57,7 +58,7 @@ where
         let src_block_indices = group.block_indices();
         let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
         let mut dst_keys = Vec::<BlockKey>::new();
-        let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+        let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
         let mut rows = Vec::<Vec<T>>::new();
 
         for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
@@ -305,7 +306,7 @@ where
 }
 
 pub(crate) type AllCodomainRowMemo<T, RuleKey> =
-    HashMap<(RuleKey, TreeTransformOperation, FusionTreeKey), Arc<Vec<(FusionTreeKey, T)>>>;
+    FxHashMap<(RuleKey, TreeTransformOperation, FusionTreeKey), Arc<Vec<(FusionTreeKey, T)>>>;
 
 fn transformed_all_codomain_rows<R>(
     rule: &R,
@@ -416,7 +417,7 @@ where
 
     let mut missing = Vec::new();
     let mut rows_by_codomain =
-        HashMap::<FusionTreeKey, Arc<Vec<(FusionTreeKey, R::Scalar)>>>::new();
+        FxHashMap::<FusionTreeKey, Arc<Vec<(FusionTreeKey, R::Scalar)>>>::default();
     for group in &groups {
         for &src_block_index in group.block_indices() {
             let block = src_structure.block(src_block_index)?;
@@ -494,7 +495,7 @@ where
     let src_block_indices = group.block_indices();
     let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
     let mut dst_keys = Vec::<BlockKey>::new();
-    let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+    let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
     let mut rows = Vec::<Vec<T>>::new();
 
     for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
@@ -549,7 +550,7 @@ where
 /// degeneracy (bond-dimension) changes because they depend only on the tree
 /// keys, so chi sweeps recompile plans without recomputing F/R-symbol
 /// contractions.
-pub(crate) type TreePairRowMemo<T, RuleKey> = HashMap<
+pub(crate) type TreePairRowMemo<T, RuleKey> = FxHashMap<
     (RuleKey, TreeTransformOperation, FusionTreeBlockKey),
     Arc<Vec<(FusionTreeBlockKey, T)>>,
 >;
@@ -597,6 +598,53 @@ where
         ),
     };
     rows.map_err(OperationError::from_core_preserving_context)
+}
+
+/// Batched [`transformed_tree_pair_rows`] over a whole block's source trees
+/// (all sharing uncoupled sectors, e.g. one [`FusionTreeBlockGroup`]). The
+/// TensorKit 0.17 `fsbraid`/`fstranspose` batching: the bend/braid step
+/// structure is walked once for the block, not once per source. Returns rows
+/// per source in `src_keys` order. Transpose has no block port yet, so it falls
+/// back to the per-source path.
+pub(crate) fn transformed_tree_pair_rows_block<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    src_keys: &[FusionTreeBlockKey],
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            domain_permutation,
+        } => multiplicity_free_permute_tree_pair_block(
+            rule,
+            src_keys,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .map_err(OperationError::from_core_preserving_context),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        } => multiplicity_free_braid_tree_pair_block(
+            rule,
+            src_keys,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        )
+        .map_err(OperationError::from_core_preserving_context),
+        TreeTransformOperation::Transpose { .. } => src_keys
+            .iter()
+            .map(|src_key| transformed_tree_pair_rows(rule, operation, src_key))
+            .collect(),
+    }
 }
 
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
@@ -651,6 +699,42 @@ where
             threads,
         );
     }
+
+    // Pre-populate the memo one whole block at a time via the batched
+    // (TensorKit 0.17 `fsbraid`) block transform, so the bend/braid step
+    // structure is walked once per block instead of once per source tree. The
+    // memo stays keyed per source tree, so assembly below is unchanged and a
+    // partially-warm memo only computes the still-missing sources.
+    if rule.fusion_style().is_multiplicity_free() {
+        for group in src_structure.fusion_tree_groups() {
+            let mut missing_keys = Vec::new();
+            for &src_block_index in group.block_indices() {
+                let block = src_structure.block(src_block_index)?;
+                let BlockKey::FusionTree(src_key) = block.key() else {
+                    return Err(OperationError::ExpectedFusionTreeBlock {
+                        tensor: "src",
+                        index: src_block_index,
+                    });
+                };
+                let memo_key = (rule_key.clone(), operation.clone(), src_key.clone());
+                if memo.contains_key(&memo_key) {
+                    *memo_hits += 1;
+                } else {
+                    missing_keys.push(src_key.clone());
+                }
+            }
+            if missing_keys.is_empty() {
+                continue;
+            }
+            let batched = transformed_tree_pair_rows_block(rule, &operation, &missing_keys)?;
+            for (src_key, rows) in missing_keys.into_iter().zip(batched) {
+                let memo_key = (rule_key.clone(), operation.clone(), src_key);
+                memo.insert(memo_key, Arc::new(rows));
+                *memo_misses += 1;
+            }
+        }
+    }
+
     build_multiplicity_free_tree_pair_transform_group_plan_with_rows(
         rule,
         operation,
@@ -658,10 +742,11 @@ where
         |operation, src_key| {
             let memo_key = (rule_key.clone(), operation.clone(), src_key.clone());
             if let Some(rows) = memo.get(&memo_key) {
-                *memo_hits += 1;
                 return Ok(Arc::clone(rows));
             }
-            *memo_misses += 1;
+            // Unreachable when the block pre-pass ran (every source was
+            // inserted); recomputing is pure, so stay correct for the
+            // non-multiplicity-free fallthrough.
             let rows = Arc::new(transformed_tree_pair_rows(rule, operation, src_key)?);
             memo.insert(memo_key, Arc::clone(&rows));
             Ok(rows)
@@ -725,7 +810,7 @@ where
     // instead of the memo, so the memo's RuleKey never crosses threads.
     let mut missing = Vec::new();
     let mut rows_by_src =
-        HashMap::<FusionTreeBlockKey, Arc<Vec<(FusionTreeBlockKey, R::Scalar)>>>::new();
+        FxHashMap::<FusionTreeBlockKey, Arc<Vec<(FusionTreeBlockKey, R::Scalar)>>>::default();
     for group in &groups {
         for &src_block_index in group.block_indices() {
             let block = src_structure.block(src_block_index)?;
@@ -842,7 +927,7 @@ where
     let src_block_indices = group.block_indices();
     let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
     let mut dst_keys = Vec::<BlockKey>::new();
-    let mut dst_index_by_key = HashMap::<BlockKey, usize>::new();
+    let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
     let mut rows = Vec::<Vec<T>>::new();
 
     for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {

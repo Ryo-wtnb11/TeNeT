@@ -1,4 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -1101,18 +1103,18 @@ impl DynamicFusionSpaceCacheStats {
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
     last_transformed_sources: Vec<DynamicFusionTransformedSourceLastEntry<RuleKey>>,
-    fast_transformed_sources: HashMap<
+    fast_transformed_sources: FxHashMap<
         DynamicFusionTransformedSourceFastKey<RuleKey>,
         DynamicFusionTransformedSourceEntry,
     >,
-    transformed_sources: HashMap<
+    transformed_sources: FxHashMap<
         DynamicFusionTransformedSourceSpaceKey<RuleKey>,
         DynamicFusionTransformedSourceEntry,
     >,
     lru_order: VecDeque<DynamicFusionSpaceCacheEntryKey<RuleKey>>,
     last_core_dst: Option<DynamicFusionCoreDstLastEntry<RuleKey>>,
-    fast_core_dsts: HashMap<DynamicFusionCoreDstFastKey<RuleKey>, DynamicFusionCoreDstEntry>,
-    core_dsts: HashMap<DynamicFusionCoreDstSpaceKey<RuleKey>, DynamicFusionCoreDstEntry>,
+    fast_core_dsts: FxHashMap<DynamicFusionCoreDstFastKey<RuleKey>, DynamicFusionCoreDstEntry>,
+    core_dsts: FxHashMap<DynamicFusionCoreDstSpaceKey<RuleKey>, DynamicFusionCoreDstEntry>,
     policy: OperationCachePolicy,
     stats: DynamicFusionSpaceCacheStats,
 }
@@ -1134,12 +1136,12 @@ impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
     fn default() -> Self {
         Self {
             last_transformed_sources: Vec::new(),
-            fast_transformed_sources: HashMap::new(),
-            transformed_sources: HashMap::new(),
+            fast_transformed_sources: FxHashMap::default(),
+            transformed_sources: FxHashMap::default(),
             lru_order: VecDeque::new(),
             last_core_dst: None,
-            fast_core_dsts: HashMap::new(),
-            core_dsts: HashMap::new(),
+            fast_core_dsts: FxHashMap::default(),
+            core_dsts: FxHashMap::default(),
             policy: OperationCachePolicy::default(),
             stats: DynamicFusionSpaceCacheStats::default(),
         }

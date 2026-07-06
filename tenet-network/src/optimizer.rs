@@ -372,6 +372,9 @@ pub(crate) fn charge_dense_orientation_costs(
     steps: &mut [ContractionStep],
 ) -> Result<()> {
     let planned_labels = planned_dense_label_orders(ir, steps)?;
+    // Resolve each result's single later consumer once (O(steps)); the topology
+    // (lhs/rhs/result) is fixed even though this loop mutates step costs.
+    let consumers = dense_consumers(steps);
     let mut active = ir
         .tensors()
         .iter()
@@ -398,13 +401,11 @@ pub(crate) fn charge_dense_orientation_costs(
         let raw_codomain_rank = lhs.iter().filter(|label| !rhs.contains(label)).count();
         let mut labels = pair_result_labels(&lhs, &rhs);
 
-        if let Some((future_step, result_is_lhs)) =
-            next_dense_consumer(step_index, result_id, steps)
-        {
+        if let Some(&(future_index, result_is_lhs)) = consumers.get(&result_id) {
             let sibling_id = if result_is_lhs {
-                future_step.rhs
+                steps[future_index].rhs
             } else {
-                future_step.lhs
+                steps[future_index].lhs
             };
             let sibling_labels = planned_labels.get(&sibling_id).ok_or_else(|| {
                 ContractError::InvalidContractionPlan(format!(
@@ -516,20 +517,16 @@ fn dense_orientation_for_next_use(
     (true, oriented_labels)
 }
 
-fn next_dense_consumer(
-    step_index: usize,
-    result_id: TensorId,
-    steps: &[ContractionStep],
-) -> Option<(&ContractionStep, bool)> {
-    steps.iter().skip(step_index + 1).find_map(|step| {
-        if step.lhs == result_id {
-            Some((step, true))
-        } else if step.rhs == result_id {
-            Some((step, false))
-        } else {
-            None
-        }
-    })
+/// Map each tensor id to its single later consuming step and whether it is that
+/// step's lhs — one forward pass, so `charge_dense_orientation_costs` drops from
+/// O(steps²) to O(steps). Mirrors `network::build_consumers`.
+fn dense_consumers(steps: &[ContractionStep]) -> HashMap<TensorId, (usize, bool)> {
+    let mut consumers = HashMap::with_capacity(steps.len() * 2);
+    for (index, step) in steps.iter().enumerate() {
+        consumers.insert(step.lhs, (index, true));
+        consumers.insert(step.rhs, (index, false));
+    }
+    consumers
 }
 
 fn push_dense_active_contraction_step(

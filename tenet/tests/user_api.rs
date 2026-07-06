@@ -51,6 +51,31 @@ fn rand_and_zeros_construction_u1_and_su2() {
 }
 
 #[test]
+fn norm_inf_is_entrywise_max_abs() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::u1([(0, 2)]);
+    let real = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| match indices {
+        [0, 0] => 1.0,
+        [0, 1] => 2.0,
+        [1, 0] => 3.0,
+        [1, 1] => 4.0,
+        _ => unreachable!(),
+    })
+    .unwrap();
+    assert_eq!(real.norm_inf().unwrap(), 4.0);
+
+    let complex = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| match indices {
+        [0, 0] => Complex64::new(3.0, 4.0),
+        [0, 1] => Complex64::new(5.0, 12.0),
+        [1, 0] => Complex64::new(8.0, 15.0),
+        [1, 1] => Complex64::new(0.0, 6.0),
+        _ => unreachable!(),
+    })
+    .unwrap();
+    assert_eq!(complex.norm_inf().unwrap(), 17.0);
+}
+
+#[test]
 fn space_dual_roundtrip_and_dim() {
     let v = u1_space();
     assert_eq!(v.dim(), 7);

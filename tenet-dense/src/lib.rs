@@ -1002,8 +1002,18 @@ mod tenferro_adapter {
 
     impl DefaultDenseExecutor {
         pub fn new() -> Self {
+            Self::from_backend(CpuBackend::new())
+        }
+
+        pub fn with_threads(threads: usize) -> Result<Self, DenseError> {
+            CpuBackend::with_threads(threads)
+                .map(Self::from_backend)
+                .map_err(|err| tenferro_error("CpuBackend::with_threads", err))
+        }
+
+        fn from_backend(backend: CpuBackend) -> Self {
             Self {
-                backend: CpuBackend::new(),
+                backend,
                 matmul_config: DotGeneralConfig {
                     lhs_contracting_dims: vec![1],
                     rhs_contracting_dims: vec![0],

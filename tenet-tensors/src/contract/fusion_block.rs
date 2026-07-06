@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use tenet_core::{
@@ -733,7 +735,7 @@ impl FusionBlockMatrixLayout {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
-        let mut group_indices = HashMap::<SectorId, usize>::new();
+        let mut group_indices = FxHashMap::<SectorId, usize>::default();
         for block_index in 0..space.structure().block_count() {
             let block = space.structure().block(block_index)?;
             let BlockKey::FusionTree(key) = block.key() else {
@@ -782,8 +784,8 @@ impl FusionBlockMatrixLayout {
 #[derive(Clone, Debug)]
 struct FusionBlockMatrixGroupBuilder {
     coupled: SectorId,
-    row_offsets: HashMap<FusionTreeKey, TreeMatrixOffset>,
-    col_offsets: HashMap<FusionTreeKey, TreeMatrixOffset>,
+    row_offsets: FxHashMap<FusionTreeKey, TreeMatrixOffset>,
+    col_offsets: FxHashMap<FusionTreeKey, TreeMatrixOffset>,
     tree_pairs: HashSet<(FusionTreeKey, FusionTreeKey)>,
     blocks: Vec<usize>,
     occupied_elements: usize,
@@ -795,8 +797,8 @@ impl FusionBlockMatrixGroupBuilder {
     fn new(coupled: SectorId) -> Self {
         Self {
             coupled,
-            row_offsets: HashMap::new(),
-            col_offsets: HashMap::new(),
+            row_offsets: FxHashMap::default(),
+            col_offsets: FxHashMap::default(),
             tree_pairs: HashSet::new(),
             blocks: Vec::new(),
             occupied_elements: 0,

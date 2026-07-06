@@ -229,6 +229,12 @@ impl DenseTreeTransformOperations<DefaultDenseExecutor> {
     pub fn default_executor() -> Self {
         Self::new(DefaultDenseExecutor::new())
     }
+
+    pub fn with_threads(threads: usize) -> Result<Self, OperationError> {
+        Ok(Self::new(
+            DefaultDenseExecutor::with_threads(threads).map_err(OperationError::Dense)?,
+        ))
+    }
 }
 
 impl<E> DenseTreeTransformOperations<E> {

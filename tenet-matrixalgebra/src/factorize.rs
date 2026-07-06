@@ -604,6 +604,15 @@ where
                 D::dense_write(vt_view),
             )
             .map_err(OperationError::Dense)?;
+        svd_compact_gauge(
+            &mut u_workspace,
+            matrix.rows,
+            max_rows,
+            &mut vt_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+        );
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
@@ -1247,8 +1256,8 @@ where
             )
             .map_err(OperationError::Dense)?;
 
-        // Reorder bond states descending by |eigenvalue| (stable on ties).
         let mut order: Vec<usize> = (0..n).collect();
+        // Reorder bond states descending by |eigenvalue| (stable on ties).
         order.sort_by(|&a, &b| {
             let a_value: f64 = values_workspace[a].into();
             let b_value: f64 = values_workspace[b].into();
@@ -1268,7 +1277,7 @@ where
             sorted_vectors[dst_start..dst_start + n]
                 .copy_from_slice(&vectors_workspace[src_start..src_start + n]);
         }
-
+        eigenvector_gauge(&mut sorted_vectors, n, n, n);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
@@ -1326,6 +1335,14 @@ where
     D: FactorScalar,
 {
     let full = eigh_full_dyn(dense, rule, space, data)?;
+    if matches!(truncation, Truncation::Full) {
+        return Ok(EighTruncDyn {
+            d: full.d,
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
     let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false);
     if full
         .eigenvalues
@@ -1491,12 +1508,20 @@ where
             rank,
         );
 
-        let u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
+        let mut u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
         // V columns are the adjoint rows of Vh; complete V (n x rank) to
         // n x n, then store Vh = V^H.
         let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
         let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
-        let vh_full = adjoint_col_major(&v_full, matrix.cols, matrix.cols);
+        let mut vh_full = adjoint_col_major(&v_full, matrix.cols, matrix.cols);
+        svd_full_gauge(
+            &mut u_full,
+            matrix.rows,
+            matrix.rows,
+            &mut vh_full,
+            matrix.cols,
+            matrix.cols,
+        );
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
@@ -1729,6 +1754,128 @@ fn positive_diagonal_gauge_strided<D: FactorScalar>(
             let index = j + r_leading * col;
             r[index] = conj_phase * r[index];
         }
+    }
+}
+
+pub(crate) fn svd_compact_gauge<D: FactorScalar>(
+    u: &mut [D],
+    u_rows: usize,
+    u_leading: usize,
+    vh: &mut [D],
+    vh_rows: usize,
+    vh_cols: usize,
+    vh_leading: usize,
+) {
+    for j in 0..vh_rows {
+        let (phase, needs_scaling) = phase_of_largest_abs_col(u, u_rows, u_leading, j);
+        if needs_scaling {
+            scale_col(u, u_rows, u_leading, j, FactorScalar::adjoint(phase));
+            scale_row(vh, vh_cols, vh_leading, j, phase);
+        }
+    }
+}
+
+pub(crate) fn svd_full_gauge<D: FactorScalar>(
+    u: &mut [D],
+    u_rows: usize,
+    u_leading: usize,
+    vh: &mut [D],
+    vh_rows: usize,
+    vh_cols: usize,
+) {
+    let paired = u_leading.min(vh_rows);
+    for j in 0..u_leading.max(vh_rows) {
+        if j < paired {
+            let (phase, needs_scaling) = phase_of_largest_abs_col(u, u_rows, u_leading, j);
+            if needs_scaling {
+                scale_col(u, u_rows, u_leading, j, FactorScalar::adjoint(phase));
+                scale_row(vh, vh_cols, vh_rows, j, phase);
+            }
+        } else if j < u_leading {
+            let (phase, needs_scaling) = phase_of_largest_abs_col(u, u_rows, u_leading, j);
+            if needs_scaling {
+                scale_col(u, u_rows, u_leading, j, FactorScalar::adjoint(phase));
+            }
+        } else {
+            let (phase, needs_scaling) = phase_of_largest_abs_row(vh, vh_cols, vh_rows, j);
+            if needs_scaling {
+                scale_row(vh, vh_cols, vh_rows, j, FactorScalar::adjoint(phase));
+            }
+        }
+    }
+}
+
+pub(crate) fn eigenvector_gauge<D: FactorScalar>(
+    vectors: &mut [D],
+    rows: usize,
+    leading: usize,
+    cols: usize,
+) {
+    for j in 0..cols {
+        let (phase, needs_scaling) = phase_of_largest_abs_col(vectors, rows, leading, j);
+        if needs_scaling {
+            scale_col(vectors, rows, leading, j, FactorScalar::adjoint(phase));
+        }
+    }
+}
+
+fn phase_of_largest_abs_col<D: FactorScalar>(
+    data: &[D],
+    rows: usize,
+    leading: usize,
+    col: usize,
+) -> (D, bool) {
+    let mut best = Complex64::new(0.0, 0.0);
+    let mut best_norm_sqr = 0.0;
+    for row in 0..rows {
+        let value = data[row + leading * col].widen_complex();
+        let norm_sqr = value.norm_sqr();
+        if best_norm_sqr < norm_sqr {
+            best = value;
+            best_norm_sqr = norm_sqr;
+        }
+    }
+    unit_phase(best, best_norm_sqr)
+}
+
+fn phase_of_largest_abs_row<D: FactorScalar>(
+    data: &[D],
+    cols: usize,
+    leading: usize,
+    row: usize,
+) -> (D, bool) {
+    let mut best = Complex64::new(0.0, 0.0);
+    let mut best_norm_sqr = 0.0;
+    for col in 0..cols {
+        let value = data[row + leading * col].widen_complex();
+        let norm_sqr = value.norm_sqr();
+        if best_norm_sqr < norm_sqr {
+            best = value;
+            best_norm_sqr = norm_sqr;
+        }
+    }
+    unit_phase(best, best_norm_sqr)
+}
+
+fn unit_phase<D: FactorScalar>(value: Complex64, norm_sqr: f64) -> (D, bool) {
+    if norm_sqr == 0.0 || (value.im == 0.0 && value.re >= 0.0) {
+        (D::from_real(1.0), false)
+    } else {
+        (D::from_complex64(value / norm_sqr.sqrt()), true)
+    }
+}
+
+fn scale_col<D: FactorScalar>(data: &mut [D], rows: usize, leading: usize, col: usize, phase: D) {
+    for row in 0..rows {
+        let index = row + leading * col;
+        data[index] = data[index] * phase;
+    }
+}
+
+fn scale_row<D: FactorScalar>(data: &mut [D], cols: usize, leading: usize, row: usize, phase: D) {
+    for col in 0..cols {
+        let index = row + leading * col;
+        data[index] = data[index] * phase;
     }
 }
 
@@ -2023,7 +2170,7 @@ where
             sorted_vectors[position * n..(position + 1) * n]
                 .copy_from_slice(&vectors[index * n..(index + 1) * n]);
         }
-
+        eigenvector_gauge(&mut sorted_vectors, n, n, n);
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted_values,
@@ -2107,6 +2254,14 @@ where
     D: FactorScalar,
 {
     let full = eig_full_dyn::<E, R, D>(dense, rule, space, data)?;
+    if matches!(truncation, Truncation::Full) {
+        return Ok(EigTruncDyn {
+            d: full.d,
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
     let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false);
     if full
         .eigenvalues

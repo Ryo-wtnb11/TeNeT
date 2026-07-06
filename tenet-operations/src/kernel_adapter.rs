@@ -1,121 +1,58 @@
 use core::ops::{Add, Mul};
+use std::cell::RefCell;
 
 use num_traits::{One, Zero};
 
-use crate::strided::error as strided_error;
 use crate::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
     tensoradd_raw_strided_kernel_trusted, ConjugateValue, OperationError,
     RecouplingCoefficientAction,
 };
 
-fn read_view<'a, T>(
-    data: &'a [T],
-    shape: &[usize],
-    strides: &[isize],
-    offset: isize,
-) -> Result<strided_kernel::StridedView<'a, T>, OperationError>
-where
-    T: Copy,
-{
-    strided_kernel::StridedView::new(data, shape, strides, offset).map_err(strided_error)
+thread_local! {
+    /// Reused fused-loop scratch so replay copies allocate nothing after warmup,
+    /// for ANY rank. The previous stack-array fast path capped rank at 8 and fell
+    /// back to an allocating strided-view kernel (StridedView::new + plan build)
+    /// for the rank>8 contraction intermediates that dominate warm replay.
+    /// Reusing one buffer per thread mirrors TensorOperations.jl reusing a
+    /// temporaries allocator instead of allocating per contraction.
+    static FUSE_SCRATCH: RefCell<FuseScratch> = const { RefCell::new(FuseScratch::new()) };
 }
 
-fn write_view<'a, T>(
-    data: &'a mut [T],
-    shape: &[usize],
-    strides: &[isize],
-    offset: isize,
-) -> Result<strided_kernel::StridedViewMut<'a, T>, OperationError>
-where
-    T: Copy,
-{
-    strided_kernel::StridedViewMut::new(data, shape, strides, offset).map_err(strided_error)
+#[derive(Default)]
+struct FuseScratch {
+    dims: Vec<usize>,
+    dst_strides: Vec<isize>,
+    src_strides: Vec<isize>,
+    index: Vec<usize>,
 }
 
-const FUSED_RANK_LIMIT: usize = 8;
+impl FuseScratch {
+    const fn new() -> Self {
+        Self {
+            dims: Vec::new(),
+            dst_strides: Vec::new(),
+            src_strides: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+}
 
-/// Allocation-free fused loop layout for one (destination, source) view pair.
+/// Runs `dst = apply(dst, op(src))` over one (destination, source) strided view
+/// pair with a plain loop nest and NO per-call allocation, for any rank.
 ///
-/// Axes with extent 1 are dropped, the rest are ordered by destination stride
-/// and adjacent axes are fused when both stride patterns are contiguous, so
-/// small replay copies avoid per-call heap allocation and plan building.
-#[derive(Clone, Copy, Debug)]
-struct FusedPairLayout {
-    rank: usize,
-    dims: [usize; FUSED_RANK_LIMIT],
-    dst_strides: [isize; FUSED_RANK_LIMIT],
-    src_strides: [isize; FUSED_RANK_LIMIT],
-}
-
-fn fuse_pair_layout(
+/// The fused layout (extent-1 axes dropped, remaining axes ordered by
+/// destination stride, adjacent contiguous axes merged) is built into the
+/// thread-local scratch whose backing buffers are retained across calls, so the
+/// hot replay path never touches the heap after warmup. Safe indexing keeps an
+/// out-of-bounds layout a panic rather than undefined behavior.
+#[allow(clippy::too_many_arguments)]
+fn fused_pair<T, Apply, ElementOp>(
+    dst_data: &mut [T],
+    src_data: &[T],
     shape: &[usize],
     dst_strides: &[isize],
     src_strides: &[isize],
-) -> Option<FusedPairLayout> {
-    if shape.len() > FUSED_RANK_LIMIT {
-        return None;
-    }
-    let mut layout = FusedPairLayout {
-        rank: 0,
-        dims: [1; FUSED_RANK_LIMIT],
-        dst_strides: [0; FUSED_RANK_LIMIT],
-        src_strides: [0; FUSED_RANK_LIMIT],
-    };
-    for axis in 0..shape.len() {
-        if shape[axis] == 1 {
-            continue;
-        }
-        if shape[axis] == 0 {
-            return Some(FusedPairLayout {
-                rank: 1,
-                dims: [0; FUSED_RANK_LIMIT],
-                dst_strides: [0; FUSED_RANK_LIMIT],
-                src_strides: [0; FUSED_RANK_LIMIT],
-            });
-        }
-        let mut position = layout.rank;
-        while position > 0 && layout.dst_strides[position - 1] > dst_strides[axis] {
-            layout.dims[position] = layout.dims[position - 1];
-            layout.dst_strides[position] = layout.dst_strides[position - 1];
-            layout.src_strides[position] = layout.src_strides[position - 1];
-            position -= 1;
-        }
-        layout.dims[position] = shape[axis];
-        layout.dst_strides[position] = dst_strides[axis];
-        layout.src_strides[position] = src_strides[axis];
-        layout.rank += 1;
-    }
-    if layout.rank == 0 {
-        layout.rank = 1;
-        layout.dims[0] = 1;
-    }
-    let mut fused = 0usize;
-    for axis in 1..layout.rank {
-        let extent = layout.dims[fused] as isize;
-        if layout.dst_strides[fused] * extent == layout.dst_strides[axis]
-            && layout.src_strides[fused] * extent == layout.src_strides[axis]
-        {
-            layout.dims[fused] *= layout.dims[axis];
-        } else {
-            fused += 1;
-            layout.dims[fused] = layout.dims[axis];
-            layout.dst_strides[fused] = layout.dst_strides[axis];
-            layout.src_strides[fused] = layout.src_strides[axis];
-        }
-    }
-    layout.rank = fused + 1;
-    Some(layout)
-}
-
-/// Applies `dst = combine(dst, alpha * op(src))` over a fused layout with a
-/// plain loop nest; safe indexing keeps out-of-bounds layouts a panic rather
-/// than undefined behavior.
-#[allow(clippy::too_many_arguments)]
-fn apply_fused_pair<T, Apply, ElementOp>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    layout: &FusedPairLayout,
     dst_offset: isize,
     src_offset: isize,
     apply: Apply,
@@ -125,48 +62,100 @@ fn apply_fused_pair<T, Apply, ElementOp>(
     Apply: Fn(&mut T, T),
     ElementOp: Fn(T) -> T,
 {
-    if layout.dims[..layout.rank].iter().any(|&dim| dim == 0) {
+    if shape.iter().any(|&dim| dim == 0) {
         return;
     }
-    let inner_len = layout.dims[0];
-    let inner_dst = layout.dst_strides[0];
-    let inner_src = layout.src_strides[0];
-    let mut index = [0usize; FUSED_RANK_LIMIT];
-    let mut dst_base = dst_offset;
-    let mut src_base = src_offset;
-    loop {
-        if inner_dst == 1 && inner_src == 1 {
-            let dst_start = dst_base as usize;
-            let src_start = src_base as usize;
-            let dst = &mut dst_data[dst_start..dst_start + inner_len];
-            let src = &src_data[src_start..src_start + inner_len];
-            for position in 0..inner_len {
-                apply(&mut dst[position], op(src[position]));
+    FUSE_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let FuseScratch {
+            dims,
+            dst_strides: fdst,
+            src_strides: fsrc,
+            index,
+        } = &mut *scratch;
+        dims.clear();
+        fdst.clear();
+        fsrc.clear();
+        // insertion sort by destination stride, dropping extent-1 axes
+        for axis in 0..shape.len() {
+            let extent = shape[axis];
+            if extent == 1 {
+                continue;
             }
-        } else {
-            for position in 0..inner_len {
-                let dst_position = (dst_base + position as isize * inner_dst) as usize;
-                let src_position = (src_base + position as isize * inner_src) as usize;
-                apply(&mut dst_data[dst_position], op(src_data[src_position]));
+            let d = dst_strides[axis];
+            let s = src_strides[axis];
+            let mut position = dims.len();
+            while position > 0 && fdst[position - 1] > d {
+                position -= 1;
+            }
+            dims.insert(position, extent);
+            fdst.insert(position, d);
+            fsrc.insert(position, s);
+        }
+        if dims.is_empty() {
+            dims.push(1);
+            fdst.push(0);
+            fsrc.push(0);
+        }
+        // fuse adjacent contiguous axes
+        let mut fused = 0usize;
+        for axis in 1..dims.len() {
+            let extent = dims[fused] as isize;
+            if fdst[fused] * extent == fdst[axis] && fsrc[fused] * extent == fsrc[axis] {
+                dims[fused] *= dims[axis];
+            } else {
+                fused += 1;
+                dims[fused] = dims[axis];
+                fdst[fused] = fdst[axis];
+                fsrc[fused] = fsrc[axis];
             }
         }
-        let mut axis = 1;
+        let rank = fused + 1;
+        dims.truncate(rank);
+        fdst.truncate(rank);
+        fsrc.truncate(rank);
+        index.clear();
+        index.resize(rank, 0);
+
+        let inner_len = dims[0];
+        let inner_dst = fdst[0];
+        let inner_src = fsrc[0];
+        let mut dst_base = dst_offset;
+        let mut src_base = src_offset;
         loop {
-            if axis >= layout.rank {
-                return;
+            if inner_dst == 1 && inner_src == 1 {
+                let dst_start = dst_base as usize;
+                let src_start = src_base as usize;
+                let dst = &mut dst_data[dst_start..dst_start + inner_len];
+                let src = &src_data[src_start..src_start + inner_len];
+                for position in 0..inner_len {
+                    apply(&mut dst[position], op(src[position]));
+                }
+            } else {
+                for position in 0..inner_len {
+                    let dst_position = (dst_base + position as isize * inner_dst) as usize;
+                    let src_position = (src_base + position as isize * inner_src) as usize;
+                    apply(&mut dst_data[dst_position], op(src_data[src_position]));
+                }
             }
-            index[axis] += 1;
-            dst_base += layout.dst_strides[axis];
-            src_base += layout.src_strides[axis];
-            if index[axis] < layout.dims[axis] {
-                break;
+            let mut axis = 1;
+            loop {
+                if axis >= rank {
+                    return;
+                }
+                index[axis] += 1;
+                dst_base += fdst[axis];
+                src_base += fsrc[axis];
+                if index[axis] < dims[axis] {
+                    break;
+                }
+                dst_base -= dims[axis] as isize * fdst[axis];
+                src_base -= dims[axis] as isize * fsrc[axis];
+                index[axis] = 0;
+                axis += 1;
             }
-            dst_base -= layout.dims[axis] as isize * layout.dst_strides[axis];
-            src_base -= layout.dims[axis] as isize * layout.src_strides[axis];
-            index[axis] = 0;
-            axis += 1;
         }
-    }
+    });
 }
 
 /// Backend-neutral low-level kernel adapter for host-slice replay.
@@ -297,36 +286,26 @@ where
         beta: T,
     ) -> Result<(), OperationError> {
         if beta.is_zero() || beta.is_one() {
-            if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
-                let assign = beta.is_zero();
-                apply_fused_pair(
-                    dst_data,
-                    src_data,
-                    &layout,
-                    dst_offset,
-                    src_offset,
-                    |dst, value| {
-                        if assign {
-                            *dst = value;
-                        } else {
-                            *dst = *dst + value;
-                        }
-                    },
-                    |value: T| alpha * value.maybe_conj(source_conjugate),
-                );
-                zero_strides.clear();
-                return Ok(());
-            }
-            let src = read_view(src_data, shape, src_strides, src_offset)?;
-            let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
-            let result = match (beta.is_zero(), source_conjugate) {
-                (true, false) => strided_kernel::copy_scale(&mut dst, &src, alpha),
-                (true, true) => strided_kernel::copy_scale(&mut dst, &src.conj(), alpha),
-                (false, false) => strided_kernel::axpy(&mut dst, &src, alpha),
-                (false, true) => strided_kernel::axpy(&mut dst, &src.conj(), alpha),
-            };
+            let assign = beta.is_zero();
+            fused_pair(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                move |dst, value| {
+                    if assign {
+                        *dst = value;
+                    } else {
+                        *dst = *dst + value;
+                    }
+                },
+                move |value: T| alpha * value.maybe_conj(source_conjugate),
+            );
             zero_strides.clear();
-            return result.map_err(strided_error);
+            return Ok(());
         }
         tensoradd_raw_strided_kernel_trusted(
             zero_strides,
@@ -356,33 +335,25 @@ where
         beta: T,
     ) -> Result<(), OperationError> {
         if beta.is_zero() || beta.is_one() {
-            if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
-                let assign = beta.is_zero();
-                apply_fused_pair(
-                    dst_data,
-                    src_data,
-                    &layout,
-                    dst_offset,
-                    src_offset,
-                    |dst, value| {
-                        if assign {
-                            *dst = value;
-                        } else {
-                            *dst = *dst + value;
-                        }
-                    },
-                    |value: T| alpha * value,
-                );
-                return Ok(());
-            }
-            let src = read_view(src_data, shape, src_strides, src_offset)?;
-            let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
-            let result = if beta.is_zero() {
-                strided_kernel::copy_scale(&mut dst, &src, alpha)
-            } else {
-                strided_kernel::axpy(&mut dst, &src, alpha)
-            };
-            return result.map_err(strided_error);
+            let assign = beta.is_zero();
+            fused_pair(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                move |dst, value| {
+                    if assign {
+                        *dst = value;
+                    } else {
+                        *dst = *dst + value;
+                    }
+                },
+                move |value: T| alpha * value,
+            );
+            return Ok(());
         }
         axpby_raw_strided_kernel_trusted(
             dst_data,
@@ -409,25 +380,18 @@ where
         source_conjugate: bool,
         alpha: T,
     ) -> Result<(), OperationError> {
-        if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
-            apply_fused_pair(
-                dst_data,
-                src_data,
-                &layout,
-                dst_offset,
-                src_offset,
-                |dst, value| *dst = value,
-                |value: T| alpha * value.maybe_conj(source_conjugate),
-            );
-            return Ok(());
-        }
-        let src = read_view(src_data, shape, src_strides, src_offset)?;
-        let mut dst = write_view(dst_data, shape, dst_strides, dst_offset)?;
-        if source_conjugate {
-            strided_kernel::copy_scale(&mut dst, &src.conj(), alpha).map_err(strided_error)
-        } else {
-            strided_kernel::copy_scale(&mut dst, &src, alpha).map_err(strided_error)
-        }
+        fused_pair(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            |dst, value| *dst = value,
+            move |value: T| alpha * value.maybe_conj(source_conjugate),
+        );
+        Ok(())
     }
 
     fn scale_strided(

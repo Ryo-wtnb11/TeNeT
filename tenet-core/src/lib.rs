@@ -9,9 +9,25 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Add, Mul};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
+
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
+
+/// Inline storage for the low layer's small per-rank / per-leg / per-block
+/// metadata — the Rust analog of TensorKit's `NTuple` stack fields on
+/// `FusionTree`. Structural keys and layouts (sector lists, dims, duals,
+/// block indices, strides) stay allocation-free for the common small ranks,
+/// so hashing/cloning/comparing them in the cold structure/plan/recoupling
+/// caches touches no heap. Inline capacity 8 covers typical tensor ranks and
+/// per-leg sector counts; larger cases spill to heap exactly like `Vec`.
+pub type SectorVec = SmallVec<[SectorId; 8]>;
+/// Inline storage for `usize` metadata (dims, strides, indices, permutations).
+pub type DimVec = SmallVec<[usize; 8]>;
+/// Inline storage for per-leg duality flags.
+pub type DualVec = SmallVec<[bool; 8]>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Trivial;
@@ -144,7 +160,7 @@ impl<const N: usize> ProductSpace<N> {
 pub struct TensorMapSpace<const NOUT: usize, const NIN: usize> {
     codomain: ProductSpace<NOUT>,
     domain: ProductSpace<NIN>,
-    dims: Vec<usize>,
+    dims: DimVec,
     dense_dim: usize,
 }
 
@@ -154,7 +170,7 @@ impl<const NOUT: usize, const NIN: usize> TensorMapSpace<NOUT, NIN> {
             .dim()
             .checked_mul(domain.dim())
             .ok_or(CoreError::ElementCountOverflow)?;
-        let mut dims = Vec::with_capacity(NOUT + NIN);
+        let mut dims = DimVec::with_capacity(NOUT + NIN);
         dims.extend_from_slice(codomain.dims());
         dims.extend_from_slice(domain.dims());
         Ok(Self {
@@ -289,12 +305,12 @@ impl BraidingStyleKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SectorLeg {
-    sectors: Vec<SectorId>,
+    sectors: SectorVec,
     /// Per-sector degeneracy, parallel to `sectors`. The leg is the single
     /// source of truth for the sector -> degeneracy map of one tensor axis
     /// (TensorKit `GradedSpace` parity: the space stores the complete map
     /// independent of which fusion trees are populated).
-    degeneracies: Vec<usize>,
+    degeneracies: DimVec,
     is_dual: bool,
 }
 
@@ -487,7 +503,7 @@ pub struct FusionTreeHomSpace {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FusionTreeLegSetSignature {
-    sectors: Vec<SectorId>,
+    sectors: SectorVec,
     is_dual: bool,
 }
 
@@ -516,7 +532,7 @@ fn fusion_product_space_signature(space: &FusionProductSpace) -> Vec<FusionTreeL
         .legs()
         .iter()
         .map(|leg| FusionTreeLegSetSignature {
-            sectors: leg.sectors().to_vec(),
+            sectors: leg.sectors().iter().copied().collect(),
             is_dual: leg.is_dual(),
         })
         .collect()
@@ -542,12 +558,27 @@ struct FusionTreeHomSpaceLayout {
     sectors: Vec<FusionTreeCoupledSectorLayout>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct CoupledBlockStructureCacheKey {
+    layout_ptr: usize,
+    nout: usize,
+    rank: usize,
+    shapes: Arc<[DimVec]>,
+}
+
 fn fusion_tree_layout_cache(
-) -> &'static RwLock<HashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>> {
+) -> &'static RwLock<FxHashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>> {
     static CACHE: OnceLock<
-        RwLock<HashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>>,
+        RwLock<FxHashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>>,
     > = OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
+
+fn coupled_block_structure_cache(
+) -> &'static RwLock<FxHashMap<CoupledBlockStructureCacheKey, Weak<BlockStructure>>> {
+    static CACHE: OnceLock<RwLock<FxHashMap<CoupledBlockStructureCacheKey, Weak<BlockStructure>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
 fn fusion_tree_layout_from_keys<R>(
@@ -563,8 +594,8 @@ where
     while run_start < keys.len() {
         let coupled = coupled_or_vacuum(rule, keys[run_start].codomain_tree());
         let mut run_end = run_start;
-        let mut row_indices = HashMap::<FusionTreeKey, usize>::new();
-        let mut col_indices = HashMap::<FusionTreeKey, usize>::new();
+        let mut row_indices = FxHashMap::<FusionTreeKey, usize>::default();
+        let mut col_indices = FxHashMap::<FusionTreeKey, usize>::default();
         let mut entries = Vec::new();
         while run_end < keys.len()
             && coupled_or_vacuum(rule, keys[run_end].codomain_tree()) == coupled
@@ -809,6 +840,27 @@ impl FusionTreeHomSpace {
         self.cached_fusion_tree_layout(rule).keys.as_ref().to_vec()
     }
 
+    pub fn try_for_each_fusion_tree_key<R, F, E>(&self, rule: &R, mut f: F) -> Result<(), E>
+    where
+        R: MultiplicityFreeFusionRule,
+        F: FnMut(&FusionTreeBlockKey) -> Result<(), E>,
+    {
+        let layout = self.cached_fusion_tree_layout(rule);
+        for key in layout.keys.iter() {
+            f(key)?;
+        }
+        Ok(())
+    }
+
+    pub fn try_with_fusion_tree_keys<R, F, T, E>(&self, rule: &R, f: F) -> Result<T, E>
+    where
+        R: MultiplicityFreeFusionRule,
+        F: FnOnce(&[FusionTreeBlockKey]) -> Result<T, E>,
+    {
+        let layout = self.cached_fusion_tree_layout(rule);
+        f(layout.keys.as_ref())
+    }
+
     fn cached_fusion_tree_layout<R>(&self, rule: &R) -> Arc<FusionTreeHomSpaceLayout>
     where
         R: MultiplicityFreeFusionRule,
@@ -829,6 +881,62 @@ impl FusionTreeHomSpace {
             return Arc::clone(write.entry(key).or_insert_with(|| Arc::clone(&computed)));
         }
         computed
+    }
+
+    pub fn coupled_subblock_structure<R, Shapes>(
+        &self,
+        rule: &R,
+        nout: usize,
+        shapes: Shapes,
+    ) -> Result<Arc<BlockStructure>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let layout = self.cached_fusion_tree_layout(rule);
+        let rank = self.codomain().len() + self.domain().len();
+        let shapes = shapes
+            .into_iter()
+            .map(|shape| shape.into().into_iter().collect::<DimVec>())
+            .collect::<Vec<_>>();
+        if layout.keys.len() != shapes.len() {
+            return Err(CoreError::BlockCountMismatch {
+                expected: layout.keys.len(),
+                actual: shapes.len(),
+            });
+        }
+        self.validate_degeneracy_shapes(layout.keys.as_ref(), &shapes)?;
+
+        let cache_key = CoupledBlockStructureCacheKey {
+            layout_ptr: Arc::as_ptr(&layout) as usize,
+            nout,
+            rank,
+            shapes: Arc::<[DimVec]>::from(shapes),
+        };
+        let cache = coupled_block_structure_cache();
+        if let Ok(read) = cache.read() {
+            if let Some(structure) = read.get(&cache_key).and_then(Weak::upgrade) {
+                return Ok(structure);
+            }
+        }
+
+        let specs = coupled_sector_matrix_block_specs_from_layout(
+            nout,
+            rank,
+            &layout,
+            cache_key.shapes.as_ref(),
+        )?;
+        let structure = BlockStructure::from_blocks_with_rank(rank, specs)?.into_shared();
+
+        let mut write = cache
+            .write()
+            .expect("coupled block structure cache poisoned");
+        if let Some(existing) = write.get(&cache_key).and_then(Weak::upgrade) {
+            return Ok(existing);
+        }
+        write.insert(cache_key, Arc::downgrade(&structure));
+        Ok(structure)
     }
 
     fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
@@ -952,11 +1060,14 @@ impl FusionTreeHomSpace {
     /// degeneracies (the legs are authoritative): for every tree key,
     /// `shape[axis]` must equal the degeneracy the axis' leg stores for the
     /// tree's uncoupled sector on that axis.
-    pub fn validate_degeneracy_shapes(
+    pub fn validate_degeneracy_shapes<S>(
         &self,
         keys: &[FusionTreeBlockKey],
-        shapes: &[Vec<usize>],
-    ) -> Result<(), CoreError> {
+        shapes: &[S],
+    ) -> Result<(), CoreError>
+    where
+        S: AsRef<[usize]>,
+    {
         let legs = self
             .codomain
             .legs()
@@ -964,6 +1075,7 @@ impl FusionTreeHomSpace {
             .chain(self.domain.legs())
             .collect::<Vec<_>>();
         for (key, shape) in keys.iter().zip(shapes) {
+            let shape = shape.as_ref();
             if shape.len() != legs.len() {
                 return Err(CoreError::StructureRankMismatch {
                     expected: legs.len(),
@@ -1103,17 +1215,19 @@ fn validate_composed_leg(
 /// at that (row block, column block) position. Full coverage of the
 /// `rows × columns` grid is required so the sector matrix has no
 /// uninitialized holes.
-fn coupled_sector_matrix_block_specs<R>(
+fn coupled_sector_matrix_block_specs<R, S>(
     rule: &R,
     nout: usize,
     rank: usize,
     keys: &[FusionTreeBlockKey],
-    shapes: &[Vec<usize>],
+    shapes: &[S],
 ) -> Result<Vec<BlockSpec>, CoreError>
 where
     R: FusionRule,
+    S: AsRef<[usize]>,
 {
     for shape in shapes {
+        let shape = shape.as_ref();
         if shape.len() != rank {
             return Err(CoreError::StructureRankMismatch {
                 expected: rank,
@@ -1146,20 +1260,22 @@ where
             run_end += 1;
         }
 
+        // Row/column blocks keep first-seen order (offsets are cumulative), with
+        // a hash side-index for O(1) tree lookup instead of a linear scan: a run
+        // can hold many blocks, so the scan was O(run^1.5).
         let mut row_blocks: Vec<(&FusionTreeKey, usize, usize)> = Vec::new();
         let mut col_blocks: Vec<(&FusionTreeKey, usize, usize)> = Vec::new();
+        let mut row_index: FxHashMap<&FusionTreeKey, usize> = FxHashMap::default();
+        let mut col_index: FxHashMap<&FusionTreeKey, usize> = FxHashMap::default();
         for index in run_start..run_end {
             let key = &keys[index];
-            let shape = &shapes[index];
+            let shape = shapes[index].as_ref();
             let row_dim = shape[..nout].iter().product::<usize>();
             let col_dim = shape[nout..].iter().product::<usize>();
-            match row_blocks
-                .iter()
-                .find(|(tree, _, _)| *tree == key.codomain_tree())
-            {
-                Some(&(_, _, existing)) if existing != row_dim => {
+            match row_index.get(key.codomain_tree()).copied() {
+                Some(existing_index) if row_blocks[existing_index].2 != row_dim => {
                     return Err(CoreError::DimensionMismatch {
-                        expected: existing,
+                        expected: row_blocks[existing_index].2,
                         actual: row_dim,
                     });
                 }
@@ -1169,16 +1285,14 @@ where
                         .last()
                         .map(|(_, start, dim)| start + dim)
                         .unwrap_or(0);
+                    row_index.insert(key.codomain_tree(), row_blocks.len());
                     row_blocks.push((key.codomain_tree(), offset, row_dim));
                 }
             }
-            match col_blocks
-                .iter()
-                .find(|(tree, _, _)| *tree == key.domain_tree())
-            {
-                Some(&(_, _, existing)) if existing != col_dim => {
+            match col_index.get(key.domain_tree()).copied() {
+                Some(existing_index) if col_blocks[existing_index].2 != col_dim => {
                     return Err(CoreError::DimensionMismatch {
-                        expected: existing,
+                        expected: col_blocks[existing_index].2,
                         actual: col_dim,
                     });
                 }
@@ -1188,6 +1302,7 @@ where
                         .last()
                         .map(|(_, start, dim)| start + dim)
                         .unwrap_or(0);
+                    col_index.insert(key.domain_tree(), col_blocks.len());
                     col_blocks.push((key.domain_tree(), offset, col_dim));
                 }
             }
@@ -1209,7 +1324,7 @@ where
 
         for index in run_start..run_end {
             let key = &keys[index];
-            let shape = &shapes[index];
+            let shape = shapes[index].as_ref();
             let (_, row_start, _) = row_blocks
                 .iter()
                 .find(|(tree, _, _)| *tree == key.codomain_tree())
@@ -1240,7 +1355,7 @@ where
                     .ok_or(CoreError::ElementCountOverflow)?;
             specs.push(BlockSpec::with_key(
                 BlockKey::FusionTree(key.clone()),
-                shape.clone(),
+                shape.to_vec(),
                 strides,
                 offset,
             )?);
@@ -1258,12 +1373,15 @@ where
     Ok(specs)
 }
 
-fn coupled_sector_matrix_block_specs_from_layout(
+fn coupled_sector_matrix_block_specs_from_layout<S>(
     nout: usize,
     rank: usize,
     layout: &FusionTreeHomSpaceLayout,
-    shapes: &[Vec<usize>],
-) -> Result<Vec<BlockSpec>, CoreError> {
+    shapes: &[S],
+) -> Result<Vec<BlockSpec>, CoreError>
+where
+    S: AsRef<[usize]>,
+{
     let keys = layout.keys.as_ref();
     if keys.len() != shapes.len() {
         return Err(CoreError::BlockCountMismatch {
@@ -1272,6 +1390,7 @@ fn coupled_sector_matrix_block_specs_from_layout(
         });
     }
     for shape in shapes {
+        let shape = shape.as_ref();
         if shape.len() != rank {
             return Err(CoreError::StructureRankMismatch {
                 expected: rank,
@@ -1293,7 +1412,7 @@ fn coupled_sector_matrix_block_specs_from_layout(
         let mut row_dims = vec![None; sector.row_count];
         let mut col_dims = vec![None; sector.col_count];
         for (local_index, entry) in sector.entries.iter().enumerate() {
-            let shape = &shapes[sector.start + local_index];
+            let shape = shapes[sector.start + local_index].as_ref();
             register_layout_dim(&mut row_dims[entry.row], shape[..nout].iter().product())?;
             register_layout_dim(&mut col_dims[entry.col], shape[nout..].iter().product())?;
         }
@@ -1329,7 +1448,7 @@ fn coupled_sector_matrix_block_specs_from_layout(
 
         for (local_index, entry) in sector.entries.iter().enumerate() {
             let index = sector.start + local_index;
-            let shape = &shapes[index];
+            let shape = shapes[index].as_ref();
             let mut strides = Vec::with_capacity(rank);
             let mut stride = 1usize;
             for &dim in &shape[..nout] {
@@ -1352,7 +1471,7 @@ fn coupled_sector_matrix_block_specs_from_layout(
                     .ok_or(CoreError::ElementCountOverflow)?;
             specs.push(BlockSpec::with_key(
                 BlockKey::FusionTree(keys[index].clone()),
-                shape.clone(),
+                shape.to_vec(),
                 strides,
                 offset,
             )?);
@@ -1427,7 +1546,11 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         homspace: FusionTreeHomSpace,
         subblock_structure: BlockStructure,
     ) -> Result<Self, CoreError> {
-        Self::from_shared_subblock_structure(dense_space, homspace, Arc::new(subblock_structure))
+        Self::from_shared_subblock_structure(
+            dense_space,
+            homspace,
+            subblock_structure.into_shared(),
+        )
     }
 
     pub fn from_shared_subblock_structure(
@@ -1443,6 +1566,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
                 actual: subblock_structure.rank(),
             });
         }
+        let subblock_structure = BlockStructure::canonicalize_shared(subblock_structure);
         Ok(Self {
             dense_space,
             homspace: Arc::new(homspace),
@@ -1534,20 +1658,8 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         Shapes::Item: Into<Vec<usize>>,
     {
         Self::validate_homspace_rank(&homspace)?;
-        let layout = homspace.cached_fusion_tree_layout(rule);
-        let keys = layout.keys.as_ref();
-        let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
-        if keys.len() != shapes.len() {
-            return Err(CoreError::BlockCountMismatch {
-                expected: keys.len(),
-                actual: shapes.len(),
-            });
-        }
-        let rank = NOUT + NIN;
-        homspace.validate_degeneracy_shapes(keys, &shapes)?;
-        let specs = coupled_sector_matrix_block_specs_from_layout(NOUT, rank, &layout, &shapes)?;
-        let subblock_structure = BlockStructure::from_blocks_with_rank(rank, specs)?;
-        Self::new(dense_space, homspace, subblock_structure)
+        let subblock_structure = homspace.coupled_subblock_structure(rule, NOUT, shapes)?;
+        Self::from_shared_subblock_structure(dense_space, homspace, subblock_structure)
     }
 
     fn validate_homspace_rank(homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
@@ -1613,7 +1725,11 @@ pub trait FusionRule {
         sector
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId>;
+    /// Fusion channels of `left ⊗ right`. Returns a `SectorVec` so the common
+    /// small result stays stack-inline — this is called millions of times in
+    /// the cold recoupling build, and a heap `Vec` per call was ~5% of all
+    /// cold-path allocations.
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec;
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         usize::from(self.fusion_channels(left, right).contains(&coupled))
@@ -1911,18 +2027,21 @@ where
         self.encode_sector(self.left.dual(left), self.right.dual(right))
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         let (left_left, left_right) = self.decode_sector_or_panic(left);
         let (right_left, right_right) = self.decode_sector_or_panic(right);
         let left_channels = self.left.fusion_channels(left_left, right_left);
         let right_channels = self.right.fusion_channels(left_right, right_right);
-        let mut channels = Vec::with_capacity(left_channels.len() * right_channels.len());
+        // Cartesian product of the two sub-rules' channels, matching TensorKit's
+        // `⊗(p1,p2) = SectorSet(product(map(⊗, ...)))`. No dedup: each sub-rule
+        // is multiplicity-free (distinct channels) and `encode_sector` is the
+        // Cantor pairing (a bijection), so distinct (left,right) pairs always
+        // encode to distinct ids — the old `channels.contains()` guard was
+        // provably dead and made this O(k²) instead of O(k) in k = |L|·|R|.
+        let mut channels = SectorVec::with_capacity(left_channels.len() * right_channels.len());
         for right_channel in right_channels {
             for &left_channel in &left_channels {
-                let channel = self.encode_sector(left_channel, right_channel);
-                if !channels.contains(&channel) {
-                    channels.push(channel);
-                }
+                channels.push(self.encode_sector(left_channel, right_channel));
             }
         }
         channels
@@ -2118,10 +2237,10 @@ impl FusionRule for Z2FusionRule {
         true
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         let left = Z2Irrep::from_sector_id(left).expect("Z2 fusion received an invalid sector");
         let right = Z2Irrep::from_sector_id(right).expect("Z2 fusion received an invalid sector");
-        vec![Z2Irrep::new(left.parity() ^ right.parity()).into()]
+        core::iter::once(Z2Irrep::new(left.parity() ^ right.parity()).into()).collect()
     }
 }
 
@@ -2226,7 +2345,7 @@ impl FusionRule for FermionParityFusionRule {
         true
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         Z2FusionRule.fusion_channels(left, right)
     }
 }
@@ -2390,15 +2509,18 @@ impl FusionRule for U1FusionRule {
         .into()
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         let left = U1Irrep::from_sector_id(left).expect("U(1) fusion received an invalid sector");
         let right = U1Irrep::from_sector_id(right).expect("U(1) fusion received an invalid sector");
-        vec![U1Irrep::new(
-            left.charge()
-                .checked_add(right.charge())
-                .expect("U(1) fusion charge overflow"),
+        core::iter::once(
+            U1Irrep::new(
+                left.charge()
+                    .checked_add(right.charge())
+                    .expect("U(1) fusion charge overflow"),
+            )
+            .into(),
         )
-        .into()]
+        .collect()
     }
 }
 
@@ -2514,7 +2636,7 @@ impl FusionRule for SU2FusionRule {
         true
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         let left = SU2Irrep::from_sector_id(left).twice_spin();
         let right = SU2Irrep::from_sector_id(right).twice_spin();
         let min = left.abs_diff(right);
@@ -2627,10 +2749,9 @@ fn su2_f_symbol_from_doubled_spins(
 /// contractions) is a hash lookup. The cached value is bit-identical to the
 /// direct computation, so this changes cold compile cost only.
 fn wigner_6j_doubled(j1: usize, j2: usize, j3: usize, j4: usize, j5: usize, j6: usize) -> f64 {
-    static CACHE: std::sync::OnceLock<
-        std::sync::RwLock<std::collections::HashMap<[usize; 6], f64>>,
-    > = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    static CACHE: std::sync::OnceLock<std::sync::RwLock<FxHashMap<[usize; 6], f64>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(FxHashMap::default()));
     let key = [j1, j2, j3, j4, j5, j6];
     if let Ok(read) = cache.read() {
         if let Some(&value) = read.get(&key) {
@@ -2765,33 +2886,31 @@ fn fusion_trees_by_coupled_for_space<R>(
 where
     R: MultiplicityFreeFusionRule,
 {
+    // Group trees by coupled sector via a `coupled -> index` map so the merge
+    // is O(1) per (tuple, coupled) pair. The previous `grouped.iter_mut().find`
+    // linear scan was O(P·C) (P = tuple×coupled iterations, C = distinct
+    // coupled sectors); the map removes the C factor. The final `sort_by_key`
+    // still fixes the canonical order, so the map need not preserve it.
     let mut grouped = Vec::<CoupledFusionTrees>::new();
+    let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
     for tuple in space.selected_leg_tuples() {
-        for coupled in possible_coupled_sectors(rule, &effective_sectors(rule, &tuple)) {
-            let trees = fusion_trees_for_coupled(rule, &tuple, coupled);
-            if let Some(group) = grouped.iter_mut().find(|group| group.coupled == coupled) {
-                group.trees.extend(trees);
-            } else {
-                grouped.push(CoupledFusionTrees { coupled, trees });
+        let effective = effective_sectors(rule, &tuple);
+        let uncoupled: Vec<SectorId> = tuple.iter().map(|leg| leg.sector()).collect();
+        let is_dual: Vec<bool> = tuple.iter().map(|leg| leg.is_dual()).collect();
+        for coupled in reachable_coupled_sectors(rule, &effective) {
+            let trees =
+                collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
+            match index.get(&coupled) {
+                Some(&i) => grouped[i].trees.extend(trees),
+                None => {
+                    index.insert(coupled, grouped.len());
+                    grouped.push(CoupledFusionTrees { coupled, trees });
+                }
             }
         }
     }
     grouped.sort_by_key(|group| group.coupled);
     grouped
-}
-
-fn fusion_trees_for_coupled<R>(
-    rule: &R,
-    legs: &[FusionTreeLeg],
-    coupled: SectorId,
-) -> Vec<FusionTreeKey>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    let effective = effective_sectors(rule, legs);
-    let uncoupled = legs.iter().map(|leg| leg.sector()).collect::<Vec<_>>();
-    let is_dual = legs.iter().map(|leg| leg.is_dual()).collect::<Vec<_>>();
-    collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled)
 }
 
 fn fusion_trees_by_coupled_for_selected_space<R>(
@@ -2809,7 +2928,9 @@ where
         });
     }
     for (&sector, leg) in selected.iter().zip(space.legs()) {
-        if !leg.sectors().contains(&sector) {
+        // Sectors are stored sorted (SortedVectorDict invariant); binary-search
+        // to stay consistent with `SectorLeg::degeneracy`.
+        if leg.sectors().binary_search(&sector).is_err() {
             return Err(CoreError::InvalidSector { sector });
         }
     }
@@ -2820,9 +2941,12 @@ where
         .map(|(&sector, leg)| FusionTreeLeg::new(sector, leg.is_dual()))
         .collect::<Vec<_>>();
     let effective = effective_sectors(rule, &legs);
+    let uncoupled: Vec<SectorId> = legs.iter().map(|leg| leg.sector()).collect();
+    let is_dual: Vec<bool> = legs.iter().map(|leg| leg.is_dual()).collect();
     let mut grouped = Vec::new();
-    for coupled in possible_coupled_sectors(rule, &effective) {
-        let trees = fusion_trees_for_coupled(rule, &legs, coupled);
+    for coupled in reachable_coupled_sectors(rule, &effective) {
+        let trees =
+            collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
         if !trees.is_empty() {
             grouped.push(CoupledFusionTrees { coupled, trees });
         }
@@ -2831,6 +2955,41 @@ where
     Ok(grouped)
 }
 
+/// Coupled sectors reachable by fusing all legs — TensorKit's `blocksectors`.
+/// Computed once per leg tuple (not per enumeration node): the forward fold
+/// `⊗` over the legs with dedup. Used only to drive the per-coupled grouping;
+/// the tree enumeration itself does not consult it (see below).
+fn reachable_coupled_sectors<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let mut acc: Vec<SectorId> = match effective.first() {
+        None => vec![rule.vacuum()],
+        Some(&first) => vec![first],
+    };
+    for &last in effective.iter().skip(1) {
+        acc = acc
+            .iter()
+            .flat_map(|&front| rule.fusion_channels(front, last))
+            .collect();
+        acc.sort_unstable();
+        acc.dedup();
+    }
+    acc.sort_unstable();
+    acc.dedup();
+    acc
+}
+
+/// Enumerate the fusion trees of `uncoupled` (with `is_dual`) into `coupled`,
+/// ported from TensorKit's `_fusiontree_iterate` (fusiontrees/iterator.jl).
+/// It walks the inner lines *backward* from `coupled`: peel the last leg `b`,
+/// let the adjacent inner line `a` range over `coupled ⊗ dual(b)`, recurse on
+/// the front legs fusing to `a`, and prune dead branches by the recursion
+/// yielding nothing — no forward `possible_coupled` reachability set, matching
+/// TensorKit. Like TensorKit's *lazy* iterator it never materializes an
+/// intermediate tree list per recursion level: a single `visit` walk pushes
+/// each completed key straight into `out`, threading one reused inner-line
+/// stack. Multiplicity-free, so every vertex is the trivial label.
 fn collect_fusion_trees_for_coupled<R>(
     rule: &R,
     uncoupled: &[SectorId],
@@ -2841,116 +3000,68 @@ fn collect_fusion_trees_for_coupled<R>(
 where
     R: MultiplicityFreeFusionRule,
 {
-    match effective.len() {
-        0 if coupled == rule.vacuum() => vec![FusionTreeKey::new(
+    // Vertices are the trivial label for every multiplicity-free tree; a tree of
+    // `n` legs has `n - 1` vertices (and `n - 2` inner lines), or none for n < 2.
+    let vertex_count = uncoupled.len().saturating_sub(1);
+    let mut out = Vec::new();
+    // `inner_rev` accumulates the inner lines outermost-first as the walk
+    // descends; the stored key wants innermost-first, so emit reverses it.
+    let mut inner_rev: Vec<SectorId> = Vec::new();
+    visit_fusion_trees(rule, effective, coupled, &mut inner_rev, &mut |inner_rev| {
+        out.push(FusionTreeKey::new(
             uncoupled.iter().copied(),
             Some(coupled),
             is_dual.iter().copied(),
-            Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
-        )],
-        0 => Vec::new(),
-        1 if effective[0] == coupled => vec![FusionTreeKey::new(
-            uncoupled.iter().copied(),
-            Some(coupled),
-            is_dual.iter().copied(),
-            Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
-        )],
-        1 => Vec::new(),
-        2 if rule.nsymbol(effective[0], effective[1], coupled) != 0 => vec![FusionTreeKey::new(
-            uncoupled.iter().copied(),
-            Some(coupled),
-            is_dual.iter().copied(),
-            Vec::<SectorId>::new(),
-            [SectorId::new(1)],
-        )],
-        2 => Vec::new(),
-        _ => collect_nontrivial_fusion_trees_for_coupled(
-            rule, uncoupled, is_dual, effective, coupled,
-        ),
-    }
+            inner_rev.iter().rev().copied(),
+            std::iter::repeat(SectorId::new(1)).take(vertex_count),
+        ));
+    });
+    out
 }
 
-fn collect_nontrivial_fusion_trees_for_coupled<R>(
+fn visit_fusion_trees<R, F>(
     rule: &R,
-    uncoupled: &[SectorId],
-    is_dual: &[bool],
     effective: &[SectorId],
     coupled: SectorId,
-) -> Vec<FusionTreeKey>
-where
+    inner_rev: &mut Vec<SectorId>,
+    emit: &mut F,
+) where
     R: MultiplicityFreeFusionRule,
+    F: FnMut(&[SectorId]),
 {
-    let last = effective[effective.len() - 1];
-    let front_uncoupled = &uncoupled[..uncoupled.len() - 1];
-    let front_is_dual = &is_dual[..is_dual.len() - 1];
-    let front_effective = &effective[..effective.len() - 1];
-    let mut trees = Vec::new();
-    for front_coupled in tensor_kit_front_coupled_candidates(rule, front_effective, last, coupled) {
-        for front_tree in collect_fusion_trees_for_coupled(
-            rule,
-            front_uncoupled,
-            front_is_dual,
-            front_effective,
-            front_coupled,
-        ) {
-            let mut innerlines = front_tree.innerlines().to_vec();
-            innerlines.push(front_coupled);
-            let mut vertices = front_tree.vertices().to_vec();
-            vertices.push(SectorId::new(1));
-            trees.push(FusionTreeKey::new(
-                uncoupled.iter().copied(),
-                Some(coupled),
-                is_dual.iter().copied(),
-                innerlines,
-                vertices,
-            ));
+    match effective.len() {
+        0 => {
+            if coupled == rule.vacuum() {
+                emit(inner_rev);
+            }
         }
-    }
-    trees
-}
-
-fn tensor_kit_front_coupled_candidates<R>(
-    rule: &R,
-    front_effective: &[SectorId],
-    last: SectorId,
-    coupled: SectorId,
-) -> Vec<SectorId>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    let possible_fronts = possible_coupled_sectors(rule, front_effective);
-    let mut candidates = Vec::new();
-    for candidate in rule.fusion_channels(coupled, rule.dual(last)) {
-        if possible_fronts.binary_search(&candidate).is_ok()
-            && rule.nsymbol(candidate, last, coupled) != 0
-            && !candidates.contains(&candidate)
-        {
-            candidates.push(candidate);
+        1 => {
+            if effective[0] == coupled {
+                emit(inner_rev);
+            }
         }
-    }
-    candidates
-}
-
-fn possible_coupled_sectors<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
-where
-    R: MultiplicityFreeFusionRule,
-{
-    let mut sectors = match effective.len() {
-        0 => vec![rule.vacuum()],
-        1 => vec![effective[0]],
+        2 => {
+            if rule.nsymbol(effective[0], effective[1], coupled) != 0 {
+                emit(inner_rev);
+            }
+        }
         _ => {
             let last = effective[effective.len() - 1];
-            possible_coupled_sectors(rule, &effective[..effective.len() - 1])
-                .into_iter()
-                .flat_map(|front| rule.fusion_channels(front, last))
-                .collect()
+            let front_effective = &effective[..effective.len() - 1];
+            // Inner line `a` ranges over `coupled ⊗ dual(last)` (TensorKit's
+            // `vertexiterN = coupled ⊗ dual(b)`); `Nsymbol(a, last, coupled)` is
+            // the last vertex. No forward-reachability filter — dead `a` simply
+            // emit nothing from the recursion.
+            for front_coupled in rule.fusion_channels(coupled, rule.dual(last)) {
+                if rule.nsymbol(front_coupled, last, coupled) == 0 {
+                    continue;
+                }
+                inner_rev.push(front_coupled);
+                visit_fusion_trees(rule, front_effective, front_coupled, inner_rev, emit);
+                inner_rev.pop();
+            }
         }
-    };
-    sectors.sort_unstable();
-    sectors.dedup();
-    sectors
+    }
 }
 
 fn effective_sectors<R>(_rule: &R, legs: &[FusionTreeLeg]) -> Vec<SectorId>
@@ -2962,10 +3073,10 @@ where
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeGroupKey {
-    codomain_uncoupled: Vec<SectorId>,
-    domain_uncoupled: Vec<SectorId>,
-    codomain_is_dual: Vec<bool>,
-    domain_is_dual: Vec<bool>,
+    codomain_uncoupled: SectorVec,
+    domain_uncoupled: SectorVec,
+    codomain_is_dual: DualVec,
+    domain_is_dual: DualVec,
 }
 
 impl FusionTreeGroupKey {
@@ -3030,13 +3141,58 @@ impl FusionTreeGroupKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Debug)]
 pub struct FusionTreeKey {
-    uncoupled: Vec<SectorId>,
+    uncoupled: SectorVec,
     coupled: Option<SectorId>,
-    is_dual: Vec<bool>,
-    innerlines: Vec<SectorId>,
-    vertices: Vec<SectorId>,
+    is_dual: DualVec,
+    innerlines: SectorVec,
+    vertices: SectorVec,
+}
+
+// Identity of a `FusionTreeKey` is `(uncoupled, coupled, is_dual, innerlines)`
+// — `vertices` is deliberately excluded from Hash/Eq/Ord. For multiplicity-free
+// fusion (every rule in this crate) the vertex labels are functionally
+// determined by those four fields (always the trivial vertex), so two keys that
+// agree on them agree on `vertices` too: excluding it changes no equivalence
+// class or ordering, only the per-op cost. FusionTreeKey comparison/hashing is
+// the hottest logic in the cold recoupling-plan build; TensorKit likewise keys
+// its `SimpleFusion` fusion trees on the sectors alone. All three impls use the
+// SAME four fields so the Hash/Eq and Ord/Eq contracts hold.
+impl std::hash::Hash for FusionTreeKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.uncoupled.hash(state);
+        self.coupled.hash(state);
+        self.is_dual.hash(state);
+        self.innerlines.hash(state);
+    }
+}
+
+impl PartialEq for FusionTreeKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.uncoupled == other.uncoupled
+            && self.coupled == other.coupled
+            && self.is_dual == other.is_dual
+            && self.innerlines == other.innerlines
+    }
+}
+
+impl Eq for FusionTreeKey {}
+
+impl Ord for FusionTreeKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.uncoupled
+            .cmp(&other.uncoupled)
+            .then_with(|| self.coupled.cmp(&other.coupled))
+            .then_with(|| self.is_dual.cmp(&other.is_dual))
+            .then_with(|| self.innerlines.cmp(&other.innerlines))
+    }
+}
+
+impl PartialOrd for FusionTreeKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl FusionTreeKey {
@@ -3368,7 +3524,11 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    multiplicity_free_artin_braid_at_with_inverse(rule, tree, index, false)
+    Ok(
+        multiplicity_free_artin_braid_at_with_inverse(rule, tree, index, false)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 pub fn multiplicity_free_braid_tree<R>(
@@ -3517,7 +3677,7 @@ where
                             coefficient,
                         )
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             },
         )
     })?;
@@ -3612,7 +3772,7 @@ enum FusionTermAccumulator<K, S> {
     Singleton(K, S),
     Map {
         order: Vec<K>,
-        coefficients: HashMap<K, S>,
+        coefficients: FxHashMap<K, S>,
     },
 }
 
@@ -3639,7 +3799,7 @@ where
                     unreachable!("matched singleton state");
                 };
                 let mut order = Vec::with_capacity(2);
-                let mut coefficients = HashMap::with_capacity(2);
+                let mut coefficients = FxHashMap::default();
                 Self::push_map_term(
                     &mut order,
                     &mut coefficients,
@@ -3661,7 +3821,12 @@ where
         }
     }
 
-    fn push_map_term(order: &mut Vec<K>, coefficients: &mut HashMap<K, S>, key: K, coefficient: S) {
+    fn push_map_term(
+        order: &mut Vec<K>,
+        coefficients: &mut FxHashMap<K, S>,
+        key: K,
+        coefficient: S,
+    ) {
         match coefficients.entry(key) {
             Entry::Occupied(mut entry) => {
                 let existing = entry.get_mut();
@@ -3695,7 +3860,7 @@ where
     }
 }
 
-fn compose_tree_pair_terms<R, F>(
+fn compose_tree_pair_terms<R, F, I>(
     rule: &R,
     terms: Vec<(FusionTreeBlockKey, R::Scalar)>,
     mut transform: F,
@@ -3703,7 +3868,8 @@ fn compose_tree_pair_terms<R, F>(
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-    F: FnMut(&R, &FusionTreeBlockKey) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>,
+    F: FnMut(&R, &FusionTreeBlockKey) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (FusionTreeBlockKey, R::Scalar)>,
 {
     let mut output = FusionTermAccumulator::new();
     for (key, coefficient) in terms {
@@ -3712,6 +3878,239 @@ where
         }
     }
     Ok(output.into_vec())
+}
+
+/// Batched analog of [`compose_tree_pair_terms`]: apply `transform` to every
+/// tree-pair of a whole block at once, threading a coefficient *matrix* (a
+/// sparse column per original source) instead of re-running the per-source
+/// term list. `columns[i]` maps `src index -> coefficient` for `basis[i]`.
+///
+/// This is the TensorKit 0.17 `artin_braid`/`fsbraid` batching: the elementary
+/// step (bend / Artin braid) is walked ONCE for the block and its coefficients
+/// are spread across all source columns, so intermediate allocation is
+/// O(steps) rather than O(steps × sources) — the term-list style TeNeT used
+/// (equivalent to TensorKit ≤0.16's per-tree `FusionTreeDict`) allocated a
+/// fresh accumulator and cloned keys per source per step.
+fn compose_block_terms<R, F, I>(
+    rule: &R,
+    basis: &[FusionTreeBlockKey],
+    columns: &[Vec<Option<R::Scalar>>],
+    num_src: usize,
+    mut transform: F,
+) -> Result<(Vec<FusionTreeBlockKey>, Vec<Vec<Option<R::Scalar>>>), CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    F: FnMut(&R, &FusionTreeBlockKey) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (FusionTreeBlockKey, R::Scalar)>,
+{
+    let mut index: FxHashMap<FusionTreeBlockKey, usize> = FxHashMap::default();
+    let mut next_basis: Vec<FusionTreeBlockKey> = Vec::new();
+    let mut next_columns: Vec<Vec<Option<R::Scalar>>> = Vec::new();
+    for (source_key, source_column) in basis.iter().zip(columns) {
+        for (dst_key, step_coefficient) in transform(rule, source_key)? {
+            let row = match index.get(&dst_key) {
+                Some(&row) => row,
+                None => {
+                    let row = next_basis.len();
+                    index.insert(dst_key.clone(), row);
+                    next_basis.push(dst_key);
+                    // Dense coefficient column over the original sources (TK's
+                    // `Matrix{E}`): no per-tree hashmap alloc, no usize hashing.
+                    next_columns.push(vec![None; num_src]);
+                    row
+                }
+            };
+            // dst_column[src] += step_coefficient * source_column[src] for each
+            // source that reaches this basis tree.
+            let dst_column = &mut next_columns[row];
+            for (src, source_coefficient) in source_column.iter().enumerate() {
+                let Some(source_coefficient) = source_coefficient else {
+                    continue;
+                };
+                let contribution = step_coefficient.clone() * source_coefficient.clone();
+                dst_column[src] = Some(match dst_column[src].take() {
+                    Some(existing) => existing + contribution,
+                    None => contribution,
+                });
+            }
+        }
+    }
+    Ok((next_basis, next_columns))
+}
+
+/// Batched [`multiplicity_free_braid_tree_pair`] over every source tree-pair of
+/// a block (all sharing the same uncoupled sectors / duality). Returns, per
+/// source (in `src_keys` order), its `(destination tree-pair, coefficient)`
+/// rows — identical content to calling the per-source function on each, but the
+/// bend/braid step structure is walked once for the block.
+///
+/// The floating-point *summation order* of coefficients that reach a
+/// destination by several paths differs from the per-source accumulator, so
+/// results agree with the per-source version to double-precision rounding, not
+/// necessarily bit-for-bit.
+pub fn multiplicity_free_braid_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeBlockKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if src_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
+    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        });
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        });
+    }
+
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+    let all_rank = codomain_rank + domain_rank;
+
+    // Identity matrix: source `i` starts as its own basis tree with coeff one.
+    let num_src = src_keys.len();
+    let mut basis = src_keys.to_vec();
+    let mut columns: Vec<Vec<Option<R::Scalar>>> = (0..num_src)
+        .map(|i| {
+            let mut column = vec![None; num_src];
+            column[i] = Some(rule.scalar_one());
+            column
+        })
+        .collect();
+
+    // Step A: repartition everything into the codomain (bendleft chain).
+    let mut current_codomain_rank = codomain_rank;
+    while current_codomain_rank < all_rank {
+        let (next_basis, next_columns) =
+            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+                multiplicity_free_bendleft_tree_pair(rule, key)
+            })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_codomain_rank += 1;
+    }
+
+    // Step B: braid the (now all-codomain) tree ONE adjacent swap at a time,
+    // each swap batched across the whole block. This replaces the per-source
+    // inner braid (`multiplicity_free_braid_tree`, whose `FusionTermAccumulator`
+    // and elementary-swap term lists ran once per source tree) with the shared
+    // block matrix walk — the TensorKit 0.17 `artin_braid`-on-a-block scheme.
+    let swaps = permutation_to_adjacent_swaps(&permutation, all_rank)?;
+    let mut current_levels = levels.clone();
+    for swap in swaps {
+        let inverse = current_levels[swap] > current_levels[swap + 1];
+        let (next_basis, next_columns) =
+            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+                let domain = key.domain_tree().clone();
+                Ok(multiplicity_free_artin_braid_at_with_inverse(
+                    rule,
+                    key.codomain_tree(),
+                    swap,
+                    inverse,
+                )?
+                .into_iter()
+                .map(move |(codomain_tree, coefficient)| {
+                    (
+                        FusionTreeBlockKey::pair(codomain_tree, domain.clone()),
+                        coefficient,
+                    )
+                }))
+            })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_levels.swap(swap, swap + 1);
+    }
+
+    // Step C: repartition back to the requested codomain rank.
+    let target_codomain_rank = codomain_permutation.len();
+    while current_codomain_rank > target_codomain_rank {
+        let (next_basis, next_columns) =
+            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+                multiplicity_free_bendright_tree_pair(rule, key)
+            })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_codomain_rank -= 1;
+    }
+    while current_codomain_rank < target_codomain_rank {
+        let (next_basis, next_columns) =
+            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+                multiplicity_free_bendleft_tree_pair(rule, key)
+            })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_codomain_rank += 1;
+    }
+
+    // Scatter the dense matrix back into per-source row lists. Columns are
+    // indexed by source, so iterating in source order needs no sort.
+    let mut rows_per_source: Vec<Vec<(FusionTreeBlockKey, R::Scalar)>> = vec![Vec::new(); num_src];
+    for (dst_key, column) in basis.iter().zip(&columns) {
+        for (src, coefficient) in column.iter().enumerate() {
+            if let Some(coefficient) = coefficient {
+                rows_per_source[src].push((dst_key.clone(), coefficient.clone()));
+            }
+        }
+    }
+    Ok(rows_per_source)
+}
+
+/// Batched [`multiplicity_free_permute_tree_pair`] over a block: symmetric
+/// braiding with the trivial level ordering.
+pub fn multiplicity_free_permute_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeBlockKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    if src_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
+    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    multiplicity_free_braid_tree_pair_block(
+        rule,
+        src_keys,
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )
 }
 
 fn multiplicity_free_repartition_terms<R>(
@@ -4077,7 +4476,7 @@ fn multiplicity_free_artin_braid_at_with_inverse<R>(
     tree: &FusionTreeKey,
     index: usize,
     inverse: bool,
-) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+) -> Result<SmallVec<[(FusionTreeKey, R::Scalar); 2]>, CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
@@ -4096,9 +4495,11 @@ where
 
     let left = tree.uncoupled()[index];
     let right = tree.uncoupled()[index + 1];
-    let mut uncoupled = tree.uncoupled().to_vec();
+    // Collect into the inline `SmallVec` types (stack-resident for ≤8 legs)
+    // rather than heap `Vec`s: this is on the per-swap braid hot path.
+    let mut uncoupled: SectorVec = tree.uncoupled().iter().copied().collect();
     uncoupled.swap(index, index + 1);
-    let mut is_dual = tree.is_dual().to_vec();
+    let mut is_dual: DualVec = tree.is_dual().iter().copied().collect();
     is_dual.swap(index, index + 1);
 
     if left == rule.vacuum() || right == rule.vacuum() {
@@ -4122,10 +4523,12 @@ where
             }
             vertices.swap(index - 1, index);
         }
-        return Ok(vec![(
+        let mut out = SmallVec::new();
+        out.push((
             FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices),
             rule.scalar_one(),
-        )]);
+        ));
+        return Ok(out);
     }
 
     if !rule.braiding_style().has_braiding() {
@@ -4154,16 +4557,18 @@ where
         } else {
             rule.r_symbol_scalar(left, right, coupled)
         };
-        return Ok(vec![(
+        let mut out = SmallVec::new();
+        out.push((
             FusionTreeKey::new(
                 uncoupled,
                 tree.coupled(),
                 is_dual,
-                tree.innerlines().to_vec(),
-                tree.vertices().to_vec(),
+                tree.innerlines().iter().copied(),
+                tree.vertices().iter().copied(),
             ),
             coefficient,
-        )]);
+        ));
+        return Ok(out);
     }
 
     let a = inner_extended_sector(tree, index - 1)?;
@@ -4171,12 +4576,12 @@ where
     let c = inner_extended_sector(tree, index)?;
     let d = right;
     let e = inner_extended_sector(tree, index + 1)?;
-    let mut terms = Vec::new();
+    let mut terms: SmallVec<[(FusionTreeKey, R::Scalar); 2]> = SmallVec::new();
     for c_prime in rule.fusion_channels(a, d) {
         if rule.nsymbol(c_prime, b, e) == 0 {
             continue;
         }
-        let mut innerlines = tree.innerlines().to_vec();
+        let mut innerlines: SectorVec = tree.innerlines().iter().copied().collect();
         *innerlines
             .get_mut(index - 1)
             .ok_or(CoreError::MalformedFusionTree {
@@ -4187,7 +4592,7 @@ where
             tree.coupled(),
             is_dual.clone(),
             innerlines,
-            tree.vertices().to_vec(),
+            tree.vertices().iter().copied(),
         );
         let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
         let coefficient = if inverse {
@@ -4207,7 +4612,7 @@ where
 fn multiplicity_free_bendright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
-) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+) -> Result<SmallVec<[(FusionTreeBlockKey, R::Scalar); 1]>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
@@ -4249,43 +4654,53 @@ where
         },
     )?;
 
-    let new_codomain_innerlines = if codomain_rank > 2 {
-        codomain.innerlines()[..codomain.innerlines().len() - 1].to_vec()
+    // Build the new trees straight from slice iterators: `FusionTreeKey::new`
+    // collects into inline `SmallVec`, so passing iterators (not `.to_vec()`)
+    // keeps small trees stack-resident — the intermediate heap `Vec`s here were
+    // a large share of the cold recoupling-compile malloc traffic.
+    let cod_inner = codomain.innerlines();
+    let new_codomain_innerlines: &[SectorId] = if codomain_rank > 2 {
+        &cod_inner[..cod_inner.len() - 1]
     } else {
-        Vec::new()
+        &[]
     };
-    let new_codomain_vertices = if codomain_rank > 1 {
-        codomain.vertices()[..codomain.vertices().len() - 1].to_vec()
+    let cod_vertices = codomain.vertices();
+    let new_codomain_vertices: &[SectorId] = if codomain_rank > 1 {
+        &cod_vertices[..cod_vertices.len() - 1]
     } else {
-        Vec::new()
+        &[]
     };
     let new_codomain = FusionTreeKey::new(
-        codomain.uncoupled()[..codomain_rank - 1].to_vec(),
+        codomain.uncoupled()[..codomain_rank - 1].iter().copied(),
         Some(left_coupled),
-        codomain.is_dual()[..codomain_rank - 1].to_vec(),
-        new_codomain_innerlines,
-        new_codomain_vertices,
+        codomain.is_dual()[..codomain_rank - 1].iter().copied(),
+        new_codomain_innerlines.iter().copied(),
+        new_codomain_vertices.iter().copied(),
     );
 
     let domain_rank = domain.uncoupled().len();
-    let mut new_domain_uncoupled = domain.uncoupled().to_vec();
-    new_domain_uncoupled.push(rule.dual(bent_sector));
-    let mut new_domain_is_dual = domain.is_dual().to_vec();
-    new_domain_is_dual.push(!bent_is_dual);
-    let mut new_domain_innerlines = domain.innerlines().to_vec();
-    if domain_rank > 1 {
-        new_domain_innerlines.push(coupled);
-    }
-    let mut new_domain_vertices = domain.vertices().to_vec();
-    if domain_rank > 0 {
-        new_domain_vertices.push(SectorId::new(1));
-    }
     let new_domain = FusionTreeKey::new(
-        new_domain_uncoupled,
+        domain
+            .uncoupled()
+            .iter()
+            .copied()
+            .chain(std::iter::once(rule.dual(bent_sector))),
         Some(left_coupled),
-        new_domain_is_dual,
-        new_domain_innerlines,
-        new_domain_vertices,
+        domain
+            .is_dual()
+            .iter()
+            .copied()
+            .chain(std::iter::once(!bent_is_dual)),
+        domain
+            .innerlines()
+            .iter()
+            .copied()
+            .chain((domain_rank > 1).then_some(coupled)),
+        domain
+            .vertices()
+            .iter()
+            .copied()
+            .chain((domain_rank > 0).then_some(SectorId::new(1))),
     );
 
     let mut coefficient = rule.sqrt_dim_scalar(coupled)
@@ -4295,16 +4710,18 @@ where
         coefficient = coefficient
             * rule.scalar_conj(rule.frobenius_schur_phase_scalar(rule.dual(bent_sector)));
     }
-    Ok(vec![(
+    let mut out = SmallVec::new();
+    out.push((
         FusionTreeBlockKey::pair(new_codomain, new_domain),
         coefficient,
-    )])
+    ));
+    Ok(out)
 }
 
 fn multiplicity_free_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
-) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+) -> Result<SmallVec<[(FusionTreeBlockKey, R::Scalar); 1]>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
@@ -4410,8 +4827,10 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let first = if tree_pair.codomain_tree().uncoupled().is_empty() {
+    let first: Vec<_> = if tree_pair.codomain_tree().uncoupled().is_empty() {
         multiplicity_free_bendleft_tree_pair(rule, tree_pair)?
+            .into_iter()
+            .collect()
     } else {
         multiplicity_free_foldright_tree_pair(rule, tree_pair)?
     };
@@ -4434,8 +4853,10 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let first = if tree_pair.domain_tree().uncoupled().is_empty() {
+    let first: Vec<_> = if tree_pair.domain_tree().uncoupled().is_empty() {
         multiplicity_free_bendright_tree_pair(rule, tree_pair)?
+            .into_iter()
+            .collect()
     } else {
         multiplicity_free_foldleft_tree_pair(rule, tree_pair)?
     };
@@ -5252,6 +5673,22 @@ impl FusionTreeBlockKey {
         sectors
     }
 
+    pub fn external_sector<R>(&self, rule: &R, axis: usize) -> Option<SectorId>
+    where
+        R: FusionRule,
+    {
+        let codomain_len = self.codomain_tree.uncoupled().len();
+        if axis < codomain_len {
+            self.codomain_tree.uncoupled().get(axis).copied()
+        } else {
+            self.domain_tree
+                .uncoupled()
+                .get(axis.checked_sub(codomain_len)?)
+                .copied()
+                .map(|sector| rule.dual(sector))
+        }
+    }
+
     pub fn external_is_dual(&self) -> Vec<bool> {
         let mut is_dual = Vec::with_capacity(
             self.codomain_tree.is_dual().len() + self.domain_tree.is_dual().len(),
@@ -5342,8 +5779,8 @@ impl<const N: usize> From<[SectorId; N]> for BlockKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockSpec {
     key: BlockKey,
-    shape: Vec<usize>,
-    strides: Vec<usize>,
+    shape: DimVec,
+    strides: DimVec,
     offset: usize,
 }
 
@@ -5367,8 +5804,8 @@ impl BlockSpec {
         storage_end_exclusive(&shape, &strides, offset)?;
         Ok(Self {
             key,
-            shape,
-            strides,
+            shape: shape.into_iter().collect(),
+            strides: strides.into_iter().collect(),
             offset,
         })
     }
@@ -5434,14 +5871,14 @@ impl SectorBlock {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTreeBlockGroup {
     group_key: FusionTreeGroupKey,
-    block_indices: Vec<usize>,
+    block_indices: DimVec,
 }
 
 impl FusionTreeBlockGroup {
     pub fn new(group_key: FusionTreeGroupKey, block_indices: Vec<usize>) -> Self {
         Self {
             group_key,
-            block_indices,
+            block_indices: block_indices.into_iter().collect(),
         }
     }
 
@@ -5460,7 +5897,7 @@ impl FusionTreeBlockGroup {
 pub struct SectorStructure {
     rank: usize,
     blocks: Vec<SectorBlock>,
-    sorted_indices: Vec<usize>,
+    sorted_indices: DimVec,
     compact_lookup: Option<CompactBlockLookup>,
 }
 
@@ -5473,7 +5910,7 @@ impl SectorStructure {
         Self {
             rank,
             blocks: Vec::new(),
-            sorted_indices: Vec::new(),
+            sorted_indices: DimVec::new(),
             compact_lookup: None,
         }
     }
@@ -5488,7 +5925,7 @@ impl SectorStructure {
             let key = key.into();
             blocks.push(SectorBlock::new(key));
         }
-        let mut sorted_indices = (0..blocks.len()).collect::<Vec<_>>();
+        let mut sorted_indices = (0..blocks.len()).collect::<DimVec>();
         sorted_indices
             .sort_unstable_by(|&left, &right| blocks[left].key().cmp(blocks[right].key()));
         for pair in sorted_indices.windows(2) {
@@ -5524,7 +5961,7 @@ impl SectorStructure {
 
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
         let mut groups = Vec::<FusionTreeBlockGroup>::new();
-        let mut group_indices = HashMap::<FusionTreeGroupKey, usize>::new();
+        let mut group_indices = FxHashMap::<FusionTreeGroupKey, usize>::default();
         for (index, block) in self.blocks.iter().enumerate() {
             let Some(group_key) = block.key().fusion_tree_group_key() else {
                 continue;
@@ -5664,7 +6101,7 @@ impl SectorStructure {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CompactBlockLookup {
-    indices: Vec<usize>,
+    indices: DimVec,
 }
 
 impl CompactBlockLookup {
@@ -5682,7 +6119,7 @@ impl CompactBlockLookup {
         if len > blocks.len().saturating_mul(4).max(1) {
             return None;
         }
-        let mut indices = vec![Self::MISSING; len];
+        let mut indices = DimVec::from_elem(Self::MISSING, len);
         for (index, id) in ids.into_iter().enumerate() {
             if indices[id] != Self::MISSING {
                 return None;
@@ -5702,13 +6139,13 @@ impl CompactBlockLookup {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DegeneracyBlock {
-    shape: Vec<usize>,
-    strides: Vec<usize>,
+    shape: DimVec,
+    strides: DimVec,
     offset: usize,
 }
 
 impl DegeneracyBlock {
-    pub fn new(shape: Vec<usize>, strides: Vec<usize>, offset: usize) -> Result<Self, CoreError> {
+    pub fn new(shape: DimVec, strides: DimVec, offset: usize) -> Result<Self, CoreError> {
         if shape.len() != strides.len() {
             return Err(CoreError::RankMismatch {
                 shape: shape.len(),
@@ -5725,7 +6162,11 @@ impl DegeneracyBlock {
 
     pub fn column_major(shape: Vec<usize>, offset: usize) -> Result<Self, CoreError> {
         let strides = column_major_strides(&shape)?;
-        Self::new(shape, strides, offset)
+        Self::new(
+            shape.into_iter().collect(),
+            strides.into_iter().collect(),
+            offset,
+        )
     }
 
     #[inline]
@@ -5864,10 +6305,147 @@ impl<'a> BlockRef<'a> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BlockStructureContentBlock {
+    key: BlockKey,
+    shape: DimVec,
+    strides: DimVec,
+    offset: usize,
+}
+
+impl BlockStructureContentBlock {
+    #[inline]
+    pub fn key(&self) -> &BlockKey {
+        &self.key
+    }
+
+    #[inline]
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    #[inline]
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockStructureContent {
+    id: usize,
+    rank: usize,
+    blocks: Arc<[BlockStructureContentBlock]>,
+}
+
+impl BlockStructureContent {
+    #[inline]
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[inline]
+    pub fn blocks(&self) -> &[BlockStructureContentBlock] {
+        &self.blocks
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct BlockStructureInternKey {
+    rank: usize,
+    blocks: Arc<[BlockStructureContentBlock]>,
+}
+
+fn block_structure_intern_table(
+) -> &'static RwLock<FxHashMap<BlockStructureInternKey, Arc<BlockStructureContent>>> {
+    static TABLE: OnceLock<RwLock<FxHashMap<BlockStructureInternKey, Arc<BlockStructureContent>>>> =
+        OnceLock::new();
+    TABLE.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
+
+fn intern_block_structure_content(
+    sector: &SectorStructure,
+    degeneracy: &DegeneracyStructure,
+) -> Arc<BlockStructureContent> {
+    let mut blocks = Vec::with_capacity(sector.block_count());
+    for index in 0..sector.block_count() {
+        let sector_key = sector
+            .key(index)
+            .expect("validated block structure sector index");
+        let block = degeneracy
+            .block(index)
+            .expect("validated block structure degeneracy index");
+        blocks.push(BlockStructureContentBlock {
+            key: sector_key.clone(),
+            shape: block.shape().iter().copied().collect(),
+            strides: block.strides().iter().copied().collect(),
+            offset: block.offset(),
+        });
+    }
+
+    let blocks = Arc::<[BlockStructureContentBlock]>::from(blocks);
+    let key = BlockStructureInternKey {
+        rank: sector.rank(),
+        blocks: Arc::clone(&blocks),
+    };
+    let table = block_structure_intern_table();
+    if let Ok(read) = table.read() {
+        if let Some(content) = read.get(&key) {
+            return Arc::clone(content);
+        }
+    }
+
+    let mut write = table
+        .write()
+        .expect("block structure intern table poisoned");
+    if let Some(content) = write.get(&key) {
+        return Arc::clone(content);
+    }
+    let content = Arc::new(BlockStructureContent {
+        id: write.len() + 1,
+        rank: sector.rank(),
+        blocks,
+    });
+    write.insert(key, Arc::clone(&content));
+    content
+}
+
+fn block_structure_arc_table() -> &'static RwLock<FxHashMap<usize, Weak<BlockStructure>>> {
+    static TABLE: OnceLock<RwLock<FxHashMap<usize, Weak<BlockStructure>>>> = OnceLock::new();
+    TABLE.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
+
+fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<BlockStructure> {
+    let id = structure.content_id();
+    let table = block_structure_arc_table();
+    if let Ok(read) = table.read() {
+        if let Some(existing) = read.get(&id).and_then(Weak::upgrade) {
+            return existing;
+        }
+    }
+
+    let mut write = table.write().expect("block structure arc table poisoned");
+    if let Some(existing) = write.get(&id).and_then(Weak::upgrade) {
+        return existing;
+    }
+    write.insert(id, Arc::downgrade(&structure));
+    structure
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockStructure {
     sector: SectorStructure,
     degeneracy: DegeneracyStructure,
+    content: Arc<BlockStructureContent>,
     // Cached at construction; replay validation checks this against storage
     // lengths on every call and must not re-scan all blocks.
     required_len: usize,
@@ -5882,12 +6460,16 @@ impl BlockStructure {
     }
 
     pub fn empty(rank: usize) -> Self {
+        let sector = SectorStructure::empty(rank);
+        let degeneracy = DegeneracyStructure {
+            rank,
+            blocks: Vec::new(),
+        };
+        let content = intern_block_structure_content(&sector, &degeneracy);
         Self {
-            sector: SectorStructure::empty(rank),
-            degeneracy: DegeneracyStructure {
-                rank,
-                blocks: Vec::new(),
-            },
+            sector,
+            degeneracy,
+            content,
             required_len: 0,
         }
     }
@@ -5929,11 +6511,21 @@ impl BlockStructure {
             });
         }
         let required_len = degeneracy.required_len()?;
+        let content = intern_block_structure_content(&sector, &degeneracy);
         Ok(Self {
             sector,
             degeneracy,
+            content,
             required_len,
         })
+    }
+
+    pub fn into_shared(self) -> Arc<Self> {
+        canonicalize_block_structure_arc(Arc::new(self))
+    }
+
+    pub fn canonicalize_shared(structure: Arc<Self>) -> Arc<Self> {
+        canonicalize_block_structure_arc(structure)
     }
 
     pub fn packed_column_major<I>(rank: usize, shapes: I) -> Result<Self, CoreError>
@@ -5992,6 +6584,16 @@ impl BlockStructure {
     #[inline]
     pub fn degeneracy_structure(&self) -> &DegeneracyStructure {
         &self.degeneracy
+    }
+
+    #[inline]
+    pub fn content_id(&self) -> usize {
+        self.content.id()
+    }
+
+    #[inline]
+    pub fn content_key(&self) -> Arc<BlockStructureContent> {
+        Arc::clone(&self.content)
     }
 
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
@@ -6104,7 +6706,7 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         space: TensorMapSpace<NOUT, NIN>,
         structure: BlockStructure,
     ) -> Result<Self, CoreError> {
-        Self::from_vec_with_shared_structure(data, space, Arc::new(structure))
+        Self::from_vec_with_shared_structure(data, space, structure.into_shared())
     }
 
     pub fn from_vec_with_shared_structure(
@@ -6243,7 +6845,7 @@ where
         space: TensorMapSpace<NOUT, NIN>,
         structure: BlockStructure,
     ) -> Result<Self, CoreError> {
-        Self::from_storage_with_shared_structure(storage, space, Arc::new(structure))
+        Self::from_storage_with_shared_structure(storage, space, structure.into_shared())
     }
 
     pub fn from_storage_with_shared_structure(
@@ -6251,7 +6853,12 @@ where
         space: TensorMapSpace<NOUT, NIN>,
         structure: Arc<BlockStructure>,
     ) -> Result<Self, CoreError> {
-        Self::from_storage_parts(storage, space, structure, None)
+        Self::from_storage_parts(
+            storage,
+            space,
+            BlockStructure::canonicalize_shared(structure),
+            None,
+        )
     }
 
     /// Builds a symmetric tensor from caller-provided storage.
@@ -7049,6 +7656,7 @@ fn column_major_strides(shape: &[usize]) -> Result<Vec<usize>, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     /// Fixture layout: subblocks packed contiguously in key order. Not a product
     /// layout (the only one is the coupled sector matrix); fixtures use it to
@@ -7271,13 +7879,13 @@ mod tests {
             }
         }
 
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
             match (left.id(), right.id()) {
-                (0, x) | (x, 0) => vec![SectorId::new(x)],
-                (1, 1) => vec![SectorId::new(0), SectorId::new(2)],
-                (1, 2) | (2, 1) => vec![SectorId::new(1), SectorId::new(3)],
-                (2, 2) => vec![SectorId::new(0)],
-                _ => Vec::new(),
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(2)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(1), SectorId::new(3)],
+                (2, 2) => smallvec![SectorId::new(0)],
+                _ => SmallVec::new(),
             }
         }
     }
@@ -7304,13 +7912,13 @@ mod tests {
             sector
         }
 
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
             match (left.id(), right.id()) {
-                (0, x) | (x, 0) => vec![SectorId::new(x)],
-                (1, 1) => vec![SectorId::new(2), SectorId::new(0)],
-                (1, 2) | (2, 1) => vec![SectorId::new(1)],
-                (2, 2) => vec![SectorId::new(0)],
-                _ => Vec::new(),
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(2), SectorId::new(0)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(1)],
+                (2, 2) => smallvec![SectorId::new(0)],
+                _ => SmallVec::new(),
             }
         }
     }
@@ -7337,8 +7945,8 @@ mod tests {
             SectorId::new((4 - sector.id() % 4) % 4)
         }
 
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-            vec![SectorId::new((left.id() + right.id()) % 4)]
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new((left.id() + right.id()) % 4)]
         }
     }
 
@@ -7375,10 +7983,10 @@ mod tests {
             Self::encode((2 - z2) % 2, (3 - z3) % 3)
         }
 
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
             let (left_z2, left_z3) = Self::decode(left);
             let (right_z2, right_z3) = Self::decode(right);
-            vec![Self::encode(
+            smallvec![Self::encode(
                 (left_z2 + right_z2) % 2,
                 (left_z3 + right_z3) % 3,
             )]
@@ -7403,8 +8011,8 @@ mod tests {
             SectorId::new(0)
         }
 
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-            vec![SectorId::new((left.id() + right.id()) % 2)]
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new((left.id() + right.id()) % 2)]
         }
     }
 
@@ -7459,13 +8067,13 @@ mod tests {
             SectorId::new(0)
         }
 
-        fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
             match (left.id(), right.id()) {
-                (0, x) | (x, 0) => vec![SectorId::new(x)],
-                (1, 2) | (2, 1) => vec![SectorId::new(3)],
-                (3, 1) | (1, 3) => vec![SectorId::new(2)],
-                (3, 2) | (2, 3) => vec![SectorId::new(1)],
-                _ => vec![SectorId::new((left.id() + right.id()) % 4)],
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(3)],
+                (3, 1) | (1, 3) => smallvec![SectorId::new(2)],
+                (3, 2) | (2, 3) => smallvec![SectorId::new(1)],
+                _ => smallvec![SectorId::new((left.id() + right.id()) % 4)],
             }
         }
     }
@@ -7597,7 +8205,8 @@ mod tests {
 
         assert_eq!(z2.fusion_style(), FusionStyleKind::Unique);
         assert_eq!(
-            z2.fusion_channels(SectorId::new(1), SectorId::new(1)),
+            z2.fusion_channels(SectorId::new(1), SectorId::new(1))
+                .to_vec(),
             vec![SectorId::new(0)]
         );
         assert_eq!(
@@ -7611,7 +8220,8 @@ mod tests {
 
         assert_eq!(su2.fusion_style(), FusionStyleKind::Simple);
         assert_eq!(
-            su2.fusion_channels(SectorId::new(1), SectorId::new(1)),
+            su2.fusion_channels(SectorId::new(1), SectorId::new(1))
+                .to_vec(),
             vec![SectorId::new(0), SectorId::new(2)]
         );
         assert_eq!(
@@ -8355,7 +8965,8 @@ mod tests {
             U1Irrep::new(-3).sector_id()
         );
         assert_eq!(
-            rule.fusion_channels(U1Irrep::new(-2).sector_id(), U1Irrep::new(5).sector_id()),
+            rule.fusion_channels(U1Irrep::new(-2).sector_id(), U1Irrep::new(5).sector_id())
+                .to_vec(),
             vec![U1Irrep::new(3).sector_id()]
         );
     }
@@ -8409,7 +9020,7 @@ mod tests {
 
         assert_eq!(chained_rule.fusion_style(), FusionStyleKind::Simple);
         assert_eq!(chained_rule.braiding_style(), BraidingStyleKind::Fermionic);
-        assert_eq!(chained_rule.fusion_channels(a, b), vec![c0, c2]);
+        assert_eq!(chained_rule.fusion_channels(a, b).to_vec(), vec![c0, c2]);
     }
 
     #[test]
@@ -8426,7 +9037,7 @@ mod tests {
         assert_eq!(rule.vacuum(), sector(z2_even(), 0));
         assert_eq!(rule.dual(odd_two), sector(z2_odd(), -2));
         assert_eq!(
-            rule.fusion_channels(odd_two, odd_minus_five),
+            rule.fusion_channels(odd_two, odd_minus_five).to_vec(),
             vec![even_minus_three]
         );
         assert_eq!(rule.nsymbol(odd_two, odd_minus_five, even_minus_three), 1);
@@ -8456,7 +9067,7 @@ mod tests {
         assert_eq!(rule.fusion_style(), FusionStyleKind::Simple);
         assert_eq!(rule.braiding_style(), BraidingStyleKind::Fermionic);
         assert_eq!(rule.dual(a), sector(z2_odd(), -1, 1));
-        assert_eq!(rule.fusion_channels(a, b), vec![c0, c2]);
+        assert_eq!(rule.fusion_channels(a, b).to_vec(), vec![c0, c2]);
         assert_eq!(rule.r_symbol_scalar(a, b, c0), 1.0);
         assert_eq!(rule.r_symbol_scalar(a, b, c2), -1.0);
         assert!((rule.sqrt_dim_scalar(c2) - 3.0_f64.sqrt()).abs() < 1.0e-12);
@@ -8611,7 +9222,8 @@ mod tests {
             rule.fusion_channels(
                 SU2Irrep::from_twice_spin(1).sector_id(),
                 SU2Irrep::from_twice_spin(2).sector_id(),
-            ),
+            )
+            .to_vec(),
             vec![
                 SU2Irrep::from_twice_spin(1).sector_id(),
                 SU2Irrep::from_twice_spin(3).sector_id(),
@@ -9707,6 +10319,89 @@ mod tests {
             .iter()
             .all(|key| key.codomain_vertices() == [SectorId::new(1)]));
         assert!(keys.iter().all(|key| key.domain_vertices().is_empty()));
+    }
+
+    #[test]
+    fn braid_tree_pair_block_matches_per_source() {
+        use std::collections::BTreeMap;
+        let rule = SU2FusionRule;
+        let leg = || {
+            SectorLeg::new(
+                [
+                    (SectorId::new(0), 1),
+                    (SectorId::new(1), 1),
+                    (SectorId::new(2), 1),
+                ],
+                false,
+            )
+        };
+        // (V⊗V⊗V) ← V spans many uncoupled blocks; test each block.
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg(), leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // Group source tree-pairs by their uncoupled block (the batching unit).
+        let mut blocks: BTreeMap<Vec<usize>, Vec<FusionTreeBlockKey>> = BTreeMap::new();
+        for key in &keys {
+            let tag: Vec<usize> = key
+                .codomain_tree()
+                .uncoupled()
+                .iter()
+                .chain(key.domain_tree().uncoupled())
+                .map(|s| s.id())
+                .collect();
+            blocks.entry(tag).or_default().push(key.clone());
+        }
+
+        // Global leg indices: codomain legs 0,1,2 and domain leg 3. Reverse the
+        // codomain, keep the domain leg in place.
+        let codomain_permutation = [2usize, 1, 0];
+        let domain_permutation = [3usize];
+        let mut checked_blocks = 0;
+        for src_keys in blocks.values() {
+            let batched = multiplicity_free_permute_tree_pair_block(
+                &rule,
+                src_keys,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .unwrap();
+            assert_eq!(batched.len(), src_keys.len());
+            for (src, batched_rows) in src_keys.iter().zip(&batched) {
+                let per_source = multiplicity_free_permute_tree_pair(
+                    &rule,
+                    src,
+                    &codomain_permutation,
+                    &domain_permutation,
+                )
+                .unwrap();
+                // Compare as key -> coefficient maps within double-precision tol.
+                let mut want: BTreeMap<FusionTreeBlockKey, f64> = BTreeMap::new();
+                for (k, c) in &per_source {
+                    *want.entry(k.clone()).or_insert(0.0) += c;
+                }
+                let mut got: BTreeMap<FusionTreeBlockKey, f64> = BTreeMap::new();
+                for (k, c) in batched_rows {
+                    *got.entry(k.clone()).or_insert(0.0) += c;
+                }
+                assert_eq!(
+                    want.keys().collect::<Vec<_>>(),
+                    got.keys().collect::<Vec<_>>(),
+                    "destination trees differ for a source in block"
+                );
+                for (k, wc) in &want {
+                    let gc = got[k];
+                    assert!(
+                        (wc - gc).abs() <= 1e-12 * (1.0 + wc.abs()),
+                        "coefficient mismatch {wc} vs {gc}"
+                    );
+                }
+            }
+            checked_blocks += 1;
+        }
+        assert!(checked_blocks > 0, "expected at least one block");
     }
 
     #[test]
