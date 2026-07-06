@@ -323,6 +323,7 @@ pub(crate) fn reset_tree_transform_persistent_cache_state() {
     *persistent_tree_plan_loaded()
         .write()
         .expect("persistent tree-plan cache state poisoned") = false;
+    last_persisted_plan_count().store(0, std::sync::atomic::Ordering::Relaxed);
     if let Some(path) = persistent_tree_plan_cache_path() {
         let _ = fs::remove_file(path);
     }
@@ -366,7 +367,15 @@ fn load_persistent_builtin_tree_plans_if_needed() {
     *loaded = true;
 }
 
+/// Number of plans in the cache the last time it was serialized to disk.
+/// Used to skip re-encoding the entire cache on every single plan miss.
+fn last_persisted_plan_count() -> &'static std::sync::atomic::AtomicUsize {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    &COUNT
+}
+
 fn persist_builtin_tree_plans_if_enabled() {
+    use std::sync::atomic::Ordering;
     let Some(path) = persistent_tree_plan_cache_path() else {
         return;
     };
@@ -374,10 +383,21 @@ fn persist_builtin_tree_plans_if_enabled() {
     let plans = global
         .read()
         .expect("global tree-transform plan cache poisoned");
-    if plans.is_empty() {
+    let count = plans.len();
+    if count == 0 {
+        return;
+    }
+    // ponytail: this runs on every plan miss; re-encoding the whole cache each
+    // time is O(misses × cachesize) (measured: 20 GiB churn on a cross-χ run).
+    // Only re-serialize once the cache has grown by a chunk. Worst case the disk
+    // file lags the in-memory cache by up to last/8 plans, which the next process
+    // simply recompiles — the persistent cache is an optimization, not correctness.
+    let last = last_persisted_plan_count().load(Ordering::Relaxed);
+    if count < last + core::cmp::max(64, last / 8) {
         return;
     }
     let bytes = encode_builtin_tree_plan_cache(&plans);
+    last_persisted_plan_count().store(count, Ordering::Relaxed);
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() {
             return;
