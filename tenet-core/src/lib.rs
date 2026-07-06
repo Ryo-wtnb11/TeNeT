@@ -3891,39 +3891,81 @@ where
 /// O(steps) rather than O(steps × sources) — the term-list style TeNeT used
 /// (equivalent to TensorKit ≤0.16's per-tree `FusionTreeDict`) allocated a
 /// fresh accumulator and cloned keys per source per step.
+/// Dense coefficient matrix (TK's `Matrix{E}`): rows are destination basis
+/// trees, columns the original sources. Stored row-major in ONE flat
+/// allocation that grows amortized as rows are added, instead of a
+/// `Vec<Vec<_>>` that heap-allocs a fresh column per destination tree (the
+/// batched braid over a whole block adds hundreds of thousands of rows across
+/// its bend/braid steps, so the per-row allocation dominated the cold
+/// recoupling build).
+struct DenseColumns<S> {
+    data: Vec<Option<S>>,
+    num_src: usize,
+    num_rows: usize,
+}
+
+impl<S: Clone> DenseColumns<S> {
+    fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(rows_hint.saturating_mul(num_src)),
+            num_src,
+            num_rows: 0,
+        }
+    }
+
+    /// Append a new all-empty row, returning its index.
+    fn push_empty_row(&mut self) -> usize {
+        let row = self.num_rows;
+        self.data.resize_with(self.data.len() + self.num_src, || None);
+        self.num_rows += 1;
+        row
+    }
+
+    #[inline]
+    fn row(&self, row: usize) -> &[Option<S>] {
+        let start = row * self.num_src;
+        &self.data[start..start + self.num_src]
+    }
+
+    #[inline]
+    fn row_mut(&mut self, row: usize) -> &mut [Option<S>] {
+        let start = row * self.num_src;
+        &mut self.data[start..start + self.num_src]
+    }
+}
+
 fn compose_block_terms<R, F, I>(
     rule: &R,
     basis: &[FusionTreeBlockKey],
-    columns: &[Vec<Option<R::Scalar>>],
-    num_src: usize,
+    columns: &DenseColumns<R::Scalar>,
     mut transform: F,
-) -> Result<(Vec<FusionTreeBlockKey>, Vec<Vec<Option<R::Scalar>>>), CoreError>
+) -> Result<(Vec<FusionTreeBlockKey>, DenseColumns<R::Scalar>), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
     F: FnMut(&R, &FusionTreeBlockKey) -> Result<I, CoreError>,
     I: IntoIterator<Item = (FusionTreeBlockKey, R::Scalar)>,
 {
+    let num_src = columns.num_src;
     let mut index: FxHashMap<FusionTreeBlockKey, usize> = FxHashMap::default();
     let mut next_basis: Vec<FusionTreeBlockKey> = Vec::new();
-    let mut next_columns: Vec<Vec<Option<R::Scalar>>> = Vec::new();
-    for (source_key, source_column) in basis.iter().zip(columns) {
+    let mut next_columns: DenseColumns<R::Scalar> = DenseColumns::with_capacity(num_src, basis.len());
+    for (source_row, source_key) in basis.iter().enumerate() {
         for (dst_key, step_coefficient) in transform(rule, source_key)? {
             let row = match index.get(&dst_key) {
                 Some(&row) => row,
                 None => {
-                    let row = next_basis.len();
+                    let row = next_columns.push_empty_row();
                     index.insert(dst_key.clone(), row);
                     next_basis.push(dst_key);
-                    // Dense coefficient column over the original sources (TK's
-                    // `Matrix{E}`): no per-tree hashmap alloc, no usize hashing.
-                    next_columns.push(vec![None; num_src]);
                     row
                 }
             };
             // dst_column[src] += step_coefficient * source_column[src] for each
-            // source that reaches this basis tree.
-            let dst_column = &mut next_columns[row];
+            // source that reaches this basis tree. Source and destination live
+            // in different matrices, so the borrows don't overlap.
+            let source_column = columns.row(source_row);
+            let dst_column = next_columns.row_mut(row);
             for (src, source_coefficient) in source_column.iter().enumerate() {
                 let Some(source_coefficient) = source_coefficient else {
                     continue;
@@ -3993,19 +4035,17 @@ where
     // Identity matrix: source `i` starts as its own basis tree with coeff one.
     let num_src = src_keys.len();
     let mut basis = src_keys.to_vec();
-    let mut columns: Vec<Vec<Option<R::Scalar>>> = (0..num_src)
-        .map(|i| {
-            let mut column = vec![None; num_src];
-            column[i] = Some(rule.scalar_one());
-            column
-        })
-        .collect();
+    let mut columns: DenseColumns<R::Scalar> = DenseColumns::with_capacity(num_src, num_src);
+    for i in 0..num_src {
+        let row = columns.push_empty_row();
+        columns.row_mut(row)[i] = Some(rule.scalar_one());
+    }
 
     // Step A: repartition everything into the codomain (bendleft chain).
     let mut current_codomain_rank = codomain_rank;
     while current_codomain_rank < all_rank {
         let (next_basis, next_columns) =
-            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+            compose_block_terms(rule, &basis, &columns, |rule, key| {
                 multiplicity_free_bendleft_tree_pair(rule, key)
             })?;
         basis = next_basis;
@@ -4023,7 +4063,7 @@ where
     for swap in swaps {
         let inverse = current_levels[swap] > current_levels[swap + 1];
         let (next_basis, next_columns) =
-            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+            compose_block_terms(rule, &basis, &columns, |rule, key| {
                 let domain = key.domain_tree().clone();
                 Ok(multiplicity_free_artin_braid_at_with_inverse(
                     rule,
@@ -4048,7 +4088,7 @@ where
     let target_codomain_rank = codomain_permutation.len();
     while current_codomain_rank > target_codomain_rank {
         let (next_basis, next_columns) =
-            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+            compose_block_terms(rule, &basis, &columns, |rule, key| {
                 multiplicity_free_bendright_tree_pair(rule, key)
             })?;
         basis = next_basis;
@@ -4057,7 +4097,7 @@ where
     }
     while current_codomain_rank < target_codomain_rank {
         let (next_basis, next_columns) =
-            compose_block_terms(rule, &basis, &columns, num_src, |rule, key| {
+            compose_block_terms(rule, &basis, &columns, |rule, key| {
                 multiplicity_free_bendleft_tree_pair(rule, key)
             })?;
         basis = next_basis;
@@ -4068,8 +4108,8 @@ where
     // Scatter the dense matrix back into per-source row lists. Columns are
     // indexed by source, so iterating in source order needs no sort.
     let mut rows_per_source: Vec<Vec<(FusionTreeBlockKey, R::Scalar)>> = vec![Vec::new(); num_src];
-    for (dst_key, column) in basis.iter().zip(&columns) {
-        for (src, coefficient) in column.iter().enumerate() {
+    for (dst_row, dst_key) in basis.iter().enumerate() {
+        for (src, coefficient) in columns.row(dst_row).iter().enumerate() {
             if let Some(coefficient) = coefficient {
                 rows_per_source[src].push((dst_key.clone(), coefficient.clone()));
             }
