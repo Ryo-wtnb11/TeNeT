@@ -1,4 +1,3 @@
-
 use num_complex::{Complex32, Complex64};
 
 use crate::executor::{batch_offset, has_strided_batch_run, matrix_len, strided_batch_run_len};
