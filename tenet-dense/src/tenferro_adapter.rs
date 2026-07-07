@@ -326,9 +326,24 @@ impl DenseExecutor for DefaultDenseExecutor {
         let lhs = TensorRead::from_view(tenferro_view(lhs)?);
         let rhs = TensorRead::from_view(tenferro_view(rhs)?);
         let output = TensorWrite::from_view(tenferro_view_mut(output)?);
-        self.backend
-            .dot_general_read_into(lhs, rhs, &tenferro_dot_config(config), output)
-            .map_err(|err| tenferro_error("dot_general_read_into", err))
+        let dot_config = tenferro_dot_config(config);
+        // Non-conjugating path stays byte-identical to the plain read_into
+        // (which itself just wraps an overwrite accumulation). Conjugation is
+        // folded into the kernel via the accumulation's conj flags — no
+        // conjugated operand copy — instead of falling back to a scalar loop.
+        if config.lhs_conj() || config.rhs_conj() {
+            let mut accumulation = tenferro_tensor::DotGeneralAccumulation::overwrite(lhs.dtype())
+                .map_err(|err| tenferro_error("dot_general_accum", err))?;
+            accumulation.lhs_conj = config.lhs_conj();
+            accumulation.rhs_conj = config.rhs_conj();
+            self.backend
+                .dot_general_read_into_accum(lhs, rhs, &dot_config, accumulation, output)
+                .map_err(|err| tenferro_error("dot_general_accum", err))
+        } else {
+            self.backend
+                .dot_general_read_into(lhs, rhs, &dot_config, output)
+                .map_err(|err| tenferro_error("dot_general_read_into", err))
+        }
     }
 
     fn matmul_into(

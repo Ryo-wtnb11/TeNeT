@@ -27,6 +27,50 @@ fn assert_c64_close(actual: Complex64, expected: Complex64, tol: f64) {
     assert_f64_close(actual.im, expected.im, tol);
 }
 
+// Regression guard for the conjugated-contraction fast path: a conj flag on
+// `dot_general_into` must fold conjugation into the kernel and produce exactly
+// what contracting an elementwise-conjugated operand would — and it must
+// actually change the result (so the flag can't be silently dropped back to a
+// no-op or a bypassed scalar loop).
+#[test]
+fn dot_general_conjugation_flag_matches_materialized_conjugate() {
+    let c = |re: f64, im: f64| Complex64::new(re, im);
+    let shape = [2usize, 2];
+    let strides = [1usize, 2]; // column-major
+    let lhs = vec![c(1.0, 1.0), c(3.0, 2.0), c(2.0, -1.0), c(4.0, -3.0)];
+    let rhs = vec![c(5.0, -2.0), c(7.0, -4.0), c(6.0, 1.0), c(8.0, 2.0)];
+
+    let run = |lhs_data: &[Complex64], lhs_conj: bool, rhs_conj: bool| -> Vec<Complex64> {
+        let mut out = vec![c(0.0, 0.0); 4];
+        let mut executor = DefaultDenseExecutor::new();
+        executor
+            .dot_general_into(
+                DenseWrite::C64(DenseViewMut::new(&mut out, &shape, &strides, 0).unwrap()),
+                DenseRead::C64(DenseView::new(lhs_data, &shape, &strides, 0).unwrap()),
+                DenseRead::C64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
+                &DenseDotConfig::matmul().with_conjugation(lhs_conj, rhs_conj),
+            )
+            .unwrap();
+        out
+    };
+
+    let via_flag = run(&lhs, true, false);
+    let lhs_conjugated: Vec<Complex64> = lhs.iter().map(|z| z.conj()).collect();
+    let via_materialized = run(&lhs_conjugated, false, false);
+    for (actual, expected) in via_flag.iter().zip(&via_materialized) {
+        assert_c64_close(*actual, *expected, 1.0e-12);
+    }
+
+    let plain = run(&lhs, false, false);
+    assert!(
+        via_flag
+            .iter()
+            .zip(&plain)
+            .any(|(a, b)| (a - b).norm() > 1.0e-9),
+        "conjugation flag had no effect on the result"
+    );
+}
+
 fn col_major_index(rows: usize, row: usize, col: usize) -> usize {
     row + col * rows
 }
