@@ -19,6 +19,11 @@ cpu-blas = ["tenet-dense/cpu-blas", "tenet-tensors/cpu-blas"]
 blas-accelerate = ["tenet-dense/blas-accelerate", "tenet-tensors/blas-accelerate"]
 blas-openblas = ["tenet-dense/blas-openblas", "tenet-tensors/blas-openblas"]
 blas-mkl = ["tenet-dense/blas-mkl", "tenet-tensors/blas-mkl"]
+# Routes per-sector SVD/eigh (the DenseExecutor boundary) to the tenferro CUDA
+# backend (cuBLAS/cuSOLVER). Necessary but NOT sufficient for GPU finite-torus:
+# the recoupling replay still runs through the host-only StridedHostKernelAdapter
+# (see tenet-operations kernel_adapter.rs: "Device replay needs a separate" path).
+cuda = ["tenet-dense/cuda", "tenet-tensors/cuda"]
 diagnostics = []
 
 [[example]]
