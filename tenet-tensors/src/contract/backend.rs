@@ -610,50 +610,43 @@ where
     D: DenseBlockScalar + RecouplingCoefficientAction<C>,
     C: Copy + One,
 {
-    if descriptor.lhs_conjugate() || descriptor.rhs_conjugate() {
-        tensorcontract_conjugating_dot_into_workspace(
-            descriptor,
-            term,
+    // Conjugation is carried by `descriptor.dot_config()` (dot-operand order)
+    // and folded into the dense kernel, so conjugated and non-conjugated
+    // contractions share this single GEMM path — no scalar-loop fallback.
+    let logical_lhs = DenseView::new(
+        lhs_data,
+        descriptor.lhs_shape(term),
+        descriptor.lhs_strides(term),
+        term.lhs_offset,
+    )
+    .map_err(OperationError::Dense)?;
+    let logical_rhs = DenseView::new(
+        rhs_data,
+        descriptor.rhs_shape(term),
+        descriptor.rhs_strides(term),
+        term.rhs_offset,
+    )
+    .map_err(OperationError::Dense)?;
+    let (lhs, rhs) = match descriptor.dense_route_order() {
+        TensorContractDenseRouteOrder::LhsRhs => {
+            (D::dense_read(logical_lhs), D::dense_read(logical_rhs))
+        }
+        TensorContractDenseRouteOrder::RhsLhs => {
+            (D::dense_read(logical_rhs), D::dense_read(logical_lhs))
+        }
+    };
+    let output = D::dense_write(
+        DenseViewMut::new(
             output_scratch,
-            lhs_data,
-            rhs_data,
-        )?;
-    } else {
-        let logical_lhs = DenseView::new(
-            lhs_data,
-            descriptor.lhs_shape(term),
-            descriptor.lhs_strides(term),
-            term.lhs_offset,
+            descriptor.output_shape(term),
+            descriptor.output_strides(term),
+            0,
         )
+        .map_err(OperationError::Dense)?,
+    );
+    dense
+        .dot_general_into(output, lhs, rhs, descriptor.dot_config())
         .map_err(OperationError::Dense)?;
-        let logical_rhs = DenseView::new(
-            rhs_data,
-            descriptor.rhs_shape(term),
-            descriptor.rhs_strides(term),
-            term.rhs_offset,
-        )
-        .map_err(OperationError::Dense)?;
-        let (lhs, rhs) = match descriptor.dense_route_order() {
-            TensorContractDenseRouteOrder::LhsRhs => {
-                (D::dense_read(logical_lhs), D::dense_read(logical_rhs))
-            }
-            TensorContractDenseRouteOrder::RhsLhs => {
-                (D::dense_read(logical_rhs), D::dense_read(logical_lhs))
-            }
-        };
-        let output = D::dense_write(
-            DenseViewMut::new(
-                output_scratch,
-                descriptor.output_shape(term),
-                descriptor.output_strides(term),
-                0,
-            )
-            .map_err(OperationError::Dense)?,
-        );
-        dense
-            .dot_general_into(output, lhs, rhs, descriptor.dot_config())
-            .map_err(OperationError::Dense)?;
-    }
 
     let term_alpha = alpha.scale_by_coefficient(term.coefficient);
     let term_beta = if term.apply_beta { beta } else { D::one() };
@@ -671,189 +664,6 @@ where
         term_beta,
     )?;
     Ok(())
-}
-
-fn tensorcontract_conjugating_dot_into_workspace<D, C>(
-    descriptor: &super::structure::TensorContractDescriptor<C>,
-    term: &super::structure::TensorContractDescriptorTerm<C>,
-    output: &mut [D],
-    lhs_data: &[D],
-    rhs_data: &[D],
-) -> Result<(), OperationError>
-where
-    D: DenseBlockScalar + ConjugateValue,
-    C: Copy + One,
-{
-    let output_shape = descriptor.output_shape(term);
-    let contract_shape = descriptor
-        .lhs_contracting_axes()
-        .iter()
-        .map(|&axis| descriptor.lhs_shape(term)[axis])
-        .collect::<Vec<_>>();
-    let output_len = crate::strided::element_count(output_shape)?;
-    let contract_len = crate::strided::element_count(&contract_shape)?;
-    for value in output.iter_mut() {
-        *value = D::zero();
-    }
-    for output_linear in 0..output_len {
-        let mut sum = D::zero();
-        for contract_linear in 0..contract_len {
-            let lhs_index = contract_lhs_offset(descriptor, term, output_linear, contract_linear)?;
-            let rhs_index = contract_rhs_offset(descriptor, term, output_linear, contract_linear)?;
-            sum = sum
-                + lhs_data[lhs_index].maybe_conj(descriptor.lhs_conjugate())
-                    * rhs_data[rhs_index].maybe_conj(descriptor.rhs_conjugate());
-        }
-        let dst_index = linear_strided_offset(
-            output_linear,
-            output_shape,
-            descriptor.output_strides(term),
-            0,
-        )?;
-        output[dst_index] = sum;
-    }
-    Ok(())
-}
-
-fn contract_lhs_offset<C>(
-    descriptor: &super::structure::TensorContractDescriptor<C>,
-    term: &super::structure::TensorContractDescriptorTerm<C>,
-    output_linear: usize,
-    contract_linear: usize,
-) -> Result<usize, OperationError>
-where
-    C: Copy + One,
-{
-    let lhs_shape = descriptor.lhs_shape(term);
-    let lhs_strides = descriptor.lhs_strides(term);
-    let mut offset = term.lhs_offset;
-    let mut output_coords = unravel_index(output_linear, descriptor.output_shape(term))?;
-    let contract_coords = unravel_index_for_axes(
-        contract_linear,
-        lhs_shape,
-        descriptor.lhs_contracting_axes(),
-    )?;
-    for &axis in descriptor.lhs_open_axes() {
-        let coord = output_coords.remove(0);
-        offset = offset
-            .checked_add(
-                coord
-                    .checked_mul(lhs_strides[axis])
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    for (&axis, coord) in descriptor
-        .lhs_contracting_axes()
-        .iter()
-        .zip(contract_coords.into_iter())
-    {
-        offset = offset
-            .checked_add(
-                coord
-                    .checked_mul(lhs_strides[axis])
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    Ok(offset)
-}
-
-fn contract_rhs_offset<C>(
-    descriptor: &super::structure::TensorContractDescriptor<C>,
-    term: &super::structure::TensorContractDescriptorTerm<C>,
-    output_linear: usize,
-    contract_linear: usize,
-) -> Result<usize, OperationError>
-where
-    C: Copy + One,
-{
-    let rhs_shape = descriptor.rhs_shape(term);
-    let rhs_strides = descriptor.rhs_strides(term);
-    let mut offset = term.rhs_offset;
-    let output_coords = unravel_index(output_linear, descriptor.output_shape(term))?;
-    let rhs_output_start = descriptor.lhs_open_axes().len();
-    let contract_coords = unravel_index_for_axes(
-        contract_linear,
-        rhs_shape,
-        descriptor.rhs_contracting_axes(),
-    )?;
-    for (i, &axis) in descriptor.rhs_open_axes().iter().enumerate() {
-        let coord = output_coords[rhs_output_start + i];
-        offset = offset
-            .checked_add(
-                coord
-                    .checked_mul(rhs_strides[axis])
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    for (&axis, coord) in descriptor
-        .rhs_contracting_axes()
-        .iter()
-        .zip(contract_coords.into_iter())
-    {
-        offset = offset
-            .checked_add(
-                coord
-                    .checked_mul(rhs_strides[axis])
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    Ok(offset)
-}
-
-fn unravel_index(mut linear: usize, shape: &[usize]) -> Result<Vec<usize>, OperationError> {
-    let mut coords = Vec::with_capacity(shape.len());
-    for &dim in shape {
-        let coord = if dim == 0 { 0 } else { linear % dim };
-        if dim != 0 {
-            linear /= dim;
-        }
-        coords.push(coord);
-    }
-    Ok(coords)
-}
-
-fn unravel_index_for_axes(
-    mut linear: usize,
-    shape: &[usize],
-    axes: &[usize],
-) -> Result<Vec<usize>, OperationError> {
-    let mut coords = Vec::with_capacity(axes.len());
-    for &axis in axes {
-        let dim = shape[axis];
-        let coord = if dim == 0 { 0 } else { linear % dim };
-        if dim != 0 {
-            linear /= dim;
-        }
-        coords.push(coord);
-    }
-    Ok(coords)
-}
-
-fn linear_strided_offset(
-    mut linear: usize,
-    shape: &[usize],
-    strides: &[usize],
-    base: usize,
-) -> Result<usize, OperationError> {
-    let mut offset = base;
-    for (&dim, &stride) in shape.iter().zip(strides.iter()) {
-        let coord = if dim == 0 { 0 } else { linear % dim };
-        if dim != 0 {
-            linear /= dim;
-        }
-        offset = offset
-            .checked_add(
-                coord
-                    .checked_mul(stride)
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    Ok(offset)
 }
 
 #[cfg(test)]

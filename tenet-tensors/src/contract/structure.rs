@@ -701,13 +701,25 @@ where
             lhs_structure,
             rhs_structure,
         )?;
+        // Conjugation follows its operand into dot-operand order: a RhsLhs route
+        // swaps which physical tensor becomes the dot lhs (see
+        // `dot_lhs_contracting_axes`), so the conj flags swap with it.
+        let (dot_lhs_conj, dot_rhs_conj) = match dense_route.order {
+            TensorContractDenseRouteOrder::LhsRhs => {
+                (axis_plan.lhs_conjugate, axis_plan.rhs_conjugate)
+            }
+            TensorContractDenseRouteOrder::RhsLhs => {
+                (axis_plan.rhs_conjugate, axis_plan.lhs_conjugate)
+            }
+        };
         let mut descriptor = Self {
             dot_config: DenseDotConfig::new(
                 dense_route.dot_lhs_contracting_axes(),
                 dense_route.dot_rhs_contracting_axes(),
                 Vec::new(),
                 Vec::new(),
-            ),
+            )
+            .with_conjugation(dot_lhs_conj, dot_rhs_conj),
             dense_route_kind: dense_route.kind,
             dense_route_order: dense_route.order,
             lhs_contracting_axes: dense_route.lhs_contracting_axes,
