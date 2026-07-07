@@ -595,10 +595,31 @@ pub fn slice_plan_for(
     cost: &DenseCostModel,
     sliced_labels: &[TemporaryLabel],
 ) -> SlicePlan {
+    let mut sliced_vec = sliced_labels.to_vec();
+    sliced_vec.sort();
+    sliced_vec.dedup();
+    slice_plan_for_ordered(ir, plan, cost, &sliced_vec)
+}
+
+/// Build a [`SlicePlan`] while preserving the caller supplied sliced-label
+/// order. This is useful for external planners such as cotengra, which carry a
+/// concrete slice enumeration order. Duplicate labels are ignored after their
+/// first occurrence.
+pub fn slice_plan_for_ordered(
+    ir: &NetworkIR,
+    plan: &ContractionPlan,
+    cost: &DenseCostModel,
+    sliced_labels: &[TemporaryLabel],
+) -> SlicePlan {
     let shapes = step_shapes(ir, plan);
-    let sliced: BTreeSet<TemporaryLabel> = sliced_labels.iter().cloned().collect();
+    let mut sliced = BTreeSet::<TemporaryLabel>::new();
+    let mut sliced_vec = Vec::<TemporaryLabel>::new();
+    for label in sliced_labels {
+        if sliced.insert(label.clone()) {
+            sliced_vec.push(label.clone());
+        }
+    }
     let empty = BTreeSet::new();
-    let sliced_vec: Vec<TemporaryLabel> = sliced.iter().cloned().collect();
     let kinds = sliced_vec
         .iter()
         .map(|l| {

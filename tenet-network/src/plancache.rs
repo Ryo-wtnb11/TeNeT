@@ -361,15 +361,33 @@ fn plan_fresh(
             let _ = last_error;
             network.plan(tensors, &GreedyDenseOptimizer)
         }
+        #[cfg(feature = "cotengra-python")]
+        Optimizer::CotengraPython(config) => network.plan(
+            tensors,
+            &crate::cotengra_python::CotengraPythonOptimizer::new(config.clone()),
+        ),
         // `Optimizer` is #[non_exhaustive] and defined in `tenet`; variants
         // this build has no search for (e.g. Optimal without `opt-path`)
         // are an explicit error rather than a silent greedy fallback.
         #[allow(unreachable_patterns)]
         other => Err(Error::InvalidArgument(format!(
             "optimizer {other:?} is not available in this build \
-             (is the `opt-path` feature enabled?)"
+             (is the matching planner feature enabled?)"
         ))),
     }
+}
+
+fn topology_optimizer(optimizer: &Optimizer) -> Optimizer {
+    #[cfg(feature = "cotengra-python")]
+    if let Optimizer::CotengraPython(config) = optimizer {
+        let mut config = config.clone();
+        // Normal cached contractions are path-only. `optimize_sliced` consumes
+        // slicing explicitly and does not go through this cache, so slicing
+        // policy must not fragment ordinary plan-cache entries.
+        config.slicing = tenet::plancache::CotengraSlicingConfig::None;
+        return Optimizer::CotengraPython(config);
+    }
+    optimizer.clone()
 }
 
 /// Cache-aware planning for [`Network::contract`]: reuse a topology-matched
@@ -412,7 +430,7 @@ pub(crate) fn get_or_plan(
             .collect(),
         output: network.output.clone(),
         output_codomain_rank: network.output_codomain_rank,
-        optimizer: optimizer.clone(),
+        optimizer: topology_optimizer(optimizer),
     };
 
     enum Outcome {

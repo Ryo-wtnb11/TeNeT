@@ -1,0 +1,35 @@
+version = 1
+revision = 2
+requires-python = ">=3.10"
+
+[[package]]
+name = "autoray"
+version = "0.8.11"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/55/ef/3f4c83009e9825f3a8565bd71759be63de06de37768db31f9bf56a4075ce/autoray-0.8.11.tar.gz", hash = "sha256:3e994ea6813916b4e5471853f5332d69224fd67a5f057d602d20df47dcf63fe4", size = 1344555, upload-time = "2026-06-08T22:36:49.685Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/be/f0352174093c8beed98e85e37f9190cc7da8f26330b9853f5153a9514a0a/autoray-0.8.11-py3-none-any.whl", hash = "sha256:336d51cde75232585e965cac51e74e953d88c48405c8c199946514458ccbcfba", size = 941629, upload-time = "2026-06-08T22:36:47.75Z" },
+]
+
+[[package]]
+name = "cotengra"
+version = "0.7.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "autoray" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f2/42/041a65c3a12646156ae584a474a7843da977e51453403365aec9ec54bc7c/cotengra-0.7.5.tar.gz", hash = "sha256:f3cee6c0cd29fd239a1e9868c3b719c574cc56204dbf7e658ba10f3fd93dce98", size = 2830534, upload-time = "2025-06-12T23:53:13.954Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/0e/5356269a34f7860fb506b6690e74f4d0062e0e50bf6345fb5405e294b1ec/cotengra-0.7.5-py3-none-any.whl", hash = "sha256:0d269883ee87e4a08ce6c91ca38aafbd3d56e177a3b3b54d61e3fe314fe67e8b", size = 195379, upload-time = "2025-06-12T23:53:11.971Z" },
+]
+
+[[package]]
+name = "tenet-cotengra-python"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "cotengra" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "cotengra", specifier = ">=0.7,<0.8" }]

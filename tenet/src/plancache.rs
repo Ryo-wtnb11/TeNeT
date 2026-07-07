@@ -43,6 +43,185 @@ pub enum Optimizer {
     /// `tenet-network`'s `opt-path` feature at execution.
     #[cfg(feature = "opt-path")]
     AutoHq,
+    /// External Python `cotengra` path search. Requires `tenet-network`'s
+    /// `cotengra-python` feature at execution and an importable Python
+    /// `cotengra` installation. This is intentionally a cold-path planner:
+    /// the returned pairwise order is cached and warm execution stays in Rust.
+    #[cfg(feature = "cotengra-python")]
+    CotengraPython(CotengraPythonConfig),
+}
+
+/// Search family used by the Python `cotengra` backend.
+#[cfg(feature = "cotengra-python")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CotengraPythonMethod {
+    /// `cotengra` preset string `"auto"`.
+    Auto,
+    /// `cotengra` preset string `"auto-hq"`.
+    #[default]
+    AutoHq,
+    /// `cotengra.GreedyOptimizer`.
+    Greedy,
+    /// `cotengra.OptimalOptimizer`.
+    Optimal,
+    /// `cotengra.RandomGreedyOptimizer`.
+    RandomGreedy,
+    /// `cotengra.HyperOptimizer`.
+    Hyper,
+}
+
+/// Objective string passed to `cotengra` optimizers that accept `minimize`.
+#[cfg(feature = "cotengra-python")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CotengraMinimize {
+    /// Minimize estimated contraction FLOPs.
+    #[default]
+    Flops,
+    /// Minimize largest intermediate tensor.
+    Size,
+    /// Minimize total tensor write volume.
+    Write,
+    /// Minimize cotengra's combined FLOPs/write objective.
+    Combo,
+    /// Minimize cotengra's memory-limit-oriented combined objective.
+    Limit,
+    /// Pass a custom objective name through unchanged.
+    Custom(String),
+}
+
+/// Configuration for the optional Python `cotengra` planner.
+#[cfg(feature = "cotengra-python")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CotengraPythonConfig {
+    /// Which cotengra optimizer family to instantiate.
+    pub method: CotengraPythonMethod,
+    /// Objective for optimizers that expose `minimize`.
+    pub minimize: CotengraMinimize,
+    /// Trial count for `RandomGreedyOptimizer` and `HyperOptimizer`.
+    pub max_repeats: usize,
+    /// Optional RNG seed for randomized optimizers.
+    pub seed: Option<u64>,
+    /// Whether cotengra may parallelize the planner. Defaults to `false` so
+    /// path search is reproducible and does not compete with TeNeT execution.
+    pub parallel: bool,
+    /// Optional slicing policy. `None` keeps this as a path-only planner.
+    pub slicing: CotengraSlicingConfig,
+    /// Python executable. `None` means `$TENET_COTENGRA_PYTHON`,
+    /// `$TENET_COTENGRA_UV_PROJECT`, or `python3`.
+    pub python: Option<String>,
+    /// Arguments inserted between the Python executable and `-c <planner>`.
+    /// This supports launchers such as `uv run --project <dir> python`.
+    pub python_args: Vec<String>,
+}
+
+/// Optional post-processing to ask cotengra to slice a searched tree.
+///
+/// This only affects explicit sliced-plan searches. Normal
+/// `Optimizer::CotengraPython` contraction planning remains path-only and
+/// ignores slicing, because TeNeT's ordinary executor cannot consume slices.
+#[cfg(feature = "cotengra-python")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CotengraSlicingConfig {
+    /// Do not slice.
+    #[default]
+    None,
+    /// Call `ContractionTree.slice`.
+    Slice {
+        /// Target maximum intermediate size in scalar elements.
+        target_size: usize,
+        /// Number of repeated slicing searches.
+        max_repeats: usize,
+        /// Whether cotengra may slice output/open indices.
+        allow_outer: bool,
+    },
+    /// Call `ContractionTree.slice_and_reconfigure`.
+    Reconfigure {
+        /// Target maximum intermediate size in scalar elements.
+        target_size: usize,
+        /// Minimum slicing progress before each reconfiguration round.
+        step_size: usize,
+        /// Number of repeated slicing searches per round.
+        max_repeats: usize,
+        /// Whether cotengra may slice output/open indices.
+        allow_outer: bool,
+        /// Use cotengra's forested subtree reconfiguration option.
+        forested: bool,
+    },
+    /// Call `ContractionTree.slice_and_reconfigure_forest`.
+    ForestReconfigure {
+        /// Target maximum intermediate size in scalar elements.
+        target_size: usize,
+        /// Size reduction factor per forest round.
+        step_size: usize,
+        /// Number of candidate trees in the forest.
+        num_trees: usize,
+        /// Number of repeated slicing searches per candidate.
+        max_repeats: usize,
+        /// Whether cotengra may slice output/open indices.
+        allow_outer: bool,
+    },
+}
+
+#[cfg(feature = "cotengra-python")]
+impl Default for CotengraPythonConfig {
+    fn default() -> Self {
+        Self {
+            method: CotengraPythonMethod::AutoHq,
+            minimize: CotengraMinimize::Flops,
+            max_repeats: 128,
+            seed: Some(0),
+            parallel: false,
+            slicing: CotengraSlicingConfig::None,
+            python: None,
+            python_args: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "cotengra-python")]
+impl CotengraPythonConfig {
+    /// Default config launched through `uv run --project <project> python`.
+    pub fn with_uv_project(project: impl Into<String>) -> Self {
+        Self::default().uv_project(project)
+    }
+
+    /// Launch this config through `uv run --project <project> python`.
+    pub fn uv_project(mut self, project: impl Into<String>) -> Self {
+        let project = resolve_cotengra_uv_project(project.into());
+        self.python = Some("uv".to_string());
+        self.python_args = vec![
+            "run".to_string(),
+            "--project".to_string(),
+            project,
+            "python".to_string(),
+        ];
+        self
+    }
+
+    /// Launch this config through a specific Python executable.
+    pub fn python(mut self, python: impl Into<String>) -> Self {
+        self.python = Some(python.into());
+        self.python_args.clear();
+        self
+    }
+}
+
+#[cfg(feature = "cotengra-python")]
+fn resolve_cotengra_uv_project(project: String) -> String {
+    let path = std::path::Path::new(&project);
+    if path.is_absolute() || path.exists() {
+        return project;
+    }
+
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace) = manifest.parent() {
+        let workspace_path = workspace.join(&project);
+        if workspace_path.exists() {
+            return workspace_path.to_string_lossy().into_owned();
+        }
+    }
+
+    project
 }
 
 /// When to re-plan a topology-matched cache entry whose leg dimensions have

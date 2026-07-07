@@ -17,6 +17,10 @@ pub(crate) mod tensor;
 /// [`core`], [`operations`], [`dense`], and [`matrixalgebra`] modules.
 pub mod prelude {
     pub use crate::error::Error;
+    #[cfg(feature = "cotengra-python")]
+    pub use crate::plancache::CotengraSlicingConfig;
+    #[cfg(feature = "cotengra-python")]
+    pub use crate::plancache::{CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod};
     pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
     pub use crate::runtime::{Runtime, RuntimeBuilder};
     pub use crate::space::{SectorLabel, Space};

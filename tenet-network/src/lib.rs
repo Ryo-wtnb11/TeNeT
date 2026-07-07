@@ -26,11 +26,10 @@
 //!
 //! ## Follow-ups (intentionally not in this round)
 //!
-//! - **cotengrust / external path search**: the legacy `tenet-cotengrust`
-//!   crate implements [`DenseContractionOptimizer`] and drops into
-//!   [`Network::plan`] unchanged once ported. The optional `opt-path`
-//!   feature already wraps the `opt-einsum-path` crate for optimal / dp /
-//!   branch-and-bound searches.
+//! - **cotengra external path search**: the optional `cotengra-python`
+//!   feature calls the installed Python `cotengra` package for path search
+//!   while keeping execution in Rust. The optional `opt-path` feature wraps
+//!   the `opt-einsum-path` crate for optimal / dp / branch-and-bound searches.
 //! - **Sliced execution**: the slicing *decision* types ([`SlicePlan`],
 //!   [`greedy_slice`]) are ported; a memory-bounded sliced executor over
 //!   `Tensor` needs `select_index` on the user layer first.
@@ -38,6 +37,8 @@
 #[cfg(feature = "opt-path")]
 mod bitset_dp;
 mod cost;
+#[cfg(feature = "cotengra-python")]
+mod cotengra_python;
 mod error;
 mod ir;
 mod labels;
@@ -56,6 +57,8 @@ pub use cost::{
     BlockInfo, BlockLabelInfo, BlockSparseCostModel, BlockSparseTensorInfo, DenseCostModel,
     DenseTensorInfo,
 };
+#[cfg(feature = "cotengra-python")]
+pub use cotengra_python::CotengraPythonOptimizer;
 pub use error::{ContractError, Result};
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
@@ -82,6 +85,10 @@ pub use plancache::{
 pub use slice::{
     best_next_internal_index, best_next_slice_index, contraction_width, greedy_slice,
     greedy_slice_with_output, slice_plan_for, SliceKind, SlicePlan, SlicedPlan,
+};
+#[cfg(feature = "cotengra-python")]
+pub use tenet::plancache::{
+    CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod, CotengraSlicingConfig,
 };
 pub use tree::ContractionTree;
 
