@@ -13,7 +13,7 @@ use tenet_tensors::{
 
 use crate::compose::compose_dyn;
 use crate::factorize::{
-    diagonal_bond_tensor_dyn, dyn_space_of, eigh_full_dyn, svd_compact_dyn, typed_from_dyn,
+    dyn_space_of, eigh_full_dyn, scale_bond_axis_by_spectrum, svd_compact_dyn, typed_from_dyn,
     DynFactor, FactorScalar, SectorSpectrum,
 };
 
@@ -82,14 +82,12 @@ where
             values: entry.values.iter().map(|&value| function(value)).collect(),
         })
         .collect();
-    let d_factor = diagonal_bond_tensor_dyn(rule, &mapped, &D::from_real)?;
+    // f(t) = V f(D) V^H. Fold the diagonal f(D) into a column scaling of V
+    // (bond = trailing axis) rather than materializing it and running an extra
+    // GEMM (issue #46); V^H is built before V is scaled.
     let vh = adjoint_dyn(rule, &eigh.v.0, &eigh.v.1)?;
-    let vd = compose_dyn(
-        context,
-        rule,
-        (&eigh.v.0, &eigh.v.1),
-        (&d_factor.0, &d_factor.1),
-    )?;
+    let mut vd = eigh.v;
+    scale_bond_axis_by_spectrum(&mut vd, &mapped)?;
     compose_dyn(context, rule, (&vd.0, &vd.1), (&vh.0, &vh.1))
 }
 
@@ -157,11 +155,13 @@ where
                 .collect(),
         })
         .collect();
-    let s_plus = diagonal_bond_tensor_dyn(rule, &inverted, &D::from_real)?;
-    let v = adjoint_dyn(rule, &svd.vh.0, &svd.vh.1)?;
+    // t^+ = V S^+ U^H. Fold S^+ into a column scaling of V (bond = trailing
+    // axis) instead of building the dense diagonal and running an extra GEMM
+    // (issue #46).
+    let mut v = adjoint_dyn(rule, &svd.vh.0, &svd.vh.1)?;
     let uh = adjoint_dyn(rule, &svd.u.0, &svd.u.1)?;
-    let vs = compose_dyn(context, rule, (&v.0, &v.1), (&s_plus.0, &s_plus.1))?;
-    compose_dyn(context, rule, (&vs.0, &vs.1), (&uh.0, &uh.1))
+    scale_bond_axis_by_spectrum(&mut v, &inverted)?;
+    compose_dyn(context, rule, (&v.0, &v.1), (&uh.0, &uh.1))
 }
 
 /// True inverse of a full-rank endomorphism via the compact SVD; fails when
