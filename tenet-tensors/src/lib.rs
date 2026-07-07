@@ -19,7 +19,7 @@ mod tensortrace;
 mod tree_context;
 mod tree_transform;
 
-pub use adjoint::{adjoint, adjoint_dyn};
+pub use adjoint::{adjoint, adjoint_dyn, adjoint_space_dyn};
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{
     reset_global_operation_caches, BlockStructureCacheBlockKey, BlockStructureCacheKey,

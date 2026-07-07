@@ -12,7 +12,7 @@
 //! `tree_transform_dyn_into`, `adjoint_dyn`).
 
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use num_complex::Complex64;
 use tenet_core::{
@@ -478,15 +478,45 @@ fn open_axes(contracted: &[usize], rank: usize) -> Result<Vec<usize>, Error> {
 /// assert_eq!(c.data(), &[10.0, 21.0]);
 /// # Ok::<(), tenet::prelude::Error>(())
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Tensor {
     rt: Runtime,
     rule: RuleKind,
+    // The tensor's own coupled space. For a lazy adjoint this is already the
+    // *adjoint* coupled space, so all metadata is correct with no data touched.
     space: Arc<DynamicFusionMapSpace>,
     // Shared behind `Arc` so a lazy adjoint (see `adjoint`) can point at the
     // parent buffer with no copy; every value-read funnels through
-    // `coupled_data`, so nothing else observes the sharing.
+    // `coupled_data`, so nothing else observes the sharing. For a lazy adjoint
+    // this holds the *parent's* buffer in the parent's coupled layout.
     data: Arc<Data>,
+    // `Some(parent_space)` marks a lazy adjoint (TensorKit's `AdjointTensorMap`):
+    // `data` is the parent's buffer and `parent_space` its coupled space, so the
+    // conjugate-transpose can be materialized on demand. `None` for an ordinary
+    // tensor whose `data` already matches `space`.
+    adjoint_source: Option<Arc<DynamicFusionMapSpace>>,
+    // Memoized conjugate-transpose of a lazy adjoint's data, in `space`'s
+    // layout; filled at most once by `coupled_data`. Empty for ordinary tensors.
+    materialized: OnceLock<Arc<Data>>,
+}
+
+impl Clone for Tensor {
+    fn clone(&self) -> Self {
+        // `OnceLock` isn't `Clone`; carry over an already-materialized buffer
+        // (a cheap `Arc` bump) so a clone doesn't recompute the adjoint.
+        let materialized = OnceLock::new();
+        if let Some(buffer) = self.materialized.get() {
+            let _ = materialized.set(Arc::clone(buffer));
+        }
+        Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data: Arc::clone(&self.data),
+            adjoint_source: self.adjoint_source.clone(),
+            materialized,
+        }
+    }
 }
 
 impl Tensor {
@@ -543,6 +573,8 @@ impl Tensor {
             rule: rule_kind,
             space: Arc::new(space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1013,6 +1045,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1023,16 +1057,49 @@ impl Tensor {
             rule: self.rule,
             space: Arc::new(space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         }
     }
 
     /// The stored buffer resolved into this tensor's own coupled layout. The
     /// single funnel through which every value-read observes the data, so a
-    /// lazy adjoint can materialize its conjugate-transpose here exactly once
-    /// without any other method being aware of it. (No adjoint flag yet — this
-    /// just centralizes the access.)
+    /// lazy adjoint materializes its conjugate-transpose here exactly once
+    /// (memoized) without any other method being aware of it. Ordinary tensors
+    /// return the stored buffer directly.
     fn coupled_data(&self) -> &Data {
-        self.data.as_ref()
+        match &self.adjoint_source {
+            None => self.data.as_ref(),
+            Some(parent_space) => self
+                .materialized
+                .get_or_init(|| Arc::new(self.materialize_adjoint(parent_space)))
+                .as_ref(),
+        }
+    }
+
+    /// Conjugate-transpose of a lazy adjoint's shared parent buffer into this
+    /// tensor's own coupled (`space`) layout — the eager fallback TensorKit
+    /// takes (`convert(TensorMap, ::AdjointTensorMap)`) when an adjoint is
+    /// consumed by something other than a contraction.
+    fn materialize_adjoint(&self, parent_space: &DynamicFusionMapSpace) -> Data {
+        match self.data.as_ref() {
+            Data::F64(parent) => {
+                let (_space, out) = with_rule!(self.rule, rule, {
+                    tenet_tensors::adjoint_dyn(rule, parent_space, parent)
+                })
+                .expect("adjoint_dyn is total on a tensor's own space");
+                Data::F64(out)
+            }
+            Data::C64(parent) => {
+                let (_space, out) = with_rule!(self.rule, rule, {
+                    tenet_tensors::adjoint_dyn(rule, parent_space, parent)
+                })
+                .expect("adjoint_dyn is total on a tensor's own space");
+                Data::C64(out)
+            }
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => unreachable!("adjoint() rejects device tensors"),
+        }
     }
 
     /// The scalar type this tensor stores.
@@ -1086,6 +1153,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1110,6 +1179,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1200,6 +1271,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         }
     }
 
@@ -1709,12 +1782,39 @@ impl Tensor {
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
     /// conjugate-transposes every block (real scalars: transpose only, c64:
     /// entries conjugated).
+    ///
+    /// Lazy, exactly like TensorKit's `AdjointTensorMap`: no data is copied or
+    /// conjugated here — the result shares the parent buffer and presents the
+    /// adjoint coupled space (O(blocks) metadata). A contraction folds the
+    /// conjugate-transpose into its GEMM; any other consumer (`data`, `svd`, …)
+    /// materializes it once, on demand, via [`Self::coupled_data`].
     pub fn adjoint(&self) -> Result<Self, Error> {
-        with_data!(self, data, {
-            let (space, out) = with_rule!(self.rule, rule, {
-                tenet_tensors::adjoint_dyn(rule, &self.space, data)
-            })?;
-            Ok(self.with(space, UserScalar::lift(out)))
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(_) = self.data.as_ref() {
+            return Err(device_unsupported("adjoint()"));
+        }
+        if let Some(parent_space) = &self.adjoint_source {
+            // Involution: the adjoint of a lazy adjoint is the original parent,
+            // rebuilt with no copy and no pending materialization.
+            return Ok(Self {
+                rt: self.rt.clone(),
+                rule: self.rule,
+                space: Arc::clone(parent_space),
+                data: Arc::clone(&self.data),
+                adjoint_source: None,
+                materialized: OnceLock::new(),
+            });
+        }
+        let adjoint_space = with_rule!(self.rule, rule, {
+            tenet_tensors::adjoint_space_dyn(rule, &self.space)
+        })?;
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::new(adjoint_space),
+            data: Arc::clone(&self.data),
+            adjoint_source: Some(Arc::clone(&self.space)),
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1770,6 +1870,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1785,6 +1887,8 @@ impl Tensor {
                 data: Arc::new(Data::C64(
                     data.iter().map(|&value| value * factor).collect(),
                 )),
+                adjoint_source: None,
+                materialized: OnceLock::new(),
             }),
             Data::F64(_) => Err(Error::DtypeMismatch),
             #[cfg(feature = "cuda")]
@@ -1821,6 +1925,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 
@@ -1839,6 +1945,8 @@ impl Tensor {
                         .map(|(&x, &y)| alpha * x + beta * y)
                         .collect(),
                 )),
+                adjoint_source: None,
+                materialized: OnceLock::new(),
             }),
             #[cfg(feature = "cuda")]
             (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(device_unsupported("add_c64()")),
@@ -1892,6 +2000,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::new(space),
             data: Arc::new(D::lift(data)),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         }
     }
 
@@ -2349,6 +2459,8 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(data),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
         })
     }
 }
