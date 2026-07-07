@@ -189,7 +189,7 @@ impl UserScalar for Complex64 {
 /// entry points are generic over the scalar).
 macro_rules! with_data {
     ($tensor:expr, $data:ident, $body:expr) => {
-        match &$tensor.data {
+        match $tensor.coupled_data() {
             Data::F64($data) => $body,
             Data::C64($data) => $body,
             #[cfg(feature = "cuda")]
@@ -483,7 +483,10 @@ pub struct Tensor {
     rt: Runtime,
     rule: RuleKind,
     space: Arc<DynamicFusionMapSpace>,
-    data: Data,
+    // Shared behind `Arc` so a lazy adjoint (see `adjoint`) can point at the
+    // parent buffer with no copy; every value-read funnels through
+    // `coupled_data`, so nothing else observes the sharing.
+    data: Arc<Data>,
 }
 
 impl Tensor {
@@ -539,7 +542,7 @@ impl Tensor {
             rt: rt.clone(),
             rule: rule_kind,
             space: Arc::new(space),
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -664,7 +667,7 @@ impl Tensor {
         }
         let mut t = Self::build::<_, _, f64>(rt, codomain, domain, Fill::Zeros)?;
         let regions = sector_regions(t.space.structure(), t.space.nout())?;
-        let Data::F64(data) = &mut t.data else {
+        let Data::F64(data) = Arc::make_mut(&mut t.data) else {
             unreachable!("structural constructors build f64 host tensors");
         };
         for region in &regions {
@@ -991,7 +994,7 @@ impl Tensor {
         structure_space: &DynamicFusionMapSpace,
         factor_of: &dyn Fn(&BlockKey) -> f64,
     ) -> Result<Self, Error> {
-        let data = match &self.data {
+        let data = match self.coupled_data() {
             Data::F64(data) => {
                 let mut out = data.clone();
                 scale_blocks_impl(structure_space, &mut out, factor_of)?;
@@ -1009,7 +1012,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -1019,13 +1022,24 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::new(space),
-            data,
+            data: Arc::new(data),
         }
+    }
+
+    /// The stored buffer resolved into this tensor's own coupled layout. The
+    /// single funnel through which every value-read observes the data, so a
+    /// lazy adjoint can materialize its conjugate-transpose here exactly once
+    /// without any other method being aware of it. (No adjoint flag yet — this
+    /// just centralizes the access.)
+    fn coupled_data(&self) -> &Data {
+        self.data.as_ref()
     }
 
     /// The scalar type this tensor stores.
     pub fn dtype(&self) -> Dtype {
-        match self.data {
+        // Discriminant only; dtype is adjoint-invariant, so read the stored
+        // buffer directly (no need to materialize a lazy adjoint).
+        match self.data.as_ref() {
             Data::F64(_) => Dtype::F64,
             Data::C64(_) => Dtype::C64,
             #[cfg(feature = "cuda")]
@@ -1037,7 +1051,7 @@ impl Tensor {
     /// [`Placement::Cuda`] with the device ordinal. Transfers are always
     /// explicit (`to_cuda()` / `to_host()`).
     pub fn placement(&self) -> Placement {
-        match &self.data {
+        match self.data.as_ref() {
             Data::F64(_) | Data::C64(_) => Placement::Host,
             #[cfg(feature = "cuda")]
             Data::CudaF64(storage) => storage.placement(),
@@ -1050,7 +1064,7 @@ impl Tensor {
     /// yet) and runtimes built without a CUDA device.
     #[cfg(feature = "cuda")]
     pub fn to_cuda(&self) -> Result<Self, Error> {
-        let data = match &self.data {
+        let data = match self.coupled_data() {
             Data::CudaF64(storage) => Data::CudaF64(Arc::clone(storage)),
             Data::C64(_) => {
                 return Err(device_unsupported("uploading a c64 tensor"));
@@ -1071,7 +1085,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -1079,8 +1093,8 @@ impl Tensor {
     /// already host-resident.
     #[cfg(feature = "cuda")]
     pub fn to_host(&self) -> Result<Self, Error> {
-        let data = match &self.data {
-            Data::F64(_) | Data::C64(_) => self.data.clone(),
+        let data = match self.coupled_data() {
+            Data::F64(_) | Data::C64(_) => self.coupled_data().clone(),
             Data::CudaF64(storage) => {
                 let mut state = self.rt.lock();
                 let cuda = state.cuda.as_mut().ok_or_else(|| {
@@ -1095,7 +1109,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -1141,7 +1155,7 @@ impl Tensor {
     /// Panics if the tensor stores c64 data (use [`Self::data_c64`]) or is
     /// device-resident (use `to_host()`).
     pub fn data(&self) -> &[f64] {
-        match &self.data {
+        match self.coupled_data() {
             Data::F64(data) => data,
             Data::C64(_) => panic!("data(): tensor stores c64 data; use data_c64()"),
             #[cfg(feature = "cuda")]
@@ -1160,7 +1174,7 @@ impl Tensor {
     /// Panics if the tensor stores f64 data (use [`Self::data`]) or is
     /// device-resident (use `to_host()`).
     pub fn data_c64(&self) -> &[Complex64] {
-        match &self.data {
+        match self.coupled_data() {
             Data::C64(data) => data,
             Data::F64(_) => panic!("data_c64(): tensor stores f64 data; use data()"),
             #[cfg(feature = "cuda")]
@@ -1171,7 +1185,7 @@ impl Tensor {
     /// Widens to a c64 tensor (imaginary parts zero); a cheap clone when the
     /// tensor already stores c64 data.
     pub fn to_c64(&self) -> Self {
-        let data = match &self.data {
+        let data = match self.coupled_data() {
             Data::F64(data) => Data::C64(
                 data.iter()
                     .map(|&value| Complex64::new(value, 0.0))
@@ -1185,7 +1199,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         }
     }
 
@@ -1267,7 +1281,7 @@ impl Tensor {
     /// errors on tensors with legs.
     pub fn scalar(&self) -> Result<Scalar, Error> {
         self.check_rank0()?;
-        match &self.data {
+        match self.coupled_data() {
             Data::F64(data) => Ok(Scalar::F64(data.iter().sum())),
             Data::C64(data) => Ok(Scalar::C64(data.iter().sum())),
             #[cfg(feature = "cuda")]
@@ -1387,7 +1401,9 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
-        match (&self.data, &rhs.data) {
+        // Materializes a lazy-adjoint operand for now; the conjugate-fold that
+        // avoids this copy is wired in a later step.
+        match (self.coupled_data(), rhs.coupled_data()) {
             (Data::F64(a), Data::F64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
             (Data::C64(a), Data::C64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
             #[cfg(feature = "cuda")]
@@ -1707,7 +1723,7 @@ impl Tensor {
     /// `norm`. Always real, for both dtypes.
     pub fn norm(&self) -> Result<f64, Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(storage) = &self.data {
+        if let Data::CudaF64(storage) = self.data.as_ref() {
             return Ok(self.weighted_inner_cuda(storage, storage)?.re.sqrt());
         }
         let value = with_data!(self, data, {
@@ -1727,10 +1743,10 @@ impl Tensor {
     /// [`Self::norm`], this is not quantum-dimension weighted.
     pub fn norm_inf(&self) -> Result<f64, Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(_) = &self.data {
+        if let Data::CudaF64(_) = self.data.as_ref() {
             return Err(device_unsupported("norm_inf()"));
         }
-        match &self.data {
+        match self.coupled_data() {
             Data::F64(data) => Ok(data.iter().map(|value| value.abs()).fold(0.0, f64::max)),
             Data::C64(data) => Ok(data.iter().map(|value| value.norm()).fold(0.0, f64::max)),
             #[cfg(feature = "cuda")]
@@ -1741,7 +1757,7 @@ impl Tensor {
     /// Returns `factor * self` (real factor, both dtypes). Use
     /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
-        let data = match &self.data {
+        let data = match self.coupled_data() {
             Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
             Data::C64(data) => Data::C64(data.iter().map(|&value| value * factor).collect()),
             #[cfg(feature = "cuda")]
@@ -1753,7 +1769,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -1761,12 +1777,14 @@ impl Tensor {
     /// [`Error::DtypeMismatch`] on f64 tensors (widen with
     /// [`Self::to_c64`] first).
     pub fn scale_c64(&self, factor: Complex64) -> Result<Self, Error> {
-        match &self.data {
+        match self.coupled_data() {
             Data::C64(data) => Ok(Self {
                 rt: self.rt.clone(),
                 rule: self.rule,
                 space: Arc::clone(&self.space),
-                data: Data::C64(data.iter().map(|&value| value * factor).collect()),
+                data: Arc::new(Data::C64(
+                    data.iter().map(|&value| value * factor).collect(),
+                )),
             }),
             Data::F64(_) => Err(Error::DtypeMismatch),
             #[cfg(feature = "cuda")]
@@ -1779,7 +1797,7 @@ impl Tensor {
     /// space and block layout) and store the same dtype.
     pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
         self.check_same_space(other)?;
-        let data = match (&self.data, &other.data) {
+        let data = match (self.coupled_data(), other.coupled_data()) {
             (Data::F64(a), Data::F64(b)) => Data::F64(
                 a.iter()
                     .zip(b)
@@ -1802,7 +1820,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         })
     }
 
@@ -1810,17 +1828,17 @@ impl Tensor {
     /// tensors must be c64 (widen with [`Self::to_c64`] first).
     pub fn add_c64(&self, other: &Self, alpha: Complex64, beta: Complex64) -> Result<Self, Error> {
         self.check_same_space(other)?;
-        match (&self.data, &other.data) {
+        match (self.coupled_data(), other.coupled_data()) {
             (Data::C64(a), Data::C64(b)) => Ok(Self {
                 rt: self.rt.clone(),
                 rule: self.rule,
                 space: Arc::clone(&self.space),
-                data: Data::C64(
+                data: Arc::new(Data::C64(
                     a.iter()
                         .zip(b)
                         .map(|(&x, &y)| alpha * x + beta * y)
                         .collect(),
-                ),
+                )),
             }),
             #[cfg(feature = "cuda")]
             (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(device_unsupported("add_c64()")),
@@ -1837,7 +1855,7 @@ impl Tensor {
     /// dtype.
     pub fn inner(&self, other: &Self) -> Result<Scalar, Error> {
         self.check_same_space(other)?;
-        match (&self.data, &other.data) {
+        match (self.coupled_data(), other.coupled_data()) {
             (Data::F64(a), Data::F64(b)) => with_rule!(self.rule, rule, {
                 weighted_inner(rule, self.space.structure(), a, b).map(|v| Scalar::F64(v.re))
             }),
@@ -1873,7 +1891,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::new(space),
-            data: D::lift(data),
+            data: Arc::new(D::lift(data)),
         }
     }
 
@@ -1881,7 +1899,7 @@ impl Tensor {
     /// per coupled sector the bond is `min(rows, cols)`.
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(storage) = &self.data {
+        if let Data::CudaF64(storage) = self.data.as_ref() {
             let out = self.svd_cuda(storage, None)?;
             return Ok((out.u, out.s, out.vh));
         }
@@ -1919,7 +1937,7 @@ impl Tensor {
     /// Truncated SVD (MatrixAlgebraKit `svd_trunc`); see [`SvdTrunc`].
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(storage) = &self.data {
+        if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.svd_cuda(storage, Some(truncation));
         }
         let mut guard = self.rt.lock();
@@ -1961,7 +1979,7 @@ impl Tensor {
     /// orthonormal columns per coupled sector.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(storage) = &self.data {
+        if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.qr_cuda(storage);
         }
         let mut guard = self.rt.lock();
@@ -2100,7 +2118,7 @@ impl Tensor {
     /// `v` directly.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(storage) = &self.data {
+        if let Data::CudaF64(storage) = self.data.as_ref() {
             let out = self.eigh_cuda(storage, None)?;
             return Ok((out.d, out.v));
         }
@@ -2118,7 +2136,7 @@ impl Tensor {
     /// `eigh_trunc`); see [`EighTrunc`].
     pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc, Error> {
         #[cfg(feature = "cuda")]
-        if let Data::CudaF64(storage) = &self.data {
+        if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.eigh_cuda(storage, Some(truncation));
         }
         let mut guard = self.rt.lock();
@@ -2309,7 +2327,7 @@ impl Tensor {
                     .to_string(),
             ));
         }
-        let data = match &self.data {
+        let data = match self.coupled_data() {
             Data::F64(data) => Data::F64(sqrt_diagonal_impl(&self.space, data, &|value| {
                 if value < 0.0 {
                     Err(Error::InvalidArgument(format!(
@@ -2330,7 +2348,7 @@ impl Tensor {
             rt: self.rt.clone(),
             rule: self.rule,
             space: Arc::clone(&self.space),
-            data,
+            data: Arc::new(data),
         })
     }
 }
