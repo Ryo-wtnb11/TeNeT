@@ -25,3 +25,7 @@ opt-path = ["dep:opt-einsum-path", "tenet/opt-path"]
 tenet = { path = "../tenet", default-features = false }
 tenet-macros = { path = "../tenet-macros" }
 opt-einsum-path = { version = "0.2", optional = true }
+# O(1) LRU (HashMap + intrusive linked list), the Rust analog of the
+# `LRUCache.jl` that TensorKit uses for its global caches. Replaces the
+# linear-scan `VecDeque` LRU whose touch was O(capacity) per plan-cache hit.
+lru = "0.12"

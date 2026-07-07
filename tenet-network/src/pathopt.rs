@@ -126,6 +126,41 @@ pub(crate) fn build_opt_einsum_inputs(
     })
 }
 
+/// Build the bitset-DP inputs: each distinct label is assigned a dense index
+/// (same visitation order as [`build_opt_einsum_inputs`] — tensor labels then
+/// output labels), giving per-tensor label-index lists, the output label-index
+/// list, and the dimension of each label index. Contraction order does not
+/// depend on the index assignment (the DP works on set relations), so any
+/// consistent assignment yields the same optimal path.
+fn build_bitset_dp_inputs(
+    ir: &NetworkIR,
+    cost_model: &DenseCostModel,
+) -> Option<(Vec<Vec<usize>>, Vec<usize>, Vec<usize>)> {
+    let mut index_of: BTreeMap<TemporaryLabel, usize> = BTreeMap::new();
+    let mut dims: Vec<usize> = Vec::new();
+    let mut assign = |label: &TemporaryLabel| {
+        if !index_of.contains_key(label) {
+            index_of.insert(label.clone(), dims.len());
+            dims.push(cost_model.dim(label).unwrap_or(1));
+        }
+    };
+    for tensor in ir.tensors() {
+        for label in tensor.labels() {
+            assign(label);
+        }
+    }
+    for label in ir.output_labels() {
+        assign(label);
+    }
+    let per_tensor: Vec<Vec<usize>> = ir
+        .tensors()
+        .iter()
+        .map(|tensor| tensor.labels().iter().map(|l| index_of[l]).collect())
+        .collect();
+    let output: Vec<usize> = ir.output_labels().iter().map(|l| index_of[l]).collect();
+    Some((per_tensor, output, dims))
+}
+
 /// Branch-search level for `opt_einsum_path`'s branch-and-bound driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchLevel {

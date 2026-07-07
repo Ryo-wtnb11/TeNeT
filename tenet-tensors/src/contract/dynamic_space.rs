@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
+use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols,
@@ -7,6 +8,51 @@ use tenet_core::{
 
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::TensorContractSpec;
+
+/// Identity of a pairwise contraction's output space: the two operand hom
+/// spaces (by value — `Arc` gives cheap clones while `Hash`/`Eq` delegate to
+/// the pointee, so a rebuilt-but-identical space still matches) plus the
+/// contracted axis lists. The hom spaces carry the full sector/leg structure
+/// (authoritative even for structural-zero keys the subblock layout omits, so
+/// a subblock content id alone is NOT enough), and the output is a pure
+/// function of these. The same contraction across sweeps/evals thus reuses one
+/// built space instead of rebuilding the coupled-sector layout each call.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct ContractedSpaceKey {
+    /// Fusion rule discriminant: the same sector ids fuse differently under
+    /// different rules, so the process-global cache must key on the rule.
+    /// Mirrors `FusionTreeHomSpaceCacheKey` in tenet-core.
+    rule_type: &'static str,
+    lhs_homspace: Arc<FusionTreeHomSpace>,
+    rhs_homspace: Arc<FusionTreeHomSpace>,
+    lhs_axes: Vec<usize>,
+    rhs_axes: Vec<usize>,
+}
+
+fn contracted_space_cache() -> &'static RwLock<FxHashMap<ContractedSpaceKey, DynamicFusionMapSpace>>
+{
+    static CACHE: OnceLock<RwLock<FxHashMap<ContractedSpaceKey, DynamicFusionMapSpace>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
+
+/// Identity of a tree-transform (permute / braid / transpose) output space:
+/// the source hom space (by value — the legs carry the authoritative
+/// sector→degeneracy map the output shapes derive from) plus the transform
+/// operation, under a given fusion rule. Mirrors [`ContractedSpaceKey`].
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct TransformedSpaceKey {
+    rule_type: &'static str,
+    source_homspace: Arc<FusionTreeHomSpace>,
+    operation: TreeTransformOperation,
+}
+
+fn transformed_space_cache(
+) -> &'static RwLock<FxHashMap<TransformedSpaceKey, DynamicFusionMapSpace>> {
+    static CACHE: OnceLock<RwLock<FxHashMap<TransformedSpaceKey, DynamicFusionMapSpace>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+}
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
 /// spaces enumerate the full tree set of their hom spaces, so the coupled
@@ -136,6 +182,18 @@ impl DynamicFusionMapSpace {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         let source = self;
+        let cache_key = TransformedSpaceKey {
+            rule_type: std::any::type_name::<R>(),
+            source_homspace: Arc::clone(&source.homspace),
+            operation: operation.clone(),
+        };
+        if let Some(cached) = transformed_space_cache()
+            .read()
+            .ok()
+            .and_then(|map| map.get(&cache_key).cloned())
+        {
+            return Ok(cached);
+        }
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let nout = codomain_axes.len();
         let nin = domain_axes.len();
@@ -172,12 +230,16 @@ impl DynamicFusionMapSpace {
         }
         let subblock_structure =
             Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
-        Ok(Self {
+        let space = Self {
             nout,
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
-        })
+        };
+        if let Ok(mut map) = transformed_space_cache().write() {
+            map.insert(cache_key, space.clone());
+        }
+        Ok(space)
     }
 
     /// Space of the contraction result in the default output order (`lhs`
@@ -214,8 +276,26 @@ impl DynamicFusionMapSpace {
                 expected: rhs_axes.len(),
                 actual: rhs.rank(),
             })?;
+        let key = ContractedSpaceKey {
+            rule_type: std::any::type_name::<R>(),
+            lhs_homspace: Arc::clone(&lhs.homspace),
+            rhs_homspace: Arc::clone(&rhs.homspace),
+            lhs_axes: lhs_axes.to_vec(),
+            rhs_axes: rhs_axes.to_vec(),
+        };
+        if let Some(cached) = contracted_space_cache()
+            .read()
+            .ok()
+            .and_then(|map| map.get(&key).cloned())
+        {
+            return Ok(cached);
+        }
         let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
-        Self::contracted_space(rule, lhs, rhs, axes, nout, nin)
+        let space = Self::contracted_space(rule, lhs, rhs, axes, nout, nin)?;
+        if let Ok(mut map) = contracted_space_cache().write() {
+            map.insert(key, space.clone());
+        }
+        Ok(space)
     }
 
     pub(crate) fn core_dst<R>(

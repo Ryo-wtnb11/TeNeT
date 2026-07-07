@@ -1,0 +1,1140 @@
+pub trait FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind;
+
+    fn braiding_style(&self) -> BraidingStyleKind;
+
+    fn vacuum(&self) -> SectorId;
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        false
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector
+    }
+
+    /// Fusion channels of `left ⊗ right`. Returns a `SectorVec` so the common
+    /// small result stays stack-inline — this is called millions of times in
+    /// the cold recoupling build, and a heap `Vec` per call was ~5% of all
+    /// cold-path allocations.
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec;
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        usize::from(self.fusion_channels(left, right).contains(&coupled))
+    }
+}
+
+pub trait MultiplicityFreeFusionRule: FusionRule {}
+
+pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
+    // Send + Sync because cached recoupling coefficients are shared across
+    // tree-transform replay workers (TensorKit sectorscalartype parity: the
+    // concrete scalar is a plain number type).
+    type Scalar: Clone + Send + Sync;
+
+    fn scalar_one(&self) -> Self::Scalar;
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar;
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar;
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar;
+}
+
+pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
+    fn bendright_scalar(
+        &self,
+        left_coupled: SectorId,
+        bent_sector: SectorId,
+        coupled: SectorId,
+        bent_leg_is_dual: bool,
+    ) -> Self::Scalar;
+
+    fn foldright_scalar(
+        &self,
+        source: &FusionTreeBlockKey,
+        destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar;
+}
+
+// `Sync` because the tree-transform plan compile computes recoupling rows
+// for independent source trees in parallel, sharing the rule across workers
+// (TensorKit threaded transformer construction parity: sector types are
+// plain shareable data). All rule implementations are plain data.
+pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar;
+
+    fn a_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar
+    where
+        Self::Scalar: Mul<Output = Self::Scalar>,
+    {
+        let factor = self.sqrt_dim_scalar(left)
+            * self.sqrt_dim_scalar(right)
+            * self.inv_sqrt_dim_scalar(coupled);
+        let symbol = self.frobenius_schur_phase_scalar(left)
+            * self.f_symbol_scalar(self.dual(left), left, right, right, self.vacuum(), coupled);
+        factor * self.scalar_conj(symbol)
+    }
+
+    fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar
+    where
+        Self::Scalar: Mul<Output = Self::Scalar>,
+    {
+        self.sqrt_dim_scalar(left)
+            * self.sqrt_dim_scalar(right)
+            * self.inv_sqrt_dim_scalar(coupled)
+            * self.f_symbol_scalar(left, right, self.dual(right), left, coupled, self.vacuum())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ProductSector<Left, Right> {
+    left: Left,
+    right: Right,
+}
+
+impl<Left, Right> ProductSector<Left, Right> {
+    pub const fn new(left: Left, right: Right) -> Self {
+        Self { left, right }
+    }
+
+    #[inline]
+    pub const fn left(&self) -> &Left {
+        &self.left
+    }
+
+    #[inline]
+    pub const fn right(&self) -> &Right {
+        &self.right
+    }
+
+    pub fn sector_id_with<C>(self) -> SectorId
+    where
+        C: ProductSectorCodec,
+        Left: Into<SectorId>,
+        Right: Into<SectorId>,
+    {
+        C::encode(self.left.into(), self.right.into())
+    }
+}
+
+pub const fn product_sector<Left, Right>(left: Left, right: Right) -> ProductSector<Left, Right> {
+    ProductSector::new(left, right)
+}
+
+pub trait ProductSectorCodec {
+    fn try_encode(left: SectorId, right: SectorId) -> Option<SectorId>;
+
+    fn encode(left: SectorId, right: SectorId) -> SectorId {
+        Self::try_encode(left, right).expect("product sector id overflow")
+    }
+
+    fn decode(sector: SectorId) -> Option<(SectorId, SectorId)>;
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct TensorKitProductCodec;
+
+impl ProductSectorCodec for TensorKitProductCodec {
+    fn try_encode(left: SectorId, right: SectorId) -> Option<SectorId> {
+        let left = left.id() as u128;
+        let right = right.id() as u128;
+        let sum = left.checked_add(right)?;
+        let paired = sum
+            .checked_mul(sum + 1)
+            .and_then(|value| value.checked_div(2))
+            .and_then(|value| value.checked_add(left))
+            .and_then(|value| usize::try_from(value).ok())?;
+        Some(SectorId::new(paired))
+    }
+
+    fn decode(sector: SectorId) -> Option<(SectorId, SectorId)> {
+        let paired = sector.id() as u128;
+        let sum = tensor_kit_product_pairing_sum(paired);
+        let triangular = sum.checked_mul(sum + 1)?.checked_div(2)?;
+        let left = paired.checked_sub(triangular)?;
+        let right = sum.checked_sub(left)?;
+        Some((
+            SectorId::new(usize::try_from(left).ok()?),
+            SectorId::new(usize::try_from(right).ok()?),
+        ))
+    }
+}
+
+fn tensor_kit_product_pairing_sum(paired: u128) -> u128 {
+    let mut low = 0u128;
+    let mut high = 1u128;
+    while triangular_number(high) <= paired {
+        high *= 2;
+    }
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        if triangular_number(mid) <= paired {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+fn triangular_number(value: u128) -> u128 {
+    value * (value + 1) / 2
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ProductFusionRule<LeftRule, RightRule, Codec = TensorKitProductCodec> {
+    left: LeftRule,
+    right: RightRule,
+    _codec: PhantomData<Codec>,
+}
+
+impl<LeftRule, RightRule, Codec> ProductFusionRule<LeftRule, RightRule, Codec> {
+    pub const fn new(left: LeftRule, right: RightRule) -> Self {
+        Self {
+            left,
+            right,
+            _codec: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub const fn left_rule(&self) -> &LeftRule {
+        &self.left
+    }
+
+    #[inline]
+    pub const fn right_rule(&self) -> &RightRule {
+        &self.right
+    }
+
+    pub fn encode_sector(&self, left: SectorId, right: SectorId) -> SectorId
+    where
+        Codec: ProductSectorCodec,
+    {
+        Codec::encode(left, right)
+    }
+
+    pub fn decode_sector(&self, sector: SectorId) -> Option<(SectorId, SectorId)>
+    where
+        Codec: ProductSectorCodec,
+    {
+        Codec::decode(sector)
+    }
+
+    fn decode_sector_or_panic(&self, sector: SectorId) -> (SectorId, SectorId)
+    where
+        Codec: ProductSectorCodec,
+    {
+        self.decode_sector(sector)
+            .expect("product fusion rule received an invalid product sector")
+    }
+}
+
+pub const fn product_fusion_rule<LeftRule, RightRule>(
+    left: LeftRule,
+    right: RightRule,
+) -> ProductFusionRule<LeftRule, RightRule> {
+    ProductFusionRule::new(left, right)
+}
+
+pub const fn product_fusion_rule_with_codec<LeftRule, RightRule, Codec>(
+    left: LeftRule,
+    right: RightRule,
+) -> ProductFusionRule<LeftRule, RightRule, Codec> {
+    ProductFusionRule::new(left, right)
+}
+
+pub trait ProductFusionRuleExt: FusionRule + Sized {
+    fn product<RightRule>(self, right: RightRule) -> ProductFusionRule<Self, RightRule>
+    where
+        RightRule: FusionRule,
+    {
+        ProductFusionRule::new(self, right)
+    }
+}
+
+impl<Rule> ProductFusionRuleExt for Rule where Rule: FusionRule + Sized {}
+
+impl<LeftRule, RightRule, Codec> Default for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: Default,
+    RightRule: Default,
+{
+    fn default() -> Self {
+        Self::new(LeftRule::default(), RightRule::default())
+    }
+}
+
+impl<LeftRule, RightRule, Codec> FusionRule for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: FusionRule,
+    RightRule: FusionRule,
+    Codec: ProductSectorCodec,
+{
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.left
+            .fusion_style()
+            .combined_with(self.right.fusion_style())
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.left
+            .braiding_style()
+            .combined_with(self.right.braiding_style())
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.encode_sector(self.left.vacuum(), self.right.vacuum())
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        self.left.supports_unitary_braid_dagger() && self.right.supports_unitary_braid_dagger()
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.encode_sector(self.left.dual(left), self.right.dual(right))
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let (left_left, left_right) = self.decode_sector_or_panic(left);
+        let (right_left, right_right) = self.decode_sector_or_panic(right);
+        let left_channels = self.left.fusion_channels(left_left, right_left);
+        let right_channels = self.right.fusion_channels(left_right, right_right);
+        // Cartesian product of the two sub-rules' channels, matching TensorKit's
+        // `⊗(p1,p2) = SectorSet(product(map(⊗, ...)))`. No dedup: each sub-rule
+        // is multiplicity-free (distinct channels) and `encode_sector` is the
+        // Cantor pairing (a bijection), so distinct (left,right) pairs always
+        // encode to distinct ids — the old `channels.contains()` guard was
+        // provably dead and made this O(k²) instead of O(k) in k = |L|·|R|.
+        let mut channels = SectorVec::with_capacity(left_channels.len() * right_channels.len());
+        for right_channel in right_channels {
+            for &left_channel in &left_channels {
+                channels.push(self.encode_sector(left_channel, right_channel));
+            }
+        }
+        channels
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        let (left_left, left_right) = self.decode_sector_or_panic(left);
+        let (right_left, right_right) = self.decode_sector_or_panic(right);
+        let (coupled_left, coupled_right) = self.decode_sector_or_panic(coupled);
+        self.left.nsymbol(left_left, right_left, coupled_left)
+            * self.right.nsymbol(left_right, right_right, coupled_right)
+    }
+}
+
+impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionRule
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: MultiplicityFreeFusionRule,
+    RightRule: MultiplicityFreeFusionRule,
+    Codec: ProductSectorCodec,
+{
+}
+
+impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionSymbols
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
+    RightRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
+    Codec: ProductSectorCodec,
+{
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (middle_l, middle_r) = self.decode_sector_or_panic(middle);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        let (left_coupled_l, left_coupled_r) = self.decode_sector_or_panic(left_coupled);
+        let (right_coupled_l, right_coupled_r) = self.decode_sector_or_panic(right_coupled);
+        self.left.f_symbol_scalar(
+            left_l,
+            middle_l,
+            right_l,
+            coupled_l,
+            left_coupled_l,
+            right_coupled_l,
+        ) * self.right.f_symbol_scalar(
+            left_r,
+            middle_r,
+            right_r,
+            coupled_r,
+            left_coupled_r,
+            right_coupled_r,
+        )
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        self.left.r_symbol_scalar(left_l, right_l, coupled_l)
+            * self.right.r_symbol_scalar(left_r, right_r, coupled_r)
+    }
+}
+
+impl<LeftRule, RightRule, Codec> MultiplicityFreeRigidSymbols
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    RightRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    // Sync via the trait's supertrait; the codec is a PhantomData marker.
+    Codec: ProductSectorCodec + Sync,
+{
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.dim_scalar(left) * self.right.dim_scalar(right)
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.inv_dim_scalar(left) * self.right.inv_dim_scalar(right)
+    }
+
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.sqrt_dim_scalar(left) * self.right.sqrt_dim_scalar(right)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.inv_sqrt_dim_scalar(left) * self.right.inv_sqrt_dim_scalar(right)
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.twist_scalar(left) * self.right.twist_scalar(right)
+    }
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let (left, right) = self.decode_sector_or_panic(sector);
+        self.left.frobenius_schur_phase_scalar(left)
+            * self.right.frobenius_schur_phase_scalar(right)
+    }
+
+    fn a_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        self.left.a_symbol_scalar(left_l, right_l, coupled_l)
+            * self.right.a_symbol_scalar(left_r, right_r, coupled_r)
+    }
+
+    fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let (left_l, left_r) = self.decode_sector_or_panic(left);
+        let (right_l, right_r) = self.decode_sector_or_panic(right);
+        let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
+        self.left.b_symbol_scalar(left_l, right_l, coupled_l)
+            * self.right.b_symbol_scalar(left_r, right_r, coupled_r)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Z2Irrep {
+    parity: u8,
+}
+
+impl Z2Irrep {
+    pub const EVEN: Self = Self { parity: 0 };
+    pub const ODD: Self = Self { parity: 1 };
+
+    pub const fn new(parity: u8) -> Self {
+        Self { parity: parity & 1 }
+    }
+
+    #[inline]
+    pub const fn parity(self) -> u8 {
+        self.parity
+    }
+
+    #[inline]
+    pub const fn sector_id(self) -> SectorId {
+        SectorId::new(self.parity as usize)
+    }
+
+    pub const fn from_sector_id(sector: SectorId) -> Option<Self> {
+        match sector.id() {
+            0 => Some(Self::EVEN),
+            1 => Some(Self::ODD),
+            _ => None,
+        }
+    }
+}
+
+impl From<Z2Irrep> for SectorId {
+    fn from(value: Z2Irrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct Z2FusionRule;
+
+impl FusionRule for Z2FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        Z2Irrep::EVEN.into()
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let left = Z2Irrep::from_sector_id(left).expect("Z2 fusion received an invalid sector");
+        let right = Z2Irrep::from_sector_id(right).expect("Z2 fusion received an invalid sector");
+        core::iter::once(Z2Irrep::new(left.parity() ^ right.parity()).into()).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for Z2FusionRule {}
+
+impl MultiplicityFreeFusionSymbols for Z2FusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for Z2FusionRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreeBlockKey,
+        _destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for Z2FusionRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct FermionParityFusionRule;
+
+impl FusionRule for FermionParityFusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Fermionic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        Z2Irrep::EVEN.into()
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        Z2FusionRule.fusion_channels(left, right)
+    }
+}
+
+impl MultiplicityFreeFusionRule for FermionParityFusionRule {}
+
+impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
+        if left == Z2Irrep::ODD.into() && right == Z2Irrep::ODD.into() {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for FermionParityFusionRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreeBlockKey,
+        _destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for FermionParityFusionRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if sector == Z2Irrep::ODD.into() {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct U1Irrep {
+    charge: i32,
+}
+
+impl U1Irrep {
+    pub const fn new(charge: i32) -> Self {
+        Self { charge }
+    }
+
+    #[inline]
+    pub const fn charge(self) -> i32 {
+        self.charge
+    }
+
+    pub const fn sector_id(self) -> SectorId {
+        let charge = self.charge as i64;
+        if charge >= 0 {
+            SectorId::new((charge as usize) * 2)
+        } else {
+            SectorId::new(((-charge) as usize) * 2 - 1)
+        }
+    }
+
+    pub fn from_sector_id(sector: SectorId) -> Option<Self> {
+        let id = sector.id();
+        if id > u32::MAX as usize {
+            return None;
+        }
+        let charge = if id % 2 == 0 {
+            i64::try_from(id / 2).ok()?
+        } else {
+            -i64::try_from((id + 1) / 2).ok()?
+        };
+        i32::try_from(charge).ok().map(Self::new)
+    }
+}
+
+impl From<U1Irrep> for SectorId {
+    fn from(value: U1Irrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct U1FusionRule;
+
+impl FusionRule for U1FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        U1Irrep::new(0).into()
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let sector = U1Irrep::from_sector_id(sector).expect("U(1) dual received an invalid sector");
+        U1Irrep::new(
+            sector
+                .charge()
+                .checked_neg()
+                .expect("U(1) dual charge overflow"),
+        )
+        .into()
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let left = U1Irrep::from_sector_id(left).expect("U(1) fusion received an invalid sector");
+        let right = U1Irrep::from_sector_id(right).expect("U(1) fusion received an invalid sector");
+        core::iter::once(
+            U1Irrep::new(
+                left.charge()
+                    .checked_add(right.charge())
+                    .expect("U(1) fusion charge overflow"),
+            )
+            .into(),
+        )
+        .collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for U1FusionRule {}
+
+impl MultiplicityFreeFusionSymbols for U1FusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for U1FusionRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct SU2Irrep {
+    twice_spin: usize,
+}
+
+impl SU2Irrep {
+    pub const fn from_twice_spin(twice_spin: usize) -> Self {
+        Self { twice_spin }
+    }
+
+    #[inline]
+    pub const fn twice_spin(self) -> usize {
+        self.twice_spin
+    }
+
+    #[inline]
+    pub const fn sector_id(self) -> SectorId {
+        SectorId::new(self.twice_spin)
+    }
+
+    pub const fn from_sector_id(sector: SectorId) -> Self {
+        Self::from_twice_spin(sector.id())
+    }
+}
+
+impl From<SU2Irrep> for SectorId {
+    fn from(value: SU2Irrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct SU2FusionRule;
+
+impl FusionRule for SU2FusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Simple
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SU2Irrep::from_twice_spin(0).into()
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let left = SU2Irrep::from_sector_id(left).twice_spin();
+        let right = SU2Irrep::from_sector_id(right).twice_spin();
+        let min = left.abs_diff(right);
+        let max = left + right;
+        (min..=max)
+            .step_by(2)
+            .map(|twice_spin| SU2Irrep::from_twice_spin(twice_spin).into())
+            .collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for SU2FusionRule {}
+
+impl MultiplicityFreeFusionSymbols for SU2FusionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        let j1 = SU2Irrep::from_sector_id(left).twice_spin();
+        let j2 = SU2Irrep::from_sector_id(middle).twice_spin();
+        let j3 = SU2Irrep::from_sector_id(right).twice_spin();
+        let j4 = SU2Irrep::from_sector_id(coupled).twice_spin();
+        let j5 = SU2Irrep::from_sector_id(left_coupled).twice_spin();
+        let j6 = SU2Irrep::from_sector_id(right_coupled).twice_spin();
+        su2_f_symbol_from_doubled_spins(j1, j2, j3, j4, j5, j6)
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        if self.nsymbol(left, right, coupled) == 0 {
+            return 0.0;
+        }
+        let left = SU2Irrep::from_sector_id(left).twice_spin();
+        let right = SU2Irrep::from_sector_id(right).twice_spin();
+        let coupled = SU2Irrep::from_sector_id(coupled).twice_spin();
+        let exponent = (left + right - coupled) / 2;
+        if exponent % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for SU2FusionRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        (SU2Irrep::from_sector_id(sector).twice_spin() + 1) as f64
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        1.0 / self.dim_scalar(sector)
+    }
+
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        self.dim_scalar(sector).sqrt()
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        1.0 / self.sqrt_dim_scalar(sector)
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if SU2Irrep::from_sector_id(sector).twice_spin() % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+}
+
+fn su2_f_symbol_from_doubled_spins(
+    j1: usize,
+    j2: usize,
+    j3: usize,
+    j4: usize,
+    j5: usize,
+    j6: usize,
+) -> f64 {
+    if [j1, j2, j3, j4, j5, j6].iter().all(|&j| j == 0) {
+        return 1.0;
+    }
+    let phase_exponent = (j1 + j2 + j3 + j4) / 2;
+    let phase = if phase_exponent % 2 == 0 { 1.0 } else { -1.0 };
+    let dimension_factor = (((j5 + 1) * (j6 + 1)) as f64).sqrt();
+    phase * dimension_factor * wigner_6j_doubled(j1, j2, j5, j3, j4, j6)
+}
+
+/// SU(2) 6j symbol (arguments as doubled spins), memoized in a process-global
+/// cache keyed by the six doubled spins — the analogue of TensorKit's
+/// `WignerSymbols.Wigner6j` LRU. Each distinct symbol's exact summation is
+/// evaluated once; every later occurrence (across braids, permutes, and
+/// contractions) is a hash lookup. The cached value is bit-identical to the
+/// direct computation, so this changes cold compile cost only.
+fn wigner_6j_doubled(j1: usize, j2: usize, j3: usize, j4: usize, j5: usize, j6: usize) -> f64 {
+    static CACHE: std::sync::OnceLock<std::sync::RwLock<FxHashMap<[usize; 6], f64>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(FxHashMap::default()));
+    let key = [j1, j2, j3, j4, j5, j6];
+    if let Ok(read) = cache.read() {
+        if let Some(&value) = read.get(&key) {
+            return value;
+        }
+    }
+    let value = wigner_6j_doubled_uncached(j1, j2, j3, j4, j5, j6);
+    if let Ok(mut write) = cache.write() {
+        write.insert(key, value);
+    }
+    value
+}
+
+fn wigner_6j_doubled_uncached(
+    j1: usize,
+    j2: usize,
+    j3: usize,
+    j4: usize,
+    j5: usize,
+    j6: usize,
+) -> f64 {
+    let Some(delta_ln) = su2_delta_ln(j1, j2, j3)
+        .and_then(|value| su2_delta_ln(j1, j5, j6).map(|next| value + next))
+        .and_then(|value| su2_delta_ln(j4, j2, j6).map(|next| value + next))
+        .and_then(|value| su2_delta_ln(j4, j5, j3).map(|next| value + next))
+    else {
+        return 0.0;
+    };
+
+    let x = [j1 + j2 + j3, j1 + j5 + j6, j4 + j2 + j6, j4 + j5 + j3];
+    let y = [j1 + j2 + j4 + j5, j1 + j3 + j4 + j6, j2 + j3 + j5 + j6];
+    let mut z_min = x.into_iter().max().unwrap_or(0);
+    let z_max = y.into_iter().min().unwrap_or(0);
+    if z_min > z_max {
+        return 0.0;
+    }
+    if z_min % 2 != 0 {
+        z_min += 1;
+    }
+
+    let mut sum = 0.0;
+    let mut z_doubled = z_min;
+    while z_doubled <= z_max {
+        let z = z_doubled / 2;
+        let mut term_ln = ln_factorial(z + 1);
+        for value in x {
+            term_ln -= ln_factorial((z_doubled - value) / 2);
+        }
+        for value in y {
+            term_ln -= ln_factorial((value - z_doubled) / 2);
+        }
+        let sign = if z % 2 == 0 { 1.0 } else { -1.0 };
+        sum += sign * term_ln.exp();
+        z_doubled += 2;
+    }
+
+    delta_ln.exp() * sum
+}
+
+fn su2_delta_ln(j1: usize, j2: usize, j3: usize) -> Option<f64> {
+    if (j1 + j2 + j3) % 2 != 0 {
+        return None;
+    }
+    if j1 + j2 < j3 || j1 + j3 < j2 || j2 + j3 < j1 {
+        return None;
+    }
+    Some(
+        0.5 * (ln_factorial((j1 + j2 - j3) / 2)
+            + ln_factorial((j1 + j3 - j2) / 2)
+            + ln_factorial((j2 + j3 - j1) / 2)
+            - ln_factorial((j1 + j2 + j3) / 2 + 1)),
+    )
+}
+
+/// `ln(n!)`, memoized in a process-global lazily-extended table.
+///
+/// `ln(n!) = ln((n-1)!) + ln(n)` is monotone, so the table is filled once and
+/// every later call is an O(1) lookup. Recoupling-coefficient evaluation
+/// (6j symbols) calls this ~7x per summation term, so cold structure compile
+/// dominated by the previous naive `(1..=n)` recomputation. The values are
+/// identical; this only removes the recomputation.
+fn ln_factorial(n: usize) -> f64 {
+    static TABLE: std::sync::OnceLock<std::sync::RwLock<Vec<f64>>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| std::sync::RwLock::new(vec![0.0]));
+    if let Ok(read) = table.read() {
+        if let Some(&value) = read.get(n) {
+            return value;
+        }
+    }
+    let mut write = table.write().expect("ln_factorial table poisoned");
+    while write.len() <= n {
+        let previous = *write.last().expect("table seeded with ln(0!) = 0");
+        let next = write.len();
+        write.push(previous + (next as f64).ln());
+    }
+    write[n]
+}
+

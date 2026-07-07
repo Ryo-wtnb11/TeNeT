@@ -27,6 +27,9 @@ pub enum Truncation {
     /// Discard values below `max(atol, rtol * norm)`, where `norm` is the
     /// weighted 2-norm of the full spectrum.
     Tolerance { atol: f64, rtol: f64 },
+    /// Discard values below `max(atol, rtol * normInf)`, where `normInf` is the
+    /// unweighted maximum value. This matches TensorKit `trunctol(..., p=Inf)`.
+    ToleranceInf { atol: f64, rtol: f64 },
     /// Discard the smallest values while the weighted 2-norm of everything
     /// discarded stays at or below `rtol * norm`.
     DiscardWeight { rtol: f64 },
@@ -49,6 +52,11 @@ impl Truncation {
     /// Discard values below `rtol` times the weighted 2-norm.
     pub fn relative_cutoff(rtol: f64) -> Self {
         Self::Tolerance { atol: 0.0, rtol }
+    }
+
+    /// Discard values below `rtol` times the largest value.
+    pub fn relative_inf_cutoff(rtol: f64) -> Self {
+        Self::ToleranceInf { atol: 0.0, rtol }
     }
 
     /// Bound the relative truncation error (weighted 2-norm of the discarded
@@ -124,7 +132,6 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
                 if used + weight > budget + 1e-12 {
                     break;
                 }
-                // Descending order guarantees `index` extends the prefix.
                 debug_assert_eq!(index, kept[sector]);
                 used += weight;
                 kept[sector] += 1;
@@ -144,22 +151,34 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
                 })
                 .collect()
         }
+        Truncation::ToleranceInf { atol, rtol } => {
+            let threshold = atol.max(rtol * full_norm_inf(spectra));
+            spectra
+                .iter()
+                .map(|spectrum| {
+                    spectrum
+                        .values
+                        .iter()
+                        .take_while(|&&value| value >= threshold)
+                        .count()
+                })
+                .collect()
+        }
         Truncation::DiscardWeight { rtol } => {
             let norm = full_norm(spectra);
             let budget = (rtol * norm) * (rtol * norm);
-            let mut order = descending_candidates(spectra);
             let mut kept: Vec<usize> = spectra
                 .iter()
                 .map(|spectrum| spectrum.values.len())
                 .collect();
             let mut discarded = 0.0;
-            while let Some((sector, index)) = order.pop() {
+            while let Some(sector) = smallest_tail_candidate(spectra, &kept) {
+                let index = kept[sector] - 1;
                 let value = spectra[sector].values[index];
                 let next = discarded + spectra[sector].weight * value * value;
                 if next > budget + 1e-15 {
                     break;
                 }
-                debug_assert_eq!(index + 1, kept[sector]);
                 discarded = next;
                 kept[sector] -= 1;
             }
@@ -180,8 +199,32 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
     }
 }
 
+fn smallest_tail_candidate(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (sector, (spectrum, &count)) in spectra.iter().zip(kept).enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let value = spectrum.values[count - 1];
+        match best {
+            None => best = Some((sector, value)),
+            Some((best_sector, best_value))
+                if value
+                    .partial_cmp(&best_value)
+                    .expect("finite spectrum values")
+                    .is_lt()
+                    || (value == best_value && sector < best_sector) =>
+            {
+                best = Some((sector, value));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(sector, _)| sector)
+}
+
 /// Candidates as `(sector, index)` sorted by descending value; ties keep the
-/// input sector order so the decision is deterministic.
+/// parent storage order, matching TensorKit `sortperm(parent(values); rev=true)`.
 fn descending_candidates(spectra: &[WeightedSpectrum<'_>]) -> Vec<(usize, usize)> {
     let total = spectra.iter().map(|spectrum| spectrum.values.len()).sum();
     let mut heap = BinaryHeap::with_capacity(spectra.len());
@@ -256,6 +299,13 @@ fn full_norm(spectra: &[WeightedSpectrum<'_>]) -> f64 {
         .sqrt()
 }
 
+fn full_norm_inf(spectra: &[WeightedSpectrum<'_>]) -> f64 {
+    spectra
+        .iter()
+        .flat_map(|spectrum| spectrum.values.iter().copied())
+        .fold(0.0, f64::max)
+}
+
 fn discarded_norm(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> f64 {
     spectra
         .iter()
@@ -301,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_ties_keep_input_sector_order() {
+    fn rank_ties_keep_parent_storage_order() {
         let entries = [(1.0, vec![2.0, 1.0]), (1.0, vec![2.0, 1.0])];
         let spectra = spectra(&entries);
         let decision = select_truncation(&spectra, &Truncation::rank(1));
@@ -322,6 +372,14 @@ mod tests {
         // norm = 5.001..., rtol 0.5 => threshold ~2.5: keeps 4 and 3.
         let decision = select_truncation(&spectra, &Truncation::relative_cutoff(0.5));
         assert_eq!(decision.kept, vec![2]);
+    }
+
+    #[test]
+    fn tolerance_inf_thresholds_against_unweighted_max() {
+        let entries = [(3.0, vec![4.0, 3.0, 0.1]), (1.0, vec![2.5])];
+        let spectra = spectra(&entries);
+        let decision = select_truncation(&spectra, &Truncation::relative_inf_cutoff(0.7));
+        assert_eq!(decision.kept, vec![2, 0]);
     }
 
     #[test]

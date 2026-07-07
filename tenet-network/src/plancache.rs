@@ -7,9 +7,14 @@
 //! key: a pairwise contraction order is correct for any dimensions, and
 //! truncation drifts bond dimensions every sweep — an exact-dims key would
 //! miss every iteration. Each entry stores the dimensions it was planned
-//! under and its estimated cost; the [`ReplanPolicy`] decides when drift has
-//! grown enough to re-plan. Eviction is LRU (same mechanism as the
-//! resolution cache in `tenet-tensors`).
+//! under; the [`ReplanPolicy`] decides whether a dimension change forces a
+//! re-plan. The default ([`ReplanPolicy::BakeOnce`]) finds the order once at
+//! real dims and reuses it for any later dims — the standard "search once,
+//! reuse the path regardless of rank" design (cotengra's reusable
+//! `ContractionTree`, `@tensoropt`'s compile-time bake) — so the
+//! (χ-dependent) order search is paid at most once per topology, not per χ.
+//! Eviction is LRU (same mechanism as the resolution cache in
+//! `tenet-tensors`).
 //!
 //! Storage is per-[`Runtime`]: the configuration value types live in
 //! `tenet::plancache` (set them on `Runtime::builder()` or with
@@ -19,9 +24,11 @@
 //! plans or counters.
 
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use lru::LruCache;
 use tenet::prelude::{Error, Runtime, Tensor};
 
 pub use tenet::plancache::{
@@ -61,16 +68,90 @@ struct CacheEntry {
     cost: usize,
 }
 
-#[derive(Default)]
 struct PlanCache {
     hits: u64,
     misses: u64,
     replans: u64,
-    map: HashMap<NetworkTopology, CacheEntry>,
-    /// Least-recently-used key first; same mechanism as the resolution
-    /// cache in `tenet-tensors` (whose helpers are `pub(crate)` there, so
-    /// the two small operations are replicated below).
-    lru_order: VecDeque<NetworkTopology>,
+    /// O(1) LRU (HashMap + intrusive linked list): touch-on-hit, evict-LRU-on-
+    /// insert, all O(1) — the Rust analog of TensorKit's `LRUCache.jl`-backed
+    /// `GlobalLRUCache`. Capacity tracks `PlanCacheConfig::capacity`, resized on
+    /// insert if the configured capacity changed.
+    map: LruCache<NetworkTopology, CacheEntry>,
+    /// Persisted contraction orders keyed by stable topology text (see
+    /// [`topology_text`]), populated by [`load_plan_cache`] and grown on
+    /// every fresh search. A disk hit skips the (cold) optimal-order search
+    /// entirely — the plancache analog of `@tensoropt`'s compile-time bake.
+    disk: HashMap<String, crate::plan::ContractionPlan>,
+    /// Whether cross-process persistence is in use. Set by [`load_plan_cache`]
+    /// (the application's opt-in) and only then is [`disk`] consulted/grown.
+    /// Off by default so the in-memory replan behavior is byte-identical when
+    /// persistence is not used: a persisted order recorded from an early
+    /// non-degenerate search must not silently replace a later drift-replan's
+    /// fresh search, which the truncation basis (hence energy) depends on.
+    persist: bool,
+}
+
+/// Clamp a configured capacity to a non-zero LRU capacity (0 would disable
+/// caching, which the search-once design never wants — treat it as 1).
+fn lru_capacity(capacity: usize) -> NonZeroUsize {
+    NonZeroUsize::new(capacity.max(1)).expect("capacity.max(1) is non-zero")
+}
+
+impl Default for PlanCache {
+    fn default() -> Self {
+        Self {
+            hits: 0,
+            misses: 0,
+            replans: 0,
+            map: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
+            disk: HashMap::new(),
+            persist: false,
+        }
+    }
+}
+
+/// Serialized-plan-cache format version. Bumped whenever the cost model or an
+/// optimizer's order search changes so that a stale on-disk file (which would
+/// otherwise replay a now-suboptimal order and silently drift truncation) is
+/// rejected on load rather than trusted.
+const PLAN_CACHE_FILE_VERSION: &str = "TENET_PLANCACHE 1";
+
+/// Stable one-line text key for a network topology: optimizer, output split
+/// and labels, then each operand's conj / codomain rank / written split /
+/// labels. Labels are `tensor!` identifiers (no separators), so the packed
+/// form round-trips by construction and is stable across processes.
+fn topology_text(topology: &NetworkTopology) -> String {
+    let mut text = format!("{:?}|", topology.optimizer);
+    match topology.output_codomain_rank {
+        Some(rank) => text.push_str(&rank.to_string()),
+        None => text.push('-'),
+    }
+    text.push('|');
+    for (i, label) in topology.output.iter().enumerate() {
+        if i > 0 {
+            text.push(',');
+        }
+        text.push_str(label.as_str());
+    }
+    for operand in &topology.operands {
+        text.push('|');
+        text.push(if operand.conj { '1' } else { '0' });
+        text.push(':');
+        text.push_str(&operand.codomain_rank.to_string());
+        text.push(':');
+        match operand.written_split {
+            Some(split) => text.push_str(&split.to_string()),
+            None => text.push('-'),
+        }
+        text.push(':');
+        for (i, label) in operand.labels.iter().enumerate() {
+            if i > 0 {
+                text.push(',');
+            }
+            text.push_str(label.as_str());
+        }
+    }
+    text
 }
 
 // The cache lives in the runtime's `dyn Any + Send` slot; plans are
@@ -79,14 +160,6 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<PlanCache>();
 };
-
-/// Move `key` to the most-recently-used end of `order`.
-fn touch_lru_key(order: &mut VecDeque<NetworkTopology>, key: &NetworkTopology) {
-    if let Some(position) = order.iter().position(|stored| stored == key) {
-        order.remove(position);
-    }
-    order.push_back(key.clone());
-}
 
 /// The runtime slot's cache, claimed (created) on first use.
 fn cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> &mut PlanCache {
@@ -124,16 +197,105 @@ pub fn clear_plan_cache(runtime: &Runtime) {
     runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
         cache.map.clear();
-        cache.lru_order.clear();
         cache.hits = 0;
         cache.misses = 0;
         cache.replans = 0;
     });
 }
 
-fn drifted(policy: ReplanPolicy, snapshot: &[Vec<usize>], current: &[Vec<usize>]) -> bool {
+/// Serialize the persisted contraction orders (topology text + plan) to a
+/// versioned text blob for the application to write to a cache file. Restore
+/// it in a later process with [`load_plan_cache`] before the first contraction
+/// to skip the cold optimal-order search. The order is topology-only and thus
+/// dimension-independent, so one saved file serves every χ.
+pub fn save_plan_cache(runtime: &Runtime) -> String {
+    runtime.with_extension_slot(|slot| {
+        let cache = cache_mut(slot);
+        let mut text = String::from(PLAN_CACHE_FILE_VERSION);
+        text.push('\n');
+        for (topo, plan) in &cache.disk {
+            let plan_text = plan.to_text();
+            text.push_str("TOPO ");
+            text.push_str(topo);
+            text.push('\n');
+            text.push_str(&format!("PLAN {}\n", plan_text.lines().count()));
+            text.push_str(&plan_text);
+            if !plan_text.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+        text
+    })
+}
+
+/// Restore orders saved by [`save_plan_cache`]. A blob whose version header
+/// does not match this build is ignored (returns 0): a stale file would
+/// replay now-suboptimal orders and silently drift truncation, so it is
+/// dropped rather than trusted. Returns the number of orders loaded.
+pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
+    let mut lines = text.lines();
+    // An empty blob is a fresh persistence file (first run): activate
+    // persistence and load nothing. A non-empty blob with a mismatched version
+    // header is stale/foreign and is ignored WITHOUT activating persistence, so
+    // it neither replays bad orders nor perturbs in-memory replan numerics.
+    let header = lines.next();
+    if header.is_some() && header != Some(PLAN_CACHE_FILE_VERSION) {
+        return 0;
+    }
+    runtime.with_extension_slot(|slot| {
+        let cache = cache_mut(slot);
+        // The application opted into persistence: from now on record and reuse
+        // orders through the disk map (even if this file was empty).
+        cache.persist = true;
+        let mut loaded = 0;
+        while let Some(topo_line) = lines.next() {
+            let Some(topo) = topo_line.strip_prefix("TOPO ") else {
+                continue;
+            };
+            let Some(count) = lines
+                .next()
+                .and_then(|l| l.strip_prefix("PLAN "))
+                .and_then(|n| n.trim().parse::<usize>().ok())
+            else {
+                break;
+            };
+            let plan_text: String =
+                (0..count)
+                    .filter_map(|_| lines.next())
+                    .fold(String::new(), |mut acc, l| {
+                        acc.push_str(l);
+                        acc.push('\n');
+                        acc
+                    });
+            if let Ok(plan) = crate::plan::ContractionPlan::from_text(&plan_text) {
+                cache.disk.insert(topo.to_string(), plan);
+                loaded += 1;
+            }
+        }
+        loaded
+    })
+}
+
+/// A plan made while some leg was trivial (dim ≤ 1) can encode a degenerate,
+/// outer-product-heavy order that fits the real state poorly (reusing it is
+/// catastrophically slow — that is what [`ReplanPolicy::BakeOnce`] guards
+/// against). Once planned at non-degenerate dims the order is frozen.
+fn snapshot_is_degenerate(snapshot: &[Vec<usize>]) -> bool {
+    snapshot.iter().flatten().any(|&d| d <= 1)
+}
+
+/// Whether a topology-matched cache entry must be re-planned given how its
+/// leg dims have drifted, per the [`ReplanPolicy`].
+fn needs_replan(policy: ReplanPolicy, snapshot: &[Vec<usize>], current: &[Vec<usize>]) -> bool {
     match policy {
         ReplanPolicy::AlwaysReuse => false,
+        // Reuse the once-found path for any real dims (cotengra/@tensoropt
+        // style); only replace a plan seeded at degenerate dims, and only
+        // once the dims have actually moved off that seed.
+        ReplanPolicy::BakeOnce => {
+            snapshot_is_degenerate(snapshot)
+                && snapshot.iter().flatten().ne(current.iter().flatten())
+        }
         ReplanPolicy::DriftFactor(factor) => snapshot
             .iter()
             .flatten()
@@ -163,6 +325,22 @@ fn plan_fresh(
             tensors,
             &crate::pathopt::OptEinsumPathOptimizer::new(crate::pathopt::PathStrategy::Optimal),
         ),
+        // Dynamic programming yields the optimal order in polynomial time for
+        // TeNeT's small networks — the `@tensoropt` analog without exhaustive
+        // search cost. Upstream `dp` errors on all-dim-1 networks (the same
+        // degenerate case `auto-hq` trips on), where the order is irrelevant
+        // anyway, so fall back to greedy there.
+        #[cfg(feature = "opt-path")]
+        Optimizer::DynamicProgramming => {
+            use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
+            match network.plan(
+                tensors,
+                &OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming),
+            ) {
+                Ok(plan) => Ok(plan),
+                Err(_) => network.plan(tensors, &GreedyDenseOptimizer),
+            }
+        }
         // Legacy `default_dense_plan` fallback chain: auto-hq -> auto -> dp
         // -> greedy. Upstream `opt-einsum-path` errors on some all-dim-1
         // networks, so each failed driver falls through to the next.
@@ -244,11 +422,14 @@ pub(crate) fn get_or_plan(
     }
     let outcome = runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
-        match cache.map.get(&topology) {
-            Some(entry) if !drifted(config.replan, &entry.dims_snapshot, &dims) => {
+        // `peek` inspects without touching LRU order, so a stale entry that will
+        // be replanned does not count as a use; a genuine hit is promoted to
+        // most-recently-used with an O(1) `promote`.
+        match cache.map.peek(&topology) {
+            Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
                 let planned = Arc::clone(&entry.planned);
                 cache.hits += 1;
-                touch_lru_key(&mut cache.lru_order, &topology);
+                cache.map.promote(&topology);
                 Outcome::Hit(planned)
             }
             Some(_) => Outcome::Replan,
@@ -259,7 +440,42 @@ pub(crate) fn get_or_plan(
         return Ok(planned);
     }
 
-    let planned = Arc::new(plan_fresh(network, tensors, optimizer)?);
+    // With persistence in use, consult the persisted orders before paying for
+    // a fresh search — on a miss AND on a drift-replan (a degenerate seed
+    // reused at real dims still pays the full search otherwise). Disk plans are
+    // only ever recorded from non-degenerate searches, so a disk hit wraps that
+    // good order via `plan_with`, skipping the cold optimal-order search. When
+    // persistence is off the disk map is never touched, keeping in-memory
+    // replan numerics byte-identical.
+    let topo_key = topology_text(&topology);
+    let disk_plan = runtime.with_extension_slot(|slot| {
+        let cache = cache_mut(slot);
+        cache
+            .persist
+            .then(|| cache.disk.get(&topo_key).cloned())
+            .flatten()
+    });
+    let planned = match disk_plan {
+        Some(plan) => Arc::new(network.plan_with(tensors, plan)?),
+        None => {
+            let fresh = Arc::new(plan_fresh(network, tensors, optimizer)?);
+            // Record the freshly searched order so a later process reusing
+            // this cache file skips the search — but only under persistence and
+            // only when searched at non-degenerate dims. A degenerate seed
+            // (dim ≤ 1) yields the outer-product-heavy order `BakeOnce` exists
+            // to reject; persisting it would replay that bad order on reuse.
+            if !snapshot_is_degenerate(&dims) {
+                let plan_copy = fresh.plan().clone();
+                runtime.with_extension_slot(|slot| {
+                    let cache = cache_mut(slot);
+                    if cache.persist {
+                        cache.disk.insert(topo_key, plan_copy);
+                    }
+                });
+            }
+            fresh
+        }
+    };
     let cost = planned.plan().total_cost();
     runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
@@ -267,7 +483,14 @@ pub(crate) fn get_or_plan(
             Outcome::Replan => cache.replans += 1,
             _ => cache.misses += 1,
         }
-        cache.map.insert(
+        // Track the configured capacity (it may change between calls), then
+        // `put`, which inserts as most-recently-used and evicts the LRU entry
+        // in O(1) when at capacity.
+        let capacity = lru_capacity(config.capacity);
+        if cache.map.cap() != capacity {
+            cache.map.resize(capacity);
+        }
+        cache.map.put(
             topology.clone(),
             CacheEntry {
                 planned: Arc::clone(&planned),
@@ -275,13 +498,6 @@ pub(crate) fn get_or_plan(
                 cost,
             },
         );
-        touch_lru_key(&mut cache.lru_order, &topology);
-        while cache.map.len() > config.capacity {
-            let Some(oldest) = cache.lru_order.pop_front() else {
-                break;
-            };
-            cache.map.remove(&oldest);
-        }
     });
     Ok(planned)
 }

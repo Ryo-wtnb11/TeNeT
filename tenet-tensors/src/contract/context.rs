@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
@@ -40,7 +40,7 @@ use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorCo
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 
 type GlobalTensorContractStructureMap<PlanKey> =
-    RwLock<HashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<f64>>>>;
+    RwLock<FxHashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<f64>>>>;
 
 fn global_tensor_contract_structures<PlanKey>() -> Arc<GlobalTensorContractStructureMap<PlanKey>>
 where
@@ -1283,7 +1283,7 @@ where
     /// Resolves the contraction route and plan once, returning a handle that
     /// [`Self::execute_prepared_tensorcontract_fusion`] replays without any
     /// cache lookups. Valid for tensors that share the prepared tensors'
-    /// fusion spaces (checked by subblock-structure identity at execute).
+    /// fusion-space handles.
     pub fn prepare_tensorcontract_fusion<
         R,
         const DST_NOUT: usize,
@@ -1345,17 +1345,17 @@ where
         )?;
         Ok(PreparedTensorContractFusion {
             rule: rule.tree_transform_rule_cache_key(),
-            dst_structure: Arc::clone(dst.structure()),
-            lhs_structure: Arc::clone(lhs.structure()),
-            rhs_structure: Arc::clone(rhs.structure()),
+            dst_fusion_space_ptr: Arc::as_ptr(dst_fusion) as usize,
+            lhs_fusion_space_ptr: Arc::as_ptr(lhs_fusion) as usize,
+            rhs_fusion_space_ptr: Arc::as_ptr(rhs_fusion) as usize,
             resolution,
         })
     }
 
     /// Replays a prepared contraction. The tensors must share the prepared
-    /// tensors' fusion spaces; this is enforced by pointer identity of the
-    /// subblock structures, so tensors created from the same
-    /// [`FusionTensorMapSpace`] (or clones of the prepared ones) are valid.
+    /// tensors' fusion-space handles, so tensors created from the same
+    /// [`FusionTensorMapSpace`] handle (or clones of the prepared ones) are
+    /// valid.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_prepared_tensorcontract_fusion<
         R,
@@ -1388,10 +1388,25 @@ where
         DLhs: HostReadableStorage<D>,
         DRhs: HostReadableStorage<D>,
     {
+        let Some(dst_fusion) = dst.fusion_space() else {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prepared contraction",
+            });
+        };
+        let Some(lhs_fusion) = lhs.fusion_space() else {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prepared contraction",
+            });
+        };
+        let Some(rhs_fusion) = rhs.fusion_space() else {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prepared contraction",
+            });
+        };
         if prepared.rule != rule.tree_transform_rule_cache_key()
-            || !Arc::ptr_eq(&prepared.dst_structure, dst.structure())
-            || !Arc::ptr_eq(&prepared.lhs_structure, lhs.structure())
-            || !Arc::ptr_eq(&prepared.rhs_structure, rhs.structure())
+            || prepared.dst_fusion_space_ptr != Arc::as_ptr(dst_fusion) as usize
+            || prepared.lhs_fusion_space_ptr != Arc::as_ptr(lhs_fusion) as usize
+            || prepared.rhs_fusion_space_ptr != Arc::as_ptr(rhs_fusion) as usize
         {
             return Err(OperationError::StructureMismatch {
                 tensor: "prepared contraction",
@@ -1830,8 +1845,8 @@ where
 #[derive(Clone, Debug)]
 pub struct PreparedTensorContractFusion<RuleKey> {
     rule: RuleKey,
-    dst_structure: Arc<BlockStructure>,
-    lhs_structure: Arc<BlockStructure>,
-    rhs_structure: Arc<BlockStructure>,
+    dst_fusion_space_ptr: usize,
+    lhs_fusion_space_ptr: usize,
+    rhs_fusion_space_ptr: usize,
     resolution: Resolution,
 }

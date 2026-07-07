@@ -1,6 +1,6 @@
 use num_traits::Zero;
 use std::sync::Arc;
-use tenet_core::{Placement, SimilarStorage};
+use tenet_core::{Placement, ScratchStorage, SimilarStorage};
 
 use crate::{host_scratch::HostScratchBuffer, OperationError, ReportsPlacement};
 
@@ -31,6 +31,25 @@ where
 
     pub(crate) fn fill_zero(&mut self) {
         self.data.fill(T::zero());
+    }
+
+    /// Re-points this scratch at a different space, reusing the existing
+    /// buffer's capacity instead of allocating a fresh one. `resize_filled`
+    /// only reallocates when the new length exceeds the current capacity, so a
+    /// slot cycled through many contraction shapes grows once to the largest
+    /// size seen and is then reused — collapsing the per-eval realloc / page
+    /// churn (madvise/bzero) that a fresh allocation on every space change
+    /// caused. The whole buffer is zeroed since `resize_filled` only fills the
+    /// grown tail.
+    pub(crate) fn reset(
+        &mut self,
+        space: Arc<DynamicFusionMapSpace>,
+    ) -> Result<(), OperationError> {
+        let len = space.required_len()?;
+        self.space = space;
+        self.data.resize_filled(len, T::zero());
+        self.data.fill(T::zero());
+        Ok(())
     }
 }
 
@@ -181,6 +200,24 @@ impl<Buf> StorageDynamicFusionScratch<Buf> {
         })
     }
 
+    pub(crate) fn reset_from_storage<T, S>(
+        &mut self,
+        space: Arc<DynamicFusionMapSpace>,
+        storage: &S,
+        zero: T,
+    ) -> Result<(), OperationError>
+    where
+        T: Clone,
+        S: SimilarStorage<T, Similar = Buf>,
+        Buf: ScratchStorage<T>,
+    {
+        let len = space.required_len()?;
+        self.space = space;
+        self.data.reset_filled(len, zero);
+        debug_assert_eq!(self.data.placement(), storage.placement());
+        Ok(())
+    }
+
     #[inline]
     pub(crate) fn space(&self) -> &DynamicFusionMapSpace {
         self.space.as_ref()
@@ -235,10 +272,22 @@ impl<LhsScratch, RhsScratch, DstScratch>
     where
         T: Clone,
         S: SimilarStorage<T, Similar = LhsScratch>,
+        LhsScratch: ScratchStorage<T>,
     {
-        self.lhs = Some(StorageDynamicFusionScratch::from_storage(
-            space, storage, zero,
-        )?);
+        match &mut self.lhs {
+            Some(scratch)
+                if scratch.buffer().placement() == storage.placement()
+                    && (Arc::ptr_eq(&scratch.space, &space)
+                        || scratch.space.as_ref() == space.as_ref()) =>
+            {
+                scratch.reset_from_storage(space, storage, zero)?;
+            }
+            _ => {
+                self.lhs = Some(StorageDynamicFusionScratch::from_storage(
+                    space, storage, zero,
+                )?);
+            }
+        }
         Ok(self
             .lhs
             .as_mut()
@@ -254,10 +303,22 @@ impl<LhsScratch, RhsScratch, DstScratch>
     where
         T: Clone,
         S: SimilarStorage<T, Similar = RhsScratch>,
+        RhsScratch: ScratchStorage<T>,
     {
-        self.rhs = Some(StorageDynamicFusionScratch::from_storage(
-            space, storage, zero,
-        )?);
+        match &mut self.rhs {
+            Some(scratch)
+                if scratch.buffer().placement() == storage.placement()
+                    && (Arc::ptr_eq(&scratch.space, &space)
+                        || scratch.space.as_ref() == space.as_ref()) =>
+            {
+                scratch.reset_from_storage(space, storage, zero)?;
+            }
+            _ => {
+                self.rhs = Some(StorageDynamicFusionScratch::from_storage(
+                    space, storage, zero,
+                )?);
+            }
+        }
         Ok(self
             .rhs
             .as_mut()
@@ -273,10 +334,22 @@ impl<LhsScratch, RhsScratch, DstScratch>
     where
         T: Clone,
         S: SimilarStorage<T, Similar = DstScratch>,
+        DstScratch: ScratchStorage<T>,
     {
-        self.dst = Some(StorageDynamicFusionScratch::from_storage(
-            space, storage, zero,
-        )?);
+        match &mut self.dst {
+            Some(scratch)
+                if scratch.buffer().placement() == storage.placement()
+                    && (Arc::ptr_eq(&scratch.space, &space)
+                        || scratch.space.as_ref() == space.as_ref()) =>
+            {
+                scratch.reset_from_storage(space, storage, zero)?;
+            }
+            _ => {
+                self.dst = Some(StorageDynamicFusionScratch::from_storage(
+                    space, storage, zero,
+                )?);
+            }
+        }
         Ok(self
             .dst
             .as_mut()
@@ -337,7 +410,10 @@ where
         {
             scratch.fill_zero();
         }
-        _ => {
+        Some(scratch) => {
+            scratch.reset(space)?;
+        }
+        None => {
             *slot = Some(DynamicFusionScratch::zeroed(space)?);
         }
     }

@@ -24,6 +24,7 @@ opt-path = []
 
 [dependencies]
 num-complex = "0.4"
+rayon = "1.10"
 tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense", default-features = false }
 tenet-matrixalgebra = { path = "../tenet-matrixalgebra", default-features = false }

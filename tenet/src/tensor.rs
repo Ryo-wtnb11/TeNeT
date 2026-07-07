@@ -1718,6 +1718,26 @@ impl Tensor {
         Ok(value.re.sqrt())
     }
 
+    /// Entrywise infinity norm over TensorKit tensor blocks:
+    /// `maximum(norm(block, Inf) for block in blocks(t))`.
+    ///
+    /// Julia's `norm(array, Inf)` is the maximum absolute element, including
+    /// for matrices. TensorKit applies that to each block, so the coupled
+    /// storage equivalent is the maximum absolute stored entry. Unlike
+    /// [`Self::norm`], this is not quantum-dimension weighted.
+    pub fn norm_inf(&self) -> Result<f64, Error> {
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(_) = &self.data {
+            return Err(device_unsupported("norm_inf()"));
+        }
+        match &self.data {
+            Data::F64(data) => Ok(data.iter().map(|value| value.abs()).fold(0.0, f64::max)),
+            Data::C64(data) => Ok(data.iter().map(|value| value.norm()).fold(0.0, f64::max)),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => unreachable!("returned above"),
+        }
+    }
+
     /// Returns `factor * self` (real factor, both dtypes). Use
     /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {

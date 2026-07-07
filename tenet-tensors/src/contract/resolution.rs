@@ -11,7 +11,9 @@
 //! [`Resolution`] value, so the facade and the plan-once API share one
 //! resolution machinery.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
@@ -30,7 +32,7 @@ use super::fusion::{external_axis_is_dual, FusionContractPlan};
 use super::fusion_block::{compile_fusion_block_contract_plan, is_core_form_fusion_block_contract};
 use super::structure::TensorContractAxisPlan;
 
-type GlobalContractionResolutionMap<RuleKey> = RwLock<HashMap<FullKey<RuleKey>, Resolution>>;
+type GlobalContractionResolutionMap<RuleKey> = RwLock<FxHashMap<FullKey<RuleKey>, Resolution>>;
 
 fn global_contraction_resolutions<RuleKey>() -> Arc<GlobalContractionResolutionMap<RuleKey>>
 where
@@ -207,8 +209,8 @@ const LAST_RING_CAPACITY: usize = 16;
 #[derive(Clone, Debug)]
 pub(crate) struct ContractionResolutionCache<RuleKey> {
     last: Vec<LastEntry<RuleKey>>,
-    fast: HashMap<FastKey<RuleKey>, Resolution>,
-    resolved: HashMap<FullKey<RuleKey>, Resolution>,
+    fast: FxHashMap<FastKey<RuleKey>, Resolution>,
+    resolved: FxHashMap<FullKey<RuleKey>, Resolution>,
     lru_order: VecDeque<FullKey<RuleKey>>,
     policy: OperationCachePolicy,
     stats: ContractionResolutionStats,
@@ -218,8 +220,8 @@ impl<RuleKey> Default for ContractionResolutionCache<RuleKey> {
     fn default() -> Self {
         Self {
             last: Vec::new(),
-            fast: HashMap::new(),
-            resolved: HashMap::new(),
+            fast: FxHashMap::default(),
+            resolved: FxHashMap::default(),
             lru_order: VecDeque::new(),
             policy: OperationCachePolicy::default(),
             stats: ContractionResolutionStats::default(),

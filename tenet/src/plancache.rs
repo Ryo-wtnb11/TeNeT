@@ -27,6 +27,14 @@ pub enum Optimizer {
     /// only). Requires `tenet-network`'s `opt-path` feature at execution.
     #[cfg(feature = "opt-path")]
     Optimal,
+    /// Dynamic-programming search (opt_einsum `"dp"`): the SAME optimal
+    /// pairwise order as `Optimal` for the small networks TeNeT contracts,
+    /// but polynomial-time instead of exhaustive `O(n!)`. This is the
+    /// `@tensoropt` analog — optimal order without the branch-and-bound
+    /// search cost that dominates the first (cold) contraction of each
+    /// topology. Requires `tenet-network`'s `opt-path` feature at execution.
+    #[cfg(feature = "opt-path")]
+    DynamicProgramming,
     /// The legacy `EinsumPlan::compile` default: opt_einsum `"auto-hq"`
     /// with fallback to `"auto"`, then `"dp"`, then greedy when a driver
     /// errors (upstream `opt-einsum-path` rejects some all-dim-1 networks).
@@ -45,24 +53,33 @@ pub enum Optimizer {
 pub enum ReplanPolicy {
     /// Always reuse the cached order, whatever the current dimensions.
     AlwaysReuse,
+    /// Find the order once at real (non-degenerate) dims, then freeze and
+    /// reuse it for any later dimensions — the standard "search once, reuse
+    /// the path regardless of rank" design (cotengra's reusable
+    /// `ContractionTree`, `@tensoropt`'s compile-time bake). Unlike
+    /// [`AlwaysReuse`](Self::AlwaysReuse) it *does* replace a plan that was
+    /// seeded at degenerate dims (some leg trivial, dim ≤ 1), whose order can
+    /// be a poor outer-product-heavy fit for the real state. This is the
+    /// default: re-searching a drifted topology (see
+    /// [`DriftFactor`](Self::DriftFactor)) buys no measured speedup on
+    /// TeNeT's networks while paying the (χ-dependent) search cost each time.
+    BakeOnce,
     /// Re-plan when any leg dimension differs from the snapshot by more
-    /// than this factor (as a ratio, in either direction).
+    /// than this factor (as a ratio, in either direction). Chases the
+    /// per-shape-optimal order; only worth it when a network's winning order
+    /// genuinely flips between dimension regimes.
     DriftFactor(f64),
 }
 
-/// Default [`ReplanPolicy::DriftFactor`].
-///
-/// Rationale: truncation moves bond dimensions by a few percent per sweep,
-/// which never changes which pairwise order wins, so those calls must hit.
-/// Once some leg has grown or shrunk past 2x its planning-time value the
-/// network's cost balance has changed qualitatively and a fresh (cheap for
-/// greedy, expensive for exhaustive — which is exactly when hits matter)
-/// search is worth it.
+/// Drift ratio for [`ReplanPolicy::DriftFactor`] when that (non-default)
+/// policy is selected: re-plan once a leg has grown or shrunk past 2x its
+/// planning-time value, on the theory that the cost balance has changed
+/// qualitatively. Not the default — see [`ReplanPolicy::BakeOnce`].
 pub const DEFAULT_REPLAN_DRIFT_FACTOR: f64 = 2.0;
 
 impl Default for ReplanPolicy {
     fn default() -> Self {
-        Self::DriftFactor(DEFAULT_REPLAN_DRIFT_FACTOR)
+        Self::BakeOnce
     }
 }
 

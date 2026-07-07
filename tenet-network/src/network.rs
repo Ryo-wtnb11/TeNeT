@@ -121,6 +121,45 @@ impl Network {
         tensors: &[&Tensor],
         optimizer: &(impl DenseContractionOptimizer + ?Sized),
     ) -> Result<PlannedNetwork, Error> {
+        let (ir, infos) = self.lower(tensors)?;
+        let plan = if ir.tensors().len() == 1 {
+            // Single operand: nothing to order; the executor just permutes.
+            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+        } else {
+            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+            ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost).map_err(invalid)?
+        };
+        Ok(PlannedNetwork {
+            ir,
+            plan,
+            conj: self.conj.clone(),
+            output_codomain_rank: self.output_codomain_rank,
+        })
+    }
+
+    /// Wrap an already-searched [`ContractionPlan`] (same topology) into a
+    /// [`PlannedNetwork`] without re-running the order search. The plan is a
+    /// pure pairwise order over operand ids and labels, valid for any leg
+    /// dimensions of this topology, so a persisted plan (see the plan cache's
+    /// disk save/restore) skips the cold optimal-order search on reuse.
+    pub fn plan_with(
+        &self,
+        tensors: &[&Tensor],
+        plan: ContractionPlan,
+    ) -> Result<PlannedNetwork, Error> {
+        let (ir, _infos) = self.lower(tensors)?;
+        Ok(PlannedNetwork {
+            ir,
+            plan,
+            conj: self.conj.clone(),
+            output_codomain_rank: self.output_codomain_rank,
+        })
+    }
+
+    /// Validate operand ranks and `;` splits and lower conj markers into the
+    /// [`NetworkIR`] and per-operand cost infos shared by [`plan`](Self::plan)
+    /// and [`plan_with`](Self::plan_with).
+    fn lower(&self, tensors: &[&Tensor]) -> Result<(NetworkIR, Vec<DenseTensorInfo>), Error> {
         if tensors.len() != self.inputs.len() {
             return Err(invalid(format!(
                 "network has {} operands but {} tensors were given",
@@ -172,19 +211,7 @@ impl Network {
         validate_contracted_leg_spaces(&lowered_labels, &lowered_spaces)?;
 
         let ir = NetworkIR::from_labels(lowered_labels, self.output.clone()).map_err(invalid)?;
-        let plan = if ir.tensors().len() == 1 {
-            // Single operand: nothing to order; the executor just permutes.
-            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
-        } else {
-            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
-            ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost).map_err(invalid)?
-        };
-        Ok(PlannedNetwork {
-            ir,
-            plan,
-            conj: self.conj.clone(),
-            output_codomain_rank: self.output_codomain_rank,
-        })
+        Ok((ir, infos))
     }
 
     /// One-shot contraction with the operands' runtime's default
@@ -304,7 +331,8 @@ impl PlannedNetwork {
 
         let labels_by_id = planned_label_orders(&self.ir, &self.plan)?;
         let steps = self.plan.steps();
-        for (step_index, step) in steps.iter().enumerate() {
+        let consumers = build_consumers(steps);
+        for step in steps.iter() {
             let (lt, ll) = active
                 .remove(&step.lhs())
                 .ok_or_else(|| invalid("lhs operand already consumed"))?;
@@ -346,9 +374,9 @@ impl PlannedNetwork {
             let (c, c_labels) = orient_intermediate_for_next_use(
                 c,
                 c_labels,
-                step_index,
                 step.result(),
                 steps,
+                &consumers,
                 &labels_by_id,
             )?;
             active.insert(step.result(), (c, c_labels));
@@ -431,14 +459,15 @@ fn planned_label_orders(
 fn orient_intermediate_for_next_use(
     tensor: Tensor,
     labels: Vec<TemporaryLabel>,
-    step_index: usize,
     result_id: TensorId,
     steps: &[ContractionStep],
+    consumers: &HashMap<TensorId, (usize, bool)>,
     labels_by_id: &HashMap<TensorId, Vec<TemporaryLabel>>,
 ) -> Result<(Tensor, Vec<TemporaryLabel>), Error> {
-    let Some((future_step, result_is_lhs)) = next_consumer(step_index, result_id, steps) else {
+    let Some(&(future_index, result_is_lhs)) = consumers.get(&result_id) else {
         return Ok((tensor, labels));
     };
+    let future_step = &steps[future_index];
     let sibling_id = if result_is_lhs {
         future_step.rhs()
     } else {
@@ -474,20 +503,19 @@ fn orient_intermediate_for_next_use(
     Ok((oriented, oriented_labels))
 }
 
-fn next_consumer(
-    step_index: usize,
-    result_id: TensorId,
-    steps: &[ContractionStep],
-) -> Option<(&ContractionStep, bool)> {
-    steps.iter().skip(step_index + 1).find_map(|step| {
-        if step.lhs() == result_id {
-            Some((step, true))
-        } else if step.rhs() == result_id {
-            Some((step, false))
-        } else {
-            None
-        }
-    })
+/// One forward pass mapping each tensor id to the single later step that
+/// consumes it and whether it is that step's lhs. In a pairwise contraction
+/// tree every operand/intermediate is consumed exactly once, so this replaces
+/// the per-step `steps[i+1..]` scan (`orient_intermediate_for_next_use`) — the
+/// whole orientation pass drops from O(steps²) to O(steps). Resolved once here,
+/// analogous to TensorKit's `@tensor` sequence being fixed at macro-expansion.
+fn build_consumers(steps: &[ContractionStep]) -> HashMap<TensorId, (usize, bool)> {
+    let mut consumers = HashMap::with_capacity(steps.len() * 2);
+    for (index, step) in steps.iter().enumerate() {
+        consumers.insert(step.lhs(), (index, true));
+        consumers.insert(step.rhs(), (index, false));
+    }
+    consumers
 }
 
 /// One-shot entry point used by the `tensor!` macro expansion: lower

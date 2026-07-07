@@ -1721,6 +1721,126 @@ fn positive_diagonal_gauge_complex_phase_and_zero_diagonal() {
 }
 
 #[test]
+fn svd_compact_gauge_matches_matrixalgebrakit_phase_rule() {
+    use num_complex::Complex64;
+    let c = Complex64::new;
+    let mut u = vec![
+        c(3.0, 4.0),
+        c(1.0, -1.0),
+        c(-2.0, 0.5),
+        c(0.25, -0.5),
+        c(-4.0, 0.0),
+        c(1.0, 2.0),
+    ];
+    let mut vh = vec![
+        c(0.5, -1.0),
+        c(-0.25, 0.75),
+        c(1.0, 0.0),
+        c(0.0, -2.0),
+        c(-1.5, 0.25),
+        c(0.75, -0.5),
+    ];
+    let sigma = [2.0, 0.75];
+    let product = |u: &[Complex64], vh: &[Complex64]| -> Vec<Complex64> {
+        let mut out = vec![c(0.0, 0.0); 9];
+        for col in 0..3 {
+            for row in 0..3 {
+                for k in 0..2 {
+                    out[row + 3 * col] += u[row + 3 * k] * sigma[k] * vh[k + 2 * col];
+                }
+            }
+        }
+        out
+    };
+    let before = product(&u, &vh);
+    crate::factorize::svd_compact_gauge(&mut u, 3, 3, &mut vh, 2, 3, 2);
+    for &(row, col) in &[(0, 0), (1, 1)] {
+        let pivot = u[row + 3 * col];
+        assert!(pivot.im.abs() < 1e-14, "pivot {pivot} not real");
+        assert!(pivot.re >= 0.0, "pivot {pivot} negative");
+    }
+    let after = product(&u, &vh);
+    for (lhs, rhs) in after.iter().zip(&before) {
+        assert!(
+            (lhs - rhs).norm() < 1e-13,
+            "product changed: {lhs} vs {rhs}"
+        );
+    }
+}
+
+#[test]
+fn eigenvector_gauge_matches_matrixalgebrakit_phase_rule() {
+    use num_complex::Complex64;
+    let c = Complex64::new;
+    let mut vectors = vec![
+        c(3.0, 4.0),
+        c(1.0, -1.0),
+        c(-2.0, 0.5),
+        c(0.25, -0.5),
+        c(-4.0, 0.0),
+        c(1.0, 2.0),
+    ];
+
+    crate::factorize::eigenvector_gauge(&mut vectors, 3, 3, 2);
+
+    for &(row, col) in &[(0, 0), (1, 1)] {
+        let pivot = vectors[row + 3 * col];
+        assert!(pivot.im.abs() < 1e-14, "pivot {pivot} not real");
+        assert!(pivot.re >= 0.0, "pivot {pivot} negative");
+    }
+}
+
+#[test]
+fn svd_full_gauge_fixes_extra_vh_rows_without_changing_product() {
+    use num_complex::Complex64;
+    let c = Complex64::new;
+    let mut u = vec![c(0.0, -2.0), c(0.25, 0.5), c(1.0, -1.0), c(-3.0, 0.0)];
+    let mut vh = vec![
+        c(1.0, 0.5),
+        c(-0.25, 0.75),
+        c(1.0, -1.0),
+        c(0.5, -0.5),
+        c(2.0, 0.0),
+        c(-0.5, 0.25),
+        c(-1.0, 0.75),
+        c(0.0, -1.5),
+        c(0.25, 0.0),
+    ];
+    let sigma = [1.5, 0.7];
+    let product = |u: &[Complex64], vh: &[Complex64]| -> Vec<Complex64> {
+        let mut out = vec![c(0.0, 0.0); 6];
+        for col in 0..3 {
+            for row in 0..2 {
+                for k in 0..2 {
+                    out[row + 2 * col] += u[row + 2 * k] * sigma[k] * vh[k + 3 * col];
+                }
+            }
+        }
+        out
+    };
+    let before = product(&u, &vh);
+    crate::factorize::svd_full_gauge(&mut u, 2, 2, &mut vh, 3, 3);
+    for &(row, col) in &[(0, 0), (1, 1)] {
+        let pivot = u[row + 2 * col];
+        assert!(pivot.im.abs() < 1e-14, "U pivot {pivot} not real");
+        assert!(pivot.re >= 0.0, "U pivot {pivot} negative");
+    }
+    let extra_pivot = vh[2 + 3 * 0];
+    assert!(
+        extra_pivot.im.abs() < 1e-14,
+        "Vh pivot {extra_pivot} not real"
+    );
+    assert!(extra_pivot.re >= 0.0, "Vh pivot {extra_pivot} negative");
+    let after = product(&u, &vh);
+    for (lhs, rhs) in after.iter().zip(&before) {
+        assert!(
+            (lhs - rhs).norm() < 1e-13,
+            "product changed: {lhs} vs {rhs}"
+        );
+    }
+}
+
+#[test]
 fn qr_compact_positive_gauge_idempotent_on_isometry() {
     for rule_case in [0usize, 1usize] {
         if rule_case == 0 {

@@ -34,8 +34,8 @@ use tenet_core::{
     FusionTreeHomSpace, FusionTreeKey, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols,
     MultiplicityFreeRigidSymbols, Placement, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, SectorStructure, SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial,
-    U1FusionRule, U1Irrep, Z2FusionRule,
+    SectorLeg, SectorStructure, SectorVec, SimilarStorage, TensorMap, TensorMapSpace,
+    TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 
@@ -338,8 +338,8 @@ impl FusionRule for UniqueZ2Rule {
         SectorId::new(0)
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-        vec![SectorId::new((left.id() + right.id()) % 2)]
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        vec![SectorId::new((left.id() + right.id()) % 2)].into()
     }
 }
 
@@ -414,8 +414,8 @@ impl FusionRule for UniqueAnyonicRule {
         SectorId::new(0)
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-        vec![SectorId::new((left.id() + right.id()) % 2)]
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        vec![SectorId::new((left.id() + right.id()) % 2)].into()
     }
 }
 
@@ -519,8 +519,8 @@ impl FusionRule for UnitaryPhaseAnyonicRule {
         true
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-        vec![SectorId::new((left.id() + right.id()) % 4)]
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        vec![SectorId::new((left.id() + right.id()) % 4)].into()
     }
 }
 
@@ -620,8 +620,8 @@ impl FusionRule for UniquePlanarRule {
         SectorId::new(0)
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-        vec![SectorId::new((left.id() + right.id()) % 2)]
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        vec![SectorId::new((left.id() + right.id()) % 2)].into()
     }
 }
 
@@ -643,7 +643,7 @@ impl FusionRule for SimpleSu2Rule {
         SectorId::new(0)
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
         let min = left.id().abs_diff(right.id());
         let max = left.id() + right.id();
         (min..=max).step_by(2).map(SectorId::new).collect()
@@ -668,12 +668,13 @@ impl FusionRule for GenericMultiplicityRule {
         SectorId::new(0)
     }
 
-    fn fusion_channels(&self, left: SectorId, right: SectorId) -> Vec<SectorId> {
-        match (left.id(), right.id()) {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let channels: Vec<SectorId> = match (left.id(), right.id()) {
             (1, 1) => vec![SectorId::new(0), SectorId::new(1)],
             (0, x) | (x, 0) => vec![SectorId::new(x)],
             _ => Vec::new(),
-        }
+        };
+        channels.into()
     }
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {

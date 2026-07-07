@@ -1,23 +1,25 @@
 use std::any::{Any, TypeId};
-use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use tenet_core::{BlockKey, BlockStructure};
+use tenet_core::{BlockStructure, BlockStructureContent, BlockStructureContentBlock};
 
 use crate::{OperationError, TensorContractStructure, TreeTransformStructure};
 
 type ErasedGlobalCache = Arc<dyn Any + Send + Sync>;
-type GlobalCacheRegistry = RwLock<HashMap<TypeId, ErasedGlobalCache>>;
+type GlobalCacheRegistry = RwLock<FxHashMap<TypeId, ErasedGlobalCache>>;
 
 pub(crate) fn operation_global_registry() -> &'static GlobalCacheRegistry {
     static REGISTRY: OnceLock<GlobalCacheRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+    REGISTRY.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
 pub(crate) fn typed_global_map<K, V>(
     registry: &'static GlobalCacheRegistry,
-) -> Arc<RwLock<HashMap<K, V>>>
+) -> Arc<RwLock<FxHashMap<K, V>>>
 where
     K: 'static + Eq + Hash + Send + Sync,
     V: 'static + Send + Sync,
@@ -28,16 +30,16 @@ where
         .expect("global cache registry poisoned")
         .get(&type_id)
     {
-        return Arc::downcast::<RwLock<HashMap<K, V>>>(Arc::clone(cache))
+        return Arc::downcast::<RwLock<FxHashMap<K, V>>>(Arc::clone(cache))
             .expect("global cache registry type id collision");
     }
 
     let mut caches = registry.write().expect("global cache registry poisoned");
     if let Some(cache) = caches.get(&type_id) {
-        return Arc::downcast::<RwLock<HashMap<K, V>>>(Arc::clone(cache))
+        return Arc::downcast::<RwLock<FxHashMap<K, V>>>(Arc::clone(cache))
             .expect("global cache registry type id collision");
     }
-    let cache = Arc::new(RwLock::new(HashMap::<K, V>::new()));
+    let cache = Arc::new(RwLock::new(FxHashMap::<K, V>::default()));
     caches.insert(type_id, Arc::clone(&cache) as ErasedGlobalCache);
     cache
 }
@@ -110,7 +112,7 @@ where
 }
 
 pub(crate) fn enforce_lru_limit<K, V>(
-    map: &mut HashMap<K, V>,
+    map: &mut FxHashMap<K, V>,
     order: &mut VecDeque<K>,
     max_entries: usize,
 ) where
@@ -124,7 +126,7 @@ pub(crate) fn enforce_lru_limit<K, V>(
     }
 }
 
-pub(crate) fn rebuild_lru_order_from_keys<K, V>(map: &HashMap<K, V>, order: &mut VecDeque<K>)
+pub(crate) fn rebuild_lru_order_from_keys<K, V>(map: &FxHashMap<K, V>, order: &mut VecDeque<K>)
 where
     K: Clone,
 {
@@ -132,70 +134,51 @@ where
     order.extend(map.keys().cloned());
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug)]
 pub struct BlockStructureCacheKey {
-    rank: usize,
-    blocks: Vec<BlockStructureCacheBlockKey>,
+    content: Arc<BlockStructureContent>,
 }
 
 impl BlockStructureCacheKey {
     pub fn from_structure(structure: &BlockStructure) -> Result<Self, OperationError> {
-        let mut blocks = Vec::with_capacity(structure.block_count());
-        for index in 0..structure.block_count() {
-            let block = structure.block(index)?;
-            blocks.push(BlockStructureCacheBlockKey {
-                key: block.key().clone(),
-                shape: block.shape().to_vec(),
-                strides: block.strides().to_vec(),
-                offset: block.offset(),
-            });
-        }
         Ok(Self {
-            rank: structure.rank(),
-            blocks,
+            content: structure.content_key(),
         })
     }
 
     #[inline]
+    pub fn id(&self) -> usize {
+        self.content.id()
+    }
+
+    #[inline]
     pub fn rank(&self) -> usize {
-        self.rank
+        self.content.rank()
     }
 
     #[inline]
     pub fn blocks(&self) -> &[BlockStructureCacheBlockKey] {
-        &self.blocks
+        self.content.blocks()
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct BlockStructureCacheBlockKey {
-    key: BlockKey,
-    shape: Vec<usize>,
-    strides: Vec<usize>,
-    offset: usize,
-}
-
-impl BlockStructureCacheBlockKey {
+impl PartialEq for BlockStructureCacheKey {
     #[inline]
-    pub fn key(&self) -> &BlockKey {
-        &self.key
-    }
-
-    #[inline]
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    #[inline]
-    pub fn strides(&self) -> &[usize] {
-        &self.strides
-    }
-
-    #[inline]
-    pub fn offset(&self) -> usize {
-        self.offset
+    fn eq(&self, other: &Self) -> bool {
+        self.content.id() == other.content.id()
     }
 }
+
+impl Eq for BlockStructureCacheKey {}
+
+impl Hash for BlockStructureCacheKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.content.id().hash(state);
+    }
+}
+
+pub type BlockStructureCacheBlockKey = BlockStructureContentBlock;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformStructureCacheKey<PlanKey> {
@@ -254,7 +237,7 @@ where
 
 #[derive(Clone, Debug)]
 pub struct TreeTransformStructureCache<T, PlanKey> {
-    structures: HashMap<TreeTransformStructureCacheKey<PlanKey>, Arc<TreeTransformStructure<T>>>,
+    structures: FxHashMap<TreeTransformStructureCacheKey<PlanKey>, Arc<TreeTransformStructure<T>>>,
     lru_order: VecDeque<TreeTransformStructureCacheKey<PlanKey>>,
     policy: OperationCachePolicy,
 }
@@ -262,7 +245,7 @@ pub struct TreeTransformStructureCache<T, PlanKey> {
 impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey> {
     fn default() -> Self {
         Self {
-            structures: HashMap::new(),
+            structures: FxHashMap::default(),
             lru_order: VecDeque::new(),
             policy: OperationCachePolicy::default(),
         }
@@ -318,7 +301,8 @@ where
 
 #[derive(Clone, Debug)]
 pub struct TensorContractStructureCache<C, PlanKey> {
-    structures: HashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<C>>>,
+    structures:
+        FxHashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<C>>>,
     lru_order: VecDeque<TensorContractStructureCacheKey<PlanKey>>,
     policy: OperationCachePolicy,
 }
@@ -326,7 +310,7 @@ pub struct TensorContractStructureCache<C, PlanKey> {
 impl<C, PlanKey> Default for TensorContractStructureCache<C, PlanKey> {
     fn default() -> Self {
         Self {
-            structures: HashMap::new(),
+            structures: FxHashMap::default(),
             lru_order: VecDeque::new(),
             policy: OperationCachePolicy::default(),
         }
@@ -343,7 +327,7 @@ where
 
     pub fn with_policy(policy: OperationCachePolicy) -> Self {
         Self {
-            structures: HashMap::new(),
+            structures: FxHashMap::default(),
             lru_order: VecDeque::new(),
             policy,
         }
@@ -432,7 +416,7 @@ where
 
     pub fn with_policy(policy: OperationCachePolicy) -> Self {
         Self {
-            structures: HashMap::new(),
+            structures: FxHashMap::default(),
             lru_order: VecDeque::new(),
             policy,
         }
