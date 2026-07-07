@@ -9,6 +9,76 @@ use crate::{
     RecouplingCoefficientAction,
 };
 
+/// Whether to route pure permuted copies (pack / assign-scatter) through the
+/// HPTT-style blocked micro-kernel transpose (`strided_perm::copy_into` via
+/// `strided_kernel::copy_into_col_major`) instead of the naive fused loop.
+///
+/// Env-gated (`TENET_HPTT=1`) so the win can be A/B measured: HPTT's blocking
+/// pays off for large blocks but its per-call plan build can lose against the
+/// zero-alloc fused loop on the many tiny blocks of small-D SU(2) replay.
+#[inline]
+fn hptt_enabled() -> bool {
+    use std::sync::OnceLock;
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| std::env::var("TENET_HPTT").as_deref() == Ok("1"))
+}
+
+/// HPTT-backed permuted copy `dst = src` over strided views (no scale, no
+/// conjugate). Returns `Ok(true)` when HPTT handled the copy, `Ok(false)` when
+/// the layout is outside HPTT's supported class and the caller must fall back
+/// to the fused loop.
+///
+/// HPTT's transpose micro-kernel assumes each side has a genuine stride-1
+/// axis (the classic row-major↔transpose case). A pack that gathers a strided
+/// *slice* of a larger storage can have no stride-1 axis once extent-1 axes
+/// are dropped (its contiguous axis was a singleton) — HPTT would then treat
+/// the smallest-stride axis as if it were stride-1 and silently corrupt. We
+/// detect that and decline.
+#[allow(clippy::too_many_arguments)]
+fn hptt_permuted_copy<T: Copy + strided_kernel::MaybeSendSync>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+) -> Result<bool, OperationError> {
+    // Drop extent-1 axes (their strides are irrelevant, and the HPTT planner is
+    // not robust to extent-1 axes carrying colliding strides). `fused_pair`
+    // does the same normalization.
+    use smallvec::SmallVec;
+    let mut rshape: SmallVec<[usize; 8]> = SmallVec::new();
+    let mut rdst: SmallVec<[isize; 8]> = SmallVec::new();
+    let mut rsrc: SmallVec<[isize; 8]> = SmallVec::new();
+    for axis in 0..shape.len() {
+        if shape[axis] != 1 {
+            rshape.push(shape[axis]);
+            rdst.push(dst_strides[axis]);
+            rsrc.push(src_strides[axis]);
+        }
+    }
+    if rshape.is_empty() {
+        // single element (all axes extent 1)
+        dst_data[dst_offset as usize] = src_data[src_offset as usize];
+        return Ok(true);
+    }
+    // Eligibility: each side needs a real stride-1 axis for the micro-kernel.
+    if !rsrc.contains(&1) || !rdst.contains(&1) {
+        return Ok(false);
+    }
+    // View construction validates the same bounding box fused_pair accesses
+    // (max index = offset + Σ(dim-1)·stride < len), so with the positive-stride
+    // guard it only errors on a genuine out-of-bounds layout — an upstream bug.
+    // Propagating that as a clean error beats declining into a fused panic.
+    let src = strided_kernel::StridedView::new(src_data, &rshape, &rsrc, src_offset)
+        .map_err(crate::strided::error)?;
+    let mut dst = strided_kernel::StridedViewMut::new(dst_data, &rshape, &rdst, dst_offset)
+        .map_err(crate::strided::error)?;
+    strided_kernel::copy_into_col_major(&mut dst, &src).map_err(crate::strided::error)?;
+    Ok(true)
+}
+
 thread_local! {
     /// Reused fused-loop scratch so replay copies allocate nothing after warmup,
     /// for ANY rank. The previous stack-array fast path capped rank at 8 and fell
@@ -334,6 +404,26 @@ where
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
+        // Assign-scatter (beta=0, alpha=1, positive strides) is a pure permuted
+        // copy: route through the HPTT blocked transpose when enabled and the
+        // layout is HPTT-eligible; otherwise fall through to the fused loop.
+        if hptt_enabled()
+            && beta.is_zero()
+            && alpha.is_one()
+            && src_strides.iter().all(|&s| s >= 0)
+            && dst_strides.iter().all(|&s| s >= 0)
+            && hptt_permuted_copy(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+            )?
+        {
+            return Ok(());
+        }
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
             fused_pair(
@@ -380,6 +470,26 @@ where
         source_conjugate: bool,
         alpha: T,
     ) -> Result<(), OperationError> {
+        // Pack is a pure permuted copy (alpha=1, no conjugate, positive
+        // strides): route it through the HPTT blocked transpose when enabled
+        // and HPTT-eligible; otherwise fall through to the fused loop.
+        if hptt_enabled()
+            && alpha.is_one()
+            && !source_conjugate
+            && src_strides.iter().all(|&s| s >= 0)
+            && dst_strides.iter().all(|&s| s >= 0)
+            && hptt_permuted_copy(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+            )?
+        {
+            return Ok(());
+        }
         fused_pair(
             dst_data,
             src_data,
@@ -548,5 +658,205 @@ mod tests {
                 actual: 3,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod hptt_probe {
+    use super::{fused_pair, hptt_permuted_copy};
+
+    /// Inclusive max linear index a positive-stride layout reaches.
+    fn span(shape: &[usize], strides: &[isize], offset: isize) -> usize {
+        let mut hi = offset;
+        for (&d, &s) in shape.iter().zip(strides) {
+            hi += (d as isize - 1).max(0) * s;
+        }
+        (hi + 1) as usize
+    }
+
+    /// HPTT-path output must equal the fused-loop output for every layout HPTT
+    /// accepts (the routing contract: routing to HPTT never changes results).
+    fn assert_hptt_matches_fused(
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_off: isize,
+        src_off: isize,
+    ) {
+        let src: Vec<f64> = (0..span(shape, src_strides, src_off))
+            .map(|i| (i as f64) * 0.5 - 3.0)
+            .collect();
+        let dlen = span(shape, dst_strides, dst_off);
+        let mut hptt = vec![0.0f64; dlen];
+        let mut fused = vec![0.0f64; dlen];
+        let handled = hptt_permuted_copy(
+            &mut hptt,
+            &src,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_off,
+            src_off,
+        )
+        .unwrap();
+        assert!(
+            handled,
+            "expected HPTT to handle shape={shape:?} ds={dst_strides:?} ss={src_strides:?}"
+        );
+        fused_pair(
+            &mut fused,
+            &src,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_off,
+            src_off,
+            |d, v| *d = v,
+            |v: f64| v,
+        );
+        assert_eq!(
+            hptt, fused,
+            "HPTT != fused for shape={shape:?} ds={dst_strides:?} ss={src_strides:?} \
+             doff={dst_off} soff={src_off}"
+        );
+    }
+
+    #[test]
+    fn hptt_matches_fused_across_layouts() {
+        // (shape, dst_strides, src_strides, dst_off, src_off) — every case has a
+        // genuine stride-1 axis on each side and positive strides.
+        let cases: &[(&[usize], &[isize], &[isize], isize, isize)] = &[
+            (&[4, 4], &[1, 4], &[4, 1], 0, 0), // 2D square transpose
+            (&[3, 5], &[1, 3], &[5, 1], 0, 0), // 2D rectangular transpose
+            (&[3, 3], &[1, 3], &[3, 1], 5, 7), // 2D with offsets
+            (&[3, 4, 2], &[1, 3, 12], &[1, 10, 40], 0, 0), // 3D gapped sub-block, stride-1 axis0
+            (&[3, 4, 2], &[1, 3, 12], &[4, 1, 16], 0, 0), // 3D, src stride-1 on axis1
+            (&[2, 3, 2, 2], &[1, 2, 6, 12], &[24, 8, 1, 4], 0, 0), // 4D permuted
+            (&[1, 4, 1, 4], &[1, 1, 4, 4], &[9, 1, 9, 8], 0, 0), // extent-1 mixed, reduces to [4,4]
+            (&[6, 6], &[1, 6], &[6, 1], 0, 0), // larger transpose (hits blocking)
+        ];
+        for &(shape, ds, ss, doff, soff) in cases {
+            assert_hptt_matches_fused(shape, ds, ss, doff, soff);
+        }
+    }
+
+    #[test]
+    fn declines_strided_slice_without_stride1_axis() {
+        // Strided slice of a larger buffer: reduced strides [168,42] have no
+        // stride-1 axis (its contiguous axis was a singleton). HPTT cannot do
+        // this correctly, so the wrapper must decline (return false) and leave
+        // dst untouched. This is the exact pattern that corrupted the energy
+        // (-1.803 vs -1.772) before the guard existed.
+        let src = vec![0.0f64; 4096];
+        let shape = [4usize, 4];
+        let mut dst = [7.0f64; 16];
+        let handled =
+            hptt_permuted_copy(&mut dst, &src, &shape, &[1, 4], &[168, 42], 0, 0).unwrap();
+        assert!(!handled, "must decline the no-stride-1 strided slice");
+        assert!(
+            dst.iter().all(|&x| x == 7.0),
+            "dst must be untouched when declined"
+        );
+    }
+
+    #[test]
+    fn declines_when_only_dst_has_stride1() {
+        // dst has a stride-1 axis but src does not (both sides are required).
+        let src = vec![1.0f64; 4096];
+        let handled =
+            hptt_permuted_copy(&mut [0.0f64; 16], &src, &[4, 4], &[1, 4], &[10, 40], 0, 0).unwrap();
+        assert!(!handled, "must decline when src lacks a stride-1 axis");
+    }
+
+    #[test]
+    fn all_extent1_copies_single_element() {
+        let src = [42.0f64, 99.0];
+        let mut dst = [0.0f64, 0.0];
+        let handled = hptt_permuted_copy(&mut dst, &src, &[1, 1], &[1, 1], &[1, 1], 1, 1).unwrap();
+        assert!(handled);
+        assert_eq!(
+            dst[1], src[1],
+            "single-element copy must move src[off] to dst[off]"
+        );
+    }
+
+    #[test]
+    fn transposes_genuine_case_correctly() {
+        // Genuine transpose against a hand-computed reference (not just fused):
+        // src row-major [3,1], dst col-major [1,2]. dst[i+2j] == src[3i+j].
+        let src = [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut dst = [0.0f64; 6];
+        let handled = hptt_permuted_copy(&mut dst, &src, &[2, 3], &[1, 2], &[3, 1], 0, 0).unwrap();
+        assert!(handled, "genuine transpose must be handled by HPTT");
+        let mut expect = [0.0f64; 6];
+        for i in 0..2 {
+            for j in 0..3 {
+                expect[i + 2 * j] = src[3 * i + j];
+            }
+        }
+        assert_eq!(dst, expect, "HPTT transpose disagrees with manual copy");
+    }
+
+    // Crossover micro-bench (ignored; run explicitly):
+    //   cargo test --release -p tenet-operations -- --ignored --nocapture hptt_crossover
+    // Prints fused vs HPTT per-call ns over square transposes of growing N so
+    // the block size where HPTT's blocked micro-kernel overtakes the fused loop
+    // (amortizing its per-call plan build) is visible. Confirms the insertion
+    // point is correct and identifies when enabling HPTT pays off.
+    #[test]
+    #[ignore]
+    fn hptt_crossover_bench() {
+        use std::time::Instant;
+        println!("\n  N     fused(ns)      hptt(ns)   speedup");
+        for &n in &[4usize, 8, 16, 32, 64, 128, 256, 512] {
+            let src: Vec<f64> = (0..n * n).map(|i| i as f64).collect();
+            let shape = [n, n];
+            let ss = [n as isize, 1]; // src row-major (stride-1 axis1)
+            let ds = [1, n as isize]; // dst col-major (stride-1 axis0) => transpose
+            let mut dst = vec![0.0f64; n * n];
+            let iters = (1usize << 24 >> (2 * (n as f64).log2() as usize)).max(50);
+            // warm caches
+            fused_pair(
+                &mut dst,
+                &src,
+                &shape,
+                &ds,
+                &ss,
+                0,
+                0,
+                |d, v| *d = v,
+                |v: f64| v,
+            );
+            let _ = hptt_permuted_copy(&mut dst, &src, &shape, &ds, &ss, 0, 0);
+            let t = Instant::now();
+            for _ in 0..iters {
+                fused_pair(
+                    &mut dst,
+                    &src,
+                    &shape,
+                    &ds,
+                    &ss,
+                    0,
+                    0,
+                    |d, v| *d = v,
+                    |v: f64| v,
+                );
+            }
+            let fused_ns = t.elapsed().as_nanos() as f64 / iters as f64;
+            let t = Instant::now();
+            for _ in 0..iters {
+                let _ = hptt_permuted_copy(&mut dst, &src, &shape, &ds, &ss, 0, 0);
+            }
+            let hptt_ns = t.elapsed().as_nanos() as f64 / iters as f64;
+            println!(
+                "{n:4}  {fused_ns:11.1}  {hptt_ns:11.1}   {:.2}x {}",
+                fused_ns / hptt_ns,
+                if hptt_ns < fused_ns {
+                    "<- HPTT wins"
+                } else {
+                    ""
+                }
+            );
+        }
     }
 }
