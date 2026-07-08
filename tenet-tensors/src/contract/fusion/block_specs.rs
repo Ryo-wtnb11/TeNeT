@@ -256,15 +256,13 @@ where
             if dst_external != expected_external {
                 return Err(OperationError::StructureMismatch { tensor: "dst" });
             }
-            let dst_keys = dst
-                .homspace()
-                .fusion_tree_keys_from_external_sectors(rule, &dst_external)
-                .map_err(OperationError::from_core_preserving_context)?;
-            if !dst_keys.contains(&dst_key) {
-                return Err(OperationError::MissingBlockKey {
-                    key: BlockKey::from(dst_key),
-                });
-            }
+            // The sorted, exact-key block lookup below already reports a
+            // missing dst key. A prior `fusion_tree_keys_from_external_sectors`
+            // + `contains` membership test is redundant — dst's structure
+            // blocks are exactly the homspace's valid fusion trees, so
+            // `find_block_index_by_fusion_tree_key` is `Some` iff the key is a
+            // valid output tree — and it costs an uncached fusion-tree
+            // enumeration + allocation per block pair (issue #52).
             let dst_index = dst
                 .structure()
                 .find_block_index_by_fusion_tree_key(&dst_key)
