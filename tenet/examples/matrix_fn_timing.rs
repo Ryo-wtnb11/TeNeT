@@ -1,10 +1,13 @@
-//! Baseline timing for the spectral matrix functions (issue #46).
+//! Timing for the spectral matrix functions and polar decomposition
+//! (issues #46 / #51).
 //!
-//! `pinv` / `inv` / `exp` currently materialize the (inverted / mapped)
-//! spectrum as a dense `rank x rank` diagonal tensor and recompose
-//! `V * D * U^H` through two full block GEMMs. This example times those user
-//! entry points on a representative symmetric endomorphism (iTEBD-sized bond)
-//! so the diagonal-scaling rewrite can be measured before/after by hand.
+//! `pinv` / `inv` / `exp` / `left_polar` / `right_polar` fold the (inverted /
+//! mapped / singular) spectrum into a block-local scaling of a factor's bond
+//! axis (TensorKit's `DiagonalTensorMap` `rmul!`) instead of materializing a
+//! dense `rank x rank` diagonal and recomposing `V * D * U^H` through a full
+//! block GEMM. This example times those user entry points on a representative
+//! symmetric endomorphism (iTEBD-sized bond); the win grows with the per-block
+//! bond rank, where the removed diagonal GEMM is O(rank^2 * deg).
 //!
 //! Run: `cargo run -p tenet --release --example matrix_fn_timing`
 
@@ -42,6 +45,12 @@ fn bench(name: &str, v: &Space, iters: usize) {
     });
     time_it("exp", iters, || {
         black_box(black_box(&t).exp().unwrap());
+    });
+    time_it("left_polar", iters, || {
+        black_box(black_box(&t).left_polar().unwrap());
+    });
+    time_it("right_polar", iters, || {
+        black_box(black_box(&t).right_polar().unwrap());
     });
 }
 
