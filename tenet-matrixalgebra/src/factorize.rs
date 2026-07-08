@@ -383,6 +383,86 @@ where
     Ok((space, data))
 }
 
+/// Multiplies each entry of a left-type factor (`codomain <- bond`, i.e. the
+/// bond leg is the trailing axis — the eigenvector / `adjoint(vh)` layout from
+/// [`build_left_right_spaces`]) by its bond-index spectrum value, in place.
+///
+/// This is `factor * D` where `D` is the diagonal `bond <- bond` tensor of
+/// `spectrum` (as [`diagonal_bond_tensor_dyn`] would build), but done as an
+/// O(size) column scaling instead of materializing the dense `rank x rank`
+/// diagonal (99% zeros) and running it through a full block GEMM. See #46:
+/// TensorKit never forms the diagonal either — its `DiagonalTensorMap` makes
+/// `S * t` an `lmul!`/`rmul!` scaling.
+pub(crate) fn scale_bond_axis_by_spectrum<D>(
+    factor: &mut DynFactor<D>,
+    spectrum: &[SectorSpectrum],
+) -> Result<(), OperationError>
+where
+    D: FactorScalar,
+{
+    let (space, data) = factor;
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
+        spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    let structure = Arc::clone(space.structure());
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(tree) = block.key() else {
+            continue;
+        };
+        let sector = tree
+            .codomain_tree()
+            .coupled()
+            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        // Absent sector => this block is a structurally-zero bond; nothing to
+        // scale (mirrors the `unwrap_or(0)` shape in `diagonal_bond_tensor_dyn`).
+        let Some(&entry) = spectrum_by_sector.get(&sector) else {
+            continue;
+        };
+        let shape = block.shape();
+        if shape.is_empty() {
+            continue;
+        }
+        let strides = block.strides();
+        let offset = block.offset();
+        let last = shape.len() - 1;
+        let bond = shape[last];
+        let bond_stride = strides[last];
+        debug_assert_eq!(
+            bond,
+            entry.values.len(),
+            "bond degeneracy must match the spectrum length"
+        );
+        let bond = bond.min(entry.values.len());
+        // Walk every combination of the leading (non-bond) axes; for each,
+        // scale the `bond` trailing entries by the spectrum.
+        let lead_shape = &shape[..last];
+        let lead_strides = &strides[..last];
+        let outer: usize = lead_shape.iter().product();
+        let mut coord = vec![0usize; lead_shape.len()];
+        for _ in 0..outer {
+            let mut base = offset;
+            for (c, stride) in coord.iter().zip(lead_strides) {
+                base += c * stride;
+            }
+            for j in 0..bond {
+                let scale = D::from_real(entry.values[j]);
+                let idx = base + j * bond_stride;
+                data[idx] = data[idx] * scale;
+            }
+            for axis in (0..coord.len()).rev() {
+                coord[axis] += 1;
+                if coord[axis] < lead_shape[axis] {
+                    break;
+                }
+                coord[axis] = 0;
+            }
+        }
+    }
+    Ok(())
+}
+
 struct SectorMatricization<D> {
     sector: SectorId,
     rows: usize,

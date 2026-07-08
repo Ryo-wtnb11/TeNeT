@@ -619,34 +619,19 @@ where
         self.dense_route_order
     }
 
+    // Test-only accessors (like `dense_route_kind` above): the descriptor's
+    // contracting axes are asserted by the contract tests; production reads
+    // them off `TensorContractSpec`/`TensorContractStructure`, not here.
+    #[cfg(test)]
     #[inline]
     pub(super) fn lhs_contracting_axes(&self) -> &[usize] {
         &self.lhs_contracting_axes
     }
 
+    #[cfg(test)]
     #[inline]
     pub(super) fn rhs_contracting_axes(&self) -> &[usize] {
         &self.rhs_contracting_axes
-    }
-
-    #[inline]
-    pub(super) fn lhs_open_axes(&self) -> &[usize] {
-        &self.lhs_open_axes
-    }
-
-    #[inline]
-    pub(super) fn rhs_open_axes(&self) -> &[usize] {
-        &self.rhs_open_axes
-    }
-
-    #[inline]
-    pub(super) fn lhs_conjugate(&self) -> bool {
-        self.lhs_conjugate
-    }
-
-    #[inline]
-    pub(super) fn rhs_conjugate(&self) -> bool {
-        self.rhs_conjugate
     }
 
     pub(super) fn lhs_shape(&self, term: &TensorContractDescriptorTerm<C>) -> &[usize] {
