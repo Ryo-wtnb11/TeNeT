@@ -30,7 +30,7 @@ use super::scratch::{
     DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratchWorkspace,
 };
 use crate::storage_scratch::StorageFusionBlockContractWorkspace;
-use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
+use tenet_operations::TensorContractFusionProfile;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
@@ -236,161 +236,12 @@ where
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) fn tensorcontract_fusion_dynamic_into_context<
-    RuleKey,
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    contract_backend: &mut BC,
-    contract_workspace: &mut BC::Workspace,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
-    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
-    scratch: &mut DynamicFusionScratchWorkspace<D>,
-    rule: &R,
-    axes: TensorContractSpec<'_>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    let plan = prepare_tensorcontract_fusion_plan(
-        rule,
-        dst.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        axes,
-    )?;
-    tensorcontract_fusion_dynamic_plan_into_context(
-        tree_context,
-        contract_backend,
-        contract_workspace,
-        dynamic_space_cache,
-        fusion_block_cache,
-        fusion_block_workspace,
-        scratch,
-        rule,
-        &plan,
-        dst,
-        lhs,
-        rhs,
-        alpha,
-        beta,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) fn tensorcontract_fusion_dynamic_into_context_profiled<
-    RuleKey,
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    contract_backend: &mut BC,
-    contract_workspace: &mut BC::Workspace,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
-    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
-    scratch: &mut DynamicFusionScratchWorkspace<D>,
-    rule: &R,
-    axes: TensorContractSpec<'_>,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    alpha: D,
-    beta: D,
-    profile: &mut TensorContractFusionProfile,
-) -> Result<(), OperationError>
-where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    profile.route = TensorContractFusionRoute::DynamicTreeCore;
-    let start = std::time::Instant::now();
-    let plan = prepare_tensorcontract_fusion_plan(
-        rule,
-        dst.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        axes,
-    )?;
-    profile.prepared_plan += start.elapsed();
-
-    tensorcontract_fusion_dynamic_plan_into_context_profiled(
-        tree_context,
-        contract_backend,
-        contract_workspace,
-        dynamic_space_cache,
-        fusion_block_cache,
-        fusion_block_workspace,
-        scratch,
-        rule,
-        &plan,
-        dst,
-        lhs,
-        rhs,
-        alpha,
-        beta,
-        profile,
-    )
-}
-
+// Non-profiled reference contraction path. Its only production caller
+// (`tensorcontract_fusion_dynamic_into_context`) was removed as dead code;
+// the profiled twin (`..._profiled`) is the live path via `context.rs`. Kept
+// as the allocation/output reference the `run_host_reference` tests compare
+// against, so it is test-only now.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     RuleKey,

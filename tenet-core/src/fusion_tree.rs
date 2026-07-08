@@ -663,22 +663,6 @@ where
     unique_braid_tree(rule, tree, permutation, &levels)
 }
 
-pub fn multiplicity_free_artin_braid_at<R>(
-    rule: &R,
-    tree: &FusionTreeKey,
-    index: usize,
-) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
-where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
-{
-    Ok(
-        multiplicity_free_artin_braid_at_with_inverse(rule, tree, index, false)?
-            .into_iter()
-            .collect(),
-    )
-}
-
 pub fn multiplicity_free_braid_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
