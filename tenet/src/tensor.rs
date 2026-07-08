@@ -2370,6 +2370,27 @@ impl Tensor {
         })
     }
 
+    /// Wraps a complex per-sector spectrum (eig `D`) as diagonal storage. The
+    /// general eigendecomposition is complex-valued even for real input, so `d`
+    /// is always c64; the spectrum stays O(rank) in `DiagonalData::C64`. Compose
+    /// densifies it (no real-spectrum scaling path), but storage is O(rank).
+    fn from_diagonal_complex_spectrum(
+        &self,
+        spectrum: Vec<SectorSpectrum<Complex64>>,
+    ) -> Result<Self, Error> {
+        let space = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::diagonal_bond_space(rule, &spectrum)
+        })?;
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::new(space),
+            data: Arc::new(Data::Diagonal(DiagonalData::C64(spectrum))),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
+        })
+    }
+
     /// Rewraps `data` in this tensor's own (shared) space — for ops that leave
     /// the space unchanged (bond scaling), so the space `Arc` is reused instead
     /// of deep-cloned.
@@ -2461,6 +2482,10 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.svd_cuda(storage, Some(truncation));
         }
+        // Singular values are real => `s` is a real diagonal in O(rank) storage
+        // (see `svd_compact`). `out.singular_values` is also returned, so it is
+        // cloned into the diagonal factor.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2475,7 +2500,7 @@ impl Tensor {
             })?;
             Ok(SvdTrunc {
                 u: self.from_dyn(out.u),
-                s: self.from_dyn(out.s),
+                s: self.from_diagonal_real_spectrum(out.singular_values.clone(), complex)?,
                 vh: self.from_dyn(out.vh),
                 singular_values: out.singular_values,
                 error: out.error,
@@ -2643,13 +2668,23 @@ impl Tensor {
             let out = self.eigh_cuda(storage, None)?;
             return Ok((out.d, out.v));
         }
+        // eigh eigenvalues are real, so `d` is a real diagonal (`RealC64` for
+        // c64 input keeps the former dense d's dtype). Build it as O(rank)
+        // diagonal storage from the spectrum; `out.d` (a transient dense
+        // diagonal) is discarded. ponytail: `eigh_full_dyn` still fills that
+        // dense d — a d-free core would skip it, but it is thrown away here and
+        // downstream composes now scale instead of GEMM, so no regression.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eigh_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
-            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+            Ok((
+                self.from_diagonal_real_spectrum(out.eigenvalues, complex)?,
+                self.from_dyn(out.v),
+            ))
         })
     }
 
@@ -2660,6 +2695,10 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.eigh_cuda(storage, Some(truncation));
         }
+        // Real eigenvalues => real diagonal `d` in O(rank) storage (see
+        // `eigh_full`). `out.eigenvalues` is also returned to the caller, so it
+        // is cloned into the diagonal factor.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2673,7 +2712,7 @@ impl Tensor {
                 )
             })?;
             Ok(EighTrunc {
-                d: self.from_dyn(out.d),
+                d: self.from_diagonal_real_spectrum(out.eigenvalues.clone(), complex)?,
                 v: self.from_dyn(out.v),
                 eigenvalues: out.eigenvalues,
                 error: out.error,
@@ -2706,7 +2745,10 @@ impl Tensor {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eig_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
-            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+            Ok((
+                self.from_diagonal_complex_spectrum(out.eigenvalues)?,
+                self.from_dyn(out.v),
+            ))
         })
     }
 
@@ -2727,7 +2769,7 @@ impl Tensor {
                 )
             })?;
             Ok(EigTrunc {
-                d: self.from_dyn(out.d),
+                d: self.from_diagonal_complex_spectrum(out.eigenvalues.clone())?,
                 v: self.from_dyn(out.v),
                 eigenvalues: out.eigenvalues,
                 error: out.error,
