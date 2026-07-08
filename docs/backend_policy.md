@@ -7,6 +7,10 @@ is being able to **choose the execution backend** for a compute primitive
 rather than hardcoding a single implementation. This document is the rule for
 how backends are structured and selected.
 
+> **See also** [complexity_parity_policy.md](complexity_parity_policy.md): a
+> backend may differ from TensorKit in mechanism and constant factor, but never
+> in asymptotic FLOP/storage order.
+
 ## Guiding principle
 
 **If a seam is a plausible backend choice, abstract it as a backend from the

@@ -14,6 +14,12 @@ Implementation policy:
 - Keep low-level tensor execution structurally aligned with the TensorKit
   ecosystem: TensorKit, TensorKitSectors, TensorOperations, MatrixAlgebraKit,
   Strided.jl/StridedViews.jl, and Rust `strided-rs`.
+- **Match TensorKit's asymptotic complexity in every operation.** The
+  implementation mechanism may be Rust-idiomatic and differ from TK, but the
+  FLOP and storage *order* must not regress — dropping an `O(d)` TK operation to
+  `O(d²)` (e.g. densifying a diagonal in a general contraction) is a policy
+  violation, not an acceptable simplification. See
+  `docs/complexity_parity_policy.md`. This applies to all implementation.
 
 Initial crate layout:
 
