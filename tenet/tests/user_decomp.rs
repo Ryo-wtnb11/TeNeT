@@ -53,7 +53,9 @@ fn svd_compact_reconstructs_u1_and_su2() {
 #[test]
 fn diagonal_contract_matches_dense_diagonal() {
     let rt = Runtime::builder().build().unwrap();
-    for v in [u1_space(), su2_space()] {
+    // Includes a fermionic (FZ2) space: `contract` twists dual contracted legs,
+    // so the fast path must fold that supertrace θ to match the dense diagonal.
+    for v in [u1_space(), su2_space(), Space::fz2([(0, 2), (1, 2)])] {
         // A genuine diagonal S on the bond `v`, from an SVD.
         let src = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 105).unwrap();
         let (_, s, _) = src.svd_compact().unwrap();
@@ -114,6 +116,19 @@ fn diagonal_contract_matches_dense_diagonal() {
         check(
             &g_r.contract(&s, &[2], &[0]).unwrap(),
             &g_r.contract(&s_dense, &[2], &[0]).unwrap(),
+        );
+
+        // DUAL contracted rhs leg (fires the fermionic twist fold on FZ2): contract
+        // against `s`'s DOMAIN leg (dual), not its codomain. A * D with rhs=s: A's
+        // non-dual bond meets s's dual bond. `a` = [bond; phys].
+        check(
+            &a.contract(&s, &[0], &[1]).unwrap(),
+            &a.contract(&s_dense, &[0], &[1]).unwrap(),
+        );
+        // D * A with rhs=B on B's dual domain bond. `b` = [phys; bond].
+        check(
+            &s.contract(&b, &[0], &[1]).unwrap(),
+            &s_dense.contract(&b, &[0], &[1]).unwrap(),
         );
     }
 }
