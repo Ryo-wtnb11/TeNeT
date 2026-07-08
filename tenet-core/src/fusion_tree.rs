@@ -2135,12 +2135,23 @@ where
     let candidates =
         collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
 
-    let mut terms = Vec::new();
+    // Constructive inverse (TensorKit `multi_Fmove_inv`,
+    // `basic_manipulations.jl`): every candidate shares `tree`'s uncoupled
+    // tail, so the expansion coefficient is directly the conjugated
+    // multi-associator relating the (N+1)-leg candidate to the N-leg `tree` —
+    // exactly the F-symbol product the forward `multi_Fmove` would assign that
+    // tail. Reuse it instead of running the full forward recoupling on every
+    // candidate and searching for the matching tail (was invert-by-search,
+    // O(candidates²·N); now O(candidates·N)). The two are term-for-term
+    // identical: `multi_associator_scalar` returns `Some` iff the uncoupled/dual
+    // tails match — which they do for every enumerated candidate — with the same
+    // coefficient (zeros included) the forward pass produced.
+    let mut terms = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        for (short_tree, coefficient) in multiplicity_free_multi_fmove_tree(rule, &candidate)? {
-            if fusion_tree_keys_match_with_empty_vacuum(rule, &short_tree, tree) {
-                terms.push((candidate.clone(), rule.scalar_conj(coefficient)));
-            }
+        if let Some(coefficient) =
+            multiplicity_free_multi_associator_scalar(rule, &candidate, tree)?
+        {
+            terms.push((candidate, rule.scalar_conj(coefficient)));
         }
     }
     Ok(terms)
@@ -2241,21 +2252,6 @@ where
         });
     }
     Ok(uncoupled.to_vec())
-}
-
-fn fusion_tree_keys_match_with_empty_vacuum<R>(
-    rule: &R,
-    left: &FusionTreeKey,
-    right: &FusionTreeKey,
-) -> bool
-where
-    R: FusionRule,
-{
-    left.uncoupled() == right.uncoupled()
-        && left.is_dual() == right.is_dual()
-        && left.innerlines() == right.innerlines()
-        && left.vertices() == right.vertices()
-        && coupled_or_vacuum(rule, left) == coupled_or_vacuum(rule, right)
 }
 
 fn permutation_to_adjacent_swaps(
