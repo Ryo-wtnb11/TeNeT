@@ -254,8 +254,20 @@ fn twist_squares_to_identity_and_naturality() {
         for leg in 0..4usize {
             let twice = t.twist(&[leg]).unwrap().twist(&[leg]).unwrap();
             assert_close(twice.data(), t.data(), 1e-12);
-            if !fermionic {
-                let once = t.twist(&[leg]).unwrap();
+            let once = t.twist(&[leg]).unwrap();
+            if fermionic {
+                // Every leg of these fermionic fixtures carries an odd sector,
+                // so the twist must negate those blocks. Guards the
+                // has_shared_twist short-circuit against wrongly skipping the
+                // sign (θ²=id alone would not catch it — doing nothing also
+                // squares to the identity).
+                assert!(
+                    once.data() != t.data(),
+                    "{name}: fermionic twist on leg {leg} must not be a no-op",
+                );
+            } else {
+                // Bosonic: θ ≡ 1, so the twist is the identity and the
+                // short-circuit returns the shared buffer unchanged.
                 assert_close(once.data(), t.data(), 1e-12);
             }
         }

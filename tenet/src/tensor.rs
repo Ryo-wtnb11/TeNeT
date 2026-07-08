@@ -940,6 +940,37 @@ impl Tensor {
         }
         let nout = self.codomain_rank();
         let rule = self.rule;
+        // TensorKit `has_shared_twist` (`indexmanipulations.jl`): the twist is
+        // the identity when every requested leg carries theta = 1 on every
+        // block. Bosonic rules are all-theta=1 by construction (O(1)
+        // short-circuit — the Z2/U1/SU2 finite-torus paths); a
+        // fermionic/anyonic tensor still shares its buffer when no requested
+        // leg touches a twisted sector. Either way, skip the whole-buffer
+        // clone-and-scale-by-1 and return the shared data.
+        let twist_is_identity = with_rule!(rule, rule, {
+            rule.braiding_style().is_bosonic() || {
+                let structure = self.space.structure();
+                (0..structure.block_count()).try_fold(true, |noop, index| {
+                    let block = structure.block(index)?;
+                    Ok::<_, Error>(
+                        noop && match block.key() {
+                            BlockKey::FusionTree(key) => legs.iter().all(|&leg| {
+                                let sector = if leg < nout {
+                                    key.codomain_uncoupled()[leg]
+                                } else {
+                                    key.domain_uncoupled()[leg - nout]
+                                };
+                                rule.twist_scalar(sector) == 1.0
+                            }),
+                            _ => true,
+                        },
+                    )
+                })?
+            }
+        });
+        if twist_is_identity {
+            return Ok(self.clone());
+        }
         self.scaled_blocks(&self.space, &|key| match key {
             BlockKey::FusionTree(key) => with_rule!(rule, rule, {
                 legs.iter()
