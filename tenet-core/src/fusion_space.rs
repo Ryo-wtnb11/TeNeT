@@ -400,11 +400,18 @@ impl FusionTreeHomSpace {
         )
     }
 
-    pub fn fusion_tree_keys<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
+    /// The cached fusion-tree block keys, shared in O(1) (`Arc::clone`): the
+    /// layout already holds them as `Arc<[_]>`, so there is no need to deep-clone
+    /// each key (two `FusionTreeKey`s, four `SectorVec`s each) into a fresh `Vec`
+    /// on every call. Returns `Arc<[_]>`, which derefs to `[FusionTreeBlockKey]`,
+    /// so iterate / index / `len` callers are unchanged; by-value consumers can
+    /// `.to_vec()`. TensorKit's `fusiontrees(W)` likewise returns the cached
+    /// index set by reference. See #53.
+    pub fn fusion_tree_keys<R>(&self, rule: &R) -> Arc<[FusionTreeBlockKey]>
     where
         R: MultiplicityFreeFusionRule,
     {
-        self.cached_fusion_tree_layout(rule).keys.as_ref().to_vec()
+        Arc::clone(&self.cached_fusion_tree_layout(rule).keys)
     }
 
     pub fn try_for_each_fusion_tree_key<R, F, E>(&self, rule: &R, mut f: F) -> Result<(), E>
@@ -544,7 +551,9 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         let rank = self.codomain.len() + self.domain.len();
-        SectorStructure::from_keys(rank, self.fusion_tree_keys(rule))
+        // `from_keys` builds owned `BlockKey`s, so cloning out of the shared
+        // slice is unavoidable here (a cold structure-build path, not a hot loop).
+        SectorStructure::from_keys(rank, self.fusion_tree_keys(rule).iter().cloned())
     }
 
     pub fn unique_fusion_tree_key_from_external_sectors<R>(
