@@ -245,6 +245,26 @@ fn exp_of_zero_acts_as_identity() {
     }
 }
 
+/// exp on a *non-trivial* spectrum: `exp(t) · exp(t) == exp(2t)` for a
+/// Hermitian `t`. Guards the spectral-function diagonal fold (issue #46):
+/// `exp_of_zero_acts_as_identity` only exercises the all-ones spectrum, where
+/// every scaling factor is 1 and a mis-mapped column scaling would still pass.
+#[test]
+fn exp_composes_as_spectral_function() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 210).unwrap();
+        // Hermitian with a modest spectrum so exp stays well-conditioned.
+        let gram = a.adjoint().unwrap().compose(&a).unwrap();
+        let t = gram.add(&gram, 0.5, 0.0).unwrap();
+        let two_t = t.add(&t, 1.0, 1.0).unwrap();
+        let lhs = t.exp().unwrap().compose(&t.exp().unwrap()).unwrap();
+        let rhs = two_t.exp().unwrap();
+        let err = relative_distance(&lhs, &rhs);
+        assert!(err < 1e-9, "exp(t)^2 != exp(2t): relative error {err}");
+    }
+}
+
 #[test]
 fn inv_and_pinv_sanity() {
     let rt = Runtime::builder().build().unwrap();
