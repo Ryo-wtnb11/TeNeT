@@ -3,24 +3,47 @@
 TeNeT's design axis is maintainability + extensibility (idiomatic Rust) *and*
 speed on dynamic-rank tensor networks. A first-class part of that extensibility
 is being able to **choose the execution backend** for a compute primitive
-(transpose/tree-transform, contraction/GEMM, device placement) rather than
-hardcoding a single implementation. This document is the rule for how backends
-are structured and selected.
+(linear algebra, transpose/tree-transform, contraction/GEMM, device placement)
+rather than hardcoding a single implementation. This document is the rule for
+how backends are structured and selected.
+
+## Guiding principle
+
+**If a seam is a plausible backend choice, abstract it as a backend from the
+start** — put it behind a trait and make it selectable at `Runtime::builder()`
+from day one. Do not hardcode one implementation and retrofit selection later.
+Linear algebra is the canonical example: on CPU there are several viable
+providers (faer, system BLAS/LAPACK, Intel MKL, OpenBLAS), so it must be a
+selectable backend, not a fixed dependency — the same way device placement
+(CPU vs CUDA) already is.
 
 ## What "backend" means here
 
 A backend is a swappable implementation of a compute primitive, living behind a
 trait:
 
+- `DenseExecutor` — the dense linear algebra (per-coupled-sector GEMM, SVD, eig,
+  QR, inv, exp). `tenet-matrixalgebra` is already generic over it
+  (`fn eigh_full_dyn<E>(dense: &mut E, …)`).
 - `TreeTransformBackend` — tree transforms / transposes (permute, braid, twist).
 - `TensorContractBackend` / `HostTensorContractBackend` — contraction (the
   per-coupled-sector GEMMs).
 - `TensorTraceOperationsBackend` — traces.
 - Device placement — CPU vs CUDA, selected on the runtime.
 
-Concrete backends today: `DenseTreeTransformOperations` (CPU dense, the
-default), `HostTensorOperations`, and the CUDA path. Planned: HPTT (fast
-transpose) and TBLIS (transpose-free contraction) — see #7, #41.
+State today, and the gap this policy targets:
+
+- The **traits exist**, but most seams have exactly one concrete implementation.
+  `DenseExecutor` has only `DefaultDenseExecutor` (`tenet-dense`, delegating to
+  `tenferro` → faer/gemm), and `Runtime` hardcodes it (`runtime.rs`); the
+  transpose/contract seam is fixed to `DenseTreeTransformOperations`.
+- Only **device** selection is exposed to callers (`Runtime::builder().cuda`).
+- Intended alternatives: system BLAS/LAPACK, Intel MKL, OpenBLAS for
+  `DenseExecutor`; HPTT (fast transpose) and TBLIS (transpose-free contraction)
+  for the transform/contract seams — see #7, #41.
+
+So the remaining work is not "add an abstraction" (it's there) but "expose the
+selection at the builder and provide more than one implementation."
 
 ## Rules
 
@@ -31,10 +54,12 @@ transpose) and TBLIS (transpose-free contraction) — see #7, #41.
 
 2. **Selection is explicit and runtime, at `Runtime::builder()`.** Device
    selection already works this way (`Runtime::builder().cuda(device)`). CPU
-   compute backends must be selectable the same way (e.g.
-   `.transpose_backend(...)`, `.contract_backend(...)`), not chosen at call
-   sites and not hardcoded at compile time. There is one documented default
-   (CPU dense); everything else is opt-in.
+   compute backends must be selectable the same way — the dense linear-algebra
+   provider (`.linalg_backend(Faer | SystemLapack | Mkl | …)`) and the
+   transpose/contract kernels (`.transpose_backend(...)`,
+   `.contract_backend(...)`) — not chosen at call sites and not hardcoded at
+   compile time. There is one documented default (faer / CPU dense); everything
+   else is opt-in.
 
 3. **Separate WHAT from WHICH.** Operator and user-layer code express *what* to
    compute — spaces, axes, conjugate flags, output order — and never *which*
