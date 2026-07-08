@@ -220,6 +220,29 @@ fn trace_cyclicity() {
     }
 }
 
+/// The block-local `tr()` (#50, TensorKit's weighted block trace) agrees with
+/// the generic partial-trace engine it replaced (`trace_pairs` over every
+/// codomain/domain leg pair) across all rule types, ranks, and both dtypes.
+/// Pins the fast path to the engine oracle.
+#[test]
+fn trace_matches_partial_trace_engine() {
+    let rt = Runtime::builder().build().unwrap();
+    for (name, v, _) in spaces() {
+        for dtype in [Dtype::F64, Dtype::C64] {
+            for (ncod, seed) in [(1usize, 71u64), (2, 72)] {
+                let cod: Vec<&Space> = std::iter::repeat(&v).take(ncod).collect();
+                let t = Tensor::rand_with_seed(&rt, dtype, cod.clone(), cod, seed).unwrap();
+                let fast = t.tr().unwrap();
+                let pairs: Vec<(usize, usize)> = (0..ncod).map(|i| (i, ncod + i)).collect();
+                let engine = t.trace_pairs(&pairs).unwrap().scalar().unwrap();
+                assert_scalar_close(fast.re(), engine.re(), 1e-12);
+                assert_scalar_close(fast.im(), engine.im(), 1e-12);
+                let _ = name;
+            }
+        }
+    }
+}
+
 /// twist² == id on every leg (all rules in scope have θ ∈ {±1}); bosonic
 /// rules have trivial twist; twist is natural with respect to permute.
 #[test]
