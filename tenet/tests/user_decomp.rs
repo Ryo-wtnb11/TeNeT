@@ -43,6 +43,96 @@ fn svd_compact_reconstructs_u1_and_su2() {
     }
 }
 
+/// Order-parity diagonal `contract` (#75): contracting a diagonal-storage `S`
+/// against a tensor leg scales that leg and repartitions instead of densifying
+/// to O(d²) + GEMM. Cross-checked against a hand-built dense diagonal driven
+/// through the ordinary contraction — the only reference independent of the
+/// scaling code. Covers sole-leg (edge) AND multi-leg geometries (a bond that is
+/// not the operand's only leg on its side, incl. an interior leg — exactly what
+/// a naive scale-in-place gets wrong).
+#[test]
+fn diagonal_contract_matches_dense_diagonal() {
+    let rt = Runtime::builder().build().unwrap();
+    // Includes a fermionic (FZ2) space: `contract` twists dual contracted legs,
+    // so the fast path must fold that supertrace θ to match the dense diagonal.
+    for v in [u1_space(), su2_space(), Space::fz2([(0, 2), (1, 2)])] {
+        // A genuine diagonal S on the bond `v`, from an SVD.
+        let src = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 105).unwrap();
+        let (_, s, _) = src.svd_compact().unwrap();
+        let bond = s.codomain_spaces()[0].clone();
+        let spectrum = s.svd_vals().unwrap();
+
+        // Dense `bond <- bond` diagonal with the same values (never Data::Diagonal).
+        let s_dense = Tensor::from_block_fn(&rt, [&bond], [&bond], |key, idx| {
+            let BlockKey::FusionTree(key) = key else {
+                return 0.0;
+            };
+            if idx[0] != idx[1] {
+                return 0.0;
+            }
+            let charge = key.codomain_uncoupled()[0];
+            spectrum
+                .iter()
+                .find(|sp| sp.sector == charge)
+                .map(|sp| sp.values[idx[0]])
+                .unwrap_or(0.0)
+        })
+        .unwrap();
+        let check = |fast: &Tensor, dense: &Tensor| assert_close(fast.data(), dense.data(), 1e-12);
+
+        // lmul!: D * A on A's sole leading (codomain) leg. A = bond <- phys.
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&v], 106).unwrap();
+        check(
+            &s.contract(&a, &[1], &[0]).unwrap(),
+            &s_dense.contract(&a, &[1], &[0]).unwrap(),
+        );
+
+        // rmul!: B * D on B's sole trailing (domain) leg. B = phys <- bond.
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&bond], 107).unwrap();
+        check(
+            &b.contract(&s, &[1], &[0]).unwrap(),
+            &b.contract(&s_dense, &[1], &[0]).unwrap(),
+        );
+
+        // Multi-leg D * A: bond is A's LEADING codomain leg but A has other legs.
+        // A = [bond, phys; phys2]; the scaled leg must repartition to codomain 0.
+        let g = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond, &v], [&v], 108).unwrap();
+        check(
+            &s.contract(&g, &[1], &[0]).unwrap(),
+            &s_dense.contract(&g, &[1], &[0]).unwrap(),
+        );
+
+        // Multi-leg D * A into an INTERIOR leg (axis 1, a codomain leg that is
+        // neither first nor last). A = [phys, bond; phys2]. This is the case a
+        // scale-in-place gets wrong (wrong codomain/domain split).
+        let g_mid = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &bond], [&v], 109).unwrap();
+        check(
+            &s.contract(&g_mid, &[1], &[1]).unwrap(),
+            &s_dense.contract(&g_mid, &[1], &[1]).unwrap(),
+        );
+
+        // Multi-leg A * D on a trailing domain leg. A = [phys; phys2, bond].
+        let g_r = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &bond], 110).unwrap();
+        check(
+            &g_r.contract(&s, &[2], &[0]).unwrap(),
+            &g_r.contract(&s_dense, &[2], &[0]).unwrap(),
+        );
+
+        // DUAL contracted rhs leg (fires the fermionic twist fold on FZ2): contract
+        // against `s`'s DOMAIN leg (dual), not its codomain. A * D with rhs=s: A's
+        // non-dual bond meets s's dual bond. `a` = [bond; phys].
+        check(
+            &a.contract(&s, &[0], &[1]).unwrap(),
+            &a.contract(&s_dense, &[0], &[1]).unwrap(),
+        );
+        // D * A with rhs=B on B's dual domain bond. `b` = [phys; bond].
+        check(
+            &s.contract(&b, &[0], &[1]).unwrap(),
+            &s_dense.contract(&b, &[0], &[1]).unwrap(),
+        );
+    }
+}
+
 /// PR1 of issue #55: `svd_compact` now stores `S` as an O(rank) per-sector
 /// spectrum (`Data::Diagonal`) instead of a dense O(rank²) block-diagonal
 /// buffer. The materialized dense buffer must still be exactly diagonal — its

@@ -146,6 +146,34 @@ impl DiagonalData {
             DiagonalData::RealC64(_) | DiagonalData::C64(_) => Dtype::C64,
         }
     }
+
+    /// Multiplies every stored value by a real factor, preserving the variant —
+    /// so scaling a diagonal factor (e.g. itebd's `λ / |λ|`) keeps O(rank)
+    /// storage instead of densifying.
+    fn scaled(&self, factor: f64) -> DiagonalData {
+        fn map_real(spectra: &[SectorSpectrum<f64>], factor: f64) -> Vec<SectorSpectrum<f64>> {
+            spectra
+                .iter()
+                .map(|entry| SectorSpectrum {
+                    sector: entry.sector,
+                    values: entry.values.iter().map(|&value| value * factor).collect(),
+                })
+                .collect()
+        }
+        match self {
+            DiagonalData::RealF64(spectra) => DiagonalData::RealF64(map_real(spectra, factor)),
+            DiagonalData::RealC64(spectra) => DiagonalData::RealC64(map_real(spectra, factor)),
+            DiagonalData::C64(spectra) => DiagonalData::C64(
+                spectra
+                    .iter()
+                    .map(|entry| SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * factor).collect(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Explicit "no device kernel yet" error; device tensors never fall back
@@ -1681,10 +1709,58 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
-        // A diagonal-storage operand (SVD `s`, eigh/eig `d`) has no direct GEMM
-        // path yet, so materialize it to dense first (issue #55 PR2 will fold it
-        // into a block-local scaling instead). Densify is a no-op clone for
-        // non-diagonal operands.
+        // Order-parity fast path for a real diagonal operand (#75): instead of
+        // densifying it to an O(d²) block-diagonal and running an O(d²·n) GEMM,
+        // scale the OTHER operand's contracted leg by the spectrum (O(d·n)) and
+        // `permute` the result into the contract output arrangement (O(n)). The
+        // `permute` reuses the tested recoupling/repartition machinery, so the
+        // result space — including leg duality and the codomain/domain split — is
+        // correct for ANY geometry, not just edge legs. This is the same
+        // scale + one-permute structure TensorKit runs (a `Diagonal` block scales
+        // the recoupled operand); see docs/complexity_parity_policy.md.
+        //
+        // `contract` (tensorcontract!) applies a supertrace twist to `rhs`'s DUAL
+        // contracted legs; `mul!` (the scaling below) does not. The exact
+        // relation, from the cancellation `compose` performs, is
+        // `contract(a, b) = mul!(a, b.twist(dual contracted rhs legs))`. So
+        // pre-twist `rhs`'s dual contracted leg: when `rhs` is the diagonal, fold
+        // θ into the spectrum (no densify); when `rhs` is the dense operand,
+        // `twist` it. θ = ±1 by charge parity, identity for bosonic rules.
+        let fermionic = with_rule!(self.rule, rule, {
+            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
+        });
+        if lhs_axes.len() == 1 && rhs_axes.len() == 1 {
+            let twist_rhs_leg = fermionic && rhs.leg_is_dual(rhs_axes[0]);
+            match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
+                // A * D: scale A's contracted leg by the (twist-folded) spectrum,
+                // then repartition to the output arrangement (A's open axes ->
+                // codomain, the scaled leg -> domain).
+                (None, Some(spectrum)) => {
+                    let leg = lhs_axes[0];
+                    let folded = self.twist_folded_spectrum(spectrum, twist_rhs_leg);
+                    let scaled = self.scaled_axis_copy(Some(leg), &folded)?;
+                    let codomain: Vec<usize> = (0..self.rank()).filter(|&a| a != leg).collect();
+                    return scaled.permute(&codomain, &[leg]);
+                }
+                // D * A: pre-twist A's dual contracted leg, scale it, then
+                // repartition (the scaled leg -> codomain 0, A's open -> domain).
+                (Some(spectrum), None) => {
+                    let leg = rhs_axes[0];
+                    let pretwisted = if twist_rhs_leg {
+                        rhs.twist(&[leg])?
+                    } else {
+                        rhs.clone()
+                    };
+                    let scaled = pretwisted.scaled_axis_copy(Some(leg), spectrum)?;
+                    let domain: Vec<usize> = (0..rhs.rank()).filter(|&a| a != leg).collect();
+                    return scaled.permute(&[leg], &domain);
+                }
+                _ => {}
+            }
+        }
+        // Fallback (complex-spectrum diagonal, diagonal∘diagonal, or a multi-axis
+        // contraction): materialize the diagonal to dense and run the ordinary
+        // contraction. Densify is a no-op clone for non-diagonal operands.
         if matches!(self.data.as_ref(), Data::Diagonal(_))
             || matches!(rhs.data.as_ref(), Data::Diagonal(_))
         {
@@ -2191,6 +2267,18 @@ impl Tensor {
     /// Returns `factor * self` (real factor, both dtypes). Use
     /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
+        // Scaling a diagonal stays diagonal (O(rank)); itebd normalizes λ this
+        // way, and keeping it diagonal lets the next contract scale the bond.
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(Self {
+                rt: self.rt.clone(),
+                rule: self.rule,
+                space: Arc::clone(&self.space),
+                data: Arc::new(Data::Diagonal(diagonal.scaled(factor))),
+                adjoint_source: None,
+                materialized: OnceLock::new(),
+            });
+        }
         let data = match self.coupled_data() {
             Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
             Data::C64(data) => Data::C64(data.iter().map(|&value| value * factor).collect()),
@@ -2370,6 +2458,27 @@ impl Tensor {
         })
     }
 
+    /// Wraps a complex per-sector spectrum (eig `D`) as diagonal storage. The
+    /// general eigendecomposition is complex-valued even for real input, so `d`
+    /// is always c64; the spectrum stays O(rank) in `DiagonalData::C64`. Compose
+    /// densifies it (no real-spectrum scaling path), but storage is O(rank).
+    fn from_diagonal_complex_spectrum(
+        &self,
+        spectrum: Vec<SectorSpectrum<Complex64>>,
+    ) -> Result<Self, Error> {
+        let space = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::diagonal_bond_space(rule, &spectrum)
+        })?;
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::new(space),
+            data: Arc::new(Data::Diagonal(DiagonalData::C64(spectrum))),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
+        })
+    }
+
     /// Rewraps `data` in this tensor's own (shared) space — for ops that leave
     /// the space unchanged (bond scaling), so the space `Arc` is reused instead
     /// of deep-cloned.
@@ -2392,6 +2501,45 @@ impl Tensor {
             Data::Diagonal(DiagonalData::RealF64(s) | DiagonalData::RealC64(s)) => Some(s),
             _ => None,
         }
+    }
+
+    /// Whether leg `axis` (flat, codomain-first) carries a dual space, read from
+    /// the hom-space legs (the same duality `compose` checks to decide which
+    /// contracted legs `contract` twists).
+    fn leg_is_dual(&self, axis: usize) -> bool {
+        let hom = self.space.homspace();
+        let nout = self.codomain_rank();
+        if axis < nout {
+            hom.codomain().legs()[axis].is_dual()
+        } else {
+            hom.domain().legs()[axis - nout].is_dual()
+        }
+    }
+
+    /// The spectrum with each value multiplied by its sector's supertrace twist
+    /// `θ` (±1) when `apply` — folds `contract`'s fermionic twist of a diagonal
+    /// operand's dual contracted leg into the scaling instead of densifying it.
+    /// Identity (a plain copy) when `!apply` or for bosonic rules (`θ = 1`).
+    fn twist_folded_spectrum(
+        &self,
+        spectrum: &[SectorSpectrum],
+        apply: bool,
+    ) -> Vec<SectorSpectrum> {
+        if !apply {
+            return spectrum.to_vec();
+        }
+        with_rule!(self.rule, rule, {
+            spectrum
+                .iter()
+                .map(|entry| {
+                    let theta = rule.twist_scalar(entry.sector);
+                    SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * theta).collect(),
+                    }
+                })
+                .collect()
+        })
     }
 
     /// Scales this (dense) operand along one bond axis by `spectrum`, keeping the
@@ -2461,6 +2609,10 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.svd_cuda(storage, Some(truncation));
         }
+        // Singular values are real => `s` is a real diagonal in O(rank) storage
+        // (see `svd_compact`). `out.singular_values` is also returned, so it is
+        // cloned into the diagonal factor.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2475,7 +2627,7 @@ impl Tensor {
             })?;
             Ok(SvdTrunc {
                 u: self.from_dyn(out.u),
-                s: self.from_dyn(out.s),
+                s: self.from_diagonal_real_spectrum(out.singular_values.clone(), complex)?,
                 vh: self.from_dyn(out.vh),
                 singular_values: out.singular_values,
                 error: out.error,
@@ -2643,13 +2795,23 @@ impl Tensor {
             let out = self.eigh_cuda(storage, None)?;
             return Ok((out.d, out.v));
         }
+        // eigh eigenvalues are real, so `d` is a real diagonal (`RealC64` for
+        // c64 input keeps the former dense d's dtype). Build it as O(rank)
+        // diagonal storage from the spectrum; `out.d` (a transient dense
+        // diagonal) is discarded. ponytail: `eigh_full_dyn` still fills that
+        // dense d — a d-free core would skip it, but it is thrown away here and
+        // downstream composes now scale instead of GEMM, so no regression.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eigh_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
-            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+            Ok((
+                self.from_diagonal_real_spectrum(out.eigenvalues, complex)?,
+                self.from_dyn(out.v),
+            ))
         })
     }
 
@@ -2660,6 +2822,10 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.eigh_cuda(storage, Some(truncation));
         }
+        // Real eigenvalues => real diagonal `d` in O(rank) storage (see
+        // `eigh_full`). `out.eigenvalues` is also returned to the caller, so it
+        // is cloned into the diagonal factor.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2673,7 +2839,7 @@ impl Tensor {
                 )
             })?;
             Ok(EighTrunc {
-                d: self.from_dyn(out.d),
+                d: self.from_diagonal_real_spectrum(out.eigenvalues.clone(), complex)?,
                 v: self.from_dyn(out.v),
                 eigenvalues: out.eigenvalues,
                 error: out.error,
@@ -2706,7 +2872,10 @@ impl Tensor {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eig_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
-            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+            Ok((
+                self.from_diagonal_complex_spectrum(out.eigenvalues)?,
+                self.from_dyn(out.v),
+            ))
         })
     }
 
@@ -2727,7 +2896,7 @@ impl Tensor {
                 )
             })?;
             Ok(EigTrunc {
-                d: self.from_dyn(out.d),
+                d: self.from_diagonal_complex_spectrum(out.eigenvalues.clone())?,
                 v: self.from_dyn(out.v),
                 eigenvalues: out.eigenvalues,
                 error: out.error,
