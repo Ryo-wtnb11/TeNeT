@@ -2231,7 +2231,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_compact_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::svd_compact_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((
                 self.from_dyn(out.u),
@@ -2248,7 +2248,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_full_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::svd_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((
                 self.from_dyn(out.u),
@@ -2269,7 +2269,7 @@ impl Tensor {
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::svd_trunc_dyn(
-                    &mut state.dense,
+                    &mut *state.dense,
                     rule,
                     &self.space,
                     data,
@@ -2293,7 +2293,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_vals_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::svd_vals_dyn(&mut *state.dense, rule, &self.space, data)
             })
             .map_err(Into::into)
         })
@@ -2310,7 +2310,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let (q, r) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::qr_compact_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::qr_compact_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((self.from_dyn(q), self.from_dyn(r)))
         })
@@ -2323,7 +2323,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let (q, r) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::qr_full_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::qr_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((self.from_dyn(q), self.from_dyn(r)))
         })
@@ -2336,7 +2336,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let (l, q) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::lq_compact_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::lq_compact_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((self.from_dyn(l), self.from_dyn(q)))
         })
@@ -2349,7 +2349,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let (l, q) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::lq_full_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::lq_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((self.from_dyn(l), self.from_dyn(q)))
         })
@@ -2374,7 +2374,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::left_null_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::left_null_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok(self.from_dyn(out))
         })
@@ -2387,7 +2387,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::right_null_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::right_null_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok(self.from_dyn(out))
         })
@@ -2404,7 +2404,7 @@ impl Tensor {
         let state = &mut *guard;
         let (w, p) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             tenet_matrixalgebra::left_polar_dyn(
-                &mut state.dense,
+                &mut *state.dense,
                 D::ctx_of(ctxs),
                 rule,
                 &self.space,
@@ -2425,7 +2425,7 @@ impl Tensor {
         let state = &mut *guard;
         let (p, w) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             tenet_matrixalgebra::right_polar_dyn(
-                &mut state.dense,
+                &mut *state.dense,
                 D::ctx_of(ctxs),
                 rule,
                 &self.space,
@@ -2450,7 +2450,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eigh_full_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eigh_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
         })
@@ -2468,7 +2468,7 @@ impl Tensor {
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eigh_trunc_dyn(
-                    &mut state.dense,
+                    &mut *state.dense,
                     rule,
                     &self.space,
                     data,
@@ -2491,7 +2491,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eigh_vals_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eigh_vals_dyn(&mut *state.dense, rule, &self.space, data)
             })
             .map_err(Into::into)
         })
@@ -2507,7 +2507,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eig_full_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eig_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
             Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
         })
@@ -2522,7 +2522,7 @@ impl Tensor {
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eig_trunc_dyn(
-                    &mut state.dense,
+                    &mut *state.dense,
                     rule,
                     &self.space,
                     data,
@@ -2545,7 +2545,7 @@ impl Tensor {
         let state = &mut *guard;
         with_data!(self, data, {
             with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eig_vals_dyn(&mut state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eig_vals_dyn(&mut *state.dense, rule, &self.space, data)
             })
             .map_err(Into::into)
         })
@@ -2561,7 +2561,13 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
-            tenet_matrixalgebra::exp_dyn(&mut state.dense, D::ctx_of(ctxs), rule, &self.space, data)
+            tenet_matrixalgebra::exp_dyn(
+                &mut *state.dense,
+                D::ctx_of(ctxs),
+                rule,
+                &self.space,
+                data,
+            )
         })?;
         Ok(self.from_dyn(out))
     }
@@ -2577,7 +2583,13 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
-            tenet_matrixalgebra::inv_dyn(&mut state.dense, D::ctx_of(ctxs), rule, &self.space, data)
+            tenet_matrixalgebra::inv_dyn(
+                &mut *state.dense,
+                D::ctx_of(ctxs),
+                rule,
+                &self.space,
+                data,
+            )
         })?;
         Ok(self.from_dyn(out))
     }
@@ -2593,7 +2605,7 @@ impl Tensor {
         let state = &mut *guard;
         let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
             tenet_matrixalgebra::pinv_dyn(
-                &mut state.dense,
+                &mut *state.dense,
                 D::ctx_of(ctxs),
                 rule,
                 &self.space,

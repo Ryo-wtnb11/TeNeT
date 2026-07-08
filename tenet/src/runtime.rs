@@ -80,8 +80,11 @@ pub(crate) struct RuntimeState {
     pub(crate) u1_fz2: Ctxs<ProductKey>,
     pub(crate) fz2_u1_su2: Ctxs<TripleKey>,
     /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
-    /// coupled-sector matrices), shared by all decomposition methods.
-    pub(crate) dense: tenet_dense::DefaultDenseExecutor,
+    /// coupled-sector matrices), shared by all decomposition methods. Boxed
+    /// behind [`tenet_dense::DenseExecutor`] so the CPU linear-algebra backend
+    /// is selectable at [`RuntimeBuilder::with_dense_executor`]; the default is
+    /// the faer-backed [`tenet_dense::DefaultDenseExecutor`].
+    pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
     /// CUDA device context when the runtime was built with
     /// [`RuntimeBuilder::cuda`]; `None` on CPU-only runtimes.
     #[cfg(feature = "cuda")]
@@ -98,7 +101,7 @@ pub(crate) struct RuntimeState {
 }
 
 impl RuntimeState {
-    fn new(dense: tenet_dense::DefaultDenseExecutor) -> Self {
+    fn new(dense: Box<dyn tenet_dense::DenseExecutor + Send>) -> Self {
         Self {
             u1: Ctxs::default(),
             z2: Ctxs::default(),
@@ -114,7 +117,10 @@ impl RuntimeState {
         }
     }
 
-    fn with_dense_threads(threads: usize) -> Result<Self, Error> {
+    fn with_dense_threads(
+        threads: usize,
+        dense: Box<dyn tenet_dense::DenseExecutor + Send>,
+    ) -> Result<Self, Error> {
         Ok(Self {
             u1: Ctxs::with_dense_threads(threads)?,
             z2: Ctxs::with_dense_threads(threads)?,
@@ -122,8 +128,7 @@ impl RuntimeState {
             su2: Ctxs::with_dense_threads(threads)?,
             u1_fz2: Ctxs::with_dense_threads(threads)?,
             fz2_u1_su2: Ctxs::with_dense_threads(threads)?,
-            dense: tenet_dense::DefaultDenseExecutor::with_threads(threads)
-                .map_err(tenet_tensors::OperationError::Dense)?,
+            dense,
             #[cfg(feature = "cuda")]
             cuda: None,
             plan_cache_config: PlanCacheConfig::default(),
@@ -159,7 +164,7 @@ impl RuntimeState {
 
 impl Default for RuntimeState {
     fn default() -> Self {
-        Self::new(tenet_dense::DefaultDenseExecutor::default())
+        Self::new(Box::new(tenet_dense::DefaultDenseExecutor::default()))
     }
 }
 
@@ -315,13 +320,33 @@ impl std::fmt::Debug for Runtime {
 }
 
 /// Builder for [`Runtime`]; see [`Runtime::builder`].
-#[derive(Clone, Debug, Default)]
+///
+/// Not `Clone`/`Debug`-derivable: an injected dense executor
+/// ([`Self::with_dense_executor`]) is a `Box<dyn DenseExecutor>`, which is
+/// neither cloneable nor `Debug`. A manual [`std::fmt::Debug`] is provided that
+/// reports the executor's presence without touching it.
+#[derive(Default)]
 pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
     plan_cache: PlanCacheConfig,
     dense_threads: Option<usize>,
     recoupling_threads: Option<usize>,
+    /// User-injected CPU linear-algebra backend; `None` uses the faer default.
+    dense_executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
+}
+
+impl std::fmt::Debug for RuntimeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("RuntimeBuilder");
+        #[cfg(feature = "cuda")]
+        s.field("cuda_device", &self.cuda_device);
+        s.field("plan_cache", &self.plan_cache)
+            .field("dense_threads", &self.dense_threads)
+            .field("recoupling_threads", &self.recoupling_threads)
+            .field("dense_executor", &self.dense_executor.is_some())
+            .finish()
+    }
 }
 
 impl RuntimeBuilder {
@@ -362,6 +387,23 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Selects the CPU linear-algebra backend (SVD / QR / eigh / GEMM on the
+    /// coupled-sector matrices) by injecting a [`tenet_dense::DenseExecutor`].
+    /// Unset uses the faer-backed default. This is the seam for a system
+    /// BLAS/LAPACK or MKL backend: implement `DenseExecutor` and pass it here —
+    /// no operator or decomposition code changes.
+    ///
+    /// The injected executor carries its own thread configuration;
+    /// [`Self::dense_threads`] then only sizes the shared rayon pool and the
+    /// recoupling contexts, not the injected backend.
+    pub fn with_dense_executor(
+        mut self,
+        executor: Box<dyn tenet_dense::DenseExecutor + Send>,
+    ) -> Self {
+        self.dense_executor = Some(executor);
+        self
+    }
+
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
@@ -384,10 +426,22 @@ impl RuntimeBuilder {
                 .num_threads(threads.max(1))
                 .build_global();
         }
+        // Injected backend wins; otherwise build the faer default, honoring the
+        // dense-thread count when set.
+        let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
+            Some(executor) => executor,
+            None => match dense_threads {
+                Some(threads) => Box::new(
+                    tenet_dense::DefaultDenseExecutor::with_threads(threads)
+                        .map_err(tenet_tensors::OperationError::Dense)?,
+                ),
+                None => Box::new(tenet_dense::DefaultDenseExecutor::default()),
+            },
+        };
         let mut state = if let Some(threads) = dense_threads {
-            RuntimeState::with_dense_threads(threads)?
+            RuntimeState::with_dense_threads(threads, dense)?
         } else {
-            RuntimeState::default()
+            RuntimeState::new(dense)
         };
         state.plan_cache_config = self.plan_cache;
         if let Some(threads) = self.recoupling_threads {
