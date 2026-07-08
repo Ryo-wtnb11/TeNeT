@@ -2370,6 +2370,27 @@ impl Tensor {
         })
     }
 
+    /// Wraps a complex per-sector spectrum (eig `D`) as diagonal storage. The
+    /// general eigendecomposition is complex-valued even for real input, so `d`
+    /// is always c64; the spectrum stays O(rank) in `DiagonalData::C64`. Compose
+    /// densifies it (no real-spectrum scaling path), but storage is O(rank).
+    fn from_diagonal_complex_spectrum(
+        &self,
+        spectrum: Vec<SectorSpectrum<Complex64>>,
+    ) -> Result<Self, Error> {
+        let space = with_rule!(self.rule, rule, {
+            tenet_matrixalgebra::diagonal_bond_space(rule, &spectrum)
+        })?;
+        Ok(Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::new(space),
+            data: Arc::new(Data::Diagonal(DiagonalData::C64(spectrum))),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
+        })
+    }
+
     /// Rewraps `data` in this tensor's own (shared) space — for ops that leave
     /// the space unchanged (bond scaling), so the space `Arc` is reused instead
     /// of deep-cloned.
@@ -2724,7 +2745,10 @@ impl Tensor {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eig_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
-            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+            Ok((
+                self.from_diagonal_complex_spectrum(out.eigenvalues)?,
+                self.from_dyn(out.v),
+            ))
         })
     }
 
@@ -2745,7 +2769,7 @@ impl Tensor {
                 )
             })?;
             Ok(EigTrunc {
-                d: self.from_dyn(out.d),
+                d: self.from_diagonal_complex_spectrum(out.eigenvalues.clone())?,
                 v: self.from_dyn(out.v),
                 eigenvalues: out.eigenvalues,
                 error: out.error,
