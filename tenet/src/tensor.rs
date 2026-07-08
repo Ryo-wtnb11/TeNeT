@@ -1709,12 +1709,50 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
-        // A diagonal-storage operand (SVD `s`, eigh/eig `d`) currently has no
-        // block-local scaling path through the general contraction, so
-        // materialize it to dense first. TensorKit keeps the diagonal type alive
-        // through the whole contraction and lets the block matmul dispatch to a
-        // scaling; porting that to the tenet-tensors contract seam is tracked
-        // separately. Densify is a no-op clone for non-diagonal operands.
+        // Order-parity fast path for a real diagonal operand (#75): instead of
+        // densifying it to an O(d²) block-diagonal and running an O(d²·n) GEMM,
+        // scale the OTHER operand's contracted leg by the spectrum (O(d·n)) and
+        // `permute` the result into the contract output arrangement (O(n)). The
+        // `permute` reuses the tested recoupling/repartition machinery, so the
+        // result space — including leg duality and the codomain/domain split — is
+        // correct for ANY geometry, not just edge legs. This is the same
+        // scale + one-permute structure TensorKit runs (a `Diagonal` block scales
+        // the recoupled operand); see docs/complexity_parity_policy.md.
+        //
+        // Gated to bosonic rules: `contract` twists dual contracted legs for
+        // fermionic rules, which a bare scaling does not reproduce; the fermionic
+        // twist-folding is a follow-up. A complex-spectrum diagonal (eig `d`) and
+        // diagonal∘diagonal also fall through to the densifying path below.
+        let no_twist = with_rule!(self.rule, rule, {
+            rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic
+        });
+        if no_twist && lhs_axes.len() == 1 && rhs_axes.len() == 1 {
+            match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
+                // A * D: scale A's contracted leg, then repartition to the output
+                // arrangement (A's open axes -> codomain, the scaled leg ->
+                // domain, matching `self`-open-then-`rhs`-open).
+                (None, Some(spectrum)) => {
+                    let leg = lhs_axes[0];
+                    let scaled = self.scaled_axis_copy(Some(leg), spectrum)?;
+                    let codomain: Vec<usize> = (0..self.rank()).filter(|&a| a != leg).collect();
+                    return scaled.permute(&codomain, &[leg]);
+                }
+                // D * A: scale A's contracted leg, then repartition (the scaled
+                // leg -> codomain, A's open axes -> domain).
+                (Some(spectrum), None) => {
+                    let leg = rhs_axes[0];
+                    let scaled = rhs.scaled_axis_copy(Some(leg), spectrum)?;
+                    let domain: Vec<usize> = (0..rhs.rank()).filter(|&a| a != leg).collect();
+                    return scaled.permute(&[leg], &domain);
+                }
+                _ => {}
+            }
+        }
+        // Fallback (fermionic twist, complex-spectrum diagonal, diagonal∘diagonal,
+        // or a multi-axis contraction): materialize the diagonal to dense and run
+        // the ordinary contraction. Densify is a no-op clone for non-diagonal
+        // operands. ponytail: the fermionic case is an order-parity gap tracked in
+        // #75; it densifies until the twist is folded into the scaling.
         if matches!(self.data.as_ref(), Data::Diagonal(_))
             || matches!(rhs.data.as_ref(), Data::Diagonal(_))
         {
