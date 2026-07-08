@@ -157,6 +157,59 @@ fn svd_compact_s_is_diagonal_storage() {
     }
 }
 
+/// Issue #55: `inv`/`pinv`/`sqrt` on a diagonal-storage tensor stay elementwise
+/// (O(rank)) and stay diagonal, instead of densifying to a per-block matrix
+/// inverse/SVD/sqrt. Cross-checked against a hand-built dense diagonal driven
+/// through the ordinary dense paths — the reference independent of the diagonal
+/// code — and the diagonal result must itself still be diagonal storage.
+#[test]
+fn diagonal_matrix_functions_match_dense() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space(), Space::fz2([(0, 2), (1, 2)])] {
+        let src = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 105).unwrap();
+        let (_, s, _) = src.svd_compact().unwrap();
+        let bond = s.codomain_spaces()[0].clone();
+        let spectrum = s.svd_vals().unwrap();
+
+        // Dense `bond <- bond` diagonal with the same values (never Data::Diagonal).
+        let s_dense = Tensor::from_block_fn(&rt, [&bond], [&bond], |key, idx| {
+            let BlockKey::FusionTree(key) = key else {
+                return 0.0;
+            };
+            if idx[0] != idx[1] {
+                return 0.0;
+            }
+            let charge = key.codomain_uncoupled()[0];
+            spectrum
+                .iter()
+                .find(|sp| sp.sector == charge)
+                .map(|sp| sp.values[idx[0]])
+                .unwrap_or(0.0)
+        })
+        .unwrap();
+
+        let num_values: usize = spectrum.iter().map(|sp| sp.values.len()).sum();
+        let still_diagonal = |t: &Tensor| {
+            assert_eq!(
+                t.data().iter().filter(|x| x.abs() > 1e-30).count(),
+                num_values,
+                "result densified off the diagonal"
+            );
+        };
+
+        // Singular values are strictly positive here, so inv == pinv == the true
+        // reciprocal and sqrt is real — the diagonal path must equal the dense path.
+        for (fast, dense) in [
+            (s.inv().unwrap(), s_dense.inv().unwrap()),
+            (s.pinv(1e-12).unwrap(), s_dense.pinv(1e-12).unwrap()),
+            (s.sqrt().unwrap(), s_dense.sqrt().unwrap()),
+        ] {
+            assert_close(fast.data(), dense.data(), 1e-12);
+            still_diagonal(&fast);
+        }
+    }
+}
+
 /// PR2 of issue #55: composing with the diagonal `S` folds to a block-local
 /// bond scaling (TensorKit `DiagonalTensorMap` `rmul!`/`lmul!`) instead of a
 /// GEMM. Both association orders must reconstruct `t` and agree, proving the
