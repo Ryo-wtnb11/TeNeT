@@ -13,8 +13,8 @@ use tenet_tensors::{
 
 use crate::compose::compose_dyn;
 use crate::factorize::{
-    dyn_space_of, eigh_full_dyn, scale_bond_axis_by_spectrum, svd_compact_dyn, typed_from_dyn,
-    DynFactor, FactorScalar, SectorSpectrum,
+    dyn_space_of, eigh_full_dyn, scale_bond_axis_by_spectrum, svd_compact_factors_dyn,
+    typed_from_dyn, DynFactor, FactorScalar, SectorSpectrum,
 };
 
 /// Matrix exponential of a Hermitian endomorphism: `exp(t) = V exp(D) V^H`.
@@ -136,15 +136,15 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let svd = svd_compact_dyn(dense, rule, space, data)?;
-    let sigma_max = svd
-        .singular_values
+    // Only the factors and the spectrum are needed — S^+ is folded into a
+    // scaling below — so skip materializing the dense diagonal S.
+    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let sigma_max = singular_values
         .iter()
         .flat_map(|entry| entry.values.iter().copied())
         .fold(0.0_f64, f64::max);
     let cutoff = rcond * sigma_max;
-    let inverted: Vec<SectorSpectrum> = svd
-        .singular_values
+    let inverted: Vec<SectorSpectrum> = singular_values
         .iter()
         .map(|entry| SectorSpectrum {
             sector: entry.sector,
@@ -158,8 +158,8 @@ where
     // t^+ = V S^+ U^H. Fold S^+ into a column scaling of V (bond = trailing
     // axis) instead of building the dense diagonal and running an extra GEMM
     // (issue #46).
-    let mut v = adjoint_dyn(rule, &svd.vh.0, &svd.vh.1)?;
-    let uh = adjoint_dyn(rule, &svd.u.0, &svd.u.1)?;
+    let mut v = adjoint_dyn(rule, &vh.0, &vh.1)?;
+    let uh = adjoint_dyn(rule, &u.0, &u.1)?;
     scale_bond_axis_by_spectrum(&mut v, &inverted)?;
     compose_dyn(context, rule, (&v.0, &v.1), (&uh.0, &uh.1))
 }
@@ -205,15 +205,15 @@ where
             message: "inv requires an endomorphism (codomain == domain)",
         });
     }
-    let svd = svd_compact_dyn(dense, rule, space, data)?;
-    let sigma_max = svd
-        .singular_values
+    // Only the spectrum is needed for the full-rank check; skip the dense S (and
+    // the factors are recomputed inside `pinv_dyn` below).
+    let (_, _, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let sigma_max = singular_values
         .iter()
         .flat_map(|entry| entry.values.iter().copied())
         .fold(0.0_f64, f64::max);
     let tolerance = sigma_max * 1e-13;
-    if svd
-        .singular_values
+    if singular_values
         .iter()
         .any(|entry| entry.values.iter().any(|&sigma| sigma <= tolerance))
     {
