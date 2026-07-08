@@ -43,6 +43,52 @@ fn svd_compact_reconstructs_u1_and_su2() {
     }
 }
 
+/// Contracting a diagonal-storage `S` against a tensor leg must match the same
+/// contraction with a hand-built dense diagonal — for both the `D * A` and
+/// `A * D` orders. This guards diagonal `contract` correctness independently of
+/// how it is implemented (currently a densify; a future seam-level scaling must
+/// keep this passing).
+#[test]
+fn diagonal_contract_matches_dense_diagonal() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        // A genuine diagonal S on the bond `v`, from an SVD.
+        let src = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 105).unwrap();
+        let (_, s, _) = src.svd_compact().unwrap();
+        let bond = s.codomain_spaces()[0].clone();
+        let spectrum = s.svd_vals().unwrap();
+
+        // Dense `bond <- bond` diagonal with the same values (never Data::Diagonal).
+        let s_dense = Tensor::from_block_fn(&rt, [&bond], [&bond], |key, idx| {
+            let BlockKey::FusionTree(key) = key else {
+                return 0.0;
+            };
+            if idx[0] != idx[1] {
+                return 0.0;
+            }
+            let charge = key.codomain_uncoupled()[0];
+            spectrum
+                .iter()
+                .find(|sp| sp.sector == charge)
+                .map(|sp| sp.values[idx[0]])
+                .unwrap_or(0.0)
+        })
+        .unwrap();
+
+        // lmul!: D * A on A's sole leading (codomain) leg. A = bond <- phys.
+        let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&v], 106).unwrap();
+        let fast_l = s.contract(&a, &[1], &[0]).unwrap();
+        let dense_l = s_dense.contract(&a, &[1], &[0]).unwrap();
+        assert_close(fast_l.data(), dense_l.data(), 1e-12);
+
+        // rmul!: B * D on B's sole trailing (domain) leg. B = phys <- bond.
+        let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&bond], 107).unwrap();
+        let fast_r = b.contract(&s, &[1], &[0]).unwrap();
+        let dense_r = b.contract(&s_dense, &[1], &[0]).unwrap();
+        assert_close(fast_r.data(), dense_r.data(), 1e-12);
+    }
+}
+
 /// PR1 of issue #55: `svd_compact` now stores `S` as an O(rank) per-sector
 /// spectrum (`Data::Diagonal`) instead of a dense O(rank²) block-diagonal
 /// buffer. The materialized dense buffer must still be exactly diagonal — its
