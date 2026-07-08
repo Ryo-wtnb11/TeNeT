@@ -2461,6 +2461,10 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.svd_cuda(storage, Some(truncation));
         }
+        // Singular values are real => `s` is a real diagonal in O(rank) storage
+        // (see `svd_compact`). `out.singular_values` is also returned, so it is
+        // cloned into the diagonal factor.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2475,7 +2479,7 @@ impl Tensor {
             })?;
             Ok(SvdTrunc {
                 u: self.from_dyn(out.u),
-                s: self.from_dyn(out.s),
+                s: self.from_diagonal_real_spectrum(out.singular_values.clone(), complex)?,
                 vh: self.from_dyn(out.vh),
                 singular_values: out.singular_values,
                 error: out.error,
