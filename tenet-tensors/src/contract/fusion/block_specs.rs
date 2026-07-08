@@ -15,6 +15,24 @@ use super::super::structure::{
     TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,
 };
 
+/// Every sector on every fusion tree of `space` equals its own dual. Used to
+/// gate the Structure route's conjugate (categorical-adjoint) block matching,
+/// which is only correct for self-dual symmetries.
+fn all_sectors_self_dual<R>(rule: &R, space: &DynamicFusionMapSpace) -> bool
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let tree_self_dual = |tree: &FusionTreeKey| {
+        tree.uncoupled().iter().all(|&s| rule.dual(s) == s)
+            && tree.coupled().is_none_or(|c| rule.dual(c) == c)
+    };
+    space
+        .homspace()
+        .fusion_tree_keys(rule)
+        .iter()
+        .all(|key| tree_self_dual(key.codomain_tree()) && tree_self_dual(key.domain_tree()))
+}
+
 pub fn tensorcontract_fusion_structure<
     R,
     TDst,
@@ -80,6 +98,23 @@ pub fn tensorcontract_fusion_structure_dyn<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    // The categorical-adjoint (conjugate) block matching in this Structure route
+    // is only correct when the conjugated operand's sectors are all self-dual
+    // (a sector equal to its dual). For non-self-dual sectors — e.g. a U(1)
+    // charge q whose dual is -q ≠ q — it mislabels the coupled sector of the
+    // output block (pairing q with -q across codomain/domain), producing an
+    // invalid `MissingBlockKey`. This was only ever exercised on self-dual
+    // symmetries (Z2, fermion parity, SU(2)). Decline to the DynamicTree route,
+    // which handles the adjoint via `adjoint_view` + a data-only storage
+    // conjugation correctly for any symmetry (still copy-free). Verified against
+    // the eager `adjoint_dyn` oracle for U(1).
+    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs))
+        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs))
+    {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+        });
+    }
     let lowered_axes =
         lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
     let lhs_adjoint;
