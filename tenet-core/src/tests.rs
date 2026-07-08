@@ -2752,6 +2752,89 @@ mod tests {
     }
 
     #[test]
+    fn transpose_tree_pair_block_matches_per_source() {
+        use std::collections::BTreeMap;
+        let rule = SU2FusionRule;
+        let leg = || {
+            SectorLeg::new(
+                [
+                    (SectorId::new(0), 1),
+                    (SectorId::new(1), 1),
+                    (SectorId::new(2), 1),
+                ],
+                false,
+            )
+        };
+        // (V⊗V⊗V) ← V spans many uncoupled blocks; test each block.
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg(), leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+        let keys = hom.fusion_tree_keys(&rule);
+
+        // Group source tree-pairs by their uncoupled block (the batching unit).
+        let mut blocks: BTreeMap<Vec<usize>, Vec<FusionTreeBlockKey>> = BTreeMap::new();
+        for key in keys.iter() {
+            let tag: Vec<usize> = key
+                .codomain_tree()
+                .uncoupled()
+                .iter()
+                .chain(key.domain_tree().uncoupled())
+                .map(|s| s.id())
+                .collect();
+            blocks.entry(tag).or_default().push(key.clone());
+        }
+
+        // Canonical planar transpose (`Tensor::transpose`): new codomain is the
+        // reversed old domain, new domain the reversed old codomain — a cyclic
+        // leg rotation.
+        let codomain_permutation = [3usize];
+        let domain_permutation = [2usize, 1, 0];
+        let mut checked_blocks = 0;
+        for src_keys in blocks.values() {
+            let batched = multiplicity_free_transpose_tree_pair_block(
+                &rule,
+                src_keys,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .unwrap();
+            assert_eq!(batched.len(), src_keys.len());
+            for (src, batched_rows) in src_keys.iter().zip(&batched) {
+                let per_source = multiplicity_free_transpose_tree_pair(
+                    &rule,
+                    src,
+                    &codomain_permutation,
+                    &domain_permutation,
+                )
+                .unwrap();
+                let mut want: BTreeMap<FusionTreeBlockKey, f64> = BTreeMap::new();
+                for (k, c) in &per_source {
+                    *want.entry(k.clone()).or_insert(0.0) += c;
+                }
+                let mut got: BTreeMap<FusionTreeBlockKey, f64> = BTreeMap::new();
+                for (k, c) in batched_rows {
+                    *got.entry(k.clone()).or_insert(0.0) += c;
+                }
+                assert_eq!(
+                    want.keys().collect::<Vec<_>>(),
+                    got.keys().collect::<Vec<_>>(),
+                    "destination trees differ for a source in block"
+                );
+                for (k, wc) in &want {
+                    let gc = got[k];
+                    assert!(
+                        (wc - gc).abs() <= 1e-12 * (1.0 + wc.abs()),
+                        "coefficient mismatch {wc} vs {gc}"
+                    );
+                }
+            }
+            checked_blocks += 1;
+        }
+        assert!(checked_blocks > 0, "expected at least one block");
+    }
+
+    #[test]
     fn fusion_tree_homspace_matches_tensorkit_su2_innerline_order() {
         let rule = SU2FusionRule;
         let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1)], [(1, 1)]);
