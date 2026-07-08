@@ -173,6 +173,15 @@ fn c64_svd_compact_recomposes_and_u_unitary() {
         let diff = recon.add(&t, 1.0, -1.0).unwrap().norm().unwrap();
         assert!(diff <= 1e-10 * (1.0 + t.norm().unwrap()), "diff = {diff}");
 
+        // lmul! order `u * (s * vh)`: real spectrum scaling a complex factor from
+        // the leading side (issue #55 PR2) must reconstruct identically.
+        let recon_left = u.compose(&s.compose(&vh).unwrap()).unwrap();
+        let diff_left = recon_left.add(&t, 1.0, -1.0).unwrap().norm().unwrap();
+        assert!(
+            diff_left <= 1e-10 * (1.0 + t.norm().unwrap()),
+            "diff_left = {diff_left}"
+        );
+
         // U^H U = id on the bond: inner-based unitarity check.
         let gram = u.adjoint().unwrap().compose(&u).unwrap();
         let bond = gram.domain_spaces()[0].clone();

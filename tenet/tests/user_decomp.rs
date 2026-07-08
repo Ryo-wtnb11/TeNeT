@@ -43,6 +43,50 @@ fn svd_compact_reconstructs_u1_and_su2() {
     }
 }
 
+/// PR1 of issue #55: `svd_compact` now stores `S` as an O(rank) per-sector
+/// spectrum (`Data::Diagonal`) instead of a dense O(rank²) block-diagonal
+/// buffer. The materialized dense buffer must still be exactly diagonal — its
+/// nonzero count equals the number of singular values, so nothing bled off the
+/// block diagonal — and reconstruction must hold via that lazy materialization.
+#[test]
+fn svd_compact_s_is_diagonal_storage() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 103).unwrap();
+        let (u, s, vh) = t.svd_compact().unwrap();
+
+        let num_values: usize = s.svd_vals().unwrap().iter().map(|sp| sp.values.len()).sum();
+        let nonzero = s.data().iter().filter(|x| x.abs() > 1e-30).count();
+        assert_eq!(
+            nonzero, num_values,
+            "materialized S is not diagonal: {nonzero} nonzeros for {num_values} singular values"
+        );
+
+        let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(relative_distance(&recon, &t) < 1e-10);
+    }
+}
+
+/// PR2 of issue #55: composing with the diagonal `S` folds to a block-local
+/// bond scaling (TensorKit `DiagonalTensorMap` `rmul!`/`lmul!`) instead of a
+/// GEMM. Both association orders must reconstruct `t` and agree, proving the
+/// trailing-axis (`u * S`, `rmul!`) and leading-axis (`S * vh`, `lmul!`)
+/// scalings are both correct — the leading path is untested by plain recompose.
+#[test]
+fn svd_compact_diagonal_scales_from_either_side() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 104).unwrap();
+        let (u, s, vh) = t.svd_compact().unwrap();
+        // rmul! path: (u * s) * vh.   lmul! path: u * (s * vh).
+        let right = u.compose(&s).unwrap().compose(&vh).unwrap();
+        let left = u.compose(&s.compose(&vh).unwrap()).unwrap();
+        assert!(relative_distance(&right, &t) < 1e-10);
+        assert!(relative_distance(&left, &t) < 1e-10);
+        assert!(relative_distance(&left, &right) < 1e-12);
+    }
+}
+
 /// The payoff case: rank-5 PEPS-shaped tensor split 1 | 4.
 #[test]
 fn svd_compact_reconstructs_rank_five_peps_split() {
