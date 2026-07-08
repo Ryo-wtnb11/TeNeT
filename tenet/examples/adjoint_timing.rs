@@ -4,9 +4,10 @@
 //! Measures three things per dtype:
 //!   * `adjoint()` construction alone — lazy, so this should be ~free (O(blocks)
 //!     metadata, no data copy);
-//!   * `adjoint().compose(b)` — the headline: for f64 the adjoint transpose
-//!     folds into the GEMM with no materialized conjugate-transpose; for c64 it
-//!     still materializes once (the seam has no data-only conjugation yet);
+//!   * `adjoint().compose(b)` — the headline: the adjoint folds into the GEMM
+//!     with no materialized conjugate-transpose, for both f64 (a pure transpose
+//!     via `adjoint_view`) and c64 (a conjugate-transpose folded via the seam's
+//!     conjugate flag, BLAS `op='C'`);
 //!   * a plain `compose(b)` baseline, so the adjoint overhead is visible as the
 //!     gap above it.
 //!
