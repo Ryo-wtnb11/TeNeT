@@ -456,21 +456,13 @@ where
 {
     let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
         spectrum.iter().map(|entry| (entry.sector, entry)).collect();
+    let nout = space.nout();
     let structure = Arc::clone(space.structure());
     for index in 0..structure.block_count() {
         let block = structure
             .block(index)
             .map_err(OperationError::from_core_preserving_context)?;
         let BlockKey::FusionTree(tree) = block.key() else {
-            continue;
-        };
-        let sector = tree
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
-        // Absent sector => this block is a structurally-zero bond; nothing to
-        // scale (mirrors the `unwrap_or(0)` shape in `diagonal_bond_tensor_dyn`).
-        let Some(&entry) = spectrum_by_sector.get(&sector) else {
             continue;
         };
         let shape = block.shape();
@@ -480,6 +472,21 @@ where
         let strides = block.strides();
         let offset = block.offset();
         let bond_axis = axis.unwrap_or(shape.len() - 1);
+        // Index the spectrum by the charge ON THE SCALED LEG — its uncoupled
+        // charge in this block's fusion tree — NOT the block's coupled charge.
+        // For an SVD/eigh factor's sole bond leg the two coincide, but scaling a
+        // general tensor leg (diagonal-aware `contract`, #75) is only correct per
+        // leg charge.
+        let leg_charge = if bond_axis < nout {
+            tree.codomain_tree().uncoupled()[bond_axis]
+        } else {
+            tree.domain_tree().uncoupled()[bond_axis - nout]
+        };
+        // Absent charge => this leg slice is structurally zero for the spectrum;
+        // nothing to scale (mirrors `diagonal_bond_tensor_dyn`'s `unwrap_or(0)`).
+        let Some(&entry) = spectrum_by_sector.get(&leg_charge) else {
+            continue;
+        };
         let bond = shape[bond_axis];
         let bond_stride = strides[bond_axis];
         debug_assert_eq!(

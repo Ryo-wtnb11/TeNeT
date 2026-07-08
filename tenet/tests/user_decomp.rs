@@ -43,11 +43,13 @@ fn svd_compact_reconstructs_u1_and_su2() {
     }
 }
 
-/// Contracting a diagonal-storage `S` against a tensor leg must match the same
-/// contraction with a hand-built dense diagonal — for both the `D * A` and
-/// `A * D` orders. This guards diagonal `contract` correctness independently of
-/// how it is implemented (currently a densify; a future seam-level scaling must
-/// keep this passing).
+/// Order-parity diagonal `contract` (#75): contracting a diagonal-storage `S`
+/// against a tensor leg scales that leg and repartitions instead of densifying
+/// to O(d²) + GEMM. Cross-checked against a hand-built dense diagonal driven
+/// through the ordinary contraction — the only reference independent of the
+/// scaling code. Covers sole-leg (edge) AND multi-leg geometries (a bond that is
+/// not the operand's only leg on its side, incl. an interior leg — exactly what
+/// a naive scale-in-place gets wrong).
 #[test]
 fn diagonal_contract_matches_dense_diagonal() {
     let rt = Runtime::builder().build().unwrap();
@@ -74,18 +76,45 @@ fn diagonal_contract_matches_dense_diagonal() {
                 .unwrap_or(0.0)
         })
         .unwrap();
+        let check = |fast: &Tensor, dense: &Tensor| assert_close(fast.data(), dense.data(), 1e-12);
 
         // lmul!: D * A on A's sole leading (codomain) leg. A = bond <- phys.
         let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&v], 106).unwrap();
-        let fast_l = s.contract(&a, &[1], &[0]).unwrap();
-        let dense_l = s_dense.contract(&a, &[1], &[0]).unwrap();
-        assert_close(fast_l.data(), dense_l.data(), 1e-12);
+        check(
+            &s.contract(&a, &[1], &[0]).unwrap(),
+            &s_dense.contract(&a, &[1], &[0]).unwrap(),
+        );
 
         // rmul!: B * D on B's sole trailing (domain) leg. B = phys <- bond.
         let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&bond], 107).unwrap();
-        let fast_r = b.contract(&s, &[1], &[0]).unwrap();
-        let dense_r = b.contract(&s_dense, &[1], &[0]).unwrap();
-        assert_close(fast_r.data(), dense_r.data(), 1e-12);
+        check(
+            &b.contract(&s, &[1], &[0]).unwrap(),
+            &b.contract(&s_dense, &[1], &[0]).unwrap(),
+        );
+
+        // Multi-leg D * A: bond is A's LEADING codomain leg but A has other legs.
+        // A = [bond, phys; phys2]; the scaled leg must repartition to codomain 0.
+        let g = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond, &v], [&v], 108).unwrap();
+        check(
+            &s.contract(&g, &[1], &[0]).unwrap(),
+            &s_dense.contract(&g, &[1], &[0]).unwrap(),
+        );
+
+        // Multi-leg D * A into an INTERIOR leg (axis 1, a codomain leg that is
+        // neither first nor last). A = [phys, bond; phys2]. This is the case a
+        // scale-in-place gets wrong (wrong codomain/domain split).
+        let g_mid = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &bond], [&v], 109).unwrap();
+        check(
+            &s.contract(&g_mid, &[1], &[1]).unwrap(),
+            &s_dense.contract(&g_mid, &[1], &[1]).unwrap(),
+        );
+
+        // Multi-leg A * D on a trailing domain leg. A = [phys; phys2, bond].
+        let g_r = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &bond], 110).unwrap();
+        check(
+            &g_r.contract(&s, &[2], &[0]).unwrap(),
+            &g_r.contract(&s_dense, &[2], &[0]).unwrap(),
+        );
     }
 }
 
