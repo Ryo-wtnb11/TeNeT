@@ -270,7 +270,7 @@ fn build_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     };
     let keys = hom.fusion_tree_keys(rule);
     let mut shapes = Vec::with_capacity(keys.len());
-    for key in &keys {
+    for key in keys.iter() {
         let mut shape = Vec::with_capacity(hom.rank());
         for (leg, &sector) in hom.codomain().legs().iter().zip(key.codomain_uncoupled()) {
             shape.push(leg_deg(leg, sector)?);

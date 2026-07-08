@@ -144,7 +144,8 @@ impl DynamicFusionMapSpace {
             .validate_degeneracy_shapes(&keys, &shapes)
             .map_err(OperationError::from_core_preserving_context)?;
         let blocks = keys
-            .into_iter()
+            .iter()
+            .cloned()
             .map(BlockKey::from)
             .zip(shapes)
             .collect::<Vec<_>>();
@@ -215,7 +216,7 @@ impl DynamicFusionMapSpace {
             .collect::<Vec<_>>();
         let keys = homspace.fusion_tree_keys(rule);
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
-        for key in keys {
+        for key in keys.iter() {
             let sectors = key.external_sectors(rule);
             let mut shape = Vec::with_capacity(src_axes.len());
             for (out_axis, leg) in src_legs.iter().enumerate() {
@@ -226,7 +227,7 @@ impl DynamicFusionMapSpace {
                         })?;
                 shape.push(dim);
             }
-            blocks.push((BlockKey::from(key), shape));
+            blocks.push((BlockKey::from(key.clone()), shape));
         }
         let subblock_structure =
             Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
@@ -356,7 +357,7 @@ impl DynamicFusionMapSpace {
             .collect::<Vec<_>>();
         let keys = homspace.fusion_tree_keys(rule);
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
-        for key in keys {
+        for key in keys.iter() {
             let sectors = key.external_sectors(rule);
             let shape = sectors
                 .iter()
@@ -368,7 +369,7 @@ impl DynamicFusionMapSpace {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            blocks.push((BlockKey::from(key), shape));
+            blocks.push((BlockKey::from(key.clone()), shape));
         }
         let subblock_structure =
             Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);

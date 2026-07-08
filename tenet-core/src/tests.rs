@@ -41,7 +41,10 @@ mod tests {
         let dense = || TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap();
         let hom = homspace();
         let packed_structure =
-            packed_fixture_structure(4, hom.fusion_tree_keys(&rule).into_iter().zip(shapes(&hom)))
+            packed_fixture_structure(
+                4,
+                hom.fusion_tree_keys(&rule).iter().cloned().zip(shapes(&hom)),
+            )
                 .unwrap();
         let packed_space =
             FusionTensorMapSpace::<2, 2>::new(dense(), hom.clone(), packed_structure).unwrap();
@@ -2688,7 +2691,7 @@ mod tests {
 
         // Group source tree-pairs by their uncoupled block (the batching unit).
         let mut blocks: BTreeMap<Vec<usize>, Vec<FusionTreeBlockKey>> = BTreeMap::new();
-        for key in &keys {
+        for key in keys.iter() {
             let tag: Vec<usize> = key
                 .codomain_tree()
                 .uncoupled()

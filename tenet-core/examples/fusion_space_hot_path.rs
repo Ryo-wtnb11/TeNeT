@@ -47,7 +47,7 @@ fn run_u1_case(charge_count: usize) {
     let lookup_iters = iterations(charge_count, 100_000);
     let tree_elapsed = elapsed_per_op(lookup_iters, charge_count, || {
         let mut checksum = 0usize;
-        for key in &keys {
+        for key in keys.iter() {
             let block = tensor.subblock_by_tree(key).unwrap();
             checksum ^= block.offset();
         }

@@ -2058,7 +2058,8 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
         packed_fixture_structure(
             4,
             hom.fusion_tree_keys(&rule)
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|key| (key, vec![2usize; 4])),
         )
         .unwrap()
