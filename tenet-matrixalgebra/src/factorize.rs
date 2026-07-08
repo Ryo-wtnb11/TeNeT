@@ -380,10 +380,8 @@ where
     D: FactorScalar,
     V: Copy,
 {
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> = spectrum
-        .iter()
-        .map(|entry| (entry.sector, entry))
-        .collect();
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> =
+        spectrum.iter().map(|entry| (entry.sector, entry)).collect();
     let len = space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
@@ -649,9 +647,9 @@ where
 /// [`svd_compact_dyn`] wraps this and adds the dense `S` as a tensor for callers
 /// that want it; polar and the matrix-function paths scale by the spectrum
 /// directly (TensorKit `DiagonalTensorMap` `rmul!`) and never build `S`.
-type SvdFactorsDyn<D> = (DynFactor<D>, DynFactor<D>, Vec<SectorSpectrum>);
+pub type SvdFactorsDyn<D> = (DynFactor<D>, DynFactor<D>, Vec<SectorSpectrum>);
 
-pub(crate) fn svd_compact_factors_dyn<E, R, D>(
+pub fn svd_compact_factors_dyn<E, R, D>(
     dense: &mut E,
     rule: &R,
     space: &DynamicFusionMapSpace,

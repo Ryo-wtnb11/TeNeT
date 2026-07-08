@@ -43,6 +43,30 @@ fn svd_compact_reconstructs_u1_and_su2() {
     }
 }
 
+/// PR1 of issue #55: `svd_compact` now stores `S` as an O(rank) per-sector
+/// spectrum (`Data::Diagonal`) instead of a dense O(rank²) block-diagonal
+/// buffer. The materialized dense buffer must still be exactly diagonal — its
+/// nonzero count equals the number of singular values, so nothing bled off the
+/// block diagonal — and reconstruction must hold via that lazy materialization.
+#[test]
+fn svd_compact_s_is_diagonal_storage() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 103).unwrap();
+        let (u, s, vh) = t.svd_compact().unwrap();
+
+        let num_values: usize = s.svd_vals().unwrap().iter().map(|sp| sp.values.len()).sum();
+        let nonzero = s.data().iter().filter(|x| x.abs() > 1e-30).count();
+        assert_eq!(
+            nonzero, num_values,
+            "materialized S is not diagonal: {nonzero} nonzeros for {num_values} singular values"
+        );
+
+        let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(relative_distance(&recon, &t) < 1e-10);
+    }
+}
+
 /// The payoff case: rank-5 PEPS-shaped tensor split 1 | 4.
 #[test]
 fn svd_compact_reconstructs_rank_five_peps_split() {
