@@ -323,8 +323,26 @@ where
     D: FactorScalar,
     V: Copy,
 {
+    let space = diagonal_bond_space(rule, singular_values)?;
+    let data = diagonal_bond_data(&space, singular_values, to_scalar)?;
+    Ok((space, data))
+}
+
+/// The square `bond <- bond` space of a diagonal spectrum tensor: one leg with
+/// a sector per spectrum entry, degeneracy = that entry's length. Split out of
+/// [`diagonal_bond_tensor_dyn`] so a compact diagonal tensor (issue #55) can
+/// hold this space and rebuild the dense diagonal data on demand via
+/// [`diagonal_bond_data`] — the two together reproduce the old dense tensor
+/// bit-for-bit.
+pub fn diagonal_bond_space<R, V>(
+    rule: &R,
+    spectrum: &[SectorSpectrum<V>],
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     let new_leg = SectorLeg::new(
-        singular_values
+        spectrum
             .iter()
             .map(|entry| (entry.sector, entry.values.len())),
         false,
@@ -333,23 +351,39 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> = singular_values
+    let length_by_sector: HashMap<SectorId, usize> = spectrum
         .iter()
-        .map(|entry| (entry.sector, entry))
+        .map(|entry| (entry.sector, entry.values.len()))
         .collect();
     let keys = homspace.fusion_tree_keys(rule);
     let shapes = keys
         .iter()
         .map(|key| {
             let sector = coupled_of(rule, key.codomain_tree());
-            let count = spectrum_by_sector
-                .get(&sector)
-                .map(|entry| entry.values.len())
-                .unwrap_or(0);
+            let count = length_by_sector.get(&sector).copied().unwrap_or(0);
             vec![count, count]
         })
         .collect::<Vec<_>>();
-    let space = DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, shapes)?;
+    DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, shapes)
+}
+
+/// Fills the dense block-diagonal data of `space` (a [`diagonal_bond_space`]
+/// result) from `spectrum`, mapping each value through `to_scalar`. Only the
+/// per-block diagonal is written; the rest stays zero. Bit-for-bit identical to
+/// the fill inside the former monolithic `diagonal_bond_tensor_dyn`.
+pub fn diagonal_bond_data<D, V>(
+    space: &DynamicFusionMapSpace,
+    spectrum: &[SectorSpectrum<V>],
+    to_scalar: &dyn Fn(V) -> D,
+) -> Result<Vec<D>, OperationError>
+where
+    D: FactorScalar,
+    V: Copy,
+{
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> = spectrum
+        .iter()
+        .map(|entry| (entry.sector, entry))
+        .collect();
     let len = space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
@@ -380,7 +414,7 @@ where
             to_scalar,
         );
     }
-    Ok((space, data))
+    Ok(data)
 }
 
 /// Multiplies each entry of a left-type factor (`codomain <- bond`, i.e. the
