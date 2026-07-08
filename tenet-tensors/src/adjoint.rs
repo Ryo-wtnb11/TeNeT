@@ -15,20 +15,20 @@ use tenet_core::{
 use crate::contract::DynamicFusionMapSpace;
 use crate::{ConjugateValue, OperationError};
 
-/// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
-/// domain swapped) together with freshly allocated coupled-layout data whose
-/// blocks are the conjugate transposes of the source blocks.
-pub fn adjoint_dyn<R, D>(
+/// Dynamic-rank adjoint space (dagger of the homspace): codomain and domain
+/// swapped, per-block shapes transposed. Pure metadata — touches no data — so a
+/// lazy adjoint can present the correct fresh coupled space in O(blocks)
+/// without copying any elements. `adjoint_dyn` is exactly this plus the
+/// conjugate-transpose of the block data, and its output data lives in this
+/// space's layout.
+pub fn adjoint_space_dyn<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
-    data: &[D],
-) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
+) -> Result<DynamicFusionMapSpace, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
     let nout = space.nout();
-    let nin = space.nin();
     let homspace = space.homspace();
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
@@ -57,7 +57,29 @@ where
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
 
-    let adjoint_space = DynamicFusionMapSpace::from_degeneracy_shapes(rule, adjoint_hom, shapes)?;
+    Ok(DynamicFusionMapSpace::from_degeneracy_shapes(
+        rule,
+        adjoint_hom,
+        shapes,
+    )?)
+}
+
+/// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
+/// domain swapped) together with freshly allocated coupled-layout data whose
+/// blocks are the conjugate transposes of the source blocks.
+pub fn adjoint_dyn<R, D>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    let nout = space.nout();
+    let nin = space.nin();
+    let structure = Arc::clone(space.structure());
+    let adjoint_space = adjoint_space_dyn(rule, space)?;
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;

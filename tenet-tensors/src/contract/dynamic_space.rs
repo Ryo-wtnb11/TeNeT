@@ -385,7 +385,7 @@ impl DynamicFusionMapSpace {
     /// no data movement implied. The block layout is a strided view into the
     /// source layout, so this space is for replay bookkeeping, not for
     /// allocating fresh coupled storage.
-    pub(crate) fn adjoint_view(&self) -> Result<Self, OperationError> {
+    pub fn adjoint_view(&self) -> Result<Self, OperationError> {
         let homspace = FusionTreeHomSpace::new(
             self.homspace.domain().clone(),
             self.homspace.codomain().clone(),
