@@ -518,7 +518,7 @@ pub fn svd_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -533,7 +533,7 @@ pub fn svd_vals_dyn<E, R, D>(
     data: &[D],
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -553,7 +553,7 @@ pub fn svd_trunc<E, R, D, const NOUT: usize, const NIN: usize>(
     truncation: &Truncation,
 ) -> Result<SvdTrunc<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -582,7 +582,7 @@ pub fn svd_trunc_dyn<E, R, D>(
     truncation: &Truncation,
 ) -> Result<SvdTruncDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -597,7 +597,7 @@ pub fn svd_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<SvdCompact<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -624,7 +624,7 @@ pub(crate) fn svd_compact_factors_dyn<E, R, D>(
     data: &[D],
 ) -> Result<SvdFactorsDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -731,7 +731,7 @@ pub fn svd_compact_dyn<E, R, D>(
     data: &[D],
 ) -> Result<SvdCompactDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1283,7 +1283,7 @@ pub fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<EighFull<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1303,7 +1303,7 @@ pub fn eigh_full_dyn<E, R, D>(
     data: &[D],
 ) -> Result<EighFullDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1405,7 +1405,7 @@ pub fn eigh_trunc<E, R, D, const NOUT: usize, const NIN: usize>(
     truncation: &Truncation,
 ) -> Result<EighTrunc<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1433,7 +1433,7 @@ pub fn eigh_trunc_dyn<E, R, D>(
     truncation: &Truncation,
 ) -> Result<EighTruncDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1513,7 +1513,7 @@ pub fn svd_full<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<SvdFull<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1534,7 +1534,7 @@ pub fn svd_full_dyn<E, R, D>(
     data: &[D],
 ) -> Result<SvdFullDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -1708,7 +1708,7 @@ fn orthonormal_completion<E, D>(
     rank: usize,
 ) -> Result<Vec<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
     if rank == rows {
@@ -1992,7 +1992,7 @@ pub fn qr_full<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, 1>, TensorMap<D, 1, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2008,7 +2008,7 @@ pub fn qr_full_dyn<E, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2078,7 +2078,7 @@ pub fn lq_full<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, 1>, TensorMap<D, 1, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2094,7 +2094,7 @@ pub fn lq_full_dyn<E, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2202,7 +2202,7 @@ pub fn eig_full<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<EigFull<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2222,7 +2222,7 @@ pub fn eig_full_dyn<E, R, D>(
     data: &[D],
 ) -> Result<EigFullDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2324,7 +2324,7 @@ pub fn eig_trunc<E, R, D, const NOUT: usize, const NIN: usize>(
     truncation: &Truncation,
 ) -> Result<EigTrunc<D, NOUT, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2352,7 +2352,7 @@ pub fn eig_trunc_dyn<E, R, D>(
     truncation: &Truncation,
 ) -> Result<EigTruncDyn<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2412,7 +2412,7 @@ pub fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2427,7 +2427,7 @@ pub fn eigh_vals_dyn<E, R, D>(
     data: &[D],
 ) -> Result<Vec<SectorSpectrum>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2442,7 +2442,7 @@ pub fn eig_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2457,7 +2457,7 @@ pub fn eig_vals_dyn<E, R, D>(
     data: &[D],
 ) -> Result<Vec<SectorSpectrum<Complex64>>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2473,7 +2473,7 @@ pub fn left_null<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<TensorMap<D, NOUT, 1>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2489,7 +2489,7 @@ pub fn left_null_dyn<E, R, D>(
     data: &[D],
 ) -> Result<DynFactor<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2571,7 +2571,7 @@ pub fn right_null<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<TensorMap<D, 1, NIN>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2587,7 +2587,7 @@ pub fn right_null_dyn<E, R, D>(
     data: &[D],
 ) -> Result<DynFactor<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2670,7 +2670,7 @@ pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, NIN>, TensorMap<D, NIN, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
@@ -2691,7 +2691,7 @@ pub fn left_polar_dyn<E, RuleKey, BT, BC, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
@@ -2722,7 +2722,7 @@ pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, NOUT>, TensorMap<D, NOUT, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
@@ -2743,7 +2743,7 @@ pub fn right_polar_dyn<E, RuleKey, BT, BC, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     BT: tenet_tensors::TreeTransformBackend<D, f64>,
     BC: tenet_tensors::TensorContractBackend<D, f64>,
@@ -2777,7 +2777,7 @@ pub fn qr_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, 1>, TensorMap<D, 1, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2793,7 +2793,7 @@ pub fn qr_compact_dyn<E, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2873,7 +2873,7 @@ pub fn lq_compact<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, 1>, TensorMap<D, 1, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2889,7 +2889,7 @@ pub fn lq_compact_dyn<E, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -2999,7 +2999,7 @@ pub fn left_orth<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, 1>, TensorMap<D, 1, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -3014,7 +3014,7 @@ pub fn left_orth_dyn<E, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -3033,7 +3033,7 @@ pub fn right_orth<E, R, D, const NOUT: usize, const NIN: usize>(
     tensor: &TensorMap<D, NOUT, NIN>,
 ) -> Result<(TensorMap<D, NOUT, 1>, TensorMap<D, 1, NIN>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -3048,7 +3048,7 @@ pub fn right_orth_dyn<E, R, D>(
     data: &[D],
 ) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
@@ -3085,7 +3085,7 @@ fn qr_into_workspace<E, D>(
     r_leading: usize,
 ) -> Result<(), OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     D: FactorScalar,
 {
     let input_shape = [input_rows, input_cols];

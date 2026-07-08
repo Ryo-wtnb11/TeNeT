@@ -25,7 +25,7 @@ pub fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
     tensor: &TensorMap<D, N, N>,
 ) -> Result<TensorMap<D, N, N>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
@@ -45,7 +45,7 @@ pub fn exp_dyn<E, RuleKey, BT, BC, R, D>(
     data: &[D],
 ) -> Result<DynFactor<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
@@ -66,7 +66,7 @@ fn spectral_function_dyn<E, RuleKey, BT, BC, R, D>(
     function: &dyn Fn(f64) -> f64,
 ) -> Result<DynFactor<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
@@ -101,7 +101,7 @@ pub fn pinv<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     rcond: f64,
 ) -> Result<TensorMap<D, NIN, NOUT>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
@@ -129,7 +129,7 @@ pub fn pinv_dyn<E, RuleKey, BT, BC, R, D>(
     rcond: f64,
 ) -> Result<DynFactor<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
@@ -173,7 +173,7 @@ pub fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
     tensor: &TensorMap<D, N, N>,
 ) -> Result<TensorMap<D, N, N>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,
@@ -193,7 +193,7 @@ pub fn inv_dyn<E, RuleKey, BT, BC, R, D>(
     data: &[D],
 ) -> Result<DynFactor<D>, OperationError>
 where
-    E: DenseExecutor,
+    E: DenseExecutor + ?Sized,
     RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
     BT: TreeTransformBackend<D, f64>,
     BC: TensorContractBackend<D, f64>,

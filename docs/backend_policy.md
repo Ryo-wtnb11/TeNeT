@@ -33,17 +33,22 @@ trait:
 
 State today, and the gap this policy targets:
 
-- The **traits exist**, but most seams have exactly one concrete implementation.
-  `DenseExecutor` has only `DefaultDenseExecutor` (`tenet-dense`, delegating to
-  `tenferro` → faer/gemm), and `Runtime` hardcodes it (`runtime.rs`); the
-  transpose/contract seam is fixed to `DenseTreeTransformOperations`.
-- Only **device** selection is exposed to callers (`Runtime::builder().cuda`).
-- Intended alternatives: system BLAS/LAPACK, Intel MKL, OpenBLAS for
-  `DenseExecutor`; HPTT (fast transpose) and TBLIS (transpose-free contraction)
-  for the transform/contract seams — see #7, #41.
+- The **traits exist**, and the dense seam is now **selectable at the builder**:
+  `Runtime::builder().with_dense_executor(Box<dyn DenseExecutor + Send>)` injects
+  the CPU linear-algebra backend (the runtime holds it behind
+  `Box<dyn DenseExecutor>`); unset uses the faer-backed `DefaultDenseExecutor`
+  (`tenet-dense`, delegating to `tenferro` → faer/gemm). #64.
+- Still hardcoded: the transpose/contract seam is fixed to
+  `DenseTreeTransformOperations`.
+- Only **device** selection is otherwise exposed to callers
+  (`Runtime::builder().cuda`).
+- Intended alternatives: system BLAS/LAPACK, Intel MKL, OpenBLAS as
+  `DenseExecutor` impls (now pluggable via `with_dense_executor`); HPTT (fast
+  transpose) and TBLIS (transpose-free contraction) for the transform/contract
+  seams — see #7, #41.
 
-So the remaining work is not "add an abstraction" (it's there) but "expose the
-selection at the builder and provide more than one implementation."
+Remaining work: provide the built-in BLAS/LAPACK/MKL `DenseExecutor` impls, and
+expose the transform/contract seam selection at the builder the same way.
 
 ## Rules
 
