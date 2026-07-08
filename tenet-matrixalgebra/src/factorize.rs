@@ -424,7 +424,8 @@ where
 /// O(size) column scaling instead of materializing the dense `rank x rank`
 /// diagonal (99% zeros) and running it through a full block GEMM. See #46:
 /// TensorKit never forms the diagonal either — its `DiagonalTensorMap` makes
-/// `S * t` an `lmul!`/`rmul!` scaling.
+/// `S * t` an `lmul!`/`rmul!` scaling. Thin wrapper for the trailing-axis
+/// (`rmul!`) case; see [`scale_axis_by_spectrum`].
 pub(crate) fn scale_bond_axis_by_spectrum<D>(
     factor: &mut DynFactor<D>,
     spectrum: &[SectorSpectrum],
@@ -432,7 +433,27 @@ pub(crate) fn scale_bond_axis_by_spectrum<D>(
 where
     D: FactorScalar,
 {
-    let (space, data) = factor;
+    scale_axis_by_spectrum(&factor.0, &mut factor.1, None, spectrum)
+}
+
+/// Scales one bond axis of `data` (laid out per `space`) by the per-sector
+/// `spectrum`, in place — the block-local realization of TensorKit's
+/// `DiagonalTensorMap` multiplication. `axis = None` scales each block's
+/// trailing axis (`t * D`, `rmul!`, column scaling); `axis = Some(0)` scales
+/// the leading axis (`D * t`, `lmul!`, row scaling). Verified twist-free
+/// against TK `diagonal.jl`: diagonal multiplication is pure per-block scaling
+/// with no braiding or fusion-tree recoupling (`block(D, c)` is a `Diagonal`,
+/// so LinearAlgebra dispatches to scaling, not GEMM). A real `spectrum` on a
+/// complex `data` promotes each entry the same way (`D::from_real`).
+pub fn scale_axis_by_spectrum<D>(
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    axis: Option<usize>,
+    spectrum: &[SectorSpectrum],
+) -> Result<(), OperationError>
+where
+    D: FactorScalar,
+{
     let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
         spectrum.iter().map(|entry| (entry.sector, entry)).collect();
     let structure = Arc::clone(space.structure());
@@ -458,37 +479,36 @@ where
         }
         let strides = block.strides();
         let offset = block.offset();
-        let last = shape.len() - 1;
-        let bond = shape[last];
-        let bond_stride = strides[last];
+        let bond_axis = axis.unwrap_or(shape.len() - 1);
+        let bond = shape[bond_axis];
+        let bond_stride = strides[bond_axis];
         debug_assert_eq!(
             bond,
             entry.values.len(),
             "bond degeneracy must match the spectrum length"
         );
         let bond = bond.min(entry.values.len());
-        // Walk every combination of the leading (non-bond) axes; for each,
-        // scale the `bond` trailing entries by the spectrum.
-        let lead_shape = &shape[..last];
-        let lead_strides = &strides[..last];
-        let outer: usize = lead_shape.iter().product();
-        let mut coord = vec![0usize; lead_shape.len()];
+        // Walk every combination of the non-bond axes; for each, scale the
+        // `bond` entries along `bond_axis` by the spectrum.
+        let lead_axes: Vec<usize> = (0..shape.len()).filter(|&a| a != bond_axis).collect();
+        let outer: usize = lead_axes.iter().map(|&a| shape[a]).product();
+        let mut coord = vec![0usize; lead_axes.len()];
         for _ in 0..outer {
             let mut base = offset;
-            for (c, stride) in coord.iter().zip(lead_strides) {
-                base += c * stride;
+            for (k, &a) in lead_axes.iter().enumerate() {
+                base += coord[k] * strides[a];
             }
             for j in 0..bond {
                 let scale = D::from_real(entry.values[j]);
                 let idx = base + j * bond_stride;
                 data[idx] = data[idx] * scale;
             }
-            for axis in (0..coord.len()).rev() {
-                coord[axis] += 1;
-                if coord[axis] < lead_shape[axis] {
+            for k in (0..coord.len()).rev() {
+                coord[k] += 1;
+                if coord[k] < shape[lead_axes[k]] {
                     break;
                 }
-                coord[axis] = 0;
+                coord[k] = 0;
             }
         }
     }

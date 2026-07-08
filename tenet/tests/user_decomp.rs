@@ -67,6 +67,26 @@ fn svd_compact_s_is_diagonal_storage() {
     }
 }
 
+/// PR2 of issue #55: composing with the diagonal `S` folds to a block-local
+/// bond scaling (TensorKit `DiagonalTensorMap` `rmul!`/`lmul!`) instead of a
+/// GEMM. Both association orders must reconstruct `t` and agree, proving the
+/// trailing-axis (`u * S`, `rmul!`) and leading-axis (`S * vh`, `lmul!`)
+/// scalings are both correct — the leading path is untested by plain recompose.
+#[test]
+fn svd_compact_diagonal_scales_from_either_side() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 104).unwrap();
+        let (u, s, vh) = t.svd_compact().unwrap();
+        // rmul! path: (u * s) * vh.   lmul! path: u * (s * vh).
+        let right = u.compose(&s).unwrap().compose(&vh).unwrap();
+        let left = u.compose(&s.compose(&vh).unwrap()).unwrap();
+        assert!(relative_distance(&right, &t) < 1e-10);
+        assert!(relative_distance(&left, &t) < 1e-10);
+        assert!(relative_distance(&left, &right) < 1e-12);
+    }
+}
+
 /// The payoff case: rank-5 PEPS-shaped tensor split 1 | 4.
 #[test]
 fn svd_compact_reconstructs_rank_five_peps_split() {

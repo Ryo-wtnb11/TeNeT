@@ -27,10 +27,11 @@ pub use factorize::{
     eigh_vals_dyn, left_null, left_null_dyn, left_orth, left_orth_dyn, left_polar, left_polar_dyn,
     lq_compact, lq_compact_dyn, lq_full, lq_full_dyn, qr_compact, qr_compact_dyn, qr_full,
     qr_full_dyn, right_null, right_null_dyn, right_orth, right_orth_dyn, right_polar,
-    right_polar_dyn, svd_compact, svd_compact_dyn, svd_compact_factors_dyn, svd_full, svd_full_dyn,
-    svd_trunc, svd_trunc_dyn, svd_vals, svd_vals_dyn, DynFactor, EigFull, EigFullDyn, EigTrunc,
-    EigTruncDyn, EighFull, EighFullDyn, EighTrunc, EighTruncDyn, FactorScalar, SectorSpectrum,
-    SpectrumMagnitude, SvdCompact, SvdCompactDyn, SvdFull, SvdFullDyn, SvdTrunc, SvdTruncDyn,
+    right_polar_dyn, scale_axis_by_spectrum, svd_compact, svd_compact_dyn, svd_compact_factors_dyn,
+    svd_full, svd_full_dyn, svd_trunc, svd_trunc_dyn, svd_vals, svd_vals_dyn, DynFactor, EigFull,
+    EigFullDyn, EigTrunc, EigTruncDyn, EighFull, EighFullDyn, EighTrunc, EighTruncDyn,
+    FactorScalar, SectorSpectrum, SpectrumMagnitude, SvdCompact, SvdCompactDyn, SvdFull,
+    SvdFullDyn, SvdTrunc, SvdTruncDyn,
 };
 pub use matrix_functions::{exp, exp_dyn, inv, inv_dyn, pinv, pinv_dyn};
 pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};

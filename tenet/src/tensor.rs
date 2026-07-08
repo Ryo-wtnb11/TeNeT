@@ -1617,6 +1617,21 @@ impl Tensor {
                 rhs.codomain_rank()
             )));
         }
+        // Diagonal fast-path (TensorKit `DiagonalTensorMap` `rmul!`/`lmul!`):
+        // composing a dense operand with a real diagonal is a pure per-block bond
+        // scaling — no GEMM, no braiding/twist (verified against TK
+        // `diagonal.jl`; diagonal mul! never recouples). Only one operand
+        // diagonal with a real spectrum; complex-spectrum (eig `d`) and
+        // diagonal∘diagonal fall through to the densifying contract path below.
+        match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
+            // `t * D`: scale `self`'s trailing bond axis (columns). `self.domain`
+            // is the single bond leg == `D.codomain`, so the space is `self`'s.
+            (None, Some(spectrum)) => return self.scaled_axis_copy(None, spectrum),
+            // `D * t`: scale `rhs`'s leading bond axis (rows). `rhs.codomain` is
+            // the single bond leg == `D.domain`, so the space is `rhs`'s.
+            (Some(spectrum), None) => return rhs.scaled_axis_copy(Some(0), spectrum),
+            _ => {}
+        }
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..rhs.codomain_rank()).collect();
         // `contract` twists the dual contracted rhs legs (tensorcontract!
@@ -2352,6 +2367,46 @@ impl Tensor {
             data: Arc::new(Data::Diagonal(data)),
             adjoint_source: None,
             materialized: OnceLock::new(),
+        })
+    }
+
+    /// Rewraps `data` in this tensor's own (shared) space — for ops that leave
+    /// the space unchanged (bond scaling), so the space `Arc` is reused instead
+    /// of deep-cloned.
+    fn with_same_space<D: UserScalar>(&self, data: Vec<D>) -> Self {
+        Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data: Arc::new(D::lift(data)),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
+        }
+    }
+
+    /// The per-sector real spectrum of a diagonal-storage operand, if it stores
+    /// one (svd `S`, eigh `D`). `None` for dense tensors and for complex-spectrum
+    /// diagonals (eig `D`), which take the densifying compose/contract path.
+    fn real_diagonal_spectrum(&self) -> Option<&[SectorSpectrum]> {
+        match self.data.as_ref() {
+            Data::Diagonal(DiagonalData::RealF64(s) | DiagonalData::RealC64(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Scales this (dense) operand along one bond axis by `spectrum`, keeping the
+    /// same space — TensorKit's `DiagonalTensorMap` `rmul!` (`axis = None`,
+    /// trailing/columns) or `lmul!` (`axis = Some(0)`, leading/rows) as a
+    /// block-local scaling instead of a GEMM against a materialized diagonal.
+    fn scaled_axis_copy(
+        &self,
+        axis: Option<usize>,
+        spectrum: &[SectorSpectrum],
+    ) -> Result<Self, Error> {
+        with_data!(self, data, {
+            let mut buf = data.to_vec();
+            tenet_matrixalgebra::scale_axis_by_spectrum(&self.space, &mut buf, axis, spectrum)?;
+            Ok(self.with_same_space(buf))
         })
     }
 
