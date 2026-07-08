@@ -1579,3 +1579,36 @@ fn abelian_inner_is_unweighted_whole_buffer_dot() {
     assert!(xx.im().abs() <= 1e-10 * (1.0 + xx.re().abs()));
     assert!((xx.re() - whole).abs() <= 1e-9 * (1.0 + whole.abs()));
 }
+
+/// #56 CTRG-lever follow-up: an identity `permute` (new codomain/domain equal
+/// the current ones, in natural order) is a no-op and must return the tensor
+/// unchanged without allocating/copying — TensorKit's `has_shared_permute`
+/// short-circuit (indexmanipulations.jl:91). A genuine repartition still moves
+/// data.
+#[test]
+fn identity_permute_is_a_noop() {
+    let rt = Runtime::builder().build().unwrap();
+    for v in [
+        Space::u1([(-1, 2), (0, 2), (1, 2)]),
+        Space::su2([(0, 2), (1, 2)]),
+        Space::fz2([(0, 2), (1, 2)]),
+    ] {
+        // rank-3 tensor, codomain [v, v] (nout = 2), domain [v] (nin = 1).
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 21).unwrap();
+
+        // Identity: codomain = [0, 1], domain = [2] → unchanged, bit-for-bit.
+        let same = t.permute(&[0, 1], &[2]).unwrap();
+        assert_eq!(same.codomain_spaces(), t.codomain_spaces());
+        assert_eq!(same.domain_spaces(), t.domain_spaces());
+        assert_eq!(same.data(), t.data(), "identity permute changed the data");
+
+        // Genuine repartition (bend the domain leg up into the codomain) must
+        // actually transform: the layout/length changes.
+        let moved = t.permute(&[0, 1, 2], &[]).unwrap();
+        assert_ne!(
+            moved.codomain_spaces().len(),
+            t.codomain_spaces().len(),
+            "repartition should change the codomain rank"
+        );
+    }
+}
