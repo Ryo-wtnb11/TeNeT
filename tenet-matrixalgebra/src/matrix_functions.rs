@@ -14,7 +14,7 @@ use tenet_tensors::{
 use crate::compose::compose_dyn;
 use crate::factorize::{
     dyn_space_of, eigh_full_dyn, scale_bond_axis_by_spectrum, svd_compact_factors_dyn,
-    typed_from_dyn, DynFactor, FactorScalar, SectorSpectrum,
+    typed_from_dyn, DynFactor, FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
 
 /// Matrix exponential of a Hermitian endomorphism: `exp(t) = V exp(D) V^H`.
@@ -138,7 +138,27 @@ where
 {
     // Only the factors and the spectrum are needed — S^+ is folded into a
     // scaling below — so skip materializing the dense diagonal S.
-    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let factors = svd_compact_factors_dyn(dense, rule, space, data)?;
+    pinv_from_factors(context, rule, factors, rcond)
+}
+
+/// Shared `pinv` core: given the compact SVD factors `(U, Vh, σ)`, form
+/// `t^+ = V S^+ U^H`. `inv_dyn` reuses this so it computes the SVD once (its
+/// own full-rank check already has the factors) instead of recomputing it.
+fn pinv_from_factors<RuleKey, BT, BC, R, D>(
+    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    rule: &R,
+    factors: SvdFactorsDyn<D>,
+    rcond: f64,
+) -> Result<DynFactor<D>, OperationError>
+where
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    let (u, vh, singular_values) = factors;
     let sigma_max = singular_values
         .iter()
         .flat_map(|entry| entry.values.iter().copied())
@@ -205,9 +225,11 @@ where
             message: "inv requires an endomorphism (codomain == domain)",
         });
     }
-    // Only the spectrum is needed for the full-rank check; skip the dense S (and
-    // the factors are recomputed inside `pinv_dyn` below).
-    let (_, _, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    // Compute the compact SVD once: the full-rank check needs the spectrum and
+    // `pinv_from_factors` needs the factors, so reuse the same decomposition
+    // instead of recomputing it inside `pinv_dyn`.
+    let factors = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let singular_values = &factors.2;
     let sigma_max = singular_values
         .iter()
         .flat_map(|entry| entry.values.iter().copied())
@@ -221,5 +243,5 @@ where
             message: "inv requires full-rank blocks",
         });
     }
-    pinv_dyn(dense, context, rule, space, data, 1e-14)
+    pinv_from_factors(context, rule, factors, 1e-14)
 }
