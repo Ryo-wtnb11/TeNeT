@@ -2679,10 +2679,14 @@ where
     let svd = svd_compact_dyn(dense, rule, space, data)?;
     let isometry =
         crate::compose::compose_dyn(context, rule, (&svd.u.0, &svd.u.1), (&svd.vh.0, &svd.vh.1))?;
-    let v = tenet_tensors::adjoint_dyn(rule, &svd.vh.0, &svd.vh.1)?;
-    let vs = crate::compose::compose_dyn(context, rule, (&v.0, &v.1), (&svd.s.0, &svd.s.1))?;
+    // P = V·S·Vh. Fold S into V as a block-local scaling of V's bond (trailing)
+    // axis — TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block
+    // GEMM against the dense diagonal S (99% zeros). `singular_values` carries S
+    // in O(rank); see #51 / #55.
+    let mut v = tenet_tensors::adjoint_dyn(rule, &svd.vh.0, &svd.vh.1)?;
+    scale_bond_axis_by_spectrum(&mut v, &svd.singular_values)?;
     let positive =
-        crate::compose::compose_dyn(context, rule, (&vs.0, &vs.1), (&svd.vh.0, &svd.vh.1))?;
+        crate::compose::compose_dyn(context, rule, (&v.0, &v.1), (&svd.vh.0, &svd.vh.1))?;
     Ok((isometry, positive))
 }
 
@@ -2726,11 +2730,15 @@ where
 {
     let svd = svd_compact_dyn(dense, rule, space, data)?;
     let uh = tenet_tensors::adjoint_dyn(rule, &svd.u.0, &svd.u.1)?;
-    let us =
-        crate::compose::compose_dyn(context, rule, (&svd.u.0, &svd.u.1), (&svd.s.0, &svd.s.1))?;
-    let positive = crate::compose::compose_dyn(context, rule, (&us.0, &us.1), (&uh.0, &uh.1))?;
     let isometry =
         crate::compose::compose_dyn(context, rule, (&svd.u.0, &svd.u.1), (&svd.vh.0, &svd.vh.1))?;
+    // P = U·S·Uh. Fold S into U's bond (trailing) axis by block-local scaling —
+    // TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block GEMM
+    // against the dense diagonal S. U is consumed above for the isometry, so
+    // scale the moved-out copy. `singular_values` carries S in O(rank); #51/#55.
+    let mut us = svd.u;
+    scale_bond_axis_by_spectrum(&mut us, &svd.singular_values)?;
+    let positive = crate::compose::compose_dyn(context, rule, (&us.0, &us.1), (&uh.0, &uh.1))?;
     Ok((positive, isometry))
 }
 
