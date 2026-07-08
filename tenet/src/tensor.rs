@@ -2643,13 +2643,23 @@ impl Tensor {
             let out = self.eigh_cuda(storage, None)?;
             return Ok((out.d, out.v));
         }
+        // eigh eigenvalues are real, so `d` is a real diagonal (`RealC64` for
+        // c64 input keeps the former dense d's dtype). Build it as O(rank)
+        // diagonal storage from the spectrum; `out.d` (a transient dense
+        // diagonal) is discarded. ponytail: `eigh_full_dyn` still fills that
+        // dense d — a d-free core would skip it, but it is thrown away here and
+        // downstream composes now scale instead of GEMM, so no regression.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eigh_full_dyn(&mut *state.dense, rule, &self.space, data)
             })?;
-            Ok((self.from_dyn(out.d), self.from_dyn(out.v)))
+            Ok((
+                self.from_diagonal_real_spectrum(out.eigenvalues, complex)?,
+                self.from_dyn(out.v),
+            ))
         })
     }
 
@@ -2660,6 +2670,10 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.eigh_cuda(storage, Some(truncation));
         }
+        // Real eigenvalues => real diagonal `d` in O(rank) storage (see
+        // `eigh_full`). `out.eigenvalues` is also returned to the caller, so it
+        // is cloned into the diagonal factor.
+        let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2673,7 +2687,7 @@ impl Tensor {
                 )
             })?;
             Ok(EighTrunc {
-                d: self.from_dyn(out.d),
+                d: self.from_diagonal_real_spectrum(out.eigenvalues.clone(), complex)?,
                 v: self.from_dyn(out.v),
                 eigenvalues: out.eigenvalues,
                 error: out.error,
