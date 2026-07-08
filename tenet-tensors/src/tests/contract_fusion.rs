@@ -4148,3 +4148,100 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
         );
     }
 }
+
+// A lhs-conjugate (categorical-adjoint) contraction over a NON-self-dual (U(1))
+// symmetry must equal the eager conjugate-transpose composed plainly. The other
+// conjugate recipe tests are all self-dual (Z2 / fermion parity), where a charge
+// equals its dual, so a sector-dualization mislabel is invisible; here charge +1
+// and -1 are distinct duals. The Structure route mislabels the output coupled
+// sector for this case, so it declines (`all_sectors_self_dual`) to the
+// DynamicTree route, which folds the adjoint via `adjoint_view` + a data-only
+// storage conjugation correctly for any symmetry.
+#[test]
+fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
+    use num_complex::Complex64;
+    let rule = U1FusionRule;
+    let c = |q: i32| U1Irrep::new(q).sector_id();
+    // Non-self-dual charges: +1 and -1 are distinct duals of each other.
+    let leg = || SectorLeg::new([(c(-1), 2), (c(1), 2)], false);
+    let hom = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        )
+    };
+    let fusion = || {
+        let h = hom();
+        let count = h.fusion_tree_keys(&rule).len();
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
+            h,
+            &rule,
+            vec![vec![2, 2]; count],
+        )
+        .unwrap()
+    };
+    let lhs_fusion = fusion();
+    let rhs_fusion = fusion();
+    let lhs_space = crate::DynamicFusionMapSpace::from_typed(&lhs_fusion);
+    let rhs_space = crate::DynamicFusionMapSpace::from_typed(&rhs_fusion);
+    let len = lhs_space.required_len().unwrap();
+    let mk = |seed: f64| {
+        (0..len)
+            .map(|i| Complex64::new(seed + i as f64, 1.0 + (i % 3) as f64 - seed))
+            .collect::<Vec<_>>()
+    };
+    let lhs_data = mk(1.0);
+    let rhs_data = mk(2.0);
+
+    // Oracle: eager conjugate-transpose, then a plain (no-conjugate) contraction.
+    let (adj_space, adj_data) = crate::adjoint_dyn(&rule, &lhs_space, &lhs_data).unwrap();
+    // compose(a†, b): contract a†'s domain axis (1) with b's codomain axis (0).
+    let dst_space =
+        crate::DynamicFusionMapSpace::contracted(&rule, &adj_space, &rhs_space, &[1], &[0])
+            .unwrap();
+    let mut oracle = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+    let mut ctx = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
+    ctx.tensorcontract_fusion_dyn_into(
+        &rule,
+        &dst_space,
+        &mut oracle,
+        &adj_space,
+        &adj_data,
+        &rhs_space,
+        &rhs_data,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    // Fold under test: parent buffer + conjugate flag, adjoint axis 1 remapped to
+    // parent axis 0 (adjointtensorindex inverse for a 1<-1 map: 1 -> 0).
+    let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+    ctx.tensorcontract_fusion_dyn_into(
+        &rule,
+        &dst_space,
+        &mut fold,
+        &lhs_space,
+        &lhs_data,
+        &rhs_space,
+        &rhs_data,
+        TensorContractSpec::new_with_conjugation(
+            &[0],
+            &[0],
+            crate::OutputAxisOrder::identity(),
+            true,
+            false,
+        ),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+    let max = oracle
+        .iter()
+        .zip(&fold)
+        .map(|(o, f)| (o - f).norm())
+        .fold(0.0f64, f64::max);
+    assert!(max < 1e-10, "fold vs eager oracle: max diff {max}");
+}
