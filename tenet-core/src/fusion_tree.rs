@@ -1285,6 +1285,129 @@ where
     )
 }
 
+/// Batched [`multiplicity_free_transpose_tree_pair`] over every source
+/// tree-pair of a block (all sharing uncoupled sectors / duality). The planar
+/// cyclic-transpose step sequence — repartition to the target codomain rank,
+/// then rotate the coupled loop one leg at a time — depends only on the ranks
+/// and permutation, so it is identical for every source. Walk it once over the
+/// shared `DenseColumns` matrix instead of replaying the repartition and cyclic
+/// bends per source (TensorKit 0.17's block `fstranspose`). Returns, per source
+/// in `src_keys` order, its `(destination tree-pair, coefficient)` rows.
+///
+/// As with the braid block port, coefficients that reach a destination by
+/// several paths sum in a different order than the per-source accumulator, so
+/// results agree to double-precision rounding, not necessarily bit-for-bit.
+pub fn multiplicity_free_transpose_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeBlockKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if src_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
+    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    if !is_cyclic_permutation(&permutation) {
+        return Err(CoreError::InvalidPermutation {
+            permutation,
+            rank: codomain_rank + domain_rank,
+        });
+    }
+
+    let num_src = src_keys.len();
+
+    // A cyclic permutation whose `0` already sits at position 0 (or that has no
+    // `0` at all) is the identity transpose: every source maps to itself with
+    // no repartition, matching the per-source early return.
+    let mut position = match permutation.iter().position(|&axis| axis == 0) {
+        Some(position) => position,
+        None => {
+            return Ok(src_keys
+                .iter()
+                .map(|key| vec![(key.clone(), rule.scalar_one())])
+                .collect());
+        }
+    };
+
+    // Identity matrix: source `i` starts as its own basis tree with coeff one.
+    let mut basis = src_keys.to_vec();
+    let mut columns: DenseColumns<R::Scalar> = DenseColumns::with_capacity(num_src, num_src);
+    for i in 0..num_src {
+        let row = columns.push_empty_row();
+        columns.row_mut(row)[i] = Some(rule.scalar_one());
+    }
+
+    // Repartition into the requested codomain rank (bendleft / bendright chain),
+    // batched across the block.
+    let target_codomain_rank = codomain_permutation.len();
+    let mut current_codomain_rank = codomain_rank;
+    while current_codomain_rank < target_codomain_rank {
+        let (next_basis, next_columns) = compose_block_terms(rule, &basis, &columns, |rule, key| {
+            multiplicity_free_bendleft_tree_pair(rule, key)
+        })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_codomain_rank += 1;
+    }
+    while current_codomain_rank > target_codomain_rank {
+        let (next_basis, next_columns) = compose_block_terms(rule, &basis, &columns, |rule, key| {
+            multiplicity_free_bendright_tree_pair(rule, key)
+        })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_codomain_rank -= 1;
+    }
+
+    let total_rank = codomain_rank + domain_rank;
+    if total_rank != 0 && position != 0 {
+        // Rotate the coupled fusion loop one leg per step (anticlockwise while
+        // `0` is in the near half, clockwise past the midpoint), each cycle
+        // batched — the block port of the per-source cyclic bends.
+        let half_rank = total_rank >> 1;
+        while position > 0 && position < half_rank {
+            let (next_basis, next_columns) =
+                compose_block_terms(rule, &basis, &columns, |rule, key| {
+                    multiplicity_free_cycle_anticlockwise_tree_pair(rule, key)
+                })?;
+            basis = next_basis;
+            columns = next_columns;
+            position -= 1;
+        }
+        while position >= half_rank && position > 0 {
+            let (next_basis, next_columns) =
+                compose_block_terms(rule, &basis, &columns, |rule, key| {
+                    multiplicity_free_cycle_clockwise_tree_pair(rule, key)
+                })?;
+            basis = next_basis;
+            columns = next_columns;
+            position = (position + 1) % total_rank;
+        }
+    }
+
+    // Scatter the dense matrix back into per-source row lists (columns are
+    // indexed by source, so source order needs no sort).
+    let mut rows_per_source: Vec<Vec<(FusionTreeBlockKey, R::Scalar)>> = vec![Vec::new(); num_src];
+    for (dst_row, dst_key) in basis.iter().enumerate() {
+        for (src, coefficient) in columns.row(dst_row).iter().enumerate() {
+            if let Some(coefficient) = coefficient {
+                rows_per_source[src].push((dst_key.clone(), coefficient.clone()));
+            }
+        }
+    }
+    Ok(rows_per_source)
+}
+
 fn multiplicity_free_repartition_terms<R>(
     rule: &R,
     terms: Vec<(FusionTreeBlockKey, R::Scalar)>,

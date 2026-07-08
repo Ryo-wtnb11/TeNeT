@@ -7,9 +7,9 @@ use tenet_core::{
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_braid_tree_pair_block, multiplicity_free_permute_tree,
     multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
-    multiplicity_free_transpose_tree_pair, BlockKey, BlockStructure, FusionRule,
-    FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols,
+    multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block, BlockKey,
+    BlockStructure, FusionRule, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -602,10 +602,9 @@ where
 
 /// Batched [`transformed_tree_pair_rows`] over a whole block's source trees
 /// (all sharing uncoupled sectors, e.g. one [`FusionTreeBlockGroup`]). The
-/// TensorKit 0.17 `fsbraid`/`fstranspose` batching: the bend/braid step
+/// TensorKit 0.17 `fsbraid`/`fstranspose` batching: the bend/braid/cyclic step
 /// structure is walked once for the block, not once per source. Returns rows
-/// per source in `src_keys` order. Transpose has no block port yet, so it falls
-/// back to the per-source path.
+/// per source in `src_keys` order.
 pub(crate) fn transformed_tree_pair_rows_block<R>(
     rule: &R,
     operation: &TreeTransformOperation,
@@ -640,10 +639,16 @@ where
             domain_levels,
         )
         .map_err(OperationError::from_core_preserving_context),
-        TreeTransformOperation::Transpose { .. } => src_keys
-            .iter()
-            .map(|src_key| transformed_tree_pair_rows(rule, operation, src_key))
-            .collect(),
+        TreeTransformOperation::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => multiplicity_free_transpose_tree_pair_block(
+            rule,
+            src_keys,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .map_err(OperationError::from_core_preserving_context),
     }
 }
 
