@@ -1474,44 +1474,87 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
-        // Materializes a lazy-adjoint operand for now; the conjugate-fold that
-        // avoids this copy is wired in a later step.
-        match (self.coupled_data(), rhs.coupled_data()) {
-            (Data::F64(a), Data::F64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
-            (Data::C64(a), Data::C64(b)) => self.contract_impl(rhs, a, b, lhs_axes, rhs_axes),
+        // Fold a real lazy-adjoint operand into the contraction with no copy:
+        // `adjoint_view` is a strided view into the shared parent buffer that
+        // presents the adjoint space (transpose + adjoint leg duality) in the
+        // adjoint axis order, so the contracted axes need no remap. For a real
+        // tensor the adjoint is a pure transpose, which the view already
+        // encodes; the GEMM consumes it directly. Verified against TensorKit
+        // (`A'*B == @tensor conj(A[v;w])*B[v;x]`, and adjoint_view carries the
+        // correct duality). Complex adjoints additionally need the elements
+        // conjugated, which the contraction seam's conjugate flag can't do
+        // without also dualizing legs (TensorKit `conj` semantics), so they
+        // fall back to a one-shot materialize — see `prepare_contraction_operand`.
+        let (lhs_space, lhs_raw) = self.prepare_contraction_operand();
+        let (rhs_space, rhs_raw) = rhs.prepare_contraction_operand();
+        let lhs_data = if lhs_raw {
+            self.data.as_ref()
+        } else {
+            self.coupled_data()
+        };
+        let rhs_data = if rhs_raw {
+            rhs.data.as_ref()
+        } else {
+            rhs.coupled_data()
+        };
+        match (lhs_data, rhs_data) {
+            (Data::F64(a), Data::F64(b)) => {
+                self.contract_impl(&lhs_space, a, &rhs_space, b, lhs_axes, rhs_axes)
+            }
+            (Data::C64(a), Data::C64(b)) => {
+                self.contract_impl(&lhs_space, a, &rhs_space, b, lhs_axes, rhs_axes)
+            }
             #[cfg(feature = "cuda")]
             (Data::CudaF64(a), Data::CudaF64(b)) => {
+                // Device tensors are never lazy adjoints (`adjoint` rejects them).
                 self.contract_cuda_impl(rhs, a, b, lhs_axes, rhs_axes)
             }
             _ => Err(Error::DtypeMismatch),
         }
     }
 
+    /// The `(space, use_raw_data)` an operand contributes to a contraction:
+    /// - ordinary tensor: its own space + the stored buffer;
+    /// - real lazy adjoint: the `adjoint_view` (a strided view over the shared
+    ///   parent buffer, adjoint space + adjoint axis order) + the raw parent
+    ///   buffer — the transpose folds into the GEMM with no copy;
+    /// - complex lazy adjoint: the materialized conjugate-transpose (`use_raw =
+    ///   false` routes the operand through `coupled_data`), because the seam has
+    ///   no data-only conjugation that leaves leg duality intact.
+    fn prepare_contraction_operand(&self) -> (DynamicFusionMapSpace, bool) {
+        match &self.adjoint_source {
+            None => ((*self.space).clone(), true),
+            Some(parent_space) if self.dtype() == Dtype::F64 => (
+                parent_space
+                    .adjoint_view()
+                    .expect("adjoint_view is total on a tensor's own space"),
+                true,
+            ),
+            Some(_) => ((*self.space).clone(), false),
+        }
+    }
+
     fn contract_impl<D: UserScalar>(
         &self,
-        rhs: &Self,
+        lhs_space: &DynamicFusionMapSpace,
         lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
         rhs_data: &[D],
         lhs_axes: &[usize],
         rhs_axes: &[usize],
     ) -> Result<Self, Error> {
         let mut state = self.rt.lock();
         let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
-            let dst_space = DynamicFusionMapSpace::contracted(
-                rule,
-                &self.space,
-                &rhs.space,
-                lhs_axes,
-                rhs_axes,
-            )?;
+            let dst_space =
+                DynamicFusionMapSpace::contracted(rule, lhs_space, rhs_space, lhs_axes, rhs_axes)?;
             let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
             D::ctx_of(ctxs).tensorcontract_fusion_dyn_into(
                 rule,
                 &dst_space,
                 &mut data,
-                &self.space,
+                lhs_space,
                 lhs_data,
-                &rhs.space,
+                rhs_space,
                 rhs_data,
                 TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
                 D::from_real(1.0),
