@@ -1719,40 +1719,48 @@ impl Tensor {
         // scale + one-permute structure TensorKit runs (a `Diagonal` block scales
         // the recoupled operand); see docs/complexity_parity_policy.md.
         //
-        // Gated to bosonic rules: `contract` twists dual contracted legs for
-        // fermionic rules, which a bare scaling does not reproduce; the fermionic
-        // twist-folding is a follow-up. A complex-spectrum diagonal (eig `d`) and
-        // diagonal∘diagonal also fall through to the densifying path below.
-        let no_twist = with_rule!(self.rule, rule, {
-            rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic
+        // `contract` (tensorcontract!) applies a supertrace twist to `rhs`'s DUAL
+        // contracted legs; `mul!` (the scaling below) does not. The exact
+        // relation, from the cancellation `compose` performs, is
+        // `contract(a, b) = mul!(a, b.twist(dual contracted rhs legs))`. So
+        // pre-twist `rhs`'s dual contracted leg: when `rhs` is the diagonal, fold
+        // θ into the spectrum (no densify); when `rhs` is the dense operand,
+        // `twist` it. θ = ±1 by charge parity, identity for bosonic rules.
+        let fermionic = with_rule!(self.rule, rule, {
+            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
         });
-        if no_twist && lhs_axes.len() == 1 && rhs_axes.len() == 1 {
+        if lhs_axes.len() == 1 && rhs_axes.len() == 1 {
+            let twist_rhs_leg = fermionic && rhs.leg_is_dual(rhs_axes[0]);
             match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
-                // A * D: scale A's contracted leg, then repartition to the output
-                // arrangement (A's open axes -> codomain, the scaled leg ->
-                // domain, matching `self`-open-then-`rhs`-open).
+                // A * D: scale A's contracted leg by the (twist-folded) spectrum,
+                // then repartition to the output arrangement (A's open axes ->
+                // codomain, the scaled leg -> domain).
                 (None, Some(spectrum)) => {
                     let leg = lhs_axes[0];
-                    let scaled = self.scaled_axis_copy(Some(leg), spectrum)?;
+                    let folded = self.twist_folded_spectrum(spectrum, twist_rhs_leg);
+                    let scaled = self.scaled_axis_copy(Some(leg), &folded)?;
                     let codomain: Vec<usize> = (0..self.rank()).filter(|&a| a != leg).collect();
                     return scaled.permute(&codomain, &[leg]);
                 }
-                // D * A: scale A's contracted leg, then repartition (the scaled
-                // leg -> codomain, A's open axes -> domain).
+                // D * A: pre-twist A's dual contracted leg, scale it, then
+                // repartition (the scaled leg -> codomain 0, A's open -> domain).
                 (Some(spectrum), None) => {
                     let leg = rhs_axes[0];
-                    let scaled = rhs.scaled_axis_copy(Some(leg), spectrum)?;
+                    let pretwisted = if twist_rhs_leg {
+                        rhs.twist(&[leg])?
+                    } else {
+                        rhs.clone()
+                    };
+                    let scaled = pretwisted.scaled_axis_copy(Some(leg), spectrum)?;
                     let domain: Vec<usize> = (0..rhs.rank()).filter(|&a| a != leg).collect();
                     return scaled.permute(&[leg], &domain);
                 }
                 _ => {}
             }
         }
-        // Fallback (fermionic twist, complex-spectrum diagonal, diagonal∘diagonal,
-        // or a multi-axis contraction): materialize the diagonal to dense and run
-        // the ordinary contraction. Densify is a no-op clone for non-diagonal
-        // operands. ponytail: the fermionic case is an order-parity gap tracked in
-        // #75; it densifies until the twist is folded into the scaling.
+        // Fallback (complex-spectrum diagonal, diagonal∘diagonal, or a multi-axis
+        // contraction): materialize the diagonal to dense and run the ordinary
+        // contraction. Densify is a no-op clone for non-diagonal operands.
         if matches!(self.data.as_ref(), Data::Diagonal(_))
             || matches!(rhs.data.as_ref(), Data::Diagonal(_))
         {
@@ -2493,6 +2501,45 @@ impl Tensor {
             Data::Diagonal(DiagonalData::RealF64(s) | DiagonalData::RealC64(s)) => Some(s),
             _ => None,
         }
+    }
+
+    /// Whether leg `axis` (flat, codomain-first) carries a dual space, read from
+    /// the hom-space legs (the same duality `compose` checks to decide which
+    /// contracted legs `contract` twists).
+    fn leg_is_dual(&self, axis: usize) -> bool {
+        let hom = self.space.homspace();
+        let nout = self.codomain_rank();
+        if axis < nout {
+            hom.codomain().legs()[axis].is_dual()
+        } else {
+            hom.domain().legs()[axis - nout].is_dual()
+        }
+    }
+
+    /// The spectrum with each value multiplied by its sector's supertrace twist
+    /// `θ` (±1) when `apply` — folds `contract`'s fermionic twist of a diagonal
+    /// operand's dual contracted leg into the scaling instead of densifying it.
+    /// Identity (a plain copy) when `!apply` or for bosonic rules (`θ = 1`).
+    fn twist_folded_spectrum(
+        &self,
+        spectrum: &[SectorSpectrum],
+        apply: bool,
+    ) -> Vec<SectorSpectrum> {
+        if !apply {
+            return spectrum.to_vec();
+        }
+        with_rule!(self.rule, rule, {
+            spectrum
+                .iter()
+                .map(|entry| {
+                    let theta = rule.twist_scalar(entry.sector);
+                    SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * theta).collect(),
+                    }
+                })
+                .collect()
+        })
     }
 
     /// Scales this (dense) operand along one bond axis by `spectrum`, keeping the
