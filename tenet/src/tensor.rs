@@ -2973,11 +2973,9 @@ impl Tensor {
             return Ok((out.d, out.v));
         }
         // eigh eigenvalues are real, so `d` is a real diagonal (`RealC64` for
-        // c64 input keeps the former dense d's dtype). Build it as O(rank)
-        // diagonal storage from the spectrum; `out.d` (a transient dense
-        // diagonal) is discarded. ponytail: `eigh_full_dyn` still fills that
-        // dense d — a d-free core would skip it, but it is thrown away here and
-        // downstream composes now scale instead of GEMM, so no regression.
+        // c64 input). Build it as O(rank) diagonal storage from the spectrum;
+        // `eigh_full_dyn` returns only the spectrum + eigenvectors (no dense d),
+        // so nothing O(rank²) is materialized and discarded here (#56 item N).
         let complex = self.dtype() == Dtype::C64;
         let mut guard = self.rt.lock();
         let state = &mut *guard;

@@ -1308,10 +1308,12 @@ pub struct EighFull<D, const NOUT: usize, const NIN: usize> {
     pub eigenvalues: Vec<SectorSpectrum>,
 }
 
-/// Dynamic-rank [`EighFull`].
+/// Dynamic-rank [`EighFull`]. Carries only the eigenvector map and the O(rank)
+/// spectrum; the dense diagonal `D` is built on demand by the typed [`eigh_full`]
+/// wrapper (which returns a `TensorMap`), so callers that keep `D` diagonal
+/// (the user layer, via `Data::Diagonal`) never pay the O(rank²) materialization.
 #[derive(Clone, Debug)]
 pub struct EighFullDyn<D> {
-    pub d: DynFactor<D>,
     pub v: DynFactor<D>,
     pub eigenvalues: Vec<SectorSpectrum>,
 }
@@ -1326,10 +1328,10 @@ pub struct EighTrunc<D, const NOUT: usize, const NIN: usize> {
     pub error: f64,
 }
 
-/// Dynamic-rank [`EighTrunc`].
+/// Dynamic-rank [`EighTrunc`]. Spectrum + eigenvectors only; the dense diagonal
+/// is materialized by the typed [`eigh_trunc`] wrapper (see [`EighFullDyn`]).
 #[derive(Clone, Debug)]
 pub struct EighTruncDyn<D> {
-    pub d: DynFactor<D>,
     pub v: DynFactor<D>,
     pub eigenvalues: Vec<SectorSpectrum>,
     pub error: f64,
@@ -1347,8 +1349,11 @@ where
     D: FactorScalar,
 {
     let out = eigh_full_dyn(dense, rule, &dyn_space_of(tensor)?, tensor.data())?;
+    // Materialize the dense diagonal here (the typed API returns a `TensorMap`);
+    // the dyn producer no longer builds it (#56 item N).
+    let d = diagonal_bond_tensor_dyn(rule, &out.eigenvalues, &D::from_real)?;
     Ok(EighFull {
-        d: typed_from_dyn(rule, out.d)?,
+        d: typed_from_dyn(rule, d)?,
         v: typed_from_dyn(rule, out.v)?,
         eigenvalues: out.eigenvalues,
     })
@@ -1447,9 +1452,7 @@ where
         scatter_left_sector_blocks(rule, &v_space, &mut v_data, matrix, &sorted_vectors, n)?;
     }
 
-    let d_factor = diagonal_bond_tensor_dyn(rule, &eigenvalues, &D::from_real)?;
     Ok(EighFullDyn {
-        d: d_factor,
         v: (v_space, v_data),
         eigenvalues,
     })
@@ -1475,8 +1478,9 @@ where
         tensor.data(),
         truncation,
     )?;
+    let d = diagonal_bond_tensor_dyn(rule, &out.eigenvalues, &D::from_real)?;
     Ok(EighTrunc {
-        d: typed_from_dyn(rule, out.d)?,
+        d: typed_from_dyn(rule, d)?,
         v: typed_from_dyn(rule, out.v)?,
         eigenvalues: out.eigenvalues,
         error: out.error,
@@ -1499,7 +1503,6 @@ where
     let full = eigh_full_dyn(dense, rule, space, data)?;
     if matches!(truncation, Truncation::Full) {
         return Ok(EighTruncDyn {
-            d: full.d,
             v: full.v,
             eigenvalues: full.eigenvalues,
             error: 0.0,
@@ -1513,7 +1516,6 @@ where
         .all(|(entry, &count)| entry.values.len() == count)
     {
         return Ok(EighTruncDyn {
-            d: full.d,
             v: full.v,
             eigenvalues: full.eigenvalues,
             error: 0.0,
@@ -1531,9 +1533,7 @@ where
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
     let bond_axis = full.v.0.nout();
     let v_factor = sliced_bond_tensor(rule, &full.v.0, &full.v.1, bond_axis, &kept_of)?;
-    let d_factor = diagonal_bond_tensor_dyn(rule, &eigenvalues, &D::from_real)?;
     Ok(EighTruncDyn {
-        d: d_factor,
         v: v_factor,
         eigenvalues,
         error: decision.error,
@@ -2227,10 +2227,10 @@ pub struct EigFull<D: FactorScalar, const NOUT: usize, const NIN: usize> {
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
 }
 
-/// Dynamic-rank [`EigFull`].
+/// Dynamic-rank [`EigFull`]. Spectrum + eigenvectors only; the dense diagonal
+/// is materialized by the typed [`eig_full`] wrapper (see [`EighFullDyn`], #56 N).
 #[derive(Clone, Debug)]
 pub struct EigFullDyn<D: FactorScalar> {
-    pub d: DynFactor<D::Eig>,
     pub v: DynFactor<D::Eig>,
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
 }
@@ -2245,10 +2245,10 @@ pub struct EigTrunc<D: FactorScalar, const NOUT: usize, const NIN: usize> {
     pub error: f64,
 }
 
-/// Dynamic-rank [`EigTrunc`].
+/// Dynamic-rank [`EigTrunc`]. Spectrum + eigenvectors only; the dense diagonal
+/// is materialized by the typed [`eig_trunc`] wrapper (see [`EighFullDyn`], #56 N).
 #[derive(Clone, Debug)]
 pub struct EigTruncDyn<D: FactorScalar> {
-    pub d: DynFactor<D::Eig>,
     pub v: DynFactor<D::Eig>,
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
     pub error: f64,
@@ -2266,8 +2266,15 @@ where
     D: FactorScalar,
 {
     let out = eig_full_dyn::<E, R, D>(dense, rule, &dyn_space_of(tensor)?, tensor.data())?;
+    // Materialize the dense diagonal here (typed API returns a `TensorMap`); the
+    // dyn producer no longer builds it (#56 item N).
+    let d = diagonal_bond_tensor_dyn(
+        rule,
+        &out.eigenvalues,
+        &<D::Eig as FactorScalar>::from_complex64,
+    )?;
     Ok(EigFull {
-        d: typed_from_dyn(rule, out.d)?,
+        d: typed_from_dyn(rule, d)?,
         v: typed_from_dyn(rule, out.v)?,
         eigenvalues: out.eigenvalues,
     })
@@ -2362,13 +2369,7 @@ where
         .collect();
     let (v_factor, _) =
         build_left_right_pair(rule, space.homspace(), &complex_matricizations, &pairs)?;
-    let d_factor = diagonal_bond_tensor_dyn(
-        rule,
-        &eigenvalues,
-        &<D::Eig as FactorScalar>::from_complex64,
-    )?;
     Ok(EigFullDyn {
-        d: d_factor,
         v: v_factor,
         eigenvalues,
     })
@@ -2394,8 +2395,13 @@ where
         tensor.data(),
         truncation,
     )?;
+    let d = diagonal_bond_tensor_dyn(
+        rule,
+        &out.eigenvalues,
+        &<D::Eig as FactorScalar>::from_complex64,
+    )?;
     Ok(EigTrunc {
-        d: typed_from_dyn(rule, out.d)?,
+        d: typed_from_dyn(rule, d)?,
         v: typed_from_dyn(rule, out.v)?,
         eigenvalues: out.eigenvalues,
         error: out.error,
@@ -2418,7 +2424,6 @@ where
     let full = eig_full_dyn::<E, R, D>(dense, rule, space, data)?;
     if matches!(truncation, Truncation::Full) {
         return Ok(EigTruncDyn {
-            d: full.d,
             v: full.v,
             eigenvalues: full.eigenvalues,
             error: 0.0,
@@ -2432,7 +2437,6 @@ where
         .all(|(entry, &count)| entry.values.len() == count)
     {
         return Ok(EigTruncDyn {
-            d: full.d,
             v: full.v,
             eigenvalues: full.eigenvalues,
             error: 0.0,
@@ -2450,13 +2454,7 @@ where
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
     let bond_axis = full.v.0.nout();
     let v_factor = sliced_bond_tensor(rule, &full.v.0, &full.v.1, bond_axis, &kept_of)?;
-    let d_factor = diagonal_bond_tensor_dyn(
-        rule,
-        &eigenvalues,
-        &<D::Eig as FactorScalar>::from_complex64,
-    )?;
     Ok(EigTruncDyn {
-        d: d_factor,
         v: v_factor,
         eigenvalues,
         error: decision.error,
