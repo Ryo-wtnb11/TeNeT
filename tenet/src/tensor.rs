@@ -174,6 +174,163 @@ impl DiagonalData {
             ),
         }
     }
+
+    /// The largest `|entry|` over all sectors (for `pinv`'s relative cutoff).
+    fn max_abs(&self) -> f64 {
+        match self {
+            DiagonalData::RealF64(s) | DiagonalData::RealC64(s) => s
+                .iter()
+                .flat_map(|e| e.values.iter())
+                .fold(0.0f64, |m, &v| m.max(v.abs())),
+            DiagonalData::C64(s) => s
+                .iter()
+                .flat_map(|e| e.values.iter())
+                .fold(0.0f64, |m, &v| m.max(v.norm())),
+        }
+    }
+
+    /// Elementwise reciprocal — the diagonal `inv` (TensorKit `inv.(d.data)`).
+    /// Errors on a zero entry, like the dense `inv` on a rank-deficient block.
+    fn try_recip(&self) -> Result<DiagonalData, Error> {
+        fn recip_real(s: &[SectorSpectrum<f64>]) -> Result<Vec<SectorSpectrum<f64>>, Error> {
+            s.iter()
+                .map(|e| {
+                    Ok(SectorSpectrum {
+                        sector: e.sector,
+                        values: e
+                            .values
+                            .iter()
+                            .map(|&v| {
+                                if v == 0.0 {
+                                    Err(Error::InvalidArgument(
+                                        "inv of a singular diagonal (zero entry)".to_string(),
+                                    ))
+                                } else {
+                                    Ok(1.0 / v)
+                                }
+                            })
+                            .collect::<Result<_, Error>>()?,
+                    })
+                })
+                .collect()
+        }
+        Ok(match self {
+            DiagonalData::RealF64(s) => DiagonalData::RealF64(recip_real(s)?),
+            DiagonalData::RealC64(s) => DiagonalData::RealC64(recip_real(s)?),
+            DiagonalData::C64(s) => DiagonalData::C64(
+                s.iter()
+                    .map(|e| {
+                        Ok(SectorSpectrum {
+                            sector: e.sector,
+                            values: e
+                                .values
+                                .iter()
+                                .map(|&v| {
+                                    if v == Complex64::new(0.0, 0.0) {
+                                        Err(Error::InvalidArgument(
+                                            "inv of a singular diagonal (zero entry)".to_string(),
+                                        ))
+                                    } else {
+                                        Ok(Complex64::new(1.0, 0.0) / v)
+                                    }
+                                })
+                                .collect::<Result<_, Error>>()?,
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?,
+            ),
+        })
+    }
+
+    /// Elementwise pseudo-inverse with an `rcond * max|entry|` cutoff (TensorKit
+    /// `pinv` on a diagonal): entries at or below the cutoff map to 0, the rest
+    /// to `1/entry`. Same variant (`1/entry` of a real entry stays real).
+    fn pinv(&self, rcond: f64) -> DiagonalData {
+        let cutoff = rcond * self.max_abs();
+        fn map_real(s: &[SectorSpectrum<f64>], cutoff: f64) -> Vec<SectorSpectrum<f64>> {
+            s.iter()
+                .map(|e| SectorSpectrum {
+                    sector: e.sector,
+                    values: e
+                        .values
+                        .iter()
+                        .map(|&v| if v.abs() > cutoff { 1.0 / v } else { 0.0 })
+                        .collect(),
+                })
+                .collect()
+        }
+        match self {
+            DiagonalData::RealF64(s) => DiagonalData::RealF64(map_real(s, cutoff)),
+            DiagonalData::RealC64(s) => DiagonalData::RealC64(map_real(s, cutoff)),
+            DiagonalData::C64(s) => DiagonalData::C64(
+                s.iter()
+                    .map(|e| SectorSpectrum {
+                        sector: e.sector,
+                        values: e
+                            .values
+                            .iter()
+                            .map(|&v| {
+                                if v.norm() > cutoff {
+                                    Complex64::new(1.0, 0.0) / v
+                                } else {
+                                    Complex64::new(0.0, 0.0)
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Elementwise principal square root (TensorKit `sqrt.(d.data)`). A real
+    /// (`RealF64`) diagonal errors on a negative entry (like the dense f64
+    /// `sqrt`); a complex-typed real spectrum (`RealC64`) takes the complex root
+    /// and promotes to `C64`, matching the dense c64 `sqrt`.
+    fn try_sqrt(&self) -> Result<DiagonalData, Error> {
+        let map_c64 = |s: &[SectorSpectrum<Complex64>]| -> Vec<SectorSpectrum<Complex64>> {
+            s.iter()
+                .map(|e| SectorSpectrum {
+                    sector: e.sector,
+                    values: e.values.iter().map(|&v| v.sqrt()).collect(),
+                })
+                .collect()
+        };
+        Ok(match self {
+            DiagonalData::RealF64(s) => DiagonalData::RealF64(
+                s.iter()
+                    .map(|e| {
+                        Ok(SectorSpectrum {
+                            sector: e.sector,
+                            values: e
+                                .values
+                                .iter()
+                                .map(|&v| {
+                                    if v < 0.0 {
+                                        Err(Error::InvalidArgument(format!(
+                                            "sqrt of a negative diagonal entry {v}; convert to \
+                                             c64 with to_c64() for the complex square root"
+                                        )))
+                                    } else {
+                                        Ok(v.sqrt())
+                                    }
+                                })
+                                .collect::<Result<_, Error>>()?,
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?,
+            ),
+            DiagonalData::RealC64(s) => DiagonalData::C64(map_c64(
+                &s.iter()
+                    .map(|e| SectorSpectrum {
+                        sector: e.sector,
+                        values: e.values.iter().map(|&v| Complex64::new(v, 0.0)).collect(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            DiagonalData::C64(s) => DiagonalData::C64(map_c64(s)),
+        })
+    }
 }
 
 /// Explicit "no device kernel yet" error; device tensors never fall back
@@ -2270,14 +2427,7 @@ impl Tensor {
         // Scaling a diagonal stays diagonal (O(rank)); itebd normalizes λ this
         // way, and keeping it diagonal lets the next contract scale the bond.
         if let Data::Diagonal(diagonal) = self.data.as_ref() {
-            return Ok(Self {
-                rt: self.rt.clone(),
-                rule: self.rule,
-                space: Arc::clone(&self.space),
-                data: Arc::new(Data::Diagonal(diagonal.scaled(factor))),
-                adjoint_source: None,
-                materialized: OnceLock::new(),
-            });
+            return Ok(self.with_diagonal(diagonal.scaled(factor)));
         }
         let data = match self.coupled_data() {
             Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
@@ -2488,6 +2638,19 @@ impl Tensor {
             rule: self.rule,
             space: Arc::clone(&self.space),
             data: Arc::new(D::lift(data)),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
+        }
+    }
+
+    /// Reuse this tensor's space with a new diagonal payload (elementwise
+    /// scale/inv/pinv/sqrt keep the same bond space).
+    fn with_diagonal(&self, data: DiagonalData) -> Self {
+        Self {
+            rt: self.rt.clone(),
+            rule: self.rule,
+            space: Arc::clone(&self.space),
+            data: Arc::new(Data::Diagonal(data)),
             adjoint_source: None,
             materialized: OnceLock::new(),
         }
@@ -2942,6 +3105,11 @@ impl Tensor {
     /// `inv`); fails when any coupled block is rank-deficient at working
     /// precision.
     pub fn inv(&self) -> Result<Self, Error> {
+        // A diagonal inverse is elementwise (O(rank)), not a block inversion;
+        // keep it diagonal so the next contract still scales the bond.
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(self.with_diagonal(diagonal.try_recip()?));
+        }
         with_data!(self, data, self.inv_impl(data))
     }
 
@@ -2963,6 +3131,12 @@ impl Tensor {
     /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
     /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
     pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+        // A diagonal pseudo-inverse is an elementwise cutoff+reciprocal on the
+        // spectrum (O(rank)) — its own singular values are |entry| — so skip the
+        // SVD and keep it diagonal (itebd's `l_out.pinv` fires this).
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(self.with_diagonal(diagonal.pinv(rcond)));
+        }
         with_data!(self, data, self.pinv_impl(data, rcond))
     }
 
@@ -3028,6 +3202,11 @@ impl Tensor {
                  codomain and domain legs), like the `s` factor of svd_trunc"
                     .to_string(),
             ));
+        }
+        // Diagonal storage: sqrt is elementwise on the spectrum (O(rank)) and
+        // stays diagonal, so √S · √S = S keeps scaling the bond.
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(self.with_diagonal(diagonal.try_sqrt()?));
         }
         let data = match self.coupled_data() {
             Data::F64(data) => Data::F64(sqrt_diagonal_impl(&self.space, data, &|value| {
