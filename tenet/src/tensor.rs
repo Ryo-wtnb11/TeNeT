@@ -146,6 +146,34 @@ impl DiagonalData {
             DiagonalData::RealC64(_) | DiagonalData::C64(_) => Dtype::C64,
         }
     }
+
+    /// Multiplies every stored value by a real factor, preserving the variant —
+    /// so scaling a diagonal factor (e.g. itebd's `λ / |λ|`) keeps O(rank)
+    /// storage instead of densifying.
+    fn scaled(&self, factor: f64) -> DiagonalData {
+        fn map_real(spectra: &[SectorSpectrum<f64>], factor: f64) -> Vec<SectorSpectrum<f64>> {
+            spectra
+                .iter()
+                .map(|entry| SectorSpectrum {
+                    sector: entry.sector,
+                    values: entry.values.iter().map(|&value| value * factor).collect(),
+                })
+                .collect()
+        }
+        match self {
+            DiagonalData::RealF64(spectra) => DiagonalData::RealF64(map_real(spectra, factor)),
+            DiagonalData::RealC64(spectra) => DiagonalData::RealC64(map_real(spectra, factor)),
+            DiagonalData::C64(spectra) => DiagonalData::C64(
+                spectra
+                    .iter()
+                    .map(|entry| SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * factor).collect(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Explicit "no device kernel yet" error; device tensors never fall back
@@ -1681,10 +1709,12 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
-        // A diagonal-storage operand (SVD `s`, eigh/eig `d`) has no direct GEMM
-        // path yet, so materialize it to dense first (issue #55 PR2 will fold it
-        // into a block-local scaling instead). Densify is a no-op clone for
-        // non-diagonal operands.
+        // A diagonal-storage operand (SVD `s`, eigh/eig `d`) currently has no
+        // block-local scaling path through the general contraction, so
+        // materialize it to dense first. TensorKit keeps the diagonal type alive
+        // through the whole contraction and lets the block matmul dispatch to a
+        // scaling; porting that to the tenet-tensors contract seam is tracked
+        // separately. Densify is a no-op clone for non-diagonal operands.
         if matches!(self.data.as_ref(), Data::Diagonal(_))
             || matches!(rhs.data.as_ref(), Data::Diagonal(_))
         {
@@ -2191,6 +2221,18 @@ impl Tensor {
     /// Returns `factor * self` (real factor, both dtypes). Use
     /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
+        // Scaling a diagonal stays diagonal (O(rank)); itebd normalizes λ this
+        // way, and keeping it diagonal lets the next contract scale the bond.
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(Self {
+                rt: self.rt.clone(),
+                rule: self.rule,
+                space: Arc::clone(&self.space),
+                data: Arc::new(Data::Diagonal(diagonal.scaled(factor))),
+                adjoint_source: None,
+                materialized: OnceLock::new(),
+            });
+        }
         let data = match self.coupled_data() {
             Data::F64(data) => Data::F64(data.iter().map(|&value| value * factor).collect()),
             Data::C64(data) => Data::C64(data.iter().map(|&value| value * factor).collect()),
