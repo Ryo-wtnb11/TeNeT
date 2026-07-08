@@ -418,6 +418,81 @@ where
     Ok(total)
 }
 
+/// Quantum-dimension-weighted block trace of an endomorphism:
+/// `sum_c dim(c) * tr(b_c)`, matching TensorKit's `tr` (`linalg.jl`, the
+/// native `sum_c dim(c) * tr(block)`). Only fusion-tree blocks whose codomain
+/// and domain trees coincide sit on the coupled-block diagonal; every other
+/// block is off-diagonal in `b_c` and contributes nothing. Within a diagonal
+/// block the trace pairs codomain degeneracy axis `i` with domain axis
+/// `nout + i` (equal degeneracies, since the spaces match). Real tensors give
+/// an exactly-real result. Fermionic rules fold their supertrace sign into the
+/// coupled blocks, so the same sum yields the supertrace.
+fn weighted_trace<R, D>(
+    rule: &R,
+    structure: &BlockStructure,
+    nout: usize,
+    data: &[D],
+) -> Result<Complex64, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: UserScalar,
+{
+    let mut total = Complex64::new(0.0, 0.0);
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let key = match block.key() {
+            BlockKey::FusionTree(key) => key,
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "tr() requires fusion-tree blocks".to_string(),
+                ))
+            }
+        };
+        // Off the coupled-block diagonal (codomain tree != domain tree): not on
+        // the matrix diagonal of b_c, so it drops out of tr(b_c).
+        if key.codomain_tree() != key.domain_tree() {
+            continue;
+        }
+        let coupled = key
+            .codomain_tree()
+            .coupled()
+            .unwrap_or_else(|| rule.vacuum());
+        // Closing codomain leg i onto domain leg i bends the coupled loop, so
+        // each block picks up its coupled charge's twist theta_c. For symmetric
+        // (bosonic) categories theta == 1; for fermionic ones it is -1 on odd
+        // sectors, which turns this sum into the supertrace — exactly matching
+        // TensorKit's `tr` (and the partial-trace engine this replaces).
+        let weight = rule.twist_scalar(coupled) * rule.dim_scalar(coupled);
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        // Walk only the codomain degeneracy multi-index and index both halves
+        // diagonally (axis i and axis nout+i share the index) — the degeneracy
+        // trace of this coupled sub-block.
+        let count: usize = shape[..nout].iter().product();
+        let mut indices = vec![0usize; nout];
+        let mut partial = D::from_real(0.0);
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, &i)| i * strides[axis] + i * strides[nout + axis])
+                    .sum::<usize>();
+            partial = partial + data[position];
+            for axis in 0..nout {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+        total += partial.widen_complex() * weight;
+    }
+    Ok(total)
+}
+
 /// Which tree transform a leg re-arrangement uses.
 enum TransformKind<'a> {
     Permute,
@@ -1869,9 +1944,22 @@ impl Tensor {
                 "tr() requires an endomorphism (domain == codomain)".to_string(),
             ));
         }
+        // Block-local weighted trace (TensorKit `tr`): sum the coupled-block
+        // diagonals weighted by quantum dimension, directly on the stored
+        // blocks. Avoids the generic partial-trace engine's per-call recoupling
+        // compile, rank-0 destination allocation, and kernel dispatch that the
+        // former `trace_pairs` route paid to produce a single scalar.
         let nout = self.codomain_rank();
-        let pairs: Vec<(usize, usize)> = (0..nout).map(|i| (i, nout + i)).collect();
-        self.trace_pairs(&pairs)?.scalar()
+        match self.coupled_data() {
+            Data::F64(data) => with_rule!(self.rule, rule, {
+                weighted_trace(rule, self.space.structure(), nout, data).map(|v| Scalar::F64(v.re))
+            }),
+            Data::C64(data) => with_rule!(self.rule, rule, {
+                weighted_trace(rule, self.space.structure(), nout, data).map(Scalar::C64)
+            }),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Err(device_unsupported("tr()")),
+        }
     }
 
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
