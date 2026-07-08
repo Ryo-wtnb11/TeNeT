@@ -610,13 +610,19 @@ where
     })
 }
 
-/// Dynamic-rank [`svd_compact`]: the shared core of every SVD entry point.
-pub fn svd_compact_dyn<E, R, D>(
+/// The compact-SVD factors without materializing the diagonal `S`:
+/// `(U, Vh, spectrum)`. The shared core of every SVD entry point.
+/// [`svd_compact_dyn`] wraps this and adds the dense `S` as a tensor for callers
+/// that want it; polar and the matrix-function paths scale by the spectrum
+/// directly (TensorKit `DiagonalTensorMap` `rmul!`) and never build `S`.
+type SvdFactorsDyn<D> = (DynFactor<D>, DynFactor<D>, Vec<SectorSpectrum>);
+
+pub(crate) fn svd_compact_factors_dyn<E, R, D>(
     dense: &mut E,
     rule: &R,
     space: &DynamicFusionMapSpace,
     data: &[D],
-) -> Result<SvdCompactDyn<D>, OperationError>
+) -> Result<SvdFactorsDyn<D>, OperationError>
 where
     E: DenseExecutor,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -713,11 +719,28 @@ where
         )?;
     }
 
-    let s_factor = diagonal_bond_tensor_dyn(rule, &singular_values, &D::from_real)?;
+    Ok(((u_space, u_data), (vt_space, vt_data), singular_values))
+}
+
+/// Dynamic-rank [`svd_compact`]: the [`svd_compact_factors_dyn`] core plus the
+/// diagonal `S` materialized as a `bond <- bond` tensor.
+pub fn svd_compact_dyn<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<SvdCompactDyn<D>, OperationError>
+where
+    E: DenseExecutor,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let s = diagonal_bond_tensor_dyn(rule, &singular_values, &D::from_real)?;
     Ok(SvdCompactDyn {
-        u: (u_space, u_data),
-        s: s_factor,
-        vh: (vt_space, vt_data),
+        u,
+        s,
+        vh,
         singular_values,
     })
 }
@@ -2676,17 +2699,17 @@ where
         + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let svd = svd_compact_dyn(dense, rule, space, data)?;
-    let isometry =
-        crate::compose::compose_dyn(context, rule, (&svd.u.0, &svd.u.1), (&svd.vh.0, &svd.vh.1))?;
+    // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
+    // use the S-free factors core.
+    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let isometry = crate::compose::compose_dyn(context, rule, (&u.0, &u.1), (&vh.0, &vh.1))?;
     // P = V·S·Vh. Fold S into V as a block-local scaling of V's bond (trailing)
     // axis — TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block
     // GEMM against the dense diagonal S (99% zeros). `singular_values` carries S
     // in O(rank); see #51 / #55.
-    let mut v = tenet_tensors::adjoint_dyn(rule, &svd.vh.0, &svd.vh.1)?;
-    scale_bond_axis_by_spectrum(&mut v, &svd.singular_values)?;
-    let positive =
-        crate::compose::compose_dyn(context, rule, (&v.0, &v.1), (&svd.vh.0, &svd.vh.1))?;
+    let mut v = tenet_tensors::adjoint_dyn(rule, &vh.0, &vh.1)?;
+    scale_bond_axis_by_spectrum(&mut v, &singular_values)?;
+    let positive = crate::compose::compose_dyn(context, rule, (&v.0, &v.1), (&vh.0, &vh.1))?;
     Ok((isometry, positive))
 }
 
@@ -2728,16 +2751,17 @@ where
         + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let svd = svd_compact_dyn(dense, rule, space, data)?;
-    let uh = tenet_tensors::adjoint_dyn(rule, &svd.u.0, &svd.u.1)?;
-    let isometry =
-        crate::compose::compose_dyn(context, rule, (&svd.u.0, &svd.u.1), (&svd.vh.0, &svd.vh.1))?;
+    // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
+    // use the S-free factors core.
+    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, rule, space, data)?;
+    let uh = tenet_tensors::adjoint_dyn(rule, &u.0, &u.1)?;
+    let isometry = crate::compose::compose_dyn(context, rule, (&u.0, &u.1), (&vh.0, &vh.1))?;
     // P = U·S·Uh. Fold S into U's bond (trailing) axis by block-local scaling —
     // TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block GEMM
     // against the dense diagonal S. U is consumed above for the isometry, so
     // scale the moved-out copy. `singular_values` carries S in O(rank); #51/#55.
-    let mut us = svd.u;
-    scale_bond_axis_by_spectrum(&mut us, &svd.singular_values)?;
+    let mut us = u;
+    scale_bond_axis_by_spectrum(&mut us, &singular_values)?;
     let positive = crate::compose::compose_dyn(context, rule, (&us.0, &us.1), (&uh.0, &uh.1))?;
     Ok((positive, isometry))
 }
