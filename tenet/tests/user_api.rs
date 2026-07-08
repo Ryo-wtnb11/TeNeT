@@ -1529,3 +1529,53 @@ fn space_rejects_duplicate_sectors_same_degeneracy() {
 fn space_rejects_duplicate_sectors_conflicting_degeneracy() {
     let _ = Space::u1([(0, 2), (0, 3)]);
 }
+
+/// #56 item K: the abelian (UniqueFusion) `inner`/`norm` fast path. For an
+/// abelian symmetry every `dim(c) == 1`, so the quantum-dimension-weighted
+/// block sum equals the plain unweighted whole-buffer conjugated dot — exactly
+/// what TensorKit's `inner(t.data, t.data)` / `norm(t.data)` UniqueFusion
+/// specialization computes (vectorinterface.jl:124, linalg.jl:277). A
+/// non-abelian symmetry (SU(2), sectors with `dim(c) > 1`) must NOT equal the
+/// unweighted whole-buffer sum, pinning that it still applies the `dim(c)`
+/// weights (i.e. did not fall into the abelian path).
+#[test]
+fn abelian_inner_is_unweighted_whole_buffer_dot() {
+    let rt = Runtime::builder().build().unwrap();
+
+    // Abelian (U(1), Z2, fermionic Z2): inner(self, self) == Σ x² over the
+    // whole coupled buffer, and norm² agrees.
+    for v in [
+        Space::u1([(-1, 2), (0, 3), (1, 2)]),
+        Space::z2([(0, 2), (1, 3)]),
+        Space::fz2([(0, 2), (1, 2)]),
+    ] {
+        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 11).unwrap();
+        let whole: f64 = t.data().iter().map(|x| x * x).sum();
+        let inner = t.inner(&t).unwrap().re();
+        assert!(
+            (inner - whole).abs() <= 1e-9 * (1.0 + whole.abs()),
+            "abelian inner {inner} != whole-buffer dot {whole}"
+        );
+        assert!((t.norm().unwrap().powi(2) - whole).abs() <= 1e-8 * (1.0 + whole.abs()));
+    }
+
+    // Non-abelian SU(2) with dim>1 sectors: dim-weighted, so inner must differ
+    // from the unweighted whole-buffer sum.
+    let v = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 11).unwrap();
+    let whole: f64 = t.data().iter().map(|x| x * x).sum();
+    let inner = t.inner(&t).unwrap().re();
+    assert!(
+        (inner - whole).abs() > 1e-6 * (1.0 + whole.abs()),
+        "SU(2) inner {inner} unexpectedly equals unweighted whole-buffer sum {whole} \
+         (dim(c) weights dropped?)"
+    );
+
+    // Complex abelian: inner is the conjugated dot Σ |z|², exactly real.
+    let v = Space::u1([(0, 2), (1, 2)]);
+    let t = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v], 12).unwrap();
+    let whole: f64 = t.data_c64().iter().map(|z| z.norm_sqr()).sum();
+    let xx = t.inner(&t).unwrap();
+    assert!(xx.im().abs() <= 1e-10 * (1.0 + xx.re().abs()));
+    assert!((xx.re() - whole).abs() <= 1e-9 * (1.0 + whole.abs()));
+}

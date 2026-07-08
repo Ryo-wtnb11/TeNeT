@@ -587,6 +587,20 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: UserScalar,
 {
+    // Abelian (UniqueFusion) fast path: every `dim(c) == 1`, and the coupled
+    // buffer is a padding-free concatenation of the per-sector blocks, so the
+    // weighted per-block sum collapses to one whole-buffer conjugated dot —
+    // no `dim(c)` weights and no per-element odometer. Mirrors TensorKit's
+    // `inner(tx.data, ty.data)` / `norm(t.data)` UniqueFusion specialization
+    // (vectorinterface.jl:124, linalg.jl:277). Non-abelian keeps the weighted
+    // block loop below, where `dim(c) != 1`.
+    if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+        let mut total = D::from_real(0.0);
+        for (&ai, &bi) in a.iter().zip(b) {
+            total = total + FactorScalar::adjoint(ai) * bi;
+        }
+        return Ok(total.widen_complex());
+    }
     let mut total = Complex64::new(0.0, 0.0);
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
