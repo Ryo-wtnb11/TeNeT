@@ -4130,3 +4130,101 @@ impl Tensor {
         Ok(out)
     }
 }
+
+/// Concise, explicit tensor constructors on the runtime itself: `rt.zeros(…)`
+/// is exactly `Tensor::zeros(&rt, …)`, one per common builder. Use these when
+/// juggling several runtimes (each call names its own); use the argument-free
+/// free functions ([`zeros`], [`rand`], …) when one default runtime suffices.
+impl Runtime {
+    /// [`Tensor::zeros`] on this runtime.
+    pub fn zeros<'a, C, D>(&self, dtype: Dtype, codomain: C, domain: D) -> Result<Tensor, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Tensor::zeros(self, dtype, codomain, domain)
+    }
+
+    /// [`Tensor::rand`] on this runtime.
+    pub fn rand<'a, C, D>(&self, dtype: Dtype, codomain: C, domain: D) -> Result<Tensor, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Tensor::rand(self, dtype, codomain, domain)
+    }
+
+    /// [`Tensor::rand_with_seed`] on this runtime.
+    pub fn rand_with_seed<'a, C, D>(
+        &self,
+        dtype: Dtype,
+        codomain: C,
+        domain: D,
+        seed: u64,
+    ) -> Result<Tensor, Error>
+    where
+        C: IntoIterator<Item = &'a Space>,
+        D: IntoIterator<Item = &'a Space>,
+    {
+        Tensor::rand_with_seed(self, dtype, codomain, domain, seed)
+    }
+
+    /// [`Tensor::id`] on this runtime.
+    pub fn id<'a, S>(&self, dtype: Dtype, spaces: S) -> Result<Tensor, Error>
+    where
+        S: IntoIterator<Item = &'a Space>,
+    {
+        Tensor::id(self, dtype, spaces)
+    }
+}
+
+/// Zero tensor on the calling thread's default runtime — [`Tensor::zeros`]
+/// without the runtime argument. Set the default once with
+/// [`crate::set_default_runtime`] / [`crate::default!`]; errors if none is set.
+pub fn zeros<'a, C, D>(dtype: Dtype, codomain: C, domain: D) -> Result<Tensor, Error>
+where
+    C: IntoIterator<Item = &'a Space>,
+    D: IntoIterator<Item = &'a Space>,
+{
+    Tensor::zeros(&crate::runtime::default_runtime()?, dtype, codomain, domain)
+}
+
+/// Random tensor on the calling thread's default runtime; see [`zeros`] and
+/// [`Tensor::rand`].
+pub fn rand<'a, C, D>(dtype: Dtype, codomain: C, domain: D) -> Result<Tensor, Error>
+where
+    C: IntoIterator<Item = &'a Space>,
+    D: IntoIterator<Item = &'a Space>,
+{
+    Tensor::rand(&crate::runtime::default_runtime()?, dtype, codomain, domain)
+}
+
+/// Seeded random tensor on the calling thread's default runtime; see [`zeros`]
+/// and [`Tensor::rand_with_seed`].
+pub fn rand_with_seed<'a, C, D>(
+    dtype: Dtype,
+    codomain: C,
+    domain: D,
+    seed: u64,
+) -> Result<Tensor, Error>
+where
+    C: IntoIterator<Item = &'a Space>,
+    D: IntoIterator<Item = &'a Space>,
+{
+    Tensor::rand_with_seed(
+        &crate::runtime::default_runtime()?,
+        dtype,
+        codomain,
+        domain,
+        seed,
+    )
+}
+
+/// Identity tensor on the calling thread's default runtime; see [`zeros`] and
+/// [`Tensor::id`].
+pub fn id<'a, S>(dtype: Dtype, spaces: S) -> Result<Tensor, Error>
+where
+    S: IntoIterator<Item = &'a Space>,
+{
+    Tensor::id(&crate::runtime::default_runtime()?, dtype, spaces)
+}
