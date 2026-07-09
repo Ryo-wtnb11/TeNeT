@@ -441,6 +441,32 @@ impl RuntimeBuilder {
     /// for the shipped providers; an explicitly injected executor takes
     /// precedence over this selection. Choosing [`LinalgBackend::Blas`] without
     /// a compiled `cpu-blas`/`blas-*` provider fails in [`Self::build`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// // Explicit faer provider (also the default). Every tensor created from
+    /// // this runtime factorizes on the chosen backend — no per-call argument.
+    /// let rt = Runtime::builder()
+    ///     .linalg_backend(LinalgBackend::Faer)
+    ///     .build()?;
+    /// let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+    /// let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 7)?;
+    /// let (_u, _s, _vh) = t.svd_compact()?;
+    ///
+    /// // Switch to the system BLAS/LAPACK linked via a `blas-*` cargo feature
+    /// // (OpenBLAS / MKL / Accelerate). Results are identical to faer up to
+    /// // floating-point rounding; only performance differs. Without a linked
+    /// // provider this returns an error, so fall back to faer:
+    /// let rt = Runtime::builder()
+    ///     .linalg_backend(LinalgBackend::Blas)
+    ///     .build()
+    ///     .or_else(|_| Runtime::builder().build())?;
+    /// # let _ = rt;
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
     pub fn linalg_backend(mut self, backend: LinalgBackend) -> Self {
         self.linalg_backend = Some(backend);
         self
