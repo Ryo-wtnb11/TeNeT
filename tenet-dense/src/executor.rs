@@ -93,6 +93,53 @@ pub trait DenseExecutor {
         })
     }
 
+    /// Singular values only: the length-`min(m, n)` real `S`, without computing
+    /// `U`/`Vt` (LAPACK `job='N'`, MatrixAlgebraKit `svd_vals`). The default
+    /// computes the full SVD and drops the vectors — correct but wasteful;
+    /// backends with a no-vector LAPACK path override this.
+    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        let mut outputs = self.svd(input)?;
+        if outputs.len() != 3 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_vals",
+                message: "dense SVD must return exactly (U, S, Vt)".to_string(),
+            });
+        }
+        Ok(outputs.swap_remove(1))
+    }
+
+    /// Hermitian eigenvalues only, without eigenvectors (LAPACK `job='N'`,
+    /// MatrixAlgebraKit `eigh_vals`). Default drops the vectors from the full
+    /// decomposition; backends override with a no-vector path.
+    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        let mut outputs = self.eigh(input)?;
+        if outputs.len() != 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "eigh_vals",
+                message: "dense EIGH must return exactly (values, vectors)".to_string(),
+            });
+        }
+        Ok(outputs.swap_remove(0))
+    }
+
+    /// General (non-Hermitian) eigenvalues only, without eigenvectors (LAPACK
+    /// `job='N'`, MatrixAlgebraKit `eig_vals`); complex regardless of input
+    /// scalar. Default drops the vectors; backends override with a no-vector
+    /// path.
+    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        let mut outputs = self.eig(input)?;
+        if outputs.len() != 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "eig_vals",
+                message: "dense EIG must return exactly (values, vectors)".to_string(),
+            });
+        }
+        Ok(outputs.swap_remove(0))
+    }
+
     fn dot_general_into(
         &mut self,
         output: DenseWrite<'_>,

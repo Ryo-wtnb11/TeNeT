@@ -922,3 +922,71 @@ fn default_executor_rejects_integer_linalg_view() {
         } if message.contains("unsupported dtype")
     ));
 }
+
+// Exercises the values-only trait *defaults* (full decomposition minus the
+// vectors). `DefaultDenseExecutor` overrides them, so this wraps it in an
+// executor that implements svd/eigh/eig but leaves svd_vals/eigh_vals/eig_vals
+// at their trait default, then checks the fallback spectra agree with the
+// backend's no-vector override to LAPACK precision.
+#[test]
+fn values_only_defaults_fall_back_to_the_full_decomposition_spectrum() {
+    struct FullOnly(DefaultDenseExecutor);
+    impl DenseExecutor for FullOnly {
+        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.0.svd(input)
+        }
+        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.0.qr(input)
+        }
+        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.0.eigh(input)
+        }
+        fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            self.0.eig(input)
+        }
+        fn dot_general_into(
+            &mut self,
+            output: DenseWrite<'_>,
+            lhs: DenseRead<'_>,
+            rhs: DenseRead<'_>,
+            config: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            self.0.dot_general_into(output, lhs, rhs, config)
+        }
+    }
+
+    let shape = [2usize, 2];
+    let strides = [1usize, 2]; // column-major
+    let m = vec![2.0f64, 1.0, 1.0, 3.0]; // symmetric, so eigh applies too
+    fn view<'a>(data: &'a [f64], shape: &'a [usize], strides: &'a [usize]) -> DenseRead<'a> {
+        DenseRead::F64(DenseView::new(data, shape, strides, 0).unwrap())
+    }
+
+    let mut fallback = FullOnly(DefaultDenseExecutor::new());
+    let mut direct = DefaultDenseExecutor::new();
+    let tol = 1e-10;
+
+    let f = fallback.svd_vals(view(&m, &shape, &strides)).unwrap();
+    let d = direct.svd_vals(view(&m, &shape, &strides)).unwrap();
+    let (f, d) = (f.as_f64_slice().unwrap(), d.as_f64_slice().unwrap());
+    assert_eq!(f.len(), 2);
+    for (a, b) in f.iter().zip(d) {
+        assert_f64_close(*a, *b, tol);
+    }
+
+    let f = fallback.eigh_vals(view(&m, &shape, &strides)).unwrap();
+    let d = direct.eigh_vals(view(&m, &shape, &strides)).unwrap();
+    let (f, d) = (f.as_f64_slice().unwrap(), d.as_f64_slice().unwrap());
+    assert_eq!(f.len(), 2);
+    for (a, b) in f.iter().zip(d) {
+        assert_f64_close(*a, *b, tol);
+    }
+
+    let f = fallback.eig_vals(view(&m, &shape, &strides)).unwrap();
+    let d = direct.eig_vals(view(&m, &shape, &strides)).unwrap();
+    let (f, d) = (f.as_c64_slice().unwrap(), d.as_c64_slice().unwrap());
+    assert_eq!(f.len(), 2);
+    for (a, b) in f.iter().zip(d) {
+        assert_c64_close(*a, *b, tol);
+    }
+}
