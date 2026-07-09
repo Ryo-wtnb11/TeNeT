@@ -1079,8 +1079,13 @@ where
     I: IntoIterator<Item = (FusionTreeBlockKey, R::Scalar)>,
 {
     let num_src = columns.num_src;
+    // Dedup destination tree-pairs to dense rows. The key is *moved* into the
+    // map (no per-destination clone — this dedup is the hottest FusionTreeKey
+    // clone/eq/hash site on the cold recoupling path); `next_basis` is rebuilt
+    // from the map by row index afterwards. Rows are assigned in first-
+    // appearance order, so the rebuilt `next_basis` order — and therefore every
+    // coefficient — is bit-for-bit identical to pushing the key eagerly.
     let mut index: FxHashMap<FusionTreeBlockKey, usize> = FxHashMap::default();
-    let mut next_basis: Vec<FusionTreeBlockKey> = Vec::new();
     let mut next_columns: DenseColumns<R::Scalar> = DenseColumns::with_capacity(num_src, basis.len());
     for (source_row, source_key) in basis.iter().enumerate() {
         for (dst_key, step_coefficient) in transform(rule, source_key)? {
@@ -1088,8 +1093,7 @@ where
                 Some(&row) => row,
                 None => {
                     let row = next_columns.push_empty_row();
-                    index.insert(dst_key.clone(), row);
-                    next_basis.push(dst_key);
+                    index.insert(dst_key, row);
                     row
                 }
             };
@@ -1110,6 +1114,16 @@ where
             }
         }
     }
+    // Rebuild the basis in row order (= first-appearance order). Rows are dense
+    // `0..index.len()`, so place each moved key at its row index.
+    let mut slots: Vec<Option<FusionTreeBlockKey>> = (0..index.len()).map(|_| None).collect();
+    for (key, row) in index {
+        slots[row] = Some(key);
+    }
+    let next_basis: Vec<FusionTreeBlockKey> = slots
+        .into_iter()
+        .map(|key| key.expect("dense rows 0..len are all filled"))
+        .collect();
     Ok((next_basis, next_columns))
 }
 
