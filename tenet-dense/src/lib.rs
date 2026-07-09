@@ -34,6 +34,12 @@ pub use view::{DenseRead, DenseView, DenseViewMut, DenseWrite};
 #[cfg(feature = "tenferro")]
 pub use tenferro_adapter::DefaultDenseExecutor;
 
+/// CPU linear-algebra provider selector (faer vs system BLAS/LAPACK), re-exported
+/// from tenferro so runtimes can pick a backend via
+/// [`DefaultDenseExecutor::with_kind`] without depending on tenferro directly.
+#[cfg(feature = "tenferro")]
+pub use tenferro_cpu::CpuBackendKind;
+
 #[cfg(feature = "cuda")]
 pub use cuda_adapter::{
     cuda_eigh_region, cuda_gemm_region_into, cuda_matmul_region_into, cuda_qr_region,

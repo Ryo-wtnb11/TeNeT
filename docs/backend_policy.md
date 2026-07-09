@@ -37,22 +37,30 @@ trait:
 
 State today, and the gap this policy targets:
 
-- The **traits exist**, and the dense seam is now **selectable at the builder**:
-  `Runtime::builder().with_dense_executor(Box<dyn DenseExecutor + Send>)` injects
-  the CPU linear-algebra backend (the runtime holds it behind
-  `Box<dyn DenseExecutor>`); unset uses the faer-backed `DefaultDenseExecutor`
-  (`tenet-dense`, delegating to `tenferro` → faer/gemm). #64.
-- Still hardcoded: the transpose/contract seam is fixed to
-  `DenseTreeTransformOperations`.
-- Only **device** selection is otherwise exposed to callers
-  (`Runtime::builder().cuda`).
-- Intended alternatives: system BLAS/LAPACK, Intel MKL, OpenBLAS as
-  `DenseExecutor` impls (now pluggable via `with_dense_executor`); HPTT (fast
-  transpose) and TBLIS (transpose-free contraction) for the transform/contract
-  seams — see #7, #41.
+- The **traits exist**, and the CPU dense provider is **selectable at the
+  builder** with two independent knobs, both defaulting to faer (#64):
+  - `Runtime::builder().linalg_backend(LinalgBackend::Faer | LinalgBackend::Blas)`
+    picks the provider for the **factorizations** (SVD / QR / eigh / eig / inv /
+    exp — LAPACK-style work).
+  - `Runtime::builder().gemm_backend(LinalgBackend::Faer | LinalgBackend::Blas)`
+    picks the provider for the **contraction GEMM** (`compose` / `contract` and
+    recoupling replays — BLAS-style work). Independent of `linalg_backend`.
+  - `Runtime::builder().with_dense_executor(Box<dyn DenseExecutor + Send>)`
+    injects a custom factorization backend (takes precedence over
+    `linalg_backend`). Unset defaults use the faer-backed
+    `DefaultDenseExecutor` (`tenet-dense` → `tenferro` → faer).
+  - `Blas` uses the system BLAS/LAPACK linked via a `blas-*` cargo feature and
+    fails at `build()` if none was compiled in. Runtime vs compile-time:
+    OpenBLAS / MKL / Accelerate can't be linked simultaneously, so *which* BLAS
+    is a compile-time `blas-*` feature; at runtime you choose faer vs the one
+    linked BLAS. (MKL, being both BLAS and LAPACK, backs both knobs at once.)
+- Still hardcoded: the *transpose* kernel and the transpose-free contraction
+  path inside `DenseTreeTransformOperations` — swapping the GEMM provider is
+  done (above), but HPTT/TBLIS-style kernels are not yet a builder choice.
+- Device selection is exposed the same way (`Runtime::builder().cuda`).
 
-Remaining work: provide the built-in BLAS/LAPACK/MKL `DenseExecutor` impls, and
-expose the transform/contract seam selection at the builder the same way.
+Remaining work: HPTT (fast transpose) and TBLIS (transpose-free contraction)
+for the transform/contract kernels — see #7, #41.
 
 ## Rules
 
@@ -63,12 +71,15 @@ expose the transform/contract seam selection at the builder the same way.
 
 2. **Selection is explicit and runtime, at `Runtime::builder()`.** Device
    selection already works this way (`Runtime::builder().cuda(device)`). CPU
-   compute backends must be selectable the same way — the dense linear-algebra
-   provider (`.linalg_backend(Faer | SystemLapack | Mkl | …)`) and the
-   transpose/contract kernels (`.transpose_backend(...)`,
-   `.contract_backend(...)`) — not chosen at call sites and not hardcoded at
-   compile time. There is one documented default (faer / CPU dense); everything
-   else is opt-in.
+   compute backends must be selectable the same way — the dense factorization
+   provider (`.linalg_backend(...)`) and the contraction GEMM provider
+   (`.gemm_backend(...)`), both done in #64, and, still to come, the
+   transpose/transpose-free-contraction kernels (`.transpose_backend(...)`,
+   HPTT/TBLIS) — not chosen at call sites and not hardcoded at compile time.
+   There is one documented default (faer / CPU dense); everything else is
+   opt-in. (Where several implementations of one provider can't co-link —
+   OpenBLAS vs MKL — which one is a compile-time feature; the *family* stays a
+   runtime choice.)
 
 3. **Separate WHAT from WHICH.** Operator and user-layer code express *what* to
    compute — spaces, axes, conjugate flags, output order — and never *which*

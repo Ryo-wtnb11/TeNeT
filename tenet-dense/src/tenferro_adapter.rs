@@ -7,7 +7,7 @@ use crate::{
     DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite,
 };
 
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::{CpuBackend, CpuBackendKind};
 use tenferro_linalg::LinalgBackend;
 use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
 use tenferro_tensor::{
@@ -35,6 +35,23 @@ impl DefaultDenseExecutor {
         CpuBackend::with_threads(threads)
             .map(Self::from_backend)
             .map_err(|err| tenferro_error("CpuBackend::with_threads", err))
+    }
+
+    /// Builds an executor on a specific CPU linear-algebra provider
+    /// ([`CpuBackendKind::Faer`] or [`CpuBackendKind::Blas`]). Fails if the
+    /// requested provider was not compiled in (e.g. `Blas` without a
+    /// `cpu-blas`/`blas-*` feature) — the check happens here, not at first use.
+    pub fn with_kind(kind: CpuBackendKind) -> Result<Self, DenseError> {
+        CpuBackend::with_kind(kind)
+            .map(Self::from_backend)
+            .map_err(|err| tenferro_error("CpuBackend::with_kind", err))
+    }
+
+    /// [`Self::with_kind`] plus an explicit thread count for the provider.
+    pub fn with_threads_and_kind(threads: usize, kind: CpuBackendKind) -> Result<Self, DenseError> {
+        CpuBackend::with_threads_and_kind(threads, kind)
+            .map(Self::from_backend)
+            .map_err(|err| tenferro_error("CpuBackend::with_threads_and_kind", err))
     }
 
     fn from_backend(backend: CpuBackend) -> Self {

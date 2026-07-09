@@ -2,6 +2,7 @@
 //! tensor code never passes explicit contexts around.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,15 +38,39 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
     }
 }
 
+/// Builds one contraction/recoupling backend for the requested thread count and
+/// CPU GEMM provider. Both `None` yields the faer default; a `gemm_kind` of
+/// `Blas` fails if no `cpu-blas`/`blas-*` provider was compiled in.
+fn make_transform_ops(
+    threads: Option<usize>,
+    gemm_kind: Option<tenet_dense::CpuBackendKind>,
+) -> Result<DenseTreeTransformOperations, Error> {
+    let ops = match (threads, gemm_kind) {
+        (Some(threads), Some(kind)) => {
+            DenseTreeTransformOperations::with_threads_and_kind(threads, kind)
+        }
+        (None, Some(kind)) => DenseTreeTransformOperations::with_kind(kind),
+        (Some(threads), None) => DenseTreeTransformOperations::with_threads(threads),
+        (None, None) => Ok(DenseTreeTransformOperations::default_executor()),
+    };
+    Ok(ops?)
+}
+
 impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
-    fn with_dense_threads(threads: usize) -> Result<Self, Error> {
+    /// Builds the per-scalar contexts with an explicit thread count and/or CPU
+    /// GEMM provider for the contraction/recoupling backend. Passing `(None,
+    /// None)` reproduces [`Ctxs::default`] but through the same seam.
+    fn with_config(
+        threads: Option<usize>,
+        gemm_kind: Option<tenet_dense::CpuBackendKind>,
+    ) -> Result<Self, Error> {
         Ok(Self {
             f64:
                 Ctx::with_parts(
-                    tenet_tensors::TreeTransformExecutionContext::new(
-                        DenseTreeTransformOperations::with_threads(threads)?,
-                    ),
-                    DenseTreeTransformOperations::with_threads(threads)?,
+                    tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
+                        threads, gemm_kind,
+                    )?),
+                    make_transform_ops(threads, gemm_kind)?,
                     <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
                         f64,
                         f64,
@@ -53,10 +78,10 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     tenet_tensors::TensorContractCache::new(),
                 ),
             c64: Ctx::with_parts(
-                tenet_tensors::TreeTransformExecutionContext::new(
-                    DenseTreeTransformOperations::with_threads(threads)?,
-                ),
-                DenseTreeTransformOperations::with_threads(threads)?,
+                tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
+                    threads, gemm_kind,
+                )?),
+                make_transform_ops(threads, gemm_kind)?,
                 <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
                     Complex64,
                     f64,
@@ -117,17 +142,18 @@ impl RuntimeState {
         }
     }
 
-    fn with_dense_threads(
-        threads: usize,
+    fn with_config(
         dense: Box<dyn tenet_dense::DenseExecutor + Send>,
+        threads: Option<usize>,
+        gemm_kind: Option<tenet_dense::CpuBackendKind>,
     ) -> Result<Self, Error> {
         Ok(Self {
-            u1: Ctxs::with_dense_threads(threads)?,
-            z2: Ctxs::with_dense_threads(threads)?,
-            fz2: Ctxs::with_dense_threads(threads)?,
-            su2: Ctxs::with_dense_threads(threads)?,
-            u1_fz2: Ctxs::with_dense_threads(threads)?,
-            fz2_u1_su2: Ctxs::with_dense_threads(threads)?,
+            u1: Ctxs::with_config(threads, gemm_kind)?,
+            z2: Ctxs::with_config(threads, gemm_kind)?,
+            fz2: Ctxs::with_config(threads, gemm_kind)?,
+            su2: Ctxs::with_config(threads, gemm_kind)?,
+            u1_fz2: Ctxs::with_config(threads, gemm_kind)?,
+            fz2_u1_su2: Ctxs::with_config(threads, gemm_kind)?,
             dense,
             #[cfg(feature = "cuda")]
             cuda: None,
@@ -319,6 +345,33 @@ impl std::fmt::Debug for Runtime {
     }
 }
 
+/// Selects the CPU linear-algebra provider for dense per-coupled-sector
+/// factorizations (SVD / QR / eigh / GEMM), chosen via
+/// [`RuntimeBuilder::linalg_backend`]. Backend choice changes performance
+/// only — results stay TensorKit-equivalent across providers.
+///
+/// The *specific* BLAS/LAPACK behind [`LinalgBackend::Blas`] (OpenBLAS, MKL,
+/// Accelerate, or an injected provider) is a compile-time choice via the
+/// `blas-*` cargo features; at runtime you only pick faer vs the linked BLAS.
+/// Selecting `Blas` when no `cpu-blas`/`blas-*` provider was compiled in fails
+/// at [`RuntimeBuilder::build`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinalgBackend {
+    /// Pure-Rust faer provider (the default; always available).
+    Faer,
+    /// System BLAS/LAPACK linked through a `blas-*` cargo feature.
+    Blas,
+}
+
+impl LinalgBackend {
+    fn to_kind(self) -> tenet_dense::CpuBackendKind {
+        match self {
+            LinalgBackend::Faer => tenet_dense::CpuBackendKind::Faer,
+            LinalgBackend::Blas => tenet_dense::CpuBackendKind::Blas,
+        }
+    }
+}
+
 /// Builder for [`Runtime`]; see [`Runtime::builder`].
 ///
 /// Not `Clone`/`Debug`-derivable: an injected dense executor
@@ -334,6 +387,12 @@ pub struct RuntimeBuilder {
     recoupling_threads: Option<usize>,
     /// User-injected CPU linear-algebra backend; `None` uses the faer default.
     dense_executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
+    /// Selected built-in CPU provider for dense factorizations (SVD/QR/eigh);
+    /// `None` uses faer. Ignored when [`Self::dense_executor`] is set.
+    linalg_backend: Option<LinalgBackend>,
+    /// Selected built-in CPU provider for the contraction/recoupling GEMM;
+    /// `None` uses faer. Independent of [`Self::linalg_backend`].
+    gemm_backend: Option<LinalgBackend>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -345,6 +404,8 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("dense_threads", &self.dense_threads)
             .field("recoupling_threads", &self.recoupling_threads)
             .field("dense_executor", &self.dense_executor.is_some())
+            .field("linalg_backend", &self.linalg_backend)
+            .field("gemm_backend", &self.gemm_backend)
             .finish()
     }
 }
@@ -404,6 +465,73 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Selects a built-in CPU provider ([`LinalgBackend::Faer`] or
+    /// [`LinalgBackend::Blas`]) for the dense **factorizations** — SVD / QR /
+    /// eigh / eig / inv / exp (the LAPACK-style work). Unset uses faer. The
+    /// contraction GEMM (BLAS-style work) is chosen separately with
+    /// [`Self::gemm_backend`].
+    ///
+    /// This is the ergonomic counterpart to [`Self::with_dense_executor`] for
+    /// the shipped providers; an explicitly injected executor takes precedence.
+    /// Choosing [`LinalgBackend::Blas`] without a compiled `cpu-blas`/`blas-*`
+    /// provider fails in [`Self::build`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// // Explicit faer provider (also the default). Every tensor created from
+    /// // this runtime factorizes on the chosen backend — no per-call argument.
+    /// let rt = Runtime::builder()
+    ///     .linalg_backend(LinalgBackend::Faer)
+    ///     .build()?;
+    /// let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+    /// let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 7)?;
+    /// let (_u, _s, _vh) = t.svd_compact()?;
+    ///
+    /// // Switch to the system BLAS/LAPACK linked via a `blas-*` cargo feature
+    /// // (OpenBLAS / MKL / Accelerate). Results are identical to faer up to
+    /// // floating-point rounding; only performance differs. Without a linked
+    /// // provider this returns an error, so fall back to faer:
+    /// let rt = Runtime::builder()
+    ///     .linalg_backend(LinalgBackend::Blas)
+    ///     .build()
+    ///     .or_else(|_| Runtime::builder().build())?;
+    /// # let _ = rt;
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn linalg_backend(mut self, backend: LinalgBackend) -> Self {
+        self.linalg_backend = Some(backend);
+        self
+    }
+
+    /// Selects a built-in CPU provider ([`LinalgBackend::Faer`] or
+    /// [`LinalgBackend::Blas`]) for the coupled-block **contraction GEMM**
+    /// (`compose` / `contract` and the recoupling replays — the BLAS-style
+    /// work). Unset uses faer. Independent of [`Self::linalg_backend`]: the
+    /// factorizations and the contraction GEMM can run on different providers
+    /// (e.g. faer GEMM with BLAS/LAPACK factorizations, or the reverse).
+    /// Choosing [`LinalgBackend::Blas`] without a compiled `cpu-blas`/`blas-*`
+    /// provider fails in [`Self::build`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// // faer everywhere is the default; this is explicit and equivalent.
+    /// let rt = Runtime::builder()
+    ///     .gemm_backend(LinalgBackend::Faer)
+    ///     .build()?;
+    /// # let _ = rt;
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn gemm_backend(mut self, backend: LinalgBackend) -> Self {
+        self.gemm_backend = Some(backend);
+        self
+    }
+
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
@@ -426,20 +554,32 @@ impl RuntimeBuilder {
                 .num_threads(threads.max(1))
                 .build_global();
         }
-        // Injected backend wins; otherwise build the faer default, honoring the
-        // dense-thread count when set.
+        // Injected backend wins; otherwise build the selected provider (faer by
+        // default), honoring the dense-thread count when set.
         let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
             Some(executor) => executor,
-            None => match dense_threads {
-                Some(threads) => Box::new(
-                    tenet_dense::DefaultDenseExecutor::with_threads(threads)
-                        .map_err(tenet_tensors::OperationError::Dense)?,
-                ),
-                None => Box::new(tenet_dense::DefaultDenseExecutor::default()),
-            },
+            None => {
+                let kind = self.linalg_backend.map(LinalgBackend::to_kind);
+                match (kind, dense_threads) {
+                    (Some(kind), Some(threads)) => Box::new(
+                        tenet_dense::DefaultDenseExecutor::with_threads_and_kind(threads, kind)
+                            .map_err(tenet_tensors::OperationError::Dense)?,
+                    ),
+                    (Some(kind), None) => Box::new(
+                        tenet_dense::DefaultDenseExecutor::with_kind(kind)
+                            .map_err(tenet_tensors::OperationError::Dense)?,
+                    ),
+                    (None, Some(threads)) => Box::new(
+                        tenet_dense::DefaultDenseExecutor::with_threads(threads)
+                            .map_err(tenet_tensors::OperationError::Dense)?,
+                    ),
+                    (None, None) => Box::new(tenet_dense::DefaultDenseExecutor::default()),
+                }
+            }
         };
-        let mut state = if let Some(threads) = dense_threads {
-            RuntimeState::with_dense_threads(threads, dense)?
+        let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
+        let mut state = if dense_threads.is_some() || gemm_kind.is_some() {
+            RuntimeState::with_config(dense, dense_threads, gemm_kind)?
         } else {
             RuntimeState::new(dense)
         };
@@ -468,4 +608,87 @@ fn dense_threads_from_env() -> Option<usize> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .map(|threads| threads.max(1))
+}
+
+thread_local! {
+    static DEFAULT_RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
+}
+
+/// Sets the calling thread's default [`Runtime`], used by the argument-free
+/// tensor constructors ([`crate::prelude::zeros`], [`crate::prelude::rand`], …).
+///
+/// The default is **thread-local**: it is not shared with other threads, and
+/// passing a runtime explicitly (`Tensor::zeros(&rt, …)` or `rt.zeros(…)`)
+/// always works regardless of it — that is the escape hatch for using several
+/// runtimes at once (e.g. per MPI rank, or comparing backends). Call once near
+/// program start; a later call overwrites the default on this thread.
+///
+/// [`default!`](crate::default) is shorthand: `default!(rt)` == `set_default_runtime(&rt)`.
+///
+/// # Examples
+///
+/// ```
+/// use tenet::prelude::*;
+///
+/// let rt = Runtime::builder().build()?;
+/// default!(rt); // set once for this thread; equivalently set_default_runtime(&rt)
+///
+/// let v = Space::u1([(0, 1), (1, 1)]);
+/// let a = zeros(Dtype::F64, [&v], [&v])?; // no runtime argument
+/// assert_eq!(a.norm()?, 0.0);
+///
+/// // Explicit still works for a second runtime (e.g. another backend / rank):
+/// let rt2 = Runtime::builder().build()?;
+/// let b = rt2.zeros(Dtype::F64, [&v], [&v])?;
+/// # let _ = (a, b);
+/// # Ok::<(), tenet::prelude::Error>(())
+/// ```
+pub fn set_default_runtime(rt: &Runtime) {
+    DEFAULT_RUNTIME.with(|cell| *cell.borrow_mut() = Some(rt.clone()));
+}
+
+/// Returns the calling thread's default [`Runtime`] (a cheap handle clone), or
+/// an error if none was set with [`set_default_runtime`] / [`default!`](crate::default).
+pub fn default_runtime() -> Result<Runtime, Error> {
+    DEFAULT_RUNTIME.with(|cell| {
+        cell.borrow().clone().ok_or_else(|| {
+            Error::InvalidArgument(
+                "no default runtime set on this thread; call set_default_runtime(&rt) \
+                 (or default!(rt)), or pass a runtime explicitly"
+                    .to_string(),
+            )
+        })
+    })
+}
+
+/// Clears the calling thread's default [`Runtime`] (mainly for test isolation).
+pub fn clear_default_runtime() {
+    DEFAULT_RUNTIME.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Sets the calling thread's default runtime: `default!(rt)` is shorthand for
+/// [`set_default_runtime`]`(&rt)`.
+#[macro_export]
+macro_rules! default {
+    ($rt:expr) => {
+        $crate::set_default_runtime(&$rt)
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // All four provider/thread combinations of the contraction-backend builder
+    // must construct on faer (always compiled). Guards the `with_config` /
+    // `make_transform_ops` matrix, incl. the plain-default `(None, None)` arm
+    // that the builder's fast path would otherwise never exercise.
+    #[test]
+    fn transform_ops_builds_for_every_faer_config() {
+        let faer = tenet_dense::CpuBackendKind::Faer;
+        assert!(make_transform_ops(None, None).is_ok());
+        assert!(make_transform_ops(Some(1), None).is_ok());
+        assert!(make_transform_ops(None, Some(faer)).is_ok());
+        assert!(make_transform_ops(Some(1), Some(faer)).is_ok());
+    }
 }

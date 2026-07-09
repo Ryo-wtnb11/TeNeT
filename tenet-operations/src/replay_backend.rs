@@ -6,7 +6,7 @@ use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
     TensorMap,
 };
-use tenet_dense::{DefaultDenseExecutor, DenseExecutor};
+use tenet_dense::{CpuBackendKind, DefaultDenseExecutor, DenseExecutor};
 
 use crate::ReportsPlacement;
 
@@ -233,6 +233,26 @@ impl DenseTreeTransformOperations<DefaultDenseExecutor> {
     pub fn with_threads(threads: usize) -> Result<Self, OperationError> {
         Ok(Self::new(
             DefaultDenseExecutor::with_threads(threads).map_err(OperationError::Dense)?,
+        ))
+    }
+
+    /// Builds the contraction backend on a specific CPU provider
+    /// ([`CpuBackendKind`]) for the coupled-block GEMM. Fails if the provider
+    /// was not compiled in (e.g. `Blas` without a `cpu-blas`/`blas-*` feature).
+    pub fn with_kind(kind: CpuBackendKind) -> Result<Self, OperationError> {
+        Ok(Self::new(
+            DefaultDenseExecutor::with_kind(kind).map_err(OperationError::Dense)?,
+        ))
+    }
+
+    /// [`Self::with_kind`] plus an explicit thread count.
+    pub fn with_threads_and_kind(
+        threads: usize,
+        kind: CpuBackendKind,
+    ) -> Result<Self, OperationError> {
+        Ok(Self::new(
+            DefaultDenseExecutor::with_threads_and_kind(threads, kind)
+                .map_err(OperationError::Dense)?,
         ))
     }
 }
