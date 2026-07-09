@@ -2201,6 +2201,19 @@ impl Tensor {
     ) -> Result<Self, Error> {
         let rank = self.rank();
         let nout = self.codomain_rank();
+        // Identity permute (new arrangement == current codomain/domain, natural
+        // order) is a no-op: return the tensor unchanged, sharing its buffer,
+        // instead of allocating and running a copy. Matches TensorKit's
+        // `has_shared_permute(t, ...) && return t` (indexmanipulations.jl:91).
+        // Only `Permute` (not `Braid`/`Transpose`) — a braid may carry a
+        // nontrivial crossing even with identity axes, and transpose swaps
+        // sides. Measured ~27% of itebd's permutes.
+        if matches!(kind, TransformKind::Permute)
+            && codomain_axes.iter().copied().eq(0..nout)
+            && domain_axes.iter().copied().eq(nout..rank)
+        {
+            return Ok(self.clone());
+        }
         let operation = match kind {
             TransformKind::Permute => TreeTransformOperation::permute(
                 codomain_axes.iter().copied(),
