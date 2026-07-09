@@ -14,10 +14,33 @@ use super::{DenseBackend, DenseError};
 
 fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
     DenseError::Backend {
-        backend: DenseBackend::Tenferro,
+        backend: DenseBackend::Cuda,
         op,
         message: err.to_string(),
     }
+}
+
+/// Validates that every operand resides on the context's CUDA device, so a
+/// storage handle created from one context can't be silently used against
+/// another context's runtime — which would otherwise fail late inside
+/// tenferro/CUDA with a confusing error, or run against the wrong runtime.
+/// `operands` are `(name, device)` pairs; `ctx_device` is `ctx.device`.
+fn ensure_cuda_device(
+    ctx_device: usize,
+    op: &'static str,
+    operands: &[(&str, usize)],
+) -> Result<(), DenseError> {
+    for (name, device) in operands {
+        if *device != ctx_device {
+            return Err(cuda_error(
+                op,
+                format!(
+                    "operand `{name}` is on CUDA device {device} but the context is on device {ctx_device}"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Owns the tenferro CUDA backend for one device ordinal.
@@ -60,6 +83,7 @@ impl CudaDenseStorage {
 
     /// Downloads the flat device buffer back to host data.
     pub fn download_f64(&self, ctx: &CudaDenseContext) -> Result<Vec<f64>, DenseError> {
+        ensure_cuda_device(ctx.device, "cuda_download", &[("source", self.device)])?;
         let host = download_tensor(ctx.backend.runtime(), &self.tensor)
             .map_err(|err| cuda_error("cuda_download", err))?;
         match host {
@@ -188,6 +212,15 @@ pub fn cuda_gemm_region_into(
     alpha: f64,
     beta: f64,
 ) -> Result<(), DenseError> {
+    ensure_cuda_device(
+        ctx.device,
+        "cuda_matmul",
+        &[
+            ("dst", dst.device),
+            ("lhs", lhs.device),
+            ("rhs", rhs.device),
+        ],
+    )?;
     let lhs_view = lhs.region_view(m, k, lhs_ld, lhs_offset)?;
     let rhs_view = rhs.region_view(k, n, rhs_ld, rhs_offset)?;
     let dst_view = dst.region_view_mut(m, n, dst_ld, dst_offset)?;
@@ -258,6 +291,7 @@ pub fn cuda_svd_region(
     rows: usize,
     cols: usize,
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
+    ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
     let view = src.region_view(rows, cols, rows, offset)?;
     let mut outputs = ctx
         .backend
@@ -284,6 +318,7 @@ pub fn cuda_qr_region(
     rows: usize,
     cols: usize,
 ) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), DenseError> {
+    ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view(rows, cols, rows, offset)?;
     let mut outputs = ctx
         .backend
@@ -323,6 +358,7 @@ pub fn cuda_eigh_region(
     offset: usize,
     n: usize,
 ) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
+    ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
     let view = src.region_view(n, n, n, offset)?;
     let mut outputs = ctx
         .backend
@@ -337,4 +373,54 @@ pub fn cuda_eigh_region(
     let vectors = expect_f64("cuda_eigh", outputs.pop().expect("len checked"), ctx.device)?;
     let values = download_values(ctx, &outputs.pop().expect("len checked"))?;
     Ok((values, vectors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_cuda_device_accepts_matching_operands() {
+        assert!(
+            ensure_cuda_device(0, "op", &[("a", 0), ("b", 0)]).is_ok(),
+            "operands on the context device must be accepted"
+        );
+    }
+
+    #[test]
+    fn ensure_cuda_device_rejects_a_foreign_operand() {
+        let err = ensure_cuda_device(0, "cuda_matmul", &[("lhs", 0), ("rhs", 1)])
+            .expect_err("an operand on another device must be rejected");
+        match err {
+            DenseError::Backend {
+                backend,
+                op,
+                message,
+            } => {
+                assert_eq!(backend, DenseBackend::Cuda);
+                assert_eq!(op, "cuda_matmul");
+                assert!(
+                    message.contains("rhs"),
+                    "message names the operand: {message}"
+                );
+                assert!(
+                    message.contains("device 1"),
+                    "message names the device: {message}"
+                );
+            }
+            other => panic!("expected a CUDA backend error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cuda_errors_are_labelled_as_the_cuda_backend() {
+        // Regression for #38: CUDA failures must not be reported as Tenferro.
+        let err = cuda_error("cuda_svd", "boom");
+        let text = err.to_string();
+        assert!(text.contains("Cuda"), "formatted error names CUDA: {text}");
+        assert!(
+            !text.contains("Tenferro"),
+            "must not mislabel as Tenferro: {text}"
+        );
+    }
 }
