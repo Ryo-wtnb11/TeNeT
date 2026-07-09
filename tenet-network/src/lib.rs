@@ -35,8 +35,6 @@
 //!   [`greedy_slice`]) are ported; a memory-bounded sliced executor over
 //!   `Tensor` needs `select_index` on the user layer first.
 
-#[cfg(feature = "opt-path")]
-mod bitset_dp;
 mod cost;
 mod error;
 mod ir;
