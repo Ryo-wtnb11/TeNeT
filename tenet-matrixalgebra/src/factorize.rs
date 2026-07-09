@@ -596,7 +596,32 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    svd_compact_dyn(dense, rule, space, data).map(|svd| svd.singular_values)
+    // Values-only: per coupled sector call the no-vector SVD (`svd_vals`,
+    // LAPACK `job='N'`) and keep the spectrum. Unlike `svd_compact_dyn` this
+    // never builds the U/Vt spaces, allocates the factor buffers, gauge-fixes,
+    // or scatters blocks into the fusion-tree layout — all of which the old
+    // `svd_compact_dyn(..).map(|svd| svd.singular_values)` computed then threw
+    // away. LAPACK computes the singular values identically with or without
+    // vectors, so the spectrum is bit-for-bit the full-SVD spectrum.
+    let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
+    let mut singular_values = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let rank = matrix.rows.min(matrix.cols);
+        let input_shape = [matrix.rows, matrix.cols];
+        let input_strides = [1usize, matrix.rows];
+        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let s_tensor = dense
+            .svd_vals(D::dense_read(input))
+            .map_err(OperationError::Dense)?;
+        let mut s = D::real_spectrum(&s_tensor).map_err(OperationError::Dense)?;
+        s.truncate(rank);
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: s,
+        });
+    }
+    Ok(singular_values)
 }
 
 /// Truncated fusion-tensor SVD (MatrixAlgebraKit `svd_trunc`).
@@ -2488,7 +2513,37 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    eigh_full_dyn(dense, rule, space, data).map(|eigh| eigh.eigenvalues)
+    // Values-only: per sector call the no-vector Hermitian eig (`eigh_vals`,
+    // LAPACK `job='N'`) and keep the spectrum sorted descending by magnitude.
+    // Skips the eigenvector space/buffer, the vector reorder, gauge-fixing, and
+    // the block scatter that `eigh_full_dyn` did only to discard here. The sort
+    // is stable, so equal-magnitude ties keep LAPACK order — bit-for-bit the
+    // ordering `eigh_full_dyn` produces (it breaks ties by original index).
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires an endomorphism (codomain == domain)",
+        });
+    }
+    let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
+    let mut eigenvalues = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let n = matrix.rows;
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view =
+            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let values_tensor = dense
+            .eigh_vals(D::dense_read(view))
+            .map_err(OperationError::Dense)?;
+        let mut sorted = D::real_spectrum(&values_tensor).map_err(OperationError::Dense)?;
+        sorted.truncate(n);
+        sorted.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).expect("finite eigenvalues"));
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: sorted,
+        });
+    }
+    Ok(eigenvalues)
 }
 
 /// All general eigenvalues per coupled sector, descending by magnitude
@@ -2518,7 +2573,39 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    eig_full_dyn::<E, R, D>(dense, rule, space, data).map(|eig| eig.eigenvalues)
+    // Values-only: per sector call the no-vector general eig (`eig_vals`, LAPACK
+    // `job='N'`) and keep the complex spectrum sorted descending by magnitude.
+    // Skips the eigenvector reorder, gauge-fixing, and the factor-pair block
+    // assembly that `eig_full_dyn` did only to discard here. LAPACK's QR
+    // iteration yields the same eigenvalues regardless of `jobvr`, and the sort
+    // is stable, so this matches `eig_full_dyn`'s ordering bit-for-bit.
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eig requires an endomorphism (codomain == domain)",
+        });
+    }
+    let matricizations = sector_matricizations(rule, space.structure(), data, space.nout())?;
+    let mut eigenvalues = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let n = matrix.rows;
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view =
+            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+        let values_tensor = dense
+            .eig_vals(D::dense_read(view))
+            .map_err(OperationError::Dense)?;
+        validate_dense_shape(values_tensor.shape(), &[n])?;
+        let values =
+            <D::Eig as FactorScalar>::dense_slice(&values_tensor).map_err(OperationError::Dense)?;
+        let mut sorted: Vec<Complex64> = values[..n].iter().map(|&v| v.widen_complex()).collect();
+        sorted.sort_by(|a, b| b.norm().partial_cmp(&a.norm()).expect("finite eigenvalues"));
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: sorted,
+        });
+    }
+    Ok(eigenvalues)
 }
 
 /// Left null space `N : codomain <- W` (MatrixAlgebraKit `left_null`): the

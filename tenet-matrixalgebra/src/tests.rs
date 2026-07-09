@@ -1340,6 +1340,13 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
     let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
+    let svd = svd_vals(&mut dense_executor, &rule, &general).unwrap();
+    assert!(!svd.is_empty());
+    for entry in &svd {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0] >= pair[1] - 1e-12);
+        }
+    }
     let eigh = eigh_vals(&mut dense_executor, &rule, &hermitian).unwrap();
     assert!(!eigh.is_empty());
     for entry in &eigh {
@@ -1352,6 +1359,56 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
     for entry in &eig {
         for pair in entry.values.windows(2) {
             assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
+        }
+    }
+}
+
+#[test]
+fn values_only_entry_points_match_the_full_decomposition_spectra() {
+    // The `_vals` paths call LAPACK `job='N'` (no vectors) and must reproduce
+    // the full decomposition's spectrum. This is a numerical-agreement check,
+    // not bit-for-bit: LAPACK backends may route the vectors-vs-no-vectors
+    // cases through different routines (e.g. `gesdd` divide-and-conquer for the
+    // full SVD vs `gesvd` QR for values-only), which differ in the last ULPs.
+    let rule = Z2FusionRule;
+    let hermitian = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+
+    let tol = 1e-10;
+    let assert_real_close = |vals: &[SectorSpectrum], full: &[SectorSpectrum]| {
+        assert_eq!(vals.len(), full.len());
+        for (a, b) in vals.iter().zip(full) {
+            assert_eq!(a.sector, b.sector);
+            assert_eq!(a.values.len(), b.values.len());
+            for (x, y) in a.values.iter().zip(&b.values) {
+                assert!((x - y).abs() <= tol, "{x} vs {y}");
+            }
+        }
+    };
+
+    let svd_vals_spectra = svd_vals(&mut dense_executor, &rule, &general).unwrap();
+    let svd_full_spectra = svd_compact(&mut dense_executor, &rule, &general)
+        .unwrap()
+        .singular_values;
+    assert_real_close(&svd_vals_spectra, &svd_full_spectra);
+
+    let eigh_vals_spectra = eigh_vals(&mut dense_executor, &rule, &hermitian).unwrap();
+    let eigh_full_spectra = eigh_full(&mut dense_executor, &rule, &hermitian)
+        .unwrap()
+        .eigenvalues;
+    assert_real_close(&eigh_vals_spectra, &eigh_full_spectra);
+
+    let eig_vals_spectra = eig_vals(&mut dense_executor, &rule, &general).unwrap();
+    let eig_full_spectra = eig_full(&mut dense_executor, &rule, &general)
+        .unwrap()
+        .eigenvalues;
+    assert_eq!(eig_vals_spectra.len(), eig_full_spectra.len());
+    for (a, b) in eig_vals_spectra.iter().zip(&eig_full_spectra) {
+        assert_eq!(a.sector, b.sector);
+        assert_eq!(a.values.len(), b.values.len());
+        for (x, y) in a.values.iter().zip(&b.values) {
+            assert!((x - y).norm() <= tol, "{x} vs {y}");
         }
     }
 }

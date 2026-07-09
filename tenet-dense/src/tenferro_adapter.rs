@@ -316,6 +316,41 @@ impl DenseExecutor for DefaultDenseExecutor {
             .map_err(|err| tenferro_error("eigh_read", err))
     }
 
+    // Values-only overrides route to tenferro's no-vector LAPACK entries
+    // (`job='N'`), skipping the U/Vt (or eigenvector) computation the default
+    // fallback would do. The backend entries take an owned `&Tensor`, so the
+    // borrowed view is materialized to a contiguous tensor first — one cheap
+    // copy of the input matrix versus the discarded O(n^2) vector work.
+    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        let owned = tenferro_view(input)?
+            .to_tensor()
+            .map_err(|err| tenferro_error("svd_vals", err))?;
+        self.backend
+            .svd_values(&owned)
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("svd_values", err))
+    }
+
+    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        let owned = tenferro_view(input)?
+            .to_tensor()
+            .map_err(|err| tenferro_error("eigh_vals", err))?;
+        self.backend
+            .eigh_values(&owned)
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("eigh_values", err))
+    }
+
+    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        let owned = tenferro_view(input)?
+            .to_tensor()
+            .map_err(|err| tenferro_error("eig_vals", err))?;
+        self.backend
+            .eig_values(&owned)
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("eig_values", err))
+    }
+
     fn dot_general_into(
         &mut self,
         output: DenseWrite<'_>,
