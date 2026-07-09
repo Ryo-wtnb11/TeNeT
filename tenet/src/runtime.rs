@@ -319,6 +319,33 @@ impl std::fmt::Debug for Runtime {
     }
 }
 
+/// Selects the CPU linear-algebra provider for dense per-coupled-sector
+/// factorizations (SVD / QR / eigh / GEMM), chosen via
+/// [`RuntimeBuilder::linalg_backend`]. Backend choice changes performance
+/// only — results stay TensorKit-equivalent across providers.
+///
+/// The *specific* BLAS/LAPACK behind [`LinalgBackend::Blas`] (OpenBLAS, MKL,
+/// Accelerate, or an injected provider) is a compile-time choice via the
+/// `blas-*` cargo features; at runtime you only pick faer vs the linked BLAS.
+/// Selecting `Blas` when no `cpu-blas`/`blas-*` provider was compiled in fails
+/// at [`RuntimeBuilder::build`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinalgBackend {
+    /// Pure-Rust faer provider (the default; always available).
+    Faer,
+    /// System BLAS/LAPACK linked through a `blas-*` cargo feature.
+    Blas,
+}
+
+impl LinalgBackend {
+    fn to_kind(self) -> tenet_dense::CpuBackendKind {
+        match self {
+            LinalgBackend::Faer => tenet_dense::CpuBackendKind::Faer,
+            LinalgBackend::Blas => tenet_dense::CpuBackendKind::Blas,
+        }
+    }
+}
+
 /// Builder for [`Runtime`]; see [`Runtime::builder`].
 ///
 /// Not `Clone`/`Debug`-derivable: an injected dense executor
@@ -334,6 +361,9 @@ pub struct RuntimeBuilder {
     recoupling_threads: Option<usize>,
     /// User-injected CPU linear-algebra backend; `None` uses the faer default.
     dense_executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
+    /// Selected built-in CPU linear-algebra provider; `None` uses faer.
+    /// Ignored when [`Self::dense_executor`] is set (the injected backend wins).
+    linalg_backend: Option<LinalgBackend>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -345,6 +375,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("dense_threads", &self.dense_threads)
             .field("recoupling_threads", &self.recoupling_threads)
             .field("dense_executor", &self.dense_executor.is_some())
+            .field("linalg_backend", &self.linalg_backend)
             .finish()
     }
 }
@@ -404,6 +435,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Selects a built-in CPU linear-algebra provider ([`LinalgBackend::Faer`]
+    /// or [`LinalgBackend::Blas`]) for dense SVD / QR / eigh / GEMM. Unset uses
+    /// faer. This is the ergonomic counterpart to [`Self::with_dense_executor`]
+    /// for the shipped providers; an explicitly injected executor takes
+    /// precedence over this selection. Choosing [`LinalgBackend::Blas`] without
+    /// a compiled `cpu-blas`/`blas-*` provider fails in [`Self::build`].
+    pub fn linalg_backend(mut self, backend: LinalgBackend) -> Self {
+        self.linalg_backend = Some(backend);
+        self
+    }
+
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
@@ -426,17 +468,28 @@ impl RuntimeBuilder {
                 .num_threads(threads.max(1))
                 .build_global();
         }
-        // Injected backend wins; otherwise build the faer default, honoring the
-        // dense-thread count when set.
+        // Injected backend wins; otherwise build the selected provider (faer by
+        // default), honoring the dense-thread count when set.
         let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
             Some(executor) => executor,
-            None => match dense_threads {
-                Some(threads) => Box::new(
-                    tenet_dense::DefaultDenseExecutor::with_threads(threads)
-                        .map_err(tenet_tensors::OperationError::Dense)?,
-                ),
-                None => Box::new(tenet_dense::DefaultDenseExecutor::default()),
-            },
+            None => {
+                let kind = self.linalg_backend.map(LinalgBackend::to_kind);
+                match (kind, dense_threads) {
+                    (Some(kind), Some(threads)) => Box::new(
+                        tenet_dense::DefaultDenseExecutor::with_threads_and_kind(threads, kind)
+                            .map_err(tenet_tensors::OperationError::Dense)?,
+                    ),
+                    (Some(kind), None) => Box::new(
+                        tenet_dense::DefaultDenseExecutor::with_kind(kind)
+                            .map_err(tenet_tensors::OperationError::Dense)?,
+                    ),
+                    (None, Some(threads)) => Box::new(
+                        tenet_dense::DefaultDenseExecutor::with_threads(threads)
+                            .map_err(tenet_tensors::OperationError::Dense)?,
+                    ),
+                    (None, None) => Box::new(tenet_dense::DefaultDenseExecutor::default()),
+                }
+            }
         };
         let mut state = if let Some(threads) = dense_threads {
             RuntimeState::with_dense_threads(threads, dense)?
