@@ -363,11 +363,6 @@ pub(crate) fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseErr
         .ok_or(DenseError::OffsetOverflow { value: offset })
 }
 
-pub(crate) fn matrix_len(rows: usize, cols: usize) -> Result<usize, DenseError> {
-    rows.checked_mul(cols)
-        .ok_or(DenseError::ElementCountOverflow)
-}
-
 fn same_gemm_shape(lhs: &DenseGemmBatchJob, rhs: &DenseGemmBatchJob) -> bool {
     lhs.rows == rhs.rows && lhs.contracted == rhs.contracted && lhs.cols == rhs.cols
 }

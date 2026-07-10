@@ -1,6 +1,6 @@
 use num_complex::{Complex32, Complex64};
 
-use crate::executor::{batch_offset, matrix_len};
+use crate::executor::batch_offset;
 use crate::layout::strides_to_isize;
 use crate::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
@@ -238,34 +238,32 @@ impl DefaultDenseExecutor {
         {
             self.seam_dispatches += 1;
         }
+        // Only reached from the router with a run of length >= STRIDED_RUN_MIN
+        // (>= 2), so the batch strides come from the first two jobs' constant
+        // step (guaranteed constant by the plan-time run partition). The old
+        // singleton fallback is gone: singletons now route to the grouped seam.
+        debug_assert!(run.len() >= 2, "strided run must hold at least two jobs");
         let first = &run[0];
+        let next = &run[1];
         let run_len = run.len();
-        let (lhs_batch_stride, rhs_batch_stride, dst_batch_stride) = if run_len > 1 {
-            let next = &run[1];
-            (
-                next.lhs_offset.checked_sub(first.lhs_offset).ok_or(
-                    DenseError::OffsetOverflow {
-                        value: first.lhs_offset,
-                    },
-                )?,
-                next.rhs_offset.checked_sub(first.rhs_offset).ok_or(
-                    DenseError::OffsetOverflow {
-                        value: first.rhs_offset,
-                    },
-                )?,
-                next.dst_offset.checked_sub(first.dst_offset).ok_or(
-                    DenseError::OffsetOverflow {
-                        value: first.dst_offset,
-                    },
-                )?,
-            )
-        } else {
-            (
-                matrix_len(first.rows, first.contracted)?,
-                matrix_len(first.contracted, first.cols)?,
-                matrix_len(first.rows, first.cols)?,
-            )
-        };
+        let lhs_batch_stride =
+            next.lhs_offset
+                .checked_sub(first.lhs_offset)
+                .ok_or(DenseError::OffsetOverflow {
+                    value: first.lhs_offset,
+                })?;
+        let rhs_batch_stride =
+            next.rhs_offset
+                .checked_sub(first.rhs_offset)
+                .ok_or(DenseError::OffsetOverflow {
+                    value: first.rhs_offset,
+                })?;
+        let dst_batch_stride =
+            next.dst_offset
+                .checked_sub(first.dst_offset)
+                .ok_or(DenseError::OffsetOverflow {
+                    value: first.dst_offset,
+                })?;
         let lhs_shape = [first.rows, first.contracted, run_len];
         let lhs_strides = [1, first.rows, lhs_batch_stride];
         let rhs_shape = [first.contracted, first.cols, run_len];
