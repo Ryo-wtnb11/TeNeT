@@ -3804,4 +3804,368 @@ mod tests {
         assert_ne!(mult_free.cmp(&generic), std::cmp::Ordering::Equal);
         assert_ne!(generic.cmp(&mult_free), std::cmp::Ordering::Equal);
     }
+
+    // --- Stage B1: Generic-fusion Artin braid (braid × inverse == identity) --
+    //
+    // `UnitaryToyOmRule` is a *new* rule (pure addition — Stage A's
+    // `ToyOmRule` is left byte-for-byte untouched) with the same fusion
+    // structure (a⊗a→c has N=2, everything else N≤1, mixing an OM vertex with
+    // multiplicity-1 vertices), but with UNITARY F/R blocks so that TensorKit's
+    // inverse-braid identity actually holds:
+    //
+    //   * R(a,a,c) is a genuine 2×2 rotation (unitary), so the braid mixes the
+    //     two outer-multiplicity channels non-trivially — the round-trip test
+    //     is real, not vacuous.
+    //   * F(a,a,a,a,c,c) — the only F block the rank-3 braid touches — is the
+    //     2×2 IDENTITY. This is deliberate: the toy rule is not
+    //     hexagon-consistent, and for the index>1 braid the round-trip
+    //     coefficient works out to `Rθᵀ·M·Rθ·M` (M = that F block); with
+    //     nontrivial rotations Rθ, M that equals I *iff* M = I. A hexagon-
+    //     consistent model would let a nontrivial F cancel, but B1 only needs
+    //     the wiring + inverse-adjoint handling exercised, which the nontrivial
+    //     R already does. (Since both braided legs are the sector `a`,
+    //     R(a,b,c)=R(b,a,c), so no hexagon relation between the two R's is
+    //     needed for index==0 either.)
+    //   * F(a,a,0,c,c,a) is a genuine π/4 rotation, kept only so the unitarity
+    //     assertion test has a non-identity unitary F block to check. It is not
+    //     on any braid path here.
+    #[derive(Clone, Copy, Debug)]
+    struct UnitaryToyOmRule;
+
+    impl UnitaryToyOmRule {
+        const VACUUM: usize = 0;
+        const A: usize = 1;
+        const C: usize = 3;
+        // R(a,a,c) rotation angle. Any nonzero angle whose sin/cos are both
+        // nonzero makes the braid genuinely spread over both OM channels.
+        const R_THETA: f64 = std::f64::consts::PI / 5.0;
+    }
+
+    impl FusionRule for UnitaryToyOmRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            // Bosonic => has_braiding() (needed to pass the NoBraiding guard);
+            // the actual crossings are governed by the (non-symmetric) R blocks.
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(Self::VACUUM)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (Self::VACUUM, x) | (x, Self::VACUUM) => smallvec![SectorId::new(x)],
+                (Self::A, Self::A) => smallvec![SectorId::new(Self::C)],
+                (Self::A, Self::C) | (Self::C, Self::A) => smallvec![SectorId::new(Self::A)],
+                _ => smallvec![SectorId::new(Self::VACUUM)],
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (Self::A, Self::A, Self::C) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for UnitaryToyOmRule {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let n_mu = self.nsymbol(a, b, e);
+            let n_nu = self.nsymbol(e, c, d);
+            let n_kappa = self.nsymbol(b, c, f);
+            let n_lambda = self.nsymbol(a, f, d);
+            let shape = (n_mu, n_nu, n_kappa, n_lambda);
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            if ids == (Self::A, Self::A, Self::VACUUM, Self::C, Self::C, Self::A) {
+                // (mu, lambda) 2×2 block (nu = kappa = 0): a real π/4 rotation.
+                // Kept only for the unitarity assertion — not on a braid path.
+                let s = std::f64::consts::FRAC_1_SQRT_2;
+                GenericFArray::new(vec![s, -s, s, s], shape)
+            } else if ids == (Self::A, Self::A, Self::A, Self::A, Self::C, Self::C) {
+                // The one F block the rank-3 braid reads: shape (2,1,2,1), a
+                // 2×2 in (mu, kappa). IDENTITY (see the module comment for why
+                // it must be I, not a rotation). Row-major over
+                // (mu, nu, kappa, lambda): flat idx = mu*2 + kappa.
+                GenericFArray::new(vec![1.0, 0.0, 0.0, 1.0], shape)
+            } else {
+                // Defensive default: identity on the leading diagonal of the
+                // flattened ((mu,nu) × (kappa,lambda)) matrix. For 1×1 blocks
+                // this is [1.0] (unitary); for any larger square block it is a
+                // genuine unitary. No such block is reached by these tests, but
+                // an all-ones fill would be silently non-unitary if one were.
+                let rows = n_mu * n_nu;
+                let cols = n_kappa * n_lambda;
+                let mut data = vec![0.0; rows * cols];
+                for r in 0..rows {
+                    if r < cols {
+                        data[r * cols + r] = 1.0;
+                    }
+                }
+                GenericFArray::new(data, shape)
+            }
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let rows = self.nsymbol(a, b, c);
+            let cols = self.nsymbol(b, a, c);
+            if (a.id(), b.id(), c.id()) == (Self::A, Self::A, Self::C) {
+                // 2×2 rotation Rθ = [[cosθ, -sinθ], [sinθ, cosθ]] (unitary),
+                // row-major. This is the block that makes the braid non-trivial.
+                let (s, c_) = Self::R_THETA.sin_cos();
+                GenericRMatrix::new(vec![c_, -s, s, c_], rows, cols)
+            } else {
+                // Every other block is 1×1 with modulus-1 entry (unitary).
+                GenericRMatrix::new(vec![1.0; rows * cols], rows, cols)
+            }
+        }
+    }
+
+    // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
+    fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(vertex)])
+            .with_has_multiplicity(true)
+    }
+
+    // Rank-3 tree [a, a, a] -> a: fuse a⊗a->c (OM vertex `vertex1`, N=2), then
+    // c⊗a->a (vertex2, forced label 1). Innerline [c]. Mixes an OM vertex with
+    // a multiplicity-1 vertex.
+    fn unitary_rank3_tree(vertex1: usize) -> FusionTreeKey {
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        FusionTreeKey::new(
+            [a, a, a],
+            Some(a),
+            [false, false, false],
+            [c],
+            [SectorId::new(vertex1), SectorId::new(1)],
+        )
+        .with_has_multiplicity(true)
+    }
+
+    // Braid at `index` (inv=false) then braid every output at `index`
+    // (inv=true), summing coefficients per final tree. TensorKit's inverse
+    // identity: this must equal the input tree with coefficient 1.
+    fn braid_then_inverse_braid(
+        rule: &UnitaryToyOmRule,
+        tree: &FusionTreeKey,
+        index: usize,
+    ) -> std::collections::HashMap<FusionTreeKey, f64> {
+        let forward = generic_artin_braid_at_with_inverse(rule, tree, index, false).unwrap();
+        let mut totals: std::collections::HashMap<FusionTreeKey, f64> =
+            std::collections::HashMap::new();
+        for (mid, c_forward) in forward {
+            let inverse = generic_artin_braid_at_with_inverse(rule, &mid, index, true).unwrap();
+            for (final_tree, c_inverse) in inverse {
+                *totals.entry(final_tree).or_insert(0.0) += c_forward * c_inverse;
+            }
+        }
+        totals
+    }
+
+    fn assert_is_identity_on(
+        totals: &std::collections::HashMap<FusionTreeKey, f64>,
+        original: &FusionTreeKey,
+    ) {
+        let on_original = totals.get(original).copied().unwrap_or(0.0);
+        assert!(
+            (on_original - 1.0).abs() < 1e-12,
+            "braid × inverse must be 1 on the original tree, got {on_original}"
+        );
+        for (tree, coeff) in totals {
+            if tree != original {
+                assert!(
+                    coeff.abs() < 1e-12,
+                    "braid × inverse must be 0 off the original tree, got {coeff}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unitary_toy_om_rule_r_and_f_blocks_are_unitary() {
+        // Precondition of the round-trip tests: the F/R blocks the braid uses
+        // are genuinely unitary. Assert it here so the identity tests below
+        // rest on a checked assumption, not an asserted-by-fiat one.
+        let rule = UnitaryToyOmRule;
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        let vacuum = SectorId::new(UnitaryToyOmRule::VACUUM);
+
+        // R(a,a,c): 2×2, must satisfy Rᵀ R = I.
+        let r = rule.r_symbol_generic(a, a, c);
+        assert_eq!(r.shape(), (2, 2));
+        for col in 0..2 {
+            for other in 0..2 {
+                let dot: f64 = (0..2).map(|row| r.get(row, col) * r.get(row, other)).sum();
+                let expected = if col == other { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-12,
+                    "R(a,a,c) is not unitary at columns {col},{other}: {dot}"
+                );
+            }
+        }
+
+        // F(a,a,a,a,c,c): the braid's F block, shape (2,1,2,1) => 2×2 in
+        // (mu,kappa). Must be unitary (it is the identity here).
+        let f_braid = rule.f_symbol_generic(a, a, a, a, c, c);
+        assert_eq!(f_braid.shape(), (2, 1, 2, 1));
+        for mu in 0..2 {
+            for other in 0..2 {
+                let dot: f64 = (0..2)
+                    .map(|kappa| f_braid.get(mu, 0, kappa, 0) * f_braid.get(other, 0, kappa, 0))
+                    .sum();
+                let expected = if mu == other { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-12,
+                    "F(a,a,a,a,c,c) is not unitary at rows {mu},{other}: {dot}"
+                );
+            }
+        }
+
+        // F(a,a,0,c,c,a): the non-identity unitary F block, (mu,lambda) 2×2.
+        let f_rot = rule.f_symbol_generic(a, a, vacuum, c, c, a);
+        assert_eq!(f_rot.shape(), (2, 1, 1, 2));
+        for col in 0..2 {
+            for other in 0..2 {
+                let dot: f64 = (0..2)
+                    .map(|row| f_rot.get(row, 0, 0, col) * f_rot.get(row, 0, 0, other))
+                    .sum();
+                let expected = if col == other { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-12,
+                    "F(a,a,0,c,c,a) is not unitary at columns {col},{other}: {dot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generic_braid_index0_output_count_matches_nsymbol() {
+        // Test (2): the forward braid of [a,a]->c at index 0 produces exactly
+        // N(a,a,c) = 2 output trees, labelled with vertices 1 and 2 (both
+        // nonzero because Rθ is a full rotation).
+        let rule = UnitaryToyOmRule;
+        let tree = unitary_rank2_tree(1);
+        let outputs = generic_artin_braid_at_with_inverse(&rule, &tree, 0, false).unwrap();
+        assert_eq!(outputs.len(), 2, "expected N(a,a,c)=2 output trees");
+        let mut labels: Vec<usize> = outputs
+            .iter()
+            .map(|(t, _)| {
+                assert!(t.has_multiplicity(), "Generic braid output must be flagged");
+                t.vertices()[0].id()
+            })
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(labels, vec![1, 2], "output vertex labels must be {{1,2}}");
+    }
+
+    #[test]
+    fn generic_braid_index1_output_count_matches_nsymbol() {
+        // Test (2), index>0 branch: braid of [a,a,a]->a at index 1 produces the
+        // single c'=c channel, σ ∈ {1,2} (N(a,a,c)=2), λ = 1 (N(c,a,a)=1).
+        let rule = UnitaryToyOmRule;
+        let tree = unitary_rank3_tree(1);
+        let outputs = generic_artin_braid_at_with_inverse(&rule, &tree, 1, false).unwrap();
+        assert_eq!(outputs.len(), 2, "expected 2 (σ) output trees at index 1");
+        let mut labels: Vec<(usize, usize)> = outputs
+            .iter()
+            .map(|(t, _)| {
+                assert_eq!(t.innerlines(), &[SectorId::new(UnitaryToyOmRule::C)]);
+                (t.vertices()[0].id(), t.vertices()[1].id())
+            })
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(labels, vec![(1, 1), (2, 1)]);
+    }
+
+    #[test]
+    fn generic_braid_inverse_is_identity_rank2_index0() {
+        // Test (1), index==0 branch, over every enumerated vertex assignment.
+        let rule = UnitaryToyOmRule;
+        for vertex in 1..=2 {
+            let tree = unitary_rank2_tree(vertex);
+            let totals = braid_then_inverse_braid(&rule, &tree, 0);
+            assert_is_identity_on(&totals, &tree);
+        }
+    }
+
+    #[test]
+    fn generic_braid_inverse_is_identity_rank3_index0() {
+        // Test (1) + (4): index==0 on a rank>2 tree (uses the innerline as the
+        // coupled sector for R), over every OM vertex assignment.
+        let rule = UnitaryToyOmRule;
+        for vertex1 in 1..=2 {
+            let tree = unitary_rank3_tree(vertex1);
+            let totals = braid_then_inverse_braid(&rule, &tree, 0);
+            assert_is_identity_on(&totals, &tree);
+        }
+    }
+
+    #[test]
+    fn generic_braid_inverse_is_identity_rank3_index1() {
+        // Test (1) + (4): the index>1 branch (F-move + R·F̄·R̄ contraction),
+        // over every OM vertex assignment.
+        let rule = UnitaryToyOmRule;
+        for vertex1 in 1..=2 {
+            let tree = unitary_rank3_tree(vertex1);
+            let totals = braid_then_inverse_braid(&rule, &tree, 1);
+            assert_is_identity_on(&totals, &tree);
+        }
+    }
+
+    #[test]
+    fn generic_braid_tree_roundtrip_is_identity() {
+        // Exercises `generic_braid_tree`: braid [a,a]->c with the swap
+        // permutation under levels [0,1] (=> inv=false), then braid the outputs
+        // back under levels [1,0] (=> inv=true). The composite must be identity.
+        let rule = UnitaryToyOmRule;
+        for vertex in 1..=2 {
+            let tree = unitary_rank2_tree(vertex);
+            let forward = generic_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
+            let mut totals: std::collections::HashMap<FusionTreeKey, f64> =
+                std::collections::HashMap::new();
+            for (mid, c_forward) in forward {
+                let back = generic_braid_tree(&rule, &mid, &[1, 0], &[1, 0]).unwrap();
+                for (final_tree, c_back) in back {
+                    *totals.entry(final_tree).or_insert(0.0) += c_forward * c_back;
+                }
+            }
+            assert_is_identity_on(&totals, &tree);
+        }
+    }
+
+    #[test]
+    fn generic_braid_tree_identity_permutation_is_noop() {
+        // The identity permutation decomposes to zero swaps: the tree returns
+        // unchanged with coefficient 1.
+        let rule = UnitaryToyOmRule;
+        let tree = unitary_rank3_tree(2);
+        let out = generic_braid_tree(&rule, &tree, &[0, 1, 2], &[0, 1, 2]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, tree);
+        assert!((out[0].1 - 1.0).abs() < 1e-12);
+    }
 }
