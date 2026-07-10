@@ -9,13 +9,16 @@ use crate::{
     RecouplingCoefficientAction,
 };
 
+const FUSED_RANK_LIMIT: usize = 8;
+
 thread_local! {
-    /// Reused fused-loop scratch so replay copies allocate nothing after warmup,
-    /// for ANY rank. The previous stack-array fast path capped rank at 8 and fell
-    /// back to an allocating strided-view kernel (StridedView::new + plan build)
-    /// for the rank>8 contraction intermediates that dominate warm replay.
-    /// Reusing one buffer per thread mirrors TensorOperations.jl reusing a
-    /// temporaries allocator instead of allocating per contraction.
+    /// Reused fused-loop scratch for the rank > FUSED_RANK_LIMIT tail only.
+    /// Those high-rank contraction intermediates dominate warm replay, and
+    /// reusing one buffer per thread keeps them alloc-free after warmup (warm
+    /// chi16 -58%, chi32 -64%; commit 12748cf), beating the old rank>8
+    /// per-call StridedView allocation. Low-rank (<= FUSED_RANK_LIMIT) copies
+    /// never reach this path — they use the stack-array layout below, which is
+    /// faster per call and dominates the d=4 microbench (see issue #103).
     static FUSE_SCRATCH: RefCell<FuseScratch> = const { RefCell::new(FuseScratch::new()) };
 }
 
@@ -38,14 +41,153 @@ impl FuseScratch {
     }
 }
 
+/// Allocation-free fused loop layout for one (destination, source) view pair.
+///
+/// Axes with extent 1 are dropped, the rest are ordered by destination stride
+/// and adjacent axes are fused when both stride patterns are contiguous, so
+/// small replay copies avoid per-call heap allocation and plan building.
+#[derive(Clone, Copy, Debug)]
+struct FusedPairLayout {
+    rank: usize,
+    dims: [usize; FUSED_RANK_LIMIT],
+    dst_strides: [isize; FUSED_RANK_LIMIT],
+    src_strides: [isize; FUSED_RANK_LIMIT],
+}
+
+fn fuse_pair_layout(
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+) -> Option<FusedPairLayout> {
+    if shape.len() > FUSED_RANK_LIMIT {
+        return None;
+    }
+    let mut layout = FusedPairLayout {
+        rank: 0,
+        dims: [1; FUSED_RANK_LIMIT],
+        dst_strides: [0; FUSED_RANK_LIMIT],
+        src_strides: [0; FUSED_RANK_LIMIT],
+    };
+    for axis in 0..shape.len() {
+        if shape[axis] == 1 {
+            continue;
+        }
+        if shape[axis] == 0 {
+            return Some(FusedPairLayout {
+                rank: 1,
+                dims: [0; FUSED_RANK_LIMIT],
+                dst_strides: [0; FUSED_RANK_LIMIT],
+                src_strides: [0; FUSED_RANK_LIMIT],
+            });
+        }
+        let mut position = layout.rank;
+        while position > 0 && layout.dst_strides[position - 1] > dst_strides[axis] {
+            layout.dims[position] = layout.dims[position - 1];
+            layout.dst_strides[position] = layout.dst_strides[position - 1];
+            layout.src_strides[position] = layout.src_strides[position - 1];
+            position -= 1;
+        }
+        layout.dims[position] = shape[axis];
+        layout.dst_strides[position] = dst_strides[axis];
+        layout.src_strides[position] = src_strides[axis];
+        layout.rank += 1;
+    }
+    if layout.rank == 0 {
+        layout.rank = 1;
+        layout.dims[0] = 1;
+    }
+    let mut fused = 0usize;
+    for axis in 1..layout.rank {
+        let extent = layout.dims[fused] as isize;
+        if layout.dst_strides[fused] * extent == layout.dst_strides[axis]
+            && layout.src_strides[fused] * extent == layout.src_strides[axis]
+        {
+            layout.dims[fused] *= layout.dims[axis];
+        } else {
+            fused += 1;
+            layout.dims[fused] = layout.dims[axis];
+            layout.dst_strides[fused] = layout.dst_strides[axis];
+            layout.src_strides[fused] = layout.src_strides[axis];
+        }
+    }
+    layout.rank = fused + 1;
+    Some(layout)
+}
+
+/// Applies `dst = apply(dst, op(src))` over a fixed-capacity stack layout with a
+/// plain loop nest; safe indexing keeps out-of-bounds layouts a panic rather
+/// than undefined behavior. Zero heap, zero indirection — the fast path for
+/// rank <= FUSED_RANK_LIMIT.
+#[allow(clippy::too_many_arguments)]
+fn apply_fused_pair<T, Apply, ElementOp>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    layout: &FusedPairLayout,
+    dst_offset: isize,
+    src_offset: isize,
+    apply: Apply,
+    op: ElementOp,
+) where
+    T: Copy,
+    Apply: Fn(&mut T, T),
+    ElementOp: Fn(T) -> T,
+{
+    if layout.dims[..layout.rank].iter().any(|&dim| dim == 0) {
+        return;
+    }
+    let inner_len = layout.dims[0];
+    let inner_dst = layout.dst_strides[0];
+    let inner_src = layout.src_strides[0];
+    let mut index = [0usize; FUSED_RANK_LIMIT];
+    let mut dst_base = dst_offset;
+    let mut src_base = src_offset;
+    loop {
+        if inner_dst == 1 && inner_src == 1 {
+            let dst_start = dst_base as usize;
+            let src_start = src_base as usize;
+            let dst = &mut dst_data[dst_start..dst_start + inner_len];
+            let src = &src_data[src_start..src_start + inner_len];
+            for position in 0..inner_len {
+                apply(&mut dst[position], op(src[position]));
+            }
+        } else {
+            for position in 0..inner_len {
+                let dst_position = (dst_base + position as isize * inner_dst) as usize;
+                let src_position = (src_base + position as isize * inner_src) as usize;
+                apply(&mut dst_data[dst_position], op(src_data[src_position]));
+            }
+        }
+        let mut axis = 1;
+        loop {
+            if axis >= layout.rank {
+                return;
+            }
+            index[axis] += 1;
+            dst_base += layout.dst_strides[axis];
+            src_base += layout.src_strides[axis];
+            if index[axis] < layout.dims[axis] {
+                break;
+            }
+            dst_base -= layout.dims[axis] as isize * layout.dst_strides[axis];
+            src_base -= layout.dims[axis] as isize * layout.src_strides[axis];
+            index[axis] = 0;
+            axis += 1;
+        }
+    }
+}
+
 /// Runs `dst = apply(dst, op(src))` over one (destination, source) strided view
 /// pair with a plain loop nest and NO per-call allocation, for any rank.
 ///
-/// The fused layout (extent-1 axes dropped, remaining axes ordered by
-/// destination stride, adjacent contiguous axes merged) is built into the
-/// thread-local scratch whose backing buffers are retained across calls, so the
-/// hot replay path never touches the heap after warmup. Safe indexing keeps an
-/// out-of-bounds layout a panic rather than undefined behavior.
+/// Hybrid dispatch (see issue #103): rank <= FUSED_RANK_LIMIT takes the
+/// stack-array layout (`apply_fused_pair`), which has zero heap and zero
+/// indirection and recovers the d=4 per-call regression that commit 12748cf
+/// introduced when it routed every rank through the thread_local scratch. Rank
+/// > FUSED_RANK_LIMIT keeps 12748cf's reused thread_local scratch, preserving
+/// its large-chi warm-alloc win. Both paths run the identical layout algorithm
+/// (extent-1 axes dropped, axes ordered by destination stride, adjacent
+/// contiguous axes fused), so the produced values are byte-identical; only the
+/// dispatch differs.
 #[allow(clippy::too_many_arguments)]
 fn fused_pair<T, Apply, ElementOp>(
     dst_data: &mut [T],
@@ -63,6 +205,10 @@ fn fused_pair<T, Apply, ElementOp>(
     ElementOp: Fn(T) -> T,
 {
     if shape.iter().any(|&dim| dim == 0) {
+        return;
+    }
+    if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
+        apply_fused_pair(dst_data, src_data, &layout, dst_offset, src_offset, apply, op);
         return;
     }
     FUSE_SCRATCH.with(|cell| {
