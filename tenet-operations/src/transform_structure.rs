@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
-use tenet_dense::DenseGemmBatchJob;
+use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
 use crate::strided::{column_major_strides_isize, element_count, offset_to_isize};
 use crate::structure_identity::validate_structure_identity;
@@ -37,6 +37,9 @@ pub struct TreeTransformRecouplingPlan {
     coefficient_len: usize,
     block_indices: Vec<usize>,
     jobs: Vec<DenseGemmBatchJob>,
+    // Plan-time run partition of `jobs` (see issue #103): the dense backend
+    // reads it to route each run without recomputing the partition per replay.
+    runs: Vec<usize>,
 }
 
 impl TreeTransformRecouplingPlan {
@@ -58,6 +61,13 @@ impl TreeTransformRecouplingPlan {
     #[inline]
     pub fn jobs(&self) -> &[DenseGemmBatchJob] {
         &self.jobs
+    }
+
+    /// Plan-time run partition of [`Self::jobs`]; handed to the backend so it
+    /// routes runs without recomputing the partition (see issue #103).
+    #[inline]
+    pub fn runs(&self) -> &[usize] {
+        &self.runs
     }
 
     #[inline]
@@ -563,12 +573,14 @@ fn compile_recoupling_plan(
             .checked_add(block_coefficient_len)
             .ok_or(OperationError::ElementCountOverflow)?;
     }
+    let runs = strided_batch_runs(&jobs);
     Ok(TreeTransformRecouplingPlan {
         source_len,
         destination_len,
         coefficient_len,
         block_indices,
         jobs,
+        runs,
     })
 }
 
@@ -721,4 +733,38 @@ pub struct TreeTransformLayout {
     rank: usize,
     pub offset: isize,
     pub element_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn multi(element_count: usize, src_count: usize, dst_count: usize) -> TreeTransformBlock {
+        TreeTransformBlock::Multi {
+            dst_layout_start: 0,
+            dst_count,
+            src_layout_start: 0,
+            src_count,
+            coefficient_start: 0,
+            element_count,
+        }
+    }
+
+    #[test]
+    fn recoupling_plan_bakes_run_partition() {
+        // Two same-shape Multi blocks fold into one length-2 constant-stride
+        // run; a third differently-shaped block is a singleton. The compiled
+        // plan stores that partition (issue #103) so the backend routes it
+        // without recomputing, and it always covers every job.
+        let blocks = vec![multi(2, 2, 2), multi(2, 2, 2), multi(3, 1, 1)];
+        let plan = compile_recoupling_plan(&blocks).unwrap();
+        assert_eq!(plan.jobs().len(), 3);
+        assert_eq!(plan.runs(), &[2, 1]);
+        assert_eq!(plan.runs(), strided_batch_runs(plan.jobs()));
+        assert_eq!(
+            plan.runs().iter().sum::<usize>(),
+            plan.jobs().len(),
+            "run partition must cover all jobs"
+        );
+    }
 }

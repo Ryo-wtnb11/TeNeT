@@ -11,7 +11,7 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
     SimilarStorage, TensorStorage,
 };
-use tenet_dense::DenseGemmBatchJob;
+use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
 use crate::placement::ReportsPlacement;
 use crate::profile::TensorContractFusionProfile;
@@ -120,6 +120,12 @@ pub struct FusionBlockContractPlan {
     // `matmul_rank2_batch` call. `None` marks a non-direct plan — a valid
     // compile output used only for route decisions, never replayed.
     direct_batch: Option<Vec<Rank2GemmBatchJob>>,
+    // Plan-time run partition of `direct_batch` (see issue #103): the backend
+    // reads it to route each run without recomputing the partition per replay.
+    // Empty for a non-direct plan. A backend-agnostic shape fact, so it lives in
+    // this operations-layer plan struct while the route choice (strided seam vs
+    // grouped) stays at the dense-executor boundary.
+    direct_batch_runs: Vec<usize>,
 }
 
 impl FusionBlockContractPlan {
@@ -143,6 +149,10 @@ impl FusionBlockContractPlan {
         groups: Vec<FusionBlockContractGroupPlan>,
     ) -> Result<Self, OperationError> {
         let direct_batch = compile_direct_batch(&groups)?;
+        let direct_batch_runs = direct_batch
+            .as_deref()
+            .map(strided_batch_runs)
+            .unwrap_or_default();
         Ok(Self {
             dst_structure,
             lhs_structure,
@@ -150,6 +160,7 @@ impl FusionBlockContractPlan {
             inactive_dst_scale_blocks,
             groups,
             direct_batch,
+            direct_batch_runs,
         })
     }
 
@@ -327,6 +338,12 @@ impl FusionBlockContractPlan {
             .ok_or(OperationError::UnsupportedTensorContractScope {
                 message: NON_COUPLED_OPERAND_MESSAGE,
             })
+    }
+
+    /// Plan-time run partition of [`Self::direct_batch`]; handed to the backend
+    /// alongside the jobs so it routes runs without recomputing the partition.
+    fn direct_batch_runs(&self) -> &[usize] {
+        &self.direct_batch_runs
     }
 
     /// Storage-aware raw replay for callers whose operands are scratch buffers
@@ -940,6 +957,59 @@ mod tests {
             offsets,
             vec![(0, 0, 0), (4, 4, 4), (8, 8, 8), (12, 12, 12), (16, 16, 16)]
         );
+    }
+
+    #[test]
+    fn direct_batch_plan_bakes_run_partition() {
+        // Five same-shape groups fold into one length-5 constant-stride run;
+        // the plan stores that partition (issue #103) so the backend routes it
+        // without recomputing. Storage matches the shared partition helper.
+        let groups = [2usize, 0, 4, 1, 3]
+            .into_iter()
+            .map(|block| {
+                let base = block * 4;
+                group_plan((2, 2, 2), (base, base, base))
+            })
+            .collect::<Vec<_>>();
+        let structure = Arc::new(BlockStructure::trivial(&[20]).unwrap());
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            groups,
+        )
+        .unwrap();
+        assert_eq!(plan.direct_batch_runs(), &[5]);
+        assert_eq!(
+            plan.direct_batch_runs(),
+            strided_batch_runs(plan.direct_batch().unwrap())
+        );
+        assert_eq!(
+            plan.direct_batch_runs().iter().sum::<usize>(),
+            plan.direct_batch().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn non_direct_plan_has_empty_run_partition() {
+        let plan = FusionBlockContractGroupPlan::new(
+            direct_group(2, 3, None),
+            direct_group(3, 4, Some(0)),
+            direct_group(2, 4, Some(0)),
+        )
+        .unwrap();
+        let structure = Arc::new(BlockStructure::trivial(&[12]).unwrap());
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            vec![plan],
+        )
+        .unwrap();
+        assert!(!plan.is_fully_direct());
+        assert!(plan.direct_batch_runs().is_empty());
     }
 
     #[test]
