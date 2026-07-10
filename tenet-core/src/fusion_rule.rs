@@ -105,6 +105,113 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
     }
 }
 
+/// Dense rank-4 F-symbol block for `FusionStyleKind::Generic` (outer
+/// multiplicity) rules: `F(a,b,c,d,e,f)[mu,nu,kappa,lambda]` with shape
+/// `(N(a,b,e), N(e,c,d), N(b,c,f), N(a,f,d))` — TensorKit `GenericFusion`
+/// convention (`sectors.jl` Fsymbol). Row-major over `[mu,nu,kappa,lambda]`.
+///
+/// Deliberately a plain `Vec<Scalar>` + shape tuple, not an ndarray-style
+/// type: Stage A only needs this to type-check and hold toy-rule test data,
+/// nobody indexes it on a hot path yet (that lands with the Stage B recouple
+/// wrapper). Reaching for a real N-d array crate now would be solving a
+/// problem Stage A doesn't have.
+#[derive(Clone, Debug)]
+pub struct GenericFArray<Scalar> {
+    data: Vec<Scalar>,
+    shape: (usize, usize, usize, usize),
+}
+
+impl<Scalar> GenericFArray<Scalar> {
+    pub fn new(data: Vec<Scalar>, shape: (usize, usize, usize, usize)) -> Self {
+        let (n_mu, n_nu, n_kappa, n_lambda) = shape;
+        debug_assert_eq!(
+            data.len(),
+            n_mu * n_nu * n_kappa * n_lambda,
+            "GenericFArray data length must match shape product"
+        );
+        Self { data, shape }
+    }
+
+    #[inline]
+    pub fn shape(&self) -> (usize, usize, usize, usize) {
+        self.shape
+    }
+
+    #[inline]
+    pub fn data(&self) -> &[Scalar] {
+        &self.data
+    }
+
+    /// `F[mu,nu,kappa,lambda]`, row-major over the shape tuple.
+    pub fn get(&self, mu: usize, nu: usize, kappa: usize, lambda: usize) -> &Scalar {
+        let (_, n_nu, n_kappa, n_lambda) = self.shape;
+        let idx = ((mu * n_nu + nu) * n_kappa + kappa) * n_lambda + lambda;
+        &self.data[idx]
+    }
+}
+
+/// Dense R-symbol matrix for `FusionStyleKind::Generic` rules:
+/// `R(a,b,c)` is `N(a,b,c) x N(b,a,c)`, row-major.
+#[derive(Clone, Debug)]
+pub struct GenericRMatrix<Scalar> {
+    data: Vec<Scalar>,
+    rows: usize,
+    cols: usize,
+}
+
+impl<Scalar> GenericRMatrix<Scalar> {
+    pub fn new(data: Vec<Scalar>, rows: usize, cols: usize) -> Self {
+        debug_assert_eq!(
+            data.len(),
+            rows * cols,
+            "GenericRMatrix data length must match rows * cols"
+        );
+        Self { data, rows, cols }
+    }
+
+    #[inline]
+    pub fn shape(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    #[inline]
+    pub fn data(&self) -> &[Scalar] {
+        &self.data
+    }
+
+    pub fn get(&self, row: usize, col: usize) -> &Scalar {
+        &self.data[row * self.cols + col]
+    }
+}
+
+/// Outer-multiplicity ("Generic" fusion, TensorKit `FusionStyle` = `GenericFusion`)
+/// sibling of [`MultiplicityFreeFusionSymbols`]. Where the multiplicity-free
+/// trait returns a bare `Scalar` per (a,b,c,...) because `nsymbol` is always
+/// 0 or 1, this trait returns a dense rank-4 array / matrix because
+/// `nsymbol` can exceed 1 (SU(3), SO(N>=7), Sp(N), ...).
+///
+/// Stage A only: this trait is defined so the shape of the eventual
+/// recoupling API type-checks against a toy rule in tests. Nobody implements
+/// it outside `tests.rs` yet, and nothing in the recoupling engine consumes
+/// it — that wiring (the recouple wrapper, `UnsupportedFusionStyle` guard
+/// removal) is explicitly deferred to Stage B pending review of this diff.
+pub trait GenericFusionSymbols: FusionRule {
+    type Scalar: Clone + Send + Sync;
+
+    fn f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> GenericFArray<Self::Scalar>;
+
+    fn r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId)
+        -> GenericRMatrix<Self::Scalar>;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ProductSector<Left, Right> {
     left: Left,
