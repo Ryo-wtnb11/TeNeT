@@ -296,23 +296,52 @@ pub struct FusionTreeKey {
     is_dual: DualVec,
     innerlines: SectorVec,
     vertices: SectorVec,
+    // Outer-multiplicity flag (`FusionStyleKind::has_multiplicity`, i.e.
+    // `Generic`). Gates whether `vertices` participates in Hash/Eq/Ord below.
+    // See the big comment on the Hash impl for why this exists and why it
+    // is itself compared in Eq/Ord (not just used to gate `vertices`).
+    has_multiplicity: bool,
 }
 
 // Identity of a `FusionTreeKey` is `(uncoupled, coupled, is_dual, innerlines)`
-// — `vertices` is deliberately excluded from Hash/Eq/Ord. For multiplicity-free
-// fusion (every rule in this crate) the vertex labels are functionally
-// determined by those four fields (always the trivial vertex), so two keys that
-// agree on them agree on `vertices` too: excluding it changes no equivalence
-// class or ordering, only the per-op cost. FusionTreeKey comparison/hashing is
-// the hottest logic in the cold recoupling-plan build; TensorKit likewise keys
-// its `SimpleFusion` fusion trees on the sectors alone. All three impls use the
-// SAME four fields so the Hash/Eq and Ord/Eq contracts hold.
+// — `vertices` is deliberately excluded from Hash/Eq/Ord *when the tree comes
+// from a multiplicity-free rule* (`has_multiplicity == false`, every rule in
+// this crate today). For multiplicity-free fusion the vertex labels are
+// functionally determined by those four fields (always the trivial vertex),
+// so two keys that agree on them agree on `vertices` too: excluding it
+// changes no equivalence class or ordering, only the per-op cost.
+// FusionTreeKey comparison/hashing is the hottest logic in the cold
+// recoupling-plan build; TensorKit likewise keys its `SimpleFusion` fusion
+// trees on the sectors alone.
+//
+// For outer-multiplicity (`FusionStyleKind::Generic`, `has_multiplicity ==
+// true`) rules, `vertices` distinguishes trees that share the same four
+// fields but took different fusion channels at a vertex with nsymbol > 1
+// (e.g. SU(3)), so it must be included.
+//
+// `has_multiplicity` is included in Eq/Ord (not just used to *gate* the
+// `vertices` comparison) because gating alone is order-dependent and breaks
+// the Eq/Ord contracts: with `eq(a,b) = <4 fields> && (!a.has_multiplicity
+// || a.vertices == b.vertices)`, if `a.has_multiplicity == false` and
+// `b.has_multiplicity == true` with differing vertices, `eq(a,b)` would be
+// true (vertices check skipped, using `a`'s flag) while `eq(b,a)` would be
+// false (vertices check applied, using `b`'s flag) — not symmetric. Same
+// issue for `cmp`'s antisymmetry. Comparing `has_multiplicity` itself first
+// closes that hole: once it's confirmed equal on both sides, "use self's
+// flag to decide whether to compare vertices" is unambiguous. The extra
+// bool comparison is negligible next to a `SectorVec` compare and does not
+// reopen the zero-cost gate: `Hash` still hashes `vertices` (and nothing
+// else new) only when `has_multiplicity` is true, so mult-free hashing is
+// byte-identical to before this field existed.
 impl std::hash::Hash for FusionTreeKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.uncoupled.hash(state);
         self.coupled.hash(state);
         self.is_dual.hash(state);
         self.innerlines.hash(state);
+        if self.has_multiplicity {
+            self.vertices.hash(state);
+        }
     }
 }
 
@@ -322,6 +351,8 @@ impl PartialEq for FusionTreeKey {
             && self.coupled == other.coupled
             && self.is_dual == other.is_dual
             && self.innerlines == other.innerlines
+            && self.has_multiplicity == other.has_multiplicity
+            && (!self.has_multiplicity || self.vertices == other.vertices)
     }
 }
 
@@ -334,6 +365,14 @@ impl Ord for FusionTreeKey {
             .then_with(|| self.coupled.cmp(&other.coupled))
             .then_with(|| self.is_dual.cmp(&other.is_dual))
             .then_with(|| self.innerlines.cmp(&other.innerlines))
+            .then_with(|| self.has_multiplicity.cmp(&other.has_multiplicity))
+            .then_with(|| {
+                if self.has_multiplicity {
+                    self.vertices.cmp(&other.vertices)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
     }
 }
 
@@ -344,6 +383,19 @@ impl PartialOrd for FusionTreeKey {
 }
 
 impl FusionTreeKey {
+    // `has_multiplicity` is NOT a parameter of `new`/`from_sector_ids`/
+    // `from_uncoupled` on purpose. These three constructors have ~57 call
+    // sites across tenet-core and tenet-tensors (production tree-transform
+    // code, benches, tests) — every one of them today builds a
+    // multiplicity-free tree. Threading a new required argument through all
+    // of them would be a large, purely mechanical diff for a flag that is
+    // `false` at every existing call site. Instead the constructors keep
+    // their signatures and default to `false` internally (identical
+    // behavior, zero call sites touched), and `with_has_multiplicity` below
+    // is a chainable setter for the one place that needs `true`: the Stage A
+    // toy OM rule's tests. When Stage B's recouple wrapper starts producing
+    // real Generic-fusion trees, it can call `.with_has_multiplicity(true)`
+    // at its own construction sites rather than everyone else's.
     pub fn new<Uncoupled, Dual, Innerlines, Vertices>(
         uncoupled: Uncoupled,
         coupled: Option<SectorId>,
@@ -363,7 +415,22 @@ impl FusionTreeKey {
             is_dual: is_dual.into_iter().collect(),
             innerlines: innerlines.into_iter().collect(),
             vertices: vertices.into_iter().collect(),
+            has_multiplicity: false,
         }
+    }
+
+    /// Set the outer-multiplicity flag (see the Hash impl comment). Chainable
+    /// setter rather than a constructor parameter — see the rationale on
+    /// `new` above for why the existing constructors were left alone.
+    #[must_use]
+    pub fn with_has_multiplicity(mut self, has_multiplicity: bool) -> Self {
+        self.has_multiplicity = has_multiplicity;
+        self
+    }
+
+    #[inline]
+    pub fn has_multiplicity(&self) -> bool {
+        self.has_multiplicity
     }
 
     pub fn from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
