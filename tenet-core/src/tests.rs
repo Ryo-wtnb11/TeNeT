@@ -5013,4 +5013,201 @@ mod tests {
             assert!((got - coeff).abs() < 1e-10, "rank3 ({inner},{v1},{v2}) coeff {got} want {coeff}");
         }
     }
+
+    // ============ REFUTE(b2a): μ↔ν / κ↔λ transpose discriminator ============
+    //
+    // The A4 oracle CANNOT catch a B-matrix (or A-matrix) index transpose: for
+    // A4Irrep(3) both Bsymbol and Asymbol are the 2×2 IDENTITY, which is its own
+    // transpose. This synthetic rule closes that gap with a *deliberately
+    // non-symmetric* B and A block (B[0,1]≠B[1,0], A[0,1]≠A[1,0]).
+    //
+    // The reshape-collapse is transpose-free in Julia (verified out-of-band:
+    // `reshape(F,(N1,N2))[μ,ν]==F[μ,ν,1,1]` for trailing singletons and
+    // `[κ,λ]==F[1,1,κ,λ]` for leading singletons), so the CORRECT reading is
+    //   B[μ,ν] = √dim(a)·√dim(b)·invsqrtdim(c) · F(a,b,dual(b),a,c,unit)[μ,ν,0,0]
+    //   A[κ,λ] = √dim(a)·√dim(b)·invsqrtdim(c) · conj(κ_a·F(dual(a),a,b,b,unit,c)[0,0,κ,λ]).
+    // A μ↔ν (or κ↔λ) swap in the impl would read F[ν,μ,0,0] / F[0,0,λ,κ] and
+    // produce the TRANSPOSE — which THIS test detects and the A4 oracle does not.
+    #[derive(Clone, Copy, Debug)]
+    struct TransposeProbeRule;
+    // Sector 1 is self-dual with dim 4 (so √dim=2, exercising the coeff factor);
+    // 1⊗1 = {0 (rigidity), 1 (with N=2)}. Only the (1,1,1) block is non-trivial.
+    impl FusionRule for TransposeProbeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // 0 and 1 both self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2 // the single outer multiplicity
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    // The raw F data, in TK [μ,ν,κ,λ] semantic order, row-major — the SAME bytes
+    // the from-scratch oracle below reads directly.
+    const TP_FB: [f64; 4] = [0.3, 0.7, 0.9, 0.1]; // F(1,1,1,1,1,0)[μ,ν] block, non-symmetric
+    const TP_FA: [f64; 4] = [0.2, 0.5, 0.6, 0.4]; // F(1,1,1,1,0,1)[κ,λ] block, non-symmetric
+    impl GenericFusionSymbols for TransposeProbeRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            match (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) {
+                // B block: shape (N(1,1,1),N(1,1,1),1,1) = (2,2,1,1).
+                (1, 1, 1, 1, 1, 0) => GenericFArray::new(TP_FB.to_vec(), (2, 2, 1, 1)),
+                // A block: shape (1,1,N(1,1,1),N(1,1,1)) = (1,1,2,2).
+                (1, 1, 1, 1, 0, 1) => GenericFArray::new(TP_FA.to_vec(), (1, 1, 2, 2)),
+                other => panic!("TransposeProbeRule: unmodelled F{other:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for TransposeProbeRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 1 { 2.0 } else { 1.0 } // dim(1)=4
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 1 { 0.5 } else { 1.0 }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    // Independent from-scratch TK evaluation of the reshape formula — explicit
+    // index loops, NO call into b_symbol_generic / a_symbol_generic.
+    fn tp_expected_b() -> [[f64; 2]; 2] {
+        let factor = 2.0 * 2.0 * 0.5; // √dim(1)·√dim(1)·invsqrtdim(1) = 2
+        let mut b = [[0.0; 2]; 2];
+        for mu in 0..2 {
+            for nu in 0..2 {
+                b[mu][nu] = factor * TP_FB[mu * 2 + nu]; // F[μ,ν,0,0]
+            }
+        }
+        b
+    }
+    fn tp_expected_a() -> [[f64; 2]; 2] {
+        let factor = 2.0 * 2.0 * 0.5;
+        let kappa_a = 1.0f64; // FS phase, real
+        let mut a = [[0.0; 2]; 2];
+        for k in 0..2 {
+            for l in 0..2 {
+                // conj(κ_a · F[0,0,κ,λ]) · factor; all real here.
+                a[k][l] = factor * (kappa_a * TP_FA[k * 2 + l]);
+            }
+        }
+        a
+    }
+
+    #[test]
+    fn refute_b2a_b_symbol_is_not_transposed() {
+        let rule = TransposeProbeRule;
+        let s = SectorId::new(1);
+        let b = rule.b_symbol_generic(s, s, s);
+        assert_eq!(b.shape(), (2, 2));
+        let want = tp_expected_b();
+        // Sanity: the oracle itself must be non-symmetric, else no discrimination.
+        assert!((want[0][1] - want[1][0]).abs() > 0.1, "oracle B must be non-symmetric");
+        for mu in 0..2 {
+            for nu in 0..2 {
+                assert!(
+                    (b.get(mu, nu) - want[mu][nu]).abs() < 1e-12,
+                    "B[{mu},{nu}]={} want {} (μ↔ν transpose?)",
+                    b.get(mu, nu),
+                    want[mu][nu]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refute_b2a_a_symbol_is_not_transposed() {
+        // a_symbol_generic is UNUSED by any other B2a test (fold is B2b), so this
+        // is the ONLY thing exercising its κ↔λ index order today.
+        let rule = TransposeProbeRule;
+        let s = SectorId::new(1);
+        let a = rule.a_symbol_generic(s, s, s);
+        assert_eq!(a.shape(), (2, 2));
+        let want = tp_expected_a();
+        assert!((want[0][1] - want[1][0]).abs() > 0.1, "oracle A must be non-symmetric");
+        for k in 0..2 {
+            for l in 0..2 {
+                assert!(
+                    (a.get(k, l) - want[k][l]).abs() < 1e-12,
+                    "A[{k},{l}]={} want {} (κ↔λ transpose?)",
+                    a.get(k, l),
+                    want[k][l]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refute_b2a_bendright_uses_b_row_not_column() {
+        // End-to-end: bend the codomain vertex μ; the ν output distribution must
+        // equal ROW μ of B (coeff = coeff0·Bmat[μ,ν], coeff0=1 here). A μ↔ν swap
+        // in the Bmat.get(μ,ν) call would emit COLUMN μ instead.
+        let rule = TransposeProbeRule;
+        let s = SectorId::new(1);
+        let b = tp_expected_b();
+        for mu in 1..=2usize {
+            // cod [1,1]->1 vertex μ ; dom [1]->1.
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
+            // Collect coeff keyed by output domain vertex label (=ν+1).
+            let mut got = [0.0f64; 2];
+            for (key, coeff) in &out {
+                let nu = key.domain_tree().vertices()[0].id(); // 1-based ν label
+                got[nu - 1] = *coeff;
+            }
+            let row = &b[mu - 1];
+            for nu in 0..2 {
+                assert!(
+                    (got[nu] - row[nu]).abs() < 1e-12,
+                    "μ={mu}: ν={nu} coeff {} want ROW-μ {} (transpose ⇒ column-μ)",
+                    got[nu],
+                    row[nu]
+                );
+            }
+            // Guard: distinguishable from the column (transposed) reading.
+            let col = [b[0][mu - 1], b[1][mu - 1]];
+            assert!(
+                (got[0] - col[0]).abs() > 1e-9 || (got[1] - col[1]).abs() > 1e-9,
+                "μ={mu}: row and column coincide — test cannot discriminate"
+            );
+        }
+    }
 }
