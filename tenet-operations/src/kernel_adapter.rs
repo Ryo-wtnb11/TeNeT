@@ -697,4 +697,323 @@ mod tests {
             }
         );
     }
+
+    // --- hybrid fused-pair dispatch tests (issue #103) ---
+
+    fn layout(shape: &[usize], dst: &[isize], src: &[isize]) -> FusedPairLayout {
+        fuse_pair_layout(shape, dst, src).expect("rank within FUSED_RANK_LIMIT")
+    }
+
+    /// Row-major strides for a shape (last axis fastest).
+    fn row_major(shape: &[usize]) -> Vec<isize> {
+        let mut strides = vec![1isize; shape.len()];
+        for axis in (0..shape.len().saturating_sub(1)).rev() {
+            strides[axis] = strides[axis + 1] * shape[axis + 1] as isize;
+        }
+        strides
+    }
+
+    /// Naive odometer reference for `dst[i...] = src[i...]` over strided views.
+    fn reference_copy(
+        dst: &mut [f64],
+        src: &[f64],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+    ) {
+        let total: usize = shape.iter().product();
+        let mut index = vec![0usize; shape.len()];
+        for _ in 0..total {
+            let dst_pos: isize = index
+                .iter()
+                .zip(dst_strides)
+                .map(|(&i, &s)| i as isize * s)
+                .sum();
+            let src_pos: isize = index
+                .iter()
+                .zip(src_strides)
+                .map(|(&i, &s)| i as isize * s)
+                .sum();
+            dst[dst_pos as usize] = src[src_pos as usize];
+            for axis in (0..shape.len()).rev() {
+                index[axis] += 1;
+                if index[axis] < shape[axis] {
+                    break;
+                }
+                index[axis] = 0;
+            }
+        }
+    }
+
+    #[test]
+    fn fuse_pair_layout_drops_extent_one_axes_and_fuses_contiguous_runs() {
+        // Extent-1 axis dropped regardless of its (garbage) strides, then the
+        // two remaining contiguous axes fuse into one 6-element run.
+        let fused = layout(&[2, 1, 3], &[1, 999, 2], &[1, -7, 2]);
+        assert_eq!(fused.rank, 1);
+        assert_eq!(fused.dims[0], 6);
+        assert_eq!(fused.dst_strides[0], 1);
+        assert_eq!(fused.src_strides[0], 1);
+    }
+
+    #[test]
+    fn fuse_pair_layout_orders_axes_by_destination_stride_without_fusing_mismatched_source() {
+        // Axes arrive in descending destination-stride order and must be
+        // reordered ascending; destination strides are contiguous (1 * 2 == 2)
+        // but source strides are not (3 * 2 != 1), so the axes must NOT fuse.
+        let unfused = layout(&[3, 2], &[2, 1], &[1, 3]);
+        assert_eq!(unfused.rank, 2);
+        assert_eq!(&unfused.dims[..2], &[2, 3]);
+        assert_eq!(&unfused.dst_strides[..2], &[1, 2]);
+        assert_eq!(&unfused.src_strides[..2], &[3, 1]);
+    }
+
+    #[test]
+    fn fuse_pair_layout_zero_extent_collapses_to_empty_marker() {
+        let empty = layout(&[2, 0, 3], &[1, 2, 4], &[1, 2, 4]);
+        assert_eq!(empty.rank, 1);
+        assert_eq!(empty.dims[0], 0);
+    }
+
+    #[test]
+    fn fuse_pair_layout_all_extent_one_collapses_to_scalar() {
+        let scalar = layout(&[1, 1], &[5, 3], &[2, 8]);
+        assert_eq!(scalar.rank, 1);
+        assert_eq!(scalar.dims[0], 1);
+        assert_eq!(scalar.dst_strides[0], 0);
+        assert_eq!(scalar.src_strides[0], 0);
+    }
+
+    #[test]
+    fn fuse_pair_layout_rejects_rank_above_limit() {
+        // The gate is on raw shape length, before extent-1 dropping.
+        let shape = [1usize; FUSED_RANK_LIMIT + 1];
+        let strides = [0isize; FUSED_RANK_LIMIT + 1];
+        assert!(fuse_pair_layout(&shape, &strides, &strides).is_none());
+    }
+
+    #[test]
+    fn apply_fused_pair_copies_transposed_layout_exactly() {
+        // dst[j * 2 + i] = 2 * src[i * 3 + j] over a logical [2, 3] iteration:
+        // exact element placement through non-fusable permuted strides.
+        let src = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mut dst = [0.0_f64; 6];
+        let transposed = layout(&[2, 3], &[1, 2], &[3, 1]);
+        apply_fused_pair(
+            &mut dst,
+            &src,
+            &transposed,
+            0,
+            0,
+            |dst, value| *dst = value,
+            |value| 2.0 * value,
+        );
+        assert_eq!(dst, [2.0, 8.0, 4.0, 10.0, 6.0, 12.0]);
+    }
+
+    #[test]
+    fn apply_fused_pair_accumulates_with_offsets() {
+        let src = [0.0_f64, 1.0, 2.0];
+        let mut dst = [10.0_f64, 20.0, 30.0];
+        let contiguous = layout(&[2], &[1], &[1]);
+        apply_fused_pair(
+            &mut dst,
+            &src,
+            &contiguous,
+            1,
+            1,
+            |dst, value| *dst = *dst + value,
+            |value| 3.0 * value,
+        );
+        assert_eq!(dst, [10.0, 23.0, 36.0]);
+    }
+
+    #[test]
+    fn apply_fused_pair_zero_extent_is_a_noop() {
+        let empty = layout(&[2, 0], &[1, 2], &[1, 2]);
+        let src = [1.0_f64; 4];
+        let mut dst = [7.0_f64; 4];
+        apply_fused_pair(
+            &mut dst,
+            &src,
+            &empty,
+            0,
+            0,
+            |dst, value| *dst = value,
+            |value| value,
+        );
+        assert_eq!(dst, [7.0; 4]);
+    }
+
+    #[test]
+    fn fused_pair_stack_and_scratch_paths_produce_identical_values() {
+        // Differential pin for the hybrid dispatch: the same logical copy
+        // expressed at rank 8 (stack-array path) and at rank 9 via an inserted
+        // extent-1 axis (fuse_pair_layout bails on shape.len() > 8, forcing the
+        // thread_local scratch path) must produce identical values, and both
+        // must match a naive reference loop.
+        let shape8 = [2usize; 8];
+        let src_strides8 = row_major(&shape8);
+        let dst_strides8: Vec<isize> = src_strides8.iter().rev().copied().collect();
+        let src: Vec<f64> = (0..256).map(|value| value as f64 * 0.5 + 1.0).collect();
+
+        let mut dst_stack = vec![0.0_f64; 256];
+        assert!(fuse_pair_layout(&shape8, &dst_strides8, &src_strides8).is_some());
+        fused_pair(
+            &mut dst_stack,
+            &src,
+            &shape8,
+            &dst_strides8,
+            &src_strides8,
+            0,
+            0,
+            |dst, value| *dst = value,
+            |value| value,
+        );
+
+        // Same copy with an extent-1 axis spliced into the middle: rank 9.
+        let mut shape9 = shape8.to_vec();
+        let mut dst_strides9 = dst_strides8.clone();
+        let mut src_strides9 = src_strides8.clone();
+        shape9.insert(4, 1);
+        dst_strides9.insert(4, 0);
+        src_strides9.insert(4, 0);
+        assert!(fuse_pair_layout(&shape9, &dst_strides9, &src_strides9).is_none());
+        let mut dst_scratch = vec![0.0_f64; 256];
+        fused_pair(
+            &mut dst_scratch,
+            &src,
+            &shape9,
+            &dst_strides9,
+            &src_strides9,
+            0,
+            0,
+            |dst, value| *dst = value,
+            |value| value,
+        );
+
+        let mut dst_reference = vec![0.0_f64; 256];
+        reference_copy(
+            &mut dst_reference,
+            &src,
+            &shape8,
+            &dst_strides8,
+            &src_strides8,
+        );
+
+        assert_eq!(dst_stack, dst_reference);
+        assert_eq!(dst_stack, dst_scratch);
+    }
+
+    #[test]
+    fn fused_pair_scratch_path_matches_reference_for_genuine_rank_nine() {
+        // All nine axes have extent 2, so this can only run through the
+        // thread_local scratch path; compare against the naive reference.
+        let shape = [2usize; 9];
+        let src_strides = row_major(&shape);
+        let dst_strides: Vec<isize> = src_strides.iter().rev().copied().collect();
+        assert!(fuse_pair_layout(&shape, &dst_strides, &src_strides).is_none());
+        let src: Vec<f64> = (0..512).map(|value| value as f64 - 100.0).collect();
+
+        let mut dst = vec![0.0_f64; 512];
+        fused_pair(
+            &mut dst,
+            &src,
+            &shape,
+            &dst_strides,
+            &src_strides,
+            0,
+            0,
+            |dst, value| *dst = value,
+            |value| value,
+        );
+
+        let mut dst_reference = vec![0.0_f64; 512];
+        reference_copy(&mut dst_reference, &src, &shape, &dst_strides, &src_strides);
+        assert_eq!(dst, dst_reference);
+    }
+
+    #[test]
+    fn fused_pair_zero_extent_shape_is_a_noop() {
+        let src = [1.0_f64; 4];
+        let mut dst = [9.0_f64; 4];
+        fused_pair(
+            &mut dst,
+            &src,
+            &[2, 0],
+            &[1, 2],
+            &[1, 2],
+            0,
+            0,
+            |dst, value| *dst = value,
+            |value| value,
+        );
+        assert_eq!(dst, [9.0; 4]);
+    }
+
+    #[test]
+    fn strided_host_adapter_fused_beta_branches_match_axpby_semantics() {
+        let mut adapter = StridedHostKernelAdapter;
+        let mut zero_strides = Vec::new();
+        let src = [2.0_f64, 3.0];
+
+        // add_strided beta = 1: accumulate through the fused path.
+        let mut dst = [10.0_f64, 20.0];
+        adapter
+            .add_strided(
+                &mut zero_strides,
+                &mut dst,
+                &src,
+                &[2],
+                &[1],
+                &[1],
+                0,
+                0,
+                false,
+                2.0,
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(dst, [14.0, 26.0]);
+
+        // add_strided beta = 0: assign through the fused path.
+        adapter
+            .add_strided(
+                &mut zero_strides,
+                &mut dst,
+                &src,
+                &[2],
+                &[1],
+                &[1],
+                0,
+                0,
+                false,
+                2.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(dst, [4.0, 6.0]);
+
+        // axpby_strided beta = 1 then beta = 0.
+        let mut dst = [1.0_f64, 2.0];
+        adapter
+            .axpby_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, 3.0, 1.0)
+            .unwrap();
+        assert_eq!(dst, [7.0, 11.0]);
+        adapter
+            .axpby_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, 3.0, 0.0)
+            .unwrap();
+        assert_eq!(dst, [6.0, 9.0]);
+
+        // copy_scale_strided always assigns.
+        let mut dst = [99.0_f64, 99.0];
+        adapter
+            .copy_scale_strided(&mut dst, &src, &[2], &[1], &[1], 0, 0, false, -1.0)
+            .unwrap();
+        assert_eq!(dst, [-2.0, -3.0]);
+
+        // scale_strided scales in place.
+        adapter.scale_strided(&mut dst, &[2], &[1], 0, 2.0).unwrap();
+        assert_eq!(dst, [-4.0, -6.0]);
+    }
 }
