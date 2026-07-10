@@ -2459,6 +2459,265 @@ where
         .collect())
 }
 
+/// Generic-fusion (outer multiplicity) `bendright`: map the final splitting
+/// vertex `a ⊗ b ← c` of the codomain to a fusion vertex on the domain,
+/// producing a *fanout* of vertex-labelled output tree pairs.
+///
+/// Verbatim mirror of TensorKit `bendright(src::FusionTreeBlock)`, GenericFusion
+/// branch (`duality_manipulations.jl:69-114`, specifically the `else` at
+/// `:97-112`), applied to a single input tree pair. The tree-key surgery is
+/// identical to [`multiplicity_free_bendright_tree_pair`] (bookkeeping is
+/// scalar-independent — TK `_bendright_treepair` :33-54); only the coefficient
+/// becomes a `B[μ, ν]` row/column read instead of a bare `B` scalar.
+///
+/// The `ν`-loop mirrors TK's inner `for ν in axes(Bmat, 2)` (:104). When the
+/// original domain is empty (`N₂ == 0`) TK stores no new vertex, so every `ν`
+/// collapses onto the same output key and the block's `U[row, col] = coeff`
+/// assignment (:110) keeps the *last* non-skipped `ν`; we reproduce that with a
+/// keep-last overwrite on key collision. When the domain is non-empty, `ν` is
+/// stored on the new domain tree, keys are distinct, and no overwrite occurs.
+fn generic_bendright_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let codomain = tree_pair.codomain_tree();
+    let domain = tree_pair.domain_tree();
+    let codomain_rank = codomain.uncoupled().len();
+    if codomain_rank == 0 {
+        return Err(CoreError::MalformedFusionTree {
+            message: "bendright requires at least one codomain leg",
+        });
+    }
+
+    let coupled = coupled_or_vacuum(rule, codomain);
+    if !domain.uncoupled().is_empty() {
+        let domain_coupled = coupled_or_vacuum(rule, domain);
+        if domain_coupled != coupled {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            });
+        }
+    }
+
+    // a = N₁==1 ? unit : N₁==2 ? uncoupled[1] : innerlines[end]  (TK :37).
+    let left_coupled = match codomain_rank {
+        1 => rule.vacuum(),
+        2 => codomain.uncoupled()[0],
+        _ => codomain
+            .innerlines()
+            .last()
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "bendright requires the last codomain innerline",
+            })?,
+    };
+    // b = uncoupled[N₁]  (TK :38).
+    let bent_sector = codomain.uncoupled()[codomain_rank - 1];
+    let bent_is_dual = codomain.is_dual().get(codomain_rank - 1).copied().ok_or(
+        CoreError::MalformedFusionTree {
+            message: "codomain tree is missing a duality flag",
+        },
+    )?;
+
+    // New codomain tree: drop the last leg (TK `_bendright_treepair` :41-45);
+    // has_multiplicity kept so the surviving vertex labels stay meaningful.
+    let cod_inner = codomain.innerlines();
+    let new_codomain_innerlines: &[SectorId] = if codomain_rank > 2 {
+        &cod_inner[..cod_inner.len() - 1]
+    } else {
+        &[]
+    };
+    let cod_vertices = codomain.vertices();
+    let new_codomain_vertices: &[SectorId] = if codomain_rank > 1 {
+        &cod_vertices[..cod_vertices.len() - 1]
+    } else {
+        &[]
+    };
+    let new_codomain = FusionTreeKey::new(
+        codomain.uncoupled()[..codomain_rank - 1].iter().copied(),
+        Some(left_coupled),
+        codomain.is_dual()[..codomain_rank - 1].iter().copied(),
+        new_codomain_innerlines.iter().copied(),
+        new_codomain_vertices.iter().copied(),
+    )
+    .with_has_multiplicity(true);
+
+    let domain_rank = domain.uncoupled().len();
+    // Base domain data shared by every ν; only the appended vertex label varies
+    // (TK :100-103, `uncoupled₂/coupled₂/isdual₂/inner₂` hoisted out of the loop).
+    let domain_uncoupled: SectorVec = domain
+        .uncoupled()
+        .iter()
+        .copied()
+        .chain(std::iter::once(rule.dual(bent_sector)))
+        .collect();
+    let domain_is_dual: DualVec = domain
+        .is_dual()
+        .iter()
+        .copied()
+        .chain(std::iter::once(!bent_is_dual))
+        .collect();
+    let domain_innerlines: SectorVec = domain
+        .innerlines()
+        .iter()
+        .copied()
+        .chain((domain_rank > 1).then_some(coupled))
+        .collect();
+
+    // coeff₀ = √dim(c)·(1/√dim(a)); ·conj(κ_{dual(b)}) if the bent leg is dual
+    // (TK :89-92, same placement as the mult-free bend :2424-2429).
+    let mut coeff0 = rule.sqrt_dim_scalar(coupled) * rule.inv_sqrt_dim_scalar(left_coupled);
+    if bent_is_dual {
+        coeff0 = coeff0
+            * rule
+                .frobenius_schur_phase_scalar(rule.dual(bent_sector))
+                .braid_conj();
+    }
+
+    // Bmat = Bsymbol(a, b, c)  (TK :98); μ = N₁>1 ? vertices[end] : 1  (TK :99).
+    let bmat = rule.b_symbol_generic(left_coupled, bent_sector, coupled);
+    let mu0 = if codomain_rank > 1 {
+        mu_index(codomain, codomain_rank - 2)?
+    } else {
+        0
+    };
+
+    let (_, cols) = bmat.shape();
+    let mut out: Vec<(FusionTreeBlockKey, R::Scalar)> = Vec::new();
+    for nu0 in 0..cols {
+        // coeff = coeff₀ · Bmat[μ, ν]  (TK :105); iszero → skip  (TK :106).
+        let coeff = coeff0.clone() * bmat.get(mu0, nu0).clone();
+        if coeff.braid_is_zero() {
+            continue;
+        }
+        // vertices₂ = N₂>0 ? (f₂.vertices..., ν) : ()  (TK :107). ν is the
+        // 1-based output vertex label (mu_index inverts this on the way back).
+        let new_domain = FusionTreeKey::new(
+            domain_uncoupled.iter().copied(),
+            Some(left_coupled),
+            domain_is_dual.iter().copied(),
+            domain_innerlines.iter().copied(),
+            domain
+                .vertices()
+                .iter()
+                .copied()
+                .chain((domain_rank > 0).then_some(SectorId::new(nu0 + 1))),
+        )
+        .with_has_multiplicity(true);
+        let key = FusionTreeBlockKey::pair(new_codomain.clone(), new_domain);
+        // TK block writes `U[row, col] = coeff` (:110), so a repeated key (only
+        // when the domain was empty) is overwritten, keeping the last ν.
+        if let Some(slot) = out.iter_mut().find(|(existing, _)| *existing == key) {
+            slot.1 = coeff;
+        } else {
+            out.push((key, coeff));
+        }
+    }
+    Ok(out)
+}
+
+/// Generic-fusion `bendleft`: inverse planar move of [`generic_bendright_tree_pair`],
+/// mapping the final domain (fusion) vertex back to a codomain splitting vertex.
+///
+/// Verbatim mirror of TensorKit `bendleft` (`duality_manipulations.jl:140-144`,
+/// the "copy of bendright through (f₂,f₁) => conj(coeff)" note at :146-147):
+/// swap codomain/domain, run `bendright`, swap back, and conjugate every
+/// coefficient. Structurally identical to the mult-free
+/// [`multiplicity_free_bendleft_tree_pair`] :2439-2460.
+fn generic_bendleft_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let swapped = FusionTreeBlockKey::pair(
+        tree_pair.domain_tree().clone(),
+        tree_pair.codomain_tree().clone(),
+    );
+    Ok(generic_bendright_tree_pair(rule, &swapped)?
+        .into_iter()
+        .map(|(bent, coefficient)| {
+            (
+                FusionTreeBlockKey::pair(bent.domain_tree().clone(), bent.codomain_tree().clone()),
+                coefficient.braid_conj(),
+            )
+        })
+        .collect())
+}
+
+/// Compose a term list with an elementary Generic-fusion transform, summing
+/// coefficients over coincident output trees (matrix product over the
+/// intermediate basis). Generic sibling of [`compose_tree_pair_terms`] — same
+/// [`FusionTermAccumulator`], different rule bound.
+fn compose_generic_tree_pair_terms<R, F, I>(
+    rule: &R,
+    terms: Vec<(FusionTreeBlockKey, R::Scalar)>,
+    mut transform: F,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+    F: FnMut(&R, &FusionTreeBlockKey) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (FusionTreeBlockKey, R::Scalar)>,
+{
+    let mut output = FusionTermAccumulator::new();
+    for (key, coefficient) in terms {
+        for (next_key, next_coefficient) in transform(rule, &key)? {
+            output.push(next_key, coefficient.clone() * next_coefficient);
+        }
+    }
+    Ok(output.into_vec())
+}
+
+/// Generic-fusion `repartition`: bend legs between codomain and domain until the
+/// codomain has `target_codomain_rank` legs. Verbatim mirror of TensorKit
+/// `repartition` / `_repartition_body` (`duality_manipulations.jl:460-505`): the
+/// generated function unrolls `|N|` `bendleft`/`bendright` steps and composes
+/// their coefficient matrices (`U = Utmp * U`), which is exactly this
+/// accumulate-and-compose loop. Structural twin of
+/// [`multiplicity_free_repartition_tree_pair`] :794-827.
+pub fn generic_repartition_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+    target_codomain_rank: usize,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let total_rank =
+        tree_pair.codomain_tree().uncoupled().len() + tree_pair.domain_tree().uncoupled().len();
+    if target_codomain_rank > total_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: total_rank,
+            actual: target_codomain_rank,
+        });
+    }
+
+    let mut current = vec![(tree_pair.clone(), R::Scalar::braid_one())];
+    let mut current_codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    // N = numout - target > 0 ⇒ bendright; < 0 ⇒ bendleft (TK :492).
+    while current_codomain_rank < target_codomain_rank {
+        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+            generic_bendleft_tree_pair(rule, key)
+        })?;
+        current_codomain_rank += 1;
+    }
+    while current_codomain_rank > target_codomain_rank {
+        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+            generic_bendright_tree_pair(rule, key)
+        })?;
+        current_codomain_rank -= 1;
+    }
+    Ok(current)
+}
+
 fn multiplicity_free_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
