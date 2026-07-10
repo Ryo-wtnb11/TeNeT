@@ -1138,3 +1138,194 @@ fn ln_factorial(n: usize) -> f64 {
     write[n]
 }
 
+// FibonacciAnyon: the simplest genuinely non-abelian anyon model (Simple
+// fusion + Anyonic braiding + complex F/R symbols) — SectorId 0 = vacuum
+// `𝟙`, SectorId 1 = `τ`, with `τ⊗τ = 𝟙 ⊕ τ`. All numeric F/R/dim/twist
+// values below are copied verbatim from TensorKitSectors.jl's
+// `FibonacciAnyon` (`~/.julia/packages/TensorKitSectors/tugbK/src/anyons.jl`,
+// lines 82-146) — never "simplify" a sign or phase here without rereading
+// that source (project convention: don't derive anyon conventions from
+// "should be").
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct FibonacciFusionRule;
+
+impl FibonacciFusionRule {
+    /// `false` for the vacuum (`𝟙`, SectorId 0), `true` for `τ` (SectorId 1).
+    fn is_tau(sector: SectorId) -> bool {
+        sector.id() != 0
+    }
+}
+
+/// `dim(FibonacciAnyon)` (anyons.jl:82-83): `𝟙 -> 1`, `τ -> φ = (1+√5)/2`
+/// (`Float64(MathConstants.golden)`).
+fn fibonacci_quantum_dim(sector: SectorId) -> f64 {
+    if FibonacciFusionRule::is_tau(sector) {
+        (1.0 + 5.0_f64.sqrt()) / 2.0
+    } else {
+        1.0
+    }
+}
+
+impl FusionRule for FibonacciFusionRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Simple
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    // `dual(s) = s` (anyons.jl:80: `dual(s::FibonacciAnyon) = s`) is exactly
+    // the `FusionRule::dual` default (identity) — no override needed.
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        match (Self::is_tau(left), Self::is_tau(right)) {
+            (false, _) => smallvec![right],
+            (true, false) => smallvec![left],
+            // τ⊗τ = 𝟙 ⊕ τ, vacuum-first to match TensorKitSectors'
+            // `FibonacciAnyonProdIterator` iteration order (anyons.jl:96-109).
+            (true, true) => smallvec![SectorId::new(0), SectorId::new(1)],
+        }
+    }
+}
+
+impl MultiplicityFreeFusionRule for FibonacciFusionRule {}
+
+impl MultiplicityFreeFusionSymbols for FibonacciFusionRule {
+    type Scalar = Complex64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value.conj()
+    }
+
+    // Verbatim port of `Fsymbol` (anyons.jl:115-137): four `Nsymbol` gates,
+    // then the single non-trivial 2x2 block `F^{τττ}_τ` (entries ±1/φ,
+    // ±1/√φ); every other allowed configuration is 1.
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        if self.nsymbol(left, middle, left_coupled) == 0
+            || self.nsymbol(left_coupled, right, coupled) == 0
+            || self.nsymbol(middle, right, right_coupled) == 0
+            || self.nsymbol(left, right_coupled, coupled) == 0
+        {
+            return Complex64::new(0.0, 0.0);
+        }
+        if Self::is_tau(left) && Self::is_tau(middle) && Self::is_tau(right) && Self::is_tau(coupled)
+        {
+            let phi = fibonacci_quantum_dim(SectorId::new(1));
+            if !Self::is_tau(left_coupled) && !Self::is_tau(right_coupled) {
+                Complex64::new(1.0 / phi, 0.0)
+            } else if Self::is_tau(left_coupled) && Self::is_tau(right_coupled) {
+                Complex64::new(-1.0 / phi, 0.0)
+            } else {
+                Complex64::new(1.0 / phi.sqrt(), 0.0)
+            }
+        } else {
+            Complex64::new(1.0, 0.0)
+        }
+    }
+
+    // Verbatim port of `Rsymbol` (anyons.jl:139-146): trivial braiding with
+    // the vacuum, and the two complex phases `cispi(4/5)` / `cispi(-3/5)`
+    // for `R^{ττ}_𝟙` / `R^{ττ}_τ`.
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        if self.nsymbol(left, right, coupled) == 0 {
+            return Complex64::new(0.0, 0.0);
+        }
+        if !Self::is_tau(left) || !Self::is_tau(right) {
+            Complex64::new(1.0, 0.0)
+        } else if !Self::is_tau(coupled) {
+            Complex64::from_polar(1.0, std::f64::consts::PI * 4.0 / 5.0)
+        } else {
+            Complex64::from_polar(1.0, std::f64::consts::PI * -3.0 / 5.0)
+        }
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for FibonacciFusionRule {
+    // Dead code for this provider: every `unique_*` caller of
+    // `bendright_scalar`/`foldright_scalar` gates on
+    // `fusion_style() == FusionStyleKind::Unique` and errors out first
+    // (verified by reading every call site), and `FibonacciFusionRule` is
+    // `Simple`. The Simple-fusion bend path
+    // (`multiplicity_free_bendright_tree_pair`) instead derives its
+    // coefficient from `b_symbol_scalar`/`sqrt_dim_scalar`, which Fibonacci
+    // gets for free from `MultiplicityFreeRigidSymbols` below. Implemented
+    // here only for interface parity with the sibling providers
+    // (Z2/Fermion/AsymmetricAnyonic), which all also return the scalar unit.
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        self.scalar_one()
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreeBlockKey,
+        _destination: &FusionTreeBlockKey,
+    ) -> Self::Scalar {
+        self.scalar_one()
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for FibonacciFusionRule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        Complex64::new(fibonacci_quantum_dim(sector), 0.0)
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0 / fibonacci_quantum_dim(sector), 0.0)
+    }
+
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        Complex64::new(fibonacci_quantum_dim(sector).sqrt(), 0.0)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0 / fibonacci_quantum_dim(sector).sqrt(), 0.0)
+    }
+
+    // TensorKitSectors has no `FibonacciAnyon`-specific `twist` override, so
+    // it falls back to the generic `twist_from_Rsymbol` (sectors.jl:646-647):
+    // `twist(a) = Σ_{b ∈ a⊗a} dim(b)/dim(a) * Rsymbol(a,a,b)`. Verified
+    // numerically against that formula (not guessed):
+    //   twist(𝟙) = 1
+    //   twist(τ) = (1/φ)·cispi(4/5) + (φ/φ)·cispi(-3/5) = cispi(-4/5)
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if Self::is_tau(sector) {
+            Complex64::from_polar(1.0, std::f64::consts::PI * -4.0 / 5.0)
+        } else {
+            Complex64::new(1.0, 0.0)
+        }
+    }
+
+    // TensorKitSectors has no override either, so this is the generic
+    // `frobenius_schur_phase_from_Fsymbol` (sectors.jl:461-469):
+    // `sign(Fsymbol(a, dual(a), a, a, leftunit(a), rightunit(a)))`, with
+    // `leftunit`/`rightunit` defaulting to `unit(a)` = vacuum (sectors.jl:
+    // 139-154). For `a = τ` (self-dual) that is `Fsymbol(τ,τ,τ,τ,𝟙,𝟙) =
+    // +1/φ`, whose sign is `+1`; for `a = 𝟙` it is trivially `+1`.
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+}
+

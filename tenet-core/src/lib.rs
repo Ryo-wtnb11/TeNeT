@@ -13,8 +13,9 @@ use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
+use num_complex::Complex64;
 use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
 include!("storage.rs");
 include!("space.rs");
