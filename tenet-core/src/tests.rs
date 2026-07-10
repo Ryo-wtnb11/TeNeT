@@ -4455,4 +4455,149 @@ mod tests {
             "sanity: nontrivial-F round-trip should deviate from identity"
         );
     }
+
+    // ---- TK numeric oracle: real A4Irrep(3) sector, GenericFusion N=2 ----
+    //
+    // Values transcribed from TensorKit.jl v0.17 + TensorKitSectors v0.3.9
+    // (A4Irrep, FusionStyle == GenericFusion()) — computed by TK's OWN
+    // artin_braid on a FusionTreeBlock, independent of this port. We model just
+    // the a=b=c=d=e=c'=3 OM sub-block (the braid coefficient formula is local:
+    // it reads only F(3,3,3,3,3,3), R(3,3,3), which we transcribe exactly),
+    // and reproduce it with generic_artin_braid_at_with_inverse on the tree
+    // [3,3,3,3]->0, inner=[3,3], braided at index 1 (= TK i=2). If the F index
+    // order [κ,λ,μ,ρ] or any conj/adjoint were transposed, this rich
+    // (non-diagonal) 4x4 (μ,ν)->(σ,λ) block would not match.
+    #[derive(Clone, Copy, Debug)]
+    struct A4SubBlockRule;
+    impl A4SubBlockRule {
+        const VACUUM: usize = 0;
+        const THREE: usize = 3;
+        // F(3,3,3,3,3,3), row-major over (κ,λ,μ,ρ), dims (2,2,2,2). Verbatim
+        // from TK (oracle4.jl FLAT_F_rowmajor_klmr), -0.0 normalised to 0.0.
+        const F333333: [f64; 16] = [
+            0.5, 0.0, 0.0, -0.5, 0.0, -0.5, -0.5, 0.0, 0.0, -0.5, -0.5, 0.0, -0.5, 0.0, 0.0, 0.5,
+        ];
+        // R(3,3,3) = [[-1,0],[0,1]] (TK).
+        const R333: [f64; 4] = [-1.0, 0.0, 0.0, 1.0];
+    }
+    impl FusionRule for A4SubBlockRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(Self::VACUUM)
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            // Truncated to the OM channel; only fusion_channels(3,3) is read by
+            // the index-1 braid (for c' enumeration). 3⊗3 ∋ 3 with N=2 in A4.
+            if (left.id(), right.id()) == (Self::THREE, Self::THREE) {
+                smallvec![SectorId::new(Self::THREE)]
+            } else {
+                smallvec![SectorId::new(Self::VACUUM)]
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (Self::THREE, Self::THREE, Self::THREE) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    impl GenericFusionSymbols for A4SubBlockRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let all3 = [a, b, c, d, e, f]
+                .iter()
+                .all(|s| s.id() == Self::THREE);
+            assert!(all3, "only F(3,3,3,3,3,3) is modelled");
+            GenericFArray::new(Self::F333333.to_vec(), (2, 2, 2, 2))
+        }
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            assert_eq!(
+                (a.id(), b.id(), c.id()),
+                (Self::THREE, Self::THREE, Self::THREE),
+                "only R(3,3,3) is modelled"
+            );
+            GenericRMatrix::new(Self::R333.to_vec(), 2, 2)
+        }
+    }
+
+    #[test]
+    fn tk_oracle_a4_generic_braid_matches_tensorkit() {
+        let rule = A4SubBlockRule;
+        let three = SectorId::new(A4SubBlockRule::THREE);
+        let vac = SectorId::new(A4SubBlockRule::VACUUM);
+        // TK oracle sub-block (identical for inv=false and inv=true here):
+        // (mu,nu) -> (sigma,lambda) => coeff.  [oracle4.jl SUBBLOCK]
+        let oracle: [((usize, usize), (usize, usize), f64); 8] = [
+            ((1, 1), (1, 1), 0.5),
+            ((2, 2), (1, 1), 0.5),
+            ((2, 1), (2, 1), 0.5),
+            ((1, 2), (2, 1), -0.5),
+            ((2, 1), (1, 2), -0.5),
+            ((1, 2), (1, 2), 0.5),
+            ((1, 1), (2, 2), 0.5),
+            ((2, 2), (2, 2), 0.5),
+        ];
+        for &inverse in &[false, true] {
+            // Build impl matrix keyed by ((mu,nu),(sigma,lambda)).
+            let mut got: std::collections::HashMap<((usize, usize), (usize, usize)), f64> =
+                std::collections::HashMap::new();
+            for mu in 1..=2usize {
+                for nu in 1..=2usize {
+                    let tree = FusionTreeKey::new(
+                        [three, three, three, three],
+                        Some(vac),
+                        [false, false, false, false],
+                        [three, three],
+                        [SectorId::new(mu), SectorId::new(nu), SectorId::new(1)],
+                    )
+                    .with_has_multiplicity(true);
+                    for (out, coeff) in
+                        generic_artin_braid_at_with_inverse(&rule, &tree, 1, inverse).unwrap()
+                    {
+                        assert_eq!(out.innerlines(), &[three, three], "c'=3, e=3 unchanged");
+                        assert_eq!(out.vertices()[2].id(), 1);
+                        let sigma = out.vertices()[0].id();
+                        let lambda = out.vertices()[1].id();
+                        got.insert(((mu, nu), (sigma, lambda)), coeff);
+                    }
+                }
+            }
+            // Every oracle entry must be reproduced.
+            for &(inp, outp, val) in &oracle {
+                let g = got.get(&(inp, outp)).copied().unwrap_or(0.0);
+                assert!(
+                    (g - val).abs() < 1e-10,
+                    "inv={inverse} {inp:?}->{outp:?}: impl={g} TK={val}"
+                );
+            }
+            // And the impl must produce NO nonzero outside the oracle set.
+            for (&(inp, outp), &g) in &got {
+                if g.abs() > 1e-10 {
+                    let known = oracle
+                        .iter()
+                        .any(|&(i, o, v)| i == inp && o == outp && (v - g).abs() < 1e-10);
+                    assert!(known, "inv={inverse} spurious nonzero {inp:?}->{outp:?}={g}");
+                }
+            }
+        }
+    }
 }
