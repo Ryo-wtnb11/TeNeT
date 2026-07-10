@@ -4282,6 +4282,8 @@ mod tests {
     // source WITHOUT calling generic_artin_braid_at_with_inverse. Returns the
     // 2x2 braid matrix M[sigma][mu] over the OM channel (nu=lambda=rho=0 fixed,
     // c'=c, n_sigma=n_kappa=2).
+    // Index-form loops kept on purpose: they mirror the TK formula verbatim.
+    #[allow(clippy::needless_range_loop)]
     fn independent_braid_matrix_index1(rule: &RefuteOmRule, inverse: bool) -> [[f64; 2]; 2] {
         let a = SectorId::new(RefuteOmRule::A);
         let c = SectorId::new(RefuteOmRule::C);
@@ -4540,6 +4542,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)] // oracle table typed to match the TK dump verbatim
     fn tk_oracle_a4_generic_braid_matches_tensorkit() {
         let rule = A4SubBlockRule;
         let three = SectorId::new(A4SubBlockRule::THREE);
