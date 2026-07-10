@@ -208,7 +208,9 @@ fn fused_pair<T, Apply, ElementOp>(
         return;
     }
     if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
-        apply_fused_pair(dst_data, src_data, &layout, dst_offset, src_offset, apply, op);
+        apply_fused_pair(
+            dst_data, src_data, &layout, dst_offset, src_offset, apply, op,
+        );
         return;
     }
     FUSE_SCRATCH.with(|cell| {
