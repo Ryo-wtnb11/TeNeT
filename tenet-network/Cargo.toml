@@ -20,11 +20,14 @@ provider-inject = ["tenet/provider-inject"]
 # Wraps the `opt-einsum-path` crate (Apache-2.0) as a
 # `DenseContractionOptimizer` backend (optimal / dp / branch / random-greedy).
 opt-path = ["dep:opt-einsum-path", "tenet/opt-path"]
+# Calls the installed Python `cotengra` package as an external path planner.
+cotengra-python = ["dep:serde_json", "tenet/cotengra-python"]
 
 [dependencies]
 tenet = { path = "../tenet", default-features = false }
 tenet-macros = { path = "../tenet-macros" }
 opt-einsum-path = { version = "0.2", optional = true }
+serde_json = { version = "1", optional = true }
 # O(1) LRU (HashMap + intrusive linked list), the Rust analog of the
 # `LRUCache.jl` that TensorKit uses for its global caches. Replaces the
 # linear-scan `VecDeque` LRU whose touch was O(capacity) per plan-cache hit.

@@ -12,9 +12,10 @@
 //! characters (in deterministic first-seen order). For symmetric tensors pass a
 //! [`DenseCostModel`] built from each bond's effective (total) dimension.
 //!
-//! The future cotengra/cotengrust-derived backends live in the isolated
-//! `tenet-cotengrust` crate and implement the same [`DenseContractionOptimizer`]
-//! trait, so they drop into the same pipeline.
+//! The optional cotengra backend (the `cotengra-python` feature) implements the
+//! same [`DenseContractionOptimizer`] trait and drops into the same pipeline;
+//! there is no separate Rust `tenet-cotengrust` port — cotengrust is AGPL, and
+//! the Python backend already covers the hyper / reconfigure / slicing search.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

@@ -154,8 +154,8 @@ pub trait BlockSparseContractionOptimizer<S: Ord + Clone> {
 /// Default dense greedy contraction optimizer.
 ///
 /// This is cheap to run and deterministic. For hard networks, import an
-/// external active-pair path from cotengra/cotengrust and build a
-/// [`crate::ContractionPlan`] from that path.
+/// external active-pair path (e.g. from the optional cotengra backend) and
+/// build a [`crate::ContractionPlan`] from that path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GreedyDenseOptimizer;
 
