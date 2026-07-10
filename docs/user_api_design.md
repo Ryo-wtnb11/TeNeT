@@ -73,8 +73,12 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
 `eig_trunc`/`eig_vals`、`exp`、`pinv`)。tenet-matrixalgebra は既にこの命名なので、
 ユーザー層は同名メソッドの透過のみ。0.17 の export にない legacy alias は
 作らない。インデックス操作も同様に export 一覧基準:
-`permute`/`braid`/`transpose`/`twist`/`repartition`、構築系は
-`id`/`isomorphism`/`unitary`/`isometry`。
+`permute`/`braid`/`transpose`/`twist`、構築系は
+`id`/`isomorphism`/`unitary`/`isometry`。repartition(脚の折り曲げ)は独立
+メソッドではなく `permute(codomain_axes, domain_axes)` に codomain↔domain を
+またぐ分割を渡す形で提供済み(名前付き wrapper は未実装)。未実装の TK export:
+catdomain / catcodomain / insertunit / removeunit / insertleg / ishermitian /
+project_*(roadmap.md 参照)。
 
 ## 縮約適合性の契約(2026-07-04 合意)
 
