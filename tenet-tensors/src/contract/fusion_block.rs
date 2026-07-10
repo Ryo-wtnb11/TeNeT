@@ -71,6 +71,7 @@ where
         lhs: &[D],
         rhs: &[D],
         jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
@@ -83,6 +84,7 @@ where
             lhs,
             rhs,
             jobs,
+            runs,
             alpha,
             beta,
         )

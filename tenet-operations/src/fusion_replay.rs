@@ -11,7 +11,7 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
     SimilarStorage, TensorStorage,
 };
-use tenet_dense::DenseGemmBatchJob;
+use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
 use crate::placement::ReportsPlacement;
 use crate::profile::TensorContractFusionProfile;
@@ -51,18 +51,23 @@ pub trait Rank2Gemm<D> {
     /// dst_part` (column-major). The plan layer guarantees the destination
     /// ranges of a batch are pairwise disjoint, so implementations may run
     /// jobs in any order or concurrently. The default executes them in order.
+    ///
+    /// `runs` is the batch's plan-time run partition (see issue #103); backends
+    /// that route runs read it, the serial default ignores it.
     fn matmul_rank2_batch(
         &mut self,
         dst: &mut [D],
         lhs: &[D],
         rhs: &[D],
         jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
     where
         D: Copy,
     {
+        let _ = runs;
         for job in jobs {
             let lhs_slice = direct_slice(lhs, job.lhs_offset, job.rows, job.contracted)?;
             let rhs_slice = direct_slice(rhs, job.rhs_offset, job.contracted, job.cols)?;
@@ -120,6 +125,12 @@ pub struct FusionBlockContractPlan {
     // `matmul_rank2_batch` call. `None` marks a non-direct plan — a valid
     // compile output used only for route decisions, never replayed.
     direct_batch: Option<Vec<Rank2GemmBatchJob>>,
+    // Plan-time run partition of `direct_batch` (see issue #103): the backend
+    // reads it to route each run without recomputing the partition per replay.
+    // Empty for a non-direct plan. A backend-agnostic shape fact, so it lives in
+    // this operations-layer plan struct while the route choice (strided seam vs
+    // grouped) stays at the dense-executor boundary.
+    direct_batch_runs: Vec<usize>,
 }
 
 impl FusionBlockContractPlan {
@@ -143,6 +154,10 @@ impl FusionBlockContractPlan {
         groups: Vec<FusionBlockContractGroupPlan>,
     ) -> Result<Self, OperationError> {
         let direct_batch = compile_direct_batch(&groups)?;
+        let direct_batch_runs = direct_batch
+            .as_deref()
+            .map(strided_batch_runs)
+            .unwrap_or_default();
         Ok(Self {
             dst_structure,
             lhs_structure,
@@ -150,6 +165,7 @@ impl FusionBlockContractPlan {
             inactive_dst_scale_blocks,
             groups,
             direct_batch,
+            direct_batch_runs,
         })
     }
 
@@ -189,6 +205,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -235,9 +252,10 @@ impl FusionBlockContractPlan {
 
         let _ = fusion_workspace;
         let batch = self.direct_batch()?;
+        let batch_runs = self.direct_batch_runs();
         profile.core_contract_groups += batch.len();
         let start = std::time::Instant::now();
-        gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, alpha, beta)?;
+        gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, batch_runs, alpha, beta)?;
         profile.core_direct_gemm_groups += batch.len();
         profile.core_matmul += start.elapsed();
 
@@ -315,6 +333,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -327,6 +346,12 @@ impl FusionBlockContractPlan {
             .ok_or(OperationError::UnsupportedTensorContractScope {
                 message: NON_COUPLED_OPERAND_MESSAGE,
             })
+    }
+
+    /// Plan-time run partition of [`Self::direct_batch`]; handed to the backend
+    /// alongside the jobs so it routes runs without recomputing the partition.
+    fn direct_batch_runs(&self) -> &[usize] {
+        &self.direct_batch_runs
     }
 
     /// Storage-aware raw replay for callers whose operands are scratch buffers
@@ -385,6 +410,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -462,6 +488,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -943,6 +970,59 @@ mod tests {
     }
 
     #[test]
+    fn direct_batch_plan_bakes_run_partition() {
+        // Five same-shape groups fold into one length-5 constant-stride run;
+        // the plan stores that partition (issue #103) so the backend routes it
+        // without recomputing. Storage matches the shared partition helper.
+        let groups = [2usize, 0, 4, 1, 3]
+            .into_iter()
+            .map(|block| {
+                let base = block * 4;
+                group_plan((2, 2, 2), (base, base, base))
+            })
+            .collect::<Vec<_>>();
+        let structure = Arc::new(BlockStructure::trivial(&[20]).unwrap());
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            groups,
+        )
+        .unwrap();
+        assert_eq!(plan.direct_batch_runs(), &[5]);
+        assert_eq!(
+            plan.direct_batch_runs(),
+            strided_batch_runs(plan.direct_batch().unwrap())
+        );
+        assert_eq!(
+            plan.direct_batch_runs().iter().sum::<usize>(),
+            plan.direct_batch().unwrap().len()
+        );
+    }
+
+    #[test]
+    fn non_direct_plan_has_empty_run_partition() {
+        let plan = FusionBlockContractGroupPlan::new(
+            direct_group(2, 3, None),
+            direct_group(3, 4, Some(0)),
+            direct_group(2, 4, Some(0)),
+        )
+        .unwrap();
+        let structure = Arc::new(BlockStructure::trivial(&[12]).unwrap());
+        let plan = FusionBlockContractPlan::from_parts(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            vec![plan],
+        )
+        .unwrap();
+        assert!(!plan.is_fully_direct());
+        assert!(plan.direct_batch_runs().is_empty());
+    }
+
+    #[test]
     fn direct_batch_rejects_overlapping_destination_ranges() {
         // First dst covers [0, 8); second starts at 7.
         let groups = vec![
@@ -996,9 +1076,11 @@ mod tests {
             _lhs: &[f64],
             _rhs: &[f64],
             jobs: &[Rank2GemmBatchJob],
+            runs: &[usize],
             _alpha: f64,
             _beta: f64,
         ) -> Result<(), OperationError> {
+            debug_assert_eq!(runs.iter().sum::<usize>(), jobs.len());
             self.batch_calls += 1;
             self.last_batch_len = jobs.len();
             Ok(())

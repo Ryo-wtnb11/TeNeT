@@ -124,6 +124,9 @@ where
     /// guarantees the batch's destination ranges are pairwise disjoint, so
     /// implementations may run jobs in any order or concurrently; the default
     /// executes them serially through `matmul_rank2_axpby_into_raw`.
+    ///
+    /// `runs` is the batch's plan-time run partition (see issue #103), forwarded
+    /// to backends that route runs; the serial default ignores it.
     #[allow(clippy::too_many_arguments)]
     fn matmul_rank2_batch_axpby_into_raw(
         &mut self,
@@ -132,9 +135,11 @@ where
         lhs_data: &[D],
         rhs_data: &[D],
         jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
+        let _ = runs;
         for job in jobs {
             let lhs_slice = direct_slice(lhs_data, job.lhs_offset, job.rows, job.contracted)?;
             let rhs_slice = direct_slice(rhs_data, job.rhs_offset, job.contracted, job.cols)?;
@@ -397,6 +402,7 @@ where
         lhs_data: &[D],
         rhs_data: &[D],
         jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError> {
@@ -431,6 +437,7 @@ where
                 lhs,
                 rhs,
                 jobs,
+                runs,
                 alpha.dense_scalar(),
                 beta.dense_scalar(),
             )

@@ -183,15 +183,22 @@ pub trait DenseExecutor {
     /// dst_block` (column-major, BLAS gemm semantics; see
     /// [`DenseGemmBatchJob`]). The default executes the jobs serially through
     /// `matmul_axpby_into`; batch-capable backends override it.
+    ///
+    /// `runs` is the plan-time run partition of `jobs` (see
+    /// [`strided_batch_runs`] and issue #103): consecutive run lengths summing
+    /// to `jobs.len()`. Backends that route runs differently read it to avoid
+    /// recomputing the partition per replay; the serial default ignores it.
     fn matmul_batch_axpby_into(
         &mut self,
         output: DenseWrite<'_>,
         lhs: DenseRead<'_>,
         rhs: DenseRead<'_>,
         jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
         alpha: DenseScalar,
         beta: DenseScalar,
     ) -> Result<(), DenseError> {
+        let _ = runs;
         match (output, lhs, rhs) {
             (DenseWrite::F32(out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
                 matmul_batch_axpby_serial(
@@ -356,11 +363,6 @@ pub(crate) fn batch_offset(base: usize, offset: usize) -> Result<usize, DenseErr
         .ok_or(DenseError::OffsetOverflow { value: offset })
 }
 
-pub(crate) fn matrix_len(rows: usize, cols: usize) -> Result<usize, DenseError> {
-    rows.checked_mul(cols)
-        .ok_or(DenseError::ElementCountOverflow)
-}
-
 fn same_gemm_shape(lhs: &DenseGemmBatchJob, rhs: &DenseGemmBatchJob) -> bool {
     lhs.rows == rhs.rows && lhs.contracted == rhs.contracted && lhs.cols == rhs.cols
 }
@@ -405,16 +407,27 @@ pub(crate) fn strided_batch_run_len(jobs: &[DenseGemmBatchJob], start: usize) ->
     len
 }
 
-pub(crate) fn has_strided_batch_run(jobs: &[DenseGemmBatchJob]) -> bool {
+/// Plan-time run partition of a batch: the maximal same-shape, constant-stride
+/// run lengths over `jobs`, in order, summing to `jobs.len()`. A run is a
+/// contiguous sequence of jobs with identical GEMM shape whose lhs/rhs/dst
+/// offsets advance by a constant stride (exactly what the strided-batch seam
+/// can dispatch as one call); a shape or stride break, or a singleton, ends the
+/// run at length 1.
+///
+/// This is a backend-agnostic shape fact — it depends only on job shapes and
+/// offsets, not on which dense backend runs the batch — so the plan layer
+/// computes it once when a batch plan is compiled and stores it alongside the
+/// jobs. The executor then reads the partition to route each run (see issue
+/// #103) without recomputing it on every replay.
+pub fn strided_batch_runs(jobs: &[DenseGemmBatchJob]) -> Vec<usize> {
+    let mut runs = Vec::new();
     let mut start = 0usize;
     while start < jobs.len() {
         let run_len = strided_batch_run_len(jobs, start);
-        if run_len > 1 {
-            return true;
-        }
+        runs.push(run_len);
         start += run_len;
     }
-    false
+    runs
 }
 
 /// Serial fallback for [`DenseExecutor::matmul_batch_axpby_into`]: one
