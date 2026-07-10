@@ -15,7 +15,7 @@
    ユーザー面は識別子インデックスの proc-macro
    `tensor!(c[a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])`。
    ラベルは legacy planner の NetworkIR に直接下ろす(文字列 einsum
-   パーサは公開 API に出さない)。N 体は planner(greedy/cotengrust)が
+   パーサは公開 API に出さない)。N 体は planner(greedy / opt-einsum-path / cotengra)が
    順序を自動選択。
 
 ## 目標ユーザーコード
@@ -124,15 +124,15 @@ expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
 3. 分解・行列関数 wrapper(`svd_trunc`/`left_orth`/`right_orth`/`exp`/`inv`/
    `pinv`/`norm`/`eig_*`)
 4. tutorial.md をユーザー層ベースに書き直し
-5. legacy planner (tenet-legacy/tenet-contract の構造半分 + tenet-cotengrust)
+5. legacy planner (tenet-legacy/tenet-contract の構造半分)
    を移植し、`tensor!` proc-macro(@tensor 記法)を NetworkIR 直結で実装。
    execution 半分のみ新ユーザー層 Tensor に再結線
    → 実施済み(2026-07-04): `tenet-network`(planner 移植 + Tensor executor)
    + `tenet-macros`(`tensor!`)。構文は式形式
    `let c = tensor!([a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])?;`
    (出力シグネチャ先頭、`conj(x)[...]` で adjoint、`[]` で rank-0)。
-   フォローアップ: (i) tenet-cotengrust 移植(DenseContractionOptimizer
-   実装をそのまま差し込む)、(ii) Tensor 層 select_index が入り次第
-   sliced executor。
+   フォローアップ: (i) 縮約順序探索は opt-einsum-path(実施済)+ cotengra-python
+   backend(PR #94、hyper/reconfigure/slicing)でカバー、純 Rust cotengrust 移植は
+   不採用(AGPL)、(ii) sliced executor は slicing 決定済・実行未接続(#93)。
 6. 実施済み(2026-07-04): c64、`eig_*`、topology-keyed plan cache、
    partial trace、CUDA phase 1(direct f64 contraction)。

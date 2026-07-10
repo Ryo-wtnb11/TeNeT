@@ -650,9 +650,9 @@ const END_SLICE: &str = "END_SLICE_PLAN";
 /// ([`SlicePlan`]) so the two can be cached and executed together.
 ///
 /// This is a pure-structure type (order + slicing decision + serialization): it
-/// holds no tensor data and is shared with the `tenet-cotengrust` path/slice
-/// search. The new-core sliced einsum executor lives in
-/// a sliced executor.
+/// holds no tensor data and is produced by the path/slice search (the built-in
+/// [`greedy_slice`] or the optional cotengra backend). A memory-bounded sliced
+/// executor over it is not yet wired.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlicedPlan {
     plan: ContractionPlan,

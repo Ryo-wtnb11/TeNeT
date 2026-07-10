@@ -13,8 +13,8 @@
 
 /// Which contraction-order search to run: a hashable value type (usable as
 /// a cache-key component and as a runtime-wide default) rather than a trait
-/// object. `#[non_exhaustive]` so future external searches (e.g. a
-/// cotengrust adapter variant carrying its config) slot in without a
+/// object. `#[non_exhaustive]` so future external searches (e.g. another
+/// external-planner adapter carrying its config) slot in without a
 /// breaking change.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
