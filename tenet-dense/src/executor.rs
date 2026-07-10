@@ -417,6 +417,29 @@ pub(crate) fn has_strided_batch_run(jobs: &[DenseGemmBatchJob]) -> bool {
     false
 }
 
+/// Plan-time run partition of a batch: the maximal same-shape, constant-stride
+/// run lengths over `jobs`, in order, summing to `jobs.len()`. A run is a
+/// contiguous sequence of jobs with identical GEMM shape whose lhs/rhs/dst
+/// offsets advance by a constant stride (exactly what the strided-batch seam
+/// can dispatch as one call); a shape or stride break, or a singleton, ends the
+/// run at length 1.
+///
+/// This is a backend-agnostic shape fact — it depends only on job shapes and
+/// offsets, not on which dense backend runs the batch — so the plan layer
+/// computes it once when a batch plan is compiled and stores it alongside the
+/// jobs. The executor then reads the partition to route each run (see issue
+/// #103) without recomputing it on every replay.
+pub fn strided_batch_runs(jobs: &[DenseGemmBatchJob]) -> Vec<usize> {
+    let mut runs = Vec::new();
+    let mut start = 0usize;
+    while start < jobs.len() {
+        let run_len = strided_batch_run_len(jobs, start);
+        runs.push(run_len);
+        start += run_len;
+    }
+    runs
+}
+
 /// Serial fallback for [`DenseExecutor::matmul_batch_axpby_into`]: one
 /// `matmul_axpby_into` per job over rank-2 sub-views of the shared buffers.
 #[allow(clippy::too_many_arguments)]

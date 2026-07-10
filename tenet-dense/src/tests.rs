@@ -990,3 +990,47 @@ fn values_only_defaults_fall_back_to_the_full_decomposition_spectrum() {
         assert_c64_close(*a, *b, tol);
     }
 }
+
+fn batch_job(shape: (usize, usize, usize), offsets: (usize, usize, usize)) -> DenseGemmBatchJob {
+    DenseGemmBatchJob {
+        rows: shape.0,
+        contracted: shape.1,
+        cols: shape.2,
+        dst_offset: offsets.0,
+        lhs_offset: offsets.1,
+        rhs_offset: offsets.2,
+    }
+}
+
+#[test]
+fn strided_batch_runs_partitions_same_shape_constant_stride_runs() {
+    // Two length-2 constant-stride runs (shapes A, B) followed by a singleton
+    // (shape C): the plan-time partition the executor routes over.
+    let jobs = vec![
+        batch_job((2, 2, 2), (0, 0, 0)),
+        batch_job((2, 2, 2), (4, 4, 4)),
+        batch_job((3, 1, 2), (8, 8, 8)),
+        batch_job((3, 1, 2), (14, 11, 10)),
+        batch_job((1, 5, 1), (20, 14, 12)),
+    ];
+    assert_eq!(strided_batch_runs(&jobs), vec![2, 2, 1]);
+    // Empty batch => empty partition; the lengths always cover every job.
+    assert_eq!(strided_batch_runs(&[]), Vec::<usize>::new());
+    assert_eq!(
+        strided_batch_runs(&jobs).iter().sum::<usize>(),
+        jobs.len(),
+        "run partition must cover all jobs"
+    );
+}
+
+#[test]
+fn strided_batch_runs_breaks_on_shape_and_stride_changes() {
+    // A shape change ends a run; a non-constant stride within one shape also
+    // ends it (the second/third jobs share a shape but not a common stride).
+    let jobs = vec![
+        batch_job((2, 2, 2), (0, 0, 0)),
+        batch_job((2, 2, 2), (4, 4, 4)),
+        batch_job((2, 2, 2), (100, 4, 4)),
+    ];
+    assert_eq!(strided_batch_runs(&jobs), vec![2, 1]);
+}
