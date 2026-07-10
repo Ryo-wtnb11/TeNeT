@@ -9,10 +9,16 @@ Create or update the environment:
 uv sync --project tools/cotengra-python
 ```
 
-Check the installed cotengra version:
+The environment pins `cotengra` plus `kahypar` (recommended hypergraph
+partitioner) and `optuna` (Bayesian sampler). Both are required for the `hyper`
+method to actually hyper-optimize — without them cotengra silently degrades to
+the basic `labels` partitioner and purely random sampling.
+
+Check the environment:
 
 ```sh
-uv run --project tools/cotengra-python python -c 'import cotengra as ctg; print(ctg.__version__)'
+uv run --project tools/cotengra-python python -c \
+  'import cotengra, kahypar, optuna; print(cotengra.__version__)'
 ```
 
 Use it from Rust:
