@@ -10,7 +10,13 @@ live in separate crates.
 The implementation is currently an active rebuild. Public APIs are intended to
 stay Rust-native while matching the TensorKit ecosystem's semantics closely:
 TensorKit, TensorKitSectors, TensorOperations, MatrixAlgebraKit, Strided.jl, and
-StridedViews.jl are the reference vocabulary.
+StridedViews.jl are the reference vocabulary. For non-abelian symmetric-tensor
+conventions (SU(2), and the fZ2 ⊠ U(1) ⊠ SU(2) products), [QSpace][qspace]
+(Weichselbaum) is an additional design and numerical reference alongside
+TensorKit — its non-abelian fusion / recoupling (CGC) handling is a second
+oracle to check conventions against.
+
+[qspace]: https://bitbucket.org/qspace4u/workspace/repositories/
 
 ## Quick Start
 
