@@ -815,6 +815,158 @@ mod tests {
         );
     }
 
+    // --- Stage 0 spike: complex-`Scalar` fusion rule through the recoupling
+    // engine. tenet-core has so far only ever instantiated `Scalar = f64`
+    // providers; Fibonacci anyons need `Scalar = Complex64`. This probe rule
+    // is *not* a physical anyon model (its F-symbol is a constant 1, so it
+    // makes no pentagon claim) — it exists purely to prove that
+    // `multiplicity_free_braid_tree` / `FusionTermAccumulator` compile and
+    // run correctly when `Scalar: num_complex::Complex64` (Add/Mul/Clone from
+    // `num_complex`, plus a genuinely complex `scalar_conj` = `.conj()`).
+    #[derive(Clone, Copy, Debug)]
+    struct ComplexScalarProbeRule;
+
+    impl FusionRule for ComplexScalarProbeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Anyonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                // Fibonacci-shaped multi-channel fusion: x⊗x = {vacuum, x}.
+                // This is what forces `FusionStyleKind::Simple` (not `Unique`)
+                // and exercises the multi-term loop in the braid engine.
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => SectorVec::new(),
+            }
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for ComplexScalarProbeRule {}
+
+    const PROBE_ANGLE_ALPHA: f64 = std::f64::consts::FRAC_PI_3;
+    const PROBE_ANGLE_BETA: f64 = 2.0 * std::f64::consts::FRAC_PI_3;
+
+    impl MultiplicityFreeFusionSymbols for ComplexScalarProbeRule {
+        type Scalar = num_complex::Complex64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            num_complex::Complex64::new(1.0, 0.0)
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value.conj()
+        }
+
+        // Trivial associator (1 on every allowed channel, since
+        // `fusion_channels` already zeroes out disallowed ones via the
+        // engine's `nsymbol` gate): this probe only needs to exercise the
+        // complex-scalar plumbing, not satisfy the pentagon identity.
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            num_complex::Complex64::new(1.0, 0.0)
+        }
+
+        // The one place a genuine complex phase enters: R^{xx}_vacuum = e^{iα},
+        // R^{xx}_x = e^{iβ}, distinct angles so the two channels are
+        // distinguishable in the assertions below.
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Self::Scalar {
+            if self.nsymbol(left, right, coupled) == 0 {
+                return num_complex::Complex64::new(0.0, 0.0);
+            }
+            if left.id() == 0 || right.id() == 0 {
+                return num_complex::Complex64::new(1.0, 0.0);
+            }
+            if coupled.id() == 0 {
+                num_complex::Complex64::from_polar(1.0, PROBE_ANGLE_ALPHA)
+            } else {
+                num_complex::Complex64::from_polar(1.0, PROBE_ANGLE_BETA)
+            }
+        }
+    }
+
+    #[test]
+    fn complex_scalar_r_symbol_and_conjugate_inverse_braid_stage0_spike() {
+        let rule = ComplexScalarProbeRule;
+        for coupled in [0usize, 1usize] {
+            let tree = FusionTreeKey::from_sector_ids([1, 1], Some(coupled), [false, false], [], [1]);
+            let expected = num_complex::Complex64::from_polar(
+                1.0,
+                if coupled == 0 {
+                    PROBE_ANGLE_ALPHA
+                } else {
+                    PROBE_ANGLE_BETA
+                },
+            );
+
+            let forward = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
+            assert_eq!(forward.len(), 1);
+            assert!((forward[0].1 - expected).norm() < 1.0e-12);
+
+            // Reflected levels select the inverse-artin branch: the
+            // coefficient must come back as the complex conjugate, proving
+            // `scalar_conj` (not just `Clone`/`Mul`) is wired through for a
+            // non-real `Scalar`.
+            let backward = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[1, 0]).unwrap();
+            assert_eq!(backward.len(), 1);
+            assert!((backward[0].1 - expected.conj()).norm() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn complex_scalar_braid_tree_expands_multichannel_loop_stage0_spike() {
+        // Rank-3 tree with an index>0 swap: exercises the `fusion_channels(a,
+        // d)` loop branch of `multiplicity_free_artin_braid_at_with_inverse`
+        // (f_symbol_scalar * r_symbol_scalar * scalar_conj composition) —
+        // this is the part of the engine Fibonacci's Simple-fusion braid
+        // actually needs (the rank-2 spike above only reaches the
+        // single-r-symbol `index == 0` branch).
+        let rule = ComplexScalarProbeRule;
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+
+        let braided = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
+
+        // Hand-derived from the engine formula in the index>0 branch with
+        // this rule's constant F=1: coefficient(c') = R(c,d,e) * conj(R(a,d,c')).
+        // Here a=b=c=d=e=x, so R(c,d,e) = e^{iβ}; c'=vacuum -> R(a,d,c')=e^{iα},
+        // c'=x -> e^{iβ}.
+        assert_eq!(braided.len(), 2);
+        let coeff_for = |innerline: usize| {
+            braided
+                .iter()
+                .find(|(t, _)| t.innerlines() == [SectorId::new(innerline)])
+                .unwrap()
+                .1
+        };
+        let expected_vacuum_channel =
+            num_complex::Complex64::from_polar(1.0, PROBE_ANGLE_BETA - PROBE_ANGLE_ALPHA);
+        let expected_x_channel = num_complex::Complex64::new(1.0, 0.0);
+        assert!((coeff_for(0) - expected_vacuum_channel).norm() < 1.0e-12);
+        assert!((coeff_for(1) - expected_x_channel).norm() < 1.0e-12);
+    }
+
     #[test]
     fn linearize_tree_pair_permutation_matches_tensorkit_zero_based_formula() {
         assert_eq!(

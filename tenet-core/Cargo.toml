@@ -15,3 +15,7 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 # block structure (small integer sequences, no untrusted input) — the Rust
 # analog of Julia's fast `Dict` hash; std's SipHash is needlessly slow here.
 rustc-hash = "2"
+# Anyonic fusion-rule providers (e.g. FibonacciAnyon) need a genuine complex
+# `Scalar` for the recoupling engine's F/R symbols — version matches the
+# other workspace crates that already depend on it (tenet, tenet-dense, ...).
+num-complex = "0.4"
