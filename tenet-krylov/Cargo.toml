@@ -1,0 +1,13 @@
+[package]
+name = "tenet-krylov"
+version = "0.1.0"
+description = "Matrix-free Krylov solvers for TeNeT algorithm layers"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tenet_krylov"
+path = "src/lib.rs"
+
+[dependencies]
