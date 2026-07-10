@@ -967,6 +967,190 @@ mod tests {
         assert!((coeff_for(1) - expected_x_channel).norm() < 1.0e-12);
     }
 
+    // --- Stage 1: FibonacciFusionRule provider tests.
+
+    #[test]
+    fn fibonacci_fusion_channels_and_style_match_tensorkitsectors() {
+        let rule = FibonacciFusionRule;
+        let vacuum = SectorId::new(0);
+        let tau = SectorId::new(1);
+
+        assert_eq!(rule.fusion_style(), FusionStyleKind::Simple);
+        assert_eq!(rule.braiding_style(), BraidingStyleKind::Anyonic);
+        assert_eq!(rule.vacuum(), vacuum);
+        assert_eq!(rule.dual(tau), tau);
+
+        assert_eq!(rule.fusion_channels(vacuum, tau).to_vec(), vec![tau]);
+        assert_eq!(rule.fusion_channels(tau, vacuum).to_vec(), vec![tau]);
+        assert_eq!(
+            rule.fusion_channels(tau, tau).to_vec(),
+            vec![vacuum, tau]
+        );
+        assert_eq!(rule.nsymbol(tau, tau, vacuum), 1);
+        assert_eq!(rule.nsymbol(tau, tau, tau), 1);
+        // "zero if one tau and two ones" (anyons.jl:113): exactly two vacuum
+        // legs and one tau is never an allowed fusion outcome.
+        assert_eq!(rule.nsymbol(vacuum, vacuum, tau), 0);
+        assert_eq!(rule.nsymbol(vacuum, tau, vacuum), 0);
+    }
+
+    #[test]
+    fn fibonacci_f_r_dim_twist_match_tensorkitsectors_anyons_jl() {
+        // Numeric oracle: every constant here is transcribed directly from
+        // `~/.julia/packages/TensorKitSectors/tugbK/src/anyons.jl` (Fsymbol
+        // lines 115-137, Rsymbol lines 139-146, dim line 83) plus the two
+        // generic fallbacks Fibonacci does not override (`sectors.jl:646-647`
+        // for twist, `sectors.jl:461-469` for the Frobenius-Schur phase).
+        let rule = FibonacciFusionRule;
+        let vacuum = SectorId::new(0);
+        let tau = SectorId::new(1);
+        let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let cispi = |x: f64| Complex64::from_polar(1.0, std::f64::consts::PI * x);
+        let close = |a: Complex64, b: Complex64| (a - b).norm() < 1.0e-12;
+
+        // F^{τττ}_τ 2x2 block, keyed by (left_coupled, right_coupled).
+        assert!(close(
+            rule.f_symbol_scalar(tau, tau, tau, tau, vacuum, vacuum),
+            Complex64::new(1.0 / phi, 0.0)
+        ));
+        assert!(close(
+            rule.f_symbol_scalar(tau, tau, tau, tau, tau, tau),
+            Complex64::new(-1.0 / phi, 0.0)
+        ));
+        assert!(close(
+            rule.f_symbol_scalar(tau, tau, tau, tau, vacuum, tau),
+            Complex64::new(1.0 / phi.sqrt(), 0.0)
+        ));
+        assert!(close(
+            rule.f_symbol_scalar(tau, tau, tau, tau, tau, vacuum),
+            Complex64::new(1.0 / phi.sqrt(), 0.0)
+        ));
+        // Every allowed configuration touching the vacuum leg is F = 1.
+        assert_eq!(
+            rule.f_symbol_scalar(vacuum, tau, tau, tau, tau, tau),
+            Complex64::new(1.0, 0.0)
+        );
+        assert_eq!(
+            rule.f_symbol_scalar(tau, vacuum, tau, tau, tau, tau),
+            Complex64::new(1.0, 0.0)
+        );
+        // Disallowed configuration (`a ⊗ f = d` gate fails: vacuum⊗vacuum
+        // never fuses to tau) is F = 0.
+        assert_eq!(
+            rule.f_symbol_scalar(vacuum, vacuum, vacuum, tau, vacuum, vacuum),
+            Complex64::new(0.0, 0.0)
+        );
+
+        assert!(close(
+            rule.r_symbol_scalar(tau, tau, vacuum),
+            cispi(4.0 / 5.0)
+        ));
+        assert!(close(
+            rule.r_symbol_scalar(tau, tau, tau),
+            cispi(-3.0 / 5.0)
+        ));
+        assert_eq!(rule.r_symbol_scalar(vacuum, tau, tau), Complex64::new(1.0, 0.0));
+        assert_eq!(rule.r_symbol_scalar(tau, vacuum, tau), Complex64::new(1.0, 0.0));
+
+        assert_eq!(rule.dim_scalar(vacuum), Complex64::new(1.0, 0.0));
+        assert!(close(rule.dim_scalar(tau), Complex64::new(phi, 0.0)));
+        assert!(close(
+            rule.sqrt_dim_scalar(tau),
+            Complex64::new(phi.sqrt(), 0.0)
+        ));
+        assert!(close(
+            rule.inv_sqrt_dim_scalar(tau),
+            Complex64::new(1.0 / phi.sqrt(), 0.0)
+        ));
+
+        assert_eq!(rule.twist_scalar(vacuum), Complex64::new(1.0, 0.0));
+        assert!(close(rule.twist_scalar(tau), cispi(-4.0 / 5.0)));
+
+        assert_eq!(
+            rule.frobenius_schur_phase_scalar(vacuum),
+            Complex64::new(1.0, 0.0)
+        );
+        assert_eq!(
+            rule.frobenius_schur_phase_scalar(tau),
+            Complex64::new(1.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn fibonacci_braid_then_inverse_braid_is_identity() {
+        // Self-consistency (a): braiding a crossing and then undoing it
+        // (reflected levels select the inverse-artin branch) must return the
+        // exact original tree with total coefficient 1 — this only holds
+        // because R^{ττ}_* is a genuine unit-modulus phase.
+        let rule = FibonacciFusionRule;
+        for coupled in [0usize, 1usize] {
+            let tree =
+                FusionTreeKey::from_sector_ids([1, 1], Some(coupled), [false, false], [], [1]);
+
+            let forward = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
+            assert_eq!(forward.len(), 1);
+            let backward =
+                multiplicity_free_braid_tree(&rule, &forward[0].0, &[1, 0], &[1, 0]).unwrap();
+            assert_eq!(backward.len(), 1);
+
+            assert_eq!(backward[0].0.uncoupled(), tree.uncoupled());
+            assert_eq!(backward[0].0.coupled(), tree.coupled());
+            let total = forward[0].1 * backward[0].1;
+            assert!((total - Complex64::new(1.0, 0.0)).norm() < 1.0e-12);
+        }
+
+        // Same check through the rank > 2 loop branch, where the round trip
+        // additionally exercises the F-symbol: this only returns to the
+        // identity because TensorKitSectors' F^{τττ}_τ block is a genuine
+        // (real, orthogonal) unitary matrix.
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+        let forward = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        assert_eq!(forward.len(), 2);
+        let mut total = Complex64::new(0.0, 0.0);
+        for (intermediate, coeff) in &forward {
+            let backward =
+                multiplicity_free_braid_tree(&rule, intermediate, &[0, 2, 1], &[0, 2, 1]).unwrap();
+            for (roundtrip, back_coeff) in &backward {
+                if roundtrip.innerlines() == tree.innerlines() {
+                    total += *coeff * *back_coeff;
+                }
+            }
+        }
+        assert!((total - Complex64::new(1.0, 0.0)).norm() < 1.0e-12);
+    }
+
+    #[test]
+    fn fibonacci_braid_tree_end_to_end_matches_hand_derived_coefficients() {
+        // End-to-end: Simple fusion + Anyonic braiding + complex Scalar
+        // through `multiplicity_free_braid_tree` on a rank-3 tree, with
+        // coefficients hand-derived from the engine's own
+        // R(c,d,e) * conj(F(d,a,b,e,c',c) * R(a,d,c')) formula
+        // (`multiplicity_free_artin_braid_at_with_inverse`, index > 0
+        // branch) substituting TensorKitSectors' F/R values directly.
+        let rule = FibonacciFusionRule;
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+
+        let braided = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        assert_eq!(braided.len(), 2);
+
+        let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let cispi = |x: f64| Complex64::from_polar(1.0, std::f64::consts::PI * x);
+        let coeff_for = |innerline: usize| {
+            braided
+                .iter()
+                .find(|(t, _)| t.innerlines() == [SectorId::new(innerline)])
+                .unwrap()
+                .1
+        };
+
+        let expected_vacuum_channel = Complex64::new(1.0 / phi.sqrt(), 0.0) * cispi(3.0 / 5.0);
+        let expected_tau_channel = Complex64::new(-1.0 / phi, 0.0);
+        assert!((coeff_for(0) - expected_vacuum_channel).norm() < 1.0e-12);
+        assert!((coeff_for(1) - expected_tau_channel).norm() < 1.0e-12);
+    }
+
     #[test]
     fn linearize_tree_pair_permutation_matches_tensorkit_zero_based_formula() {
         assert_eq!(
