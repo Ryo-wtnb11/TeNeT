@@ -830,6 +830,7 @@ where
             source.as_slice(),
             &workspace.coefficient_scratch,
             recoupling_plan.jobs(),
+            recoupling_plan.runs(),
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
@@ -1190,6 +1191,7 @@ where
             source.as_slice(),
             &workspace.coefficient_scratch,
             recoupling_plan.jobs(),
+            recoupling_plan.runs(),
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
@@ -1410,6 +1412,7 @@ fn recoupling_gemm_batch<E, D>(
     source: &[D],
     coefficients: &[D],
     jobs: &[DenseGemmBatchJob],
+    runs: &[usize],
 ) -> Result<(), OperationError>
 where
     E: DenseExecutor,
@@ -1443,6 +1446,7 @@ where
             lhs,
             rhs,
             jobs,
+            runs,
             D::one().dense_scalar(),
             D::zero().dense_scalar(),
         )

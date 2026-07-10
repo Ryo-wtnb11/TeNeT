@@ -51,18 +51,23 @@ pub trait Rank2Gemm<D> {
     /// dst_part` (column-major). The plan layer guarantees the destination
     /// ranges of a batch are pairwise disjoint, so implementations may run
     /// jobs in any order or concurrently. The default executes them in order.
+    ///
+    /// `runs` is the batch's plan-time run partition (see issue #103); backends
+    /// that route runs read it, the serial default ignores it.
     fn matmul_rank2_batch(
         &mut self,
         dst: &mut [D],
         lhs: &[D],
         rhs: &[D],
         jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
     where
         D: Copy,
     {
+        let _ = runs;
         for job in jobs {
             let lhs_slice = direct_slice(lhs, job.lhs_offset, job.rows, job.contracted)?;
             let rhs_slice = direct_slice(rhs, job.rhs_offset, job.contracted, job.cols)?;
@@ -200,6 +205,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -246,9 +252,10 @@ impl FusionBlockContractPlan {
 
         let _ = fusion_workspace;
         let batch = self.direct_batch()?;
+        let batch_runs = self.direct_batch_runs();
         profile.core_contract_groups += batch.len();
         let start = std::time::Instant::now();
-        gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, alpha, beta)?;
+        gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, batch_runs, alpha, beta)?;
         profile.core_direct_gemm_groups += batch.len();
         profile.core_matmul += start.elapsed();
 
@@ -326,6 +333,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -402,6 +410,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -479,6 +488,7 @@ impl FusionBlockContractPlan {
             lhs_data,
             rhs_data,
             self.direct_batch()?,
+            self.direct_batch_runs(),
             alpha,
             beta,
         )?;
@@ -1066,9 +1076,11 @@ mod tests {
             _lhs: &[f64],
             _rhs: &[f64],
             jobs: &[Rank2GemmBatchJob],
+            runs: &[usize],
             _alpha: f64,
             _beta: f64,
         ) -> Result<(), OperationError> {
+            debug_assert_eq!(runs.iter().sum::<usize>(), jobs.len());
             self.batch_calls += 1;
             self.last_batch_len = jobs.len();
             Ok(())

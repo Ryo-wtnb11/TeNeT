@@ -355,15 +355,18 @@ fn default_executor_matmul_into_matches_tensorkit_recoupling_view_for_all_gemm_d
 #[cfg(feature = "tenferro")]
 #[test]
 fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
+    // Four same-shape constant-stride jobs form one length-4 run (>=
+    // STRIDED_RUN_MIN), so the batch routes through the strided-batch seam as a
+    // single dispatch rather than one call per job.
     let mut lhs = Vec::new();
     let mut rhs = Vec::new();
-    for block in 0..2 {
+    for block in 0..4 {
         let base = block as f64;
         lhs.extend_from_slice(&[1.0 + base, 2.0 + base, 3.0 + base, 4.0 + base]);
         rhs.extend_from_slice(&[5.0 + base, 6.0 + base, 7.0 + base, 8.0 + base]);
     }
-    let mut output = vec![-99.0; 2 * 4];
-    let jobs = [0usize, 1]
+    let mut output = vec![-99.0; 4 * 4];
+    let jobs = [0usize, 1, 2, 3]
         .into_iter()
         .map(|block| DenseGemmBatchJob {
             dst_offset: block * 4,
@@ -374,34 +377,37 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
             cols: 2,
         })
         .collect::<Vec<_>>();
-    let flat_shape = [2 * 4];
+    let runs = strided_batch_runs(&jobs);
+    assert_eq!(runs, vec![4]);
+    let flat_shape = [4 * 4];
     let flat_strides = [1usize];
 
     let mut executor = DefaultDenseExecutor::new();
-    executor.reset_logical_gemm_dispatches();
+    executor.reset_seam_dispatches();
     executor
         .matmul_batch_axpby_into(
             DenseWrite::F64(DenseViewMut::new(&mut output, &flat_shape, &flat_strides, 0).unwrap()),
             DenseRead::F64(DenseView::new(&lhs, &flat_shape, &flat_strides, 0).unwrap()),
             DenseRead::F64(DenseView::new(&rhs, &flat_shape, &flat_strides, 0).unwrap()),
             &jobs,
+            &runs,
             DenseScalar::F64(1.0),
             DenseScalar::F64(0.0),
         )
         .unwrap();
 
     assert_eq!(
-        executor.logical_gemm_dispatches(),
+        executor.seam_dispatches(),
         1,
-        "same-shape strided batch submitted {} logical GEMM dispatches for {} jobs",
-        executor.logical_gemm_dispatches(),
+        "same-shape strided batch made {} seam dispatches for {} jobs",
+        executor.seam_dispatches(),
         jobs.len()
     );
     assert!(
-        executor.logical_gemm_dispatches() < jobs.len(),
-        "batched GEMM logical dispatch count must not scale with same-shape job count"
+        executor.seam_dispatches() < jobs.len(),
+        "batched GEMM seam dispatch count must not scale with same-shape job count"
     );
-    for block in 0..2 {
+    for block in 0..4 {
         let start = block * 4;
         let expected = matmul_f64(&lhs[start..start + 4], &rhs[start..start + 4], 2, 2, 2);
         for (actual, expected) in output[start..start + 4].iter().zip(expected) {
@@ -411,7 +417,7 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
 
     let lhs_f32 = lhs.iter().map(|&value| value as f32).collect::<Vec<_>>();
     let rhs_f32 = rhs.iter().map(|&value| value as f32).collect::<Vec<_>>();
-    let mut output_f32 = vec![-99.0_f32; 2 * 4];
+    let mut output_f32 = vec![-99.0_f32; 4 * 4];
     let mut executor = DefaultDenseExecutor::new();
     executor
         .matmul_batch_axpby_into(
@@ -421,12 +427,13 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
             DenseRead::F32(DenseView::new(&lhs_f32, &flat_shape, &flat_strides, 0).unwrap()),
             DenseRead::F32(DenseView::new(&rhs_f32, &flat_shape, &flat_strides, 0).unwrap()),
             &jobs,
+            &runs,
             DenseScalar::F32(1.0),
             DenseScalar::F32(0.0),
         )
         .unwrap();
-    assert_eq!(executor.logical_gemm_dispatches(), 1);
-    for block in 0..2 {
+    assert_eq!(executor.seam_dispatches(), 1);
+    for block in 0..4 {
         let start = block * 4;
         let expected = matmul_f32(
             &lhs_f32[start..start + 4],
@@ -448,7 +455,7 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
         .iter()
         .map(|&value| Complex32::new(value, -0.125 * value))
         .collect::<Vec<_>>();
-    let mut output_c32 = vec![Complex32::new(-99.0, -99.0); 2 * 4];
+    let mut output_c32 = vec![Complex32::new(-99.0, -99.0); 4 * 4];
     let mut executor = DefaultDenseExecutor::new();
     executor
         .matmul_batch_axpby_into(
@@ -458,12 +465,13 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
             DenseRead::C32(DenseView::new(&lhs_c32, &flat_shape, &flat_strides, 0).unwrap()),
             DenseRead::C32(DenseView::new(&rhs_c32, &flat_shape, &flat_strides, 0).unwrap()),
             &jobs,
+            &runs,
             DenseScalar::C32(Complex32::new(1.0, 0.0)),
             DenseScalar::C32(Complex32::new(0.0, 0.0)),
         )
         .unwrap();
-    assert_eq!(executor.logical_gemm_dispatches(), 1);
-    for block in 0..2 {
+    assert_eq!(executor.seam_dispatches(), 1);
+    for block in 0..4 {
         let start = block * 4;
         let expected = matmul_c32(
             &lhs_c32[start..start + 4],
@@ -485,7 +493,7 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
         .iter()
         .map(|&value| Complex64::new(value, -0.125 * value))
         .collect::<Vec<_>>();
-    let mut output_c64 = vec![Complex64::new(-99.0, -99.0); 2 * 4];
+    let mut output_c64 = vec![Complex64::new(-99.0, -99.0); 4 * 4];
     let mut executor = DefaultDenseExecutor::new();
     executor
         .matmul_batch_axpby_into(
@@ -495,12 +503,13 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
             DenseRead::C64(DenseView::new(&lhs_c64, &flat_shape, &flat_strides, 0).unwrap()),
             DenseRead::C64(DenseView::new(&rhs_c64, &flat_shape, &flat_strides, 0).unwrap()),
             &jobs,
+            &runs,
             DenseScalar::C64(Complex64::new(1.0, 0.0)),
             DenseScalar::C64(Complex64::new(0.0, 0.0)),
         )
         .unwrap();
-    assert_eq!(executor.logical_gemm_dispatches(), 1);
-    for block in 0..2 {
+    assert_eq!(executor.seam_dispatches(), 1);
+    for block in 0..4 {
         let start = block * 4;
         let expected = matmul_c64(
             &lhs_c64[start..start + 4],
@@ -511,6 +520,111 @@ fn default_executor_fuses_same_shape_strided_batch_jobs_for_all_gemm_dtypes() {
         );
         for (actual, expected) in output_c64[start..start + 4].iter().zip(expected) {
             assert_c64_close(*actual, expected, 1.0e-12);
+        }
+    }
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn default_executor_bundles_short_runs_into_one_seam_dispatch() {
+    // Structural guard for issue #103: a fragmented batch (three runs — two
+    // length-2 same-shape runs plus a singleton, all below STRIDED_RUN_MIN)
+    // must dispatch ONE grouped seam call, not one per run. Seam-call count
+    // stays flat as a batch fragments into more runs.
+    //
+    // Layout: shape A = 2x2x2 (blocks at storage offsets 0,4), shape B = 1x3x1
+    // (blocks at 8,10), shape C = 2x1x2 singleton (at 12). All dst ranges
+    // disjoint. lhs/rhs share the same flat buffer regions via the offsets.
+    let jobs = vec![
+        DenseGemmBatchJob {
+            dst_offset: 0,
+            lhs_offset: 0,
+            rhs_offset: 0,
+            rows: 2,
+            contracted: 2,
+            cols: 2,
+        },
+        DenseGemmBatchJob {
+            dst_offset: 4,
+            lhs_offset: 4,
+            rhs_offset: 4,
+            rows: 2,
+            contracted: 2,
+            cols: 2,
+        },
+        DenseGemmBatchJob {
+            dst_offset: 8,
+            lhs_offset: 8,
+            rhs_offset: 8,
+            rows: 1,
+            contracted: 3,
+            cols: 1,
+        },
+        DenseGemmBatchJob {
+            dst_offset: 9,
+            lhs_offset: 11,
+            rhs_offset: 11,
+            rows: 1,
+            contracted: 3,
+            cols: 1,
+        },
+        DenseGemmBatchJob {
+            dst_offset: 10,
+            lhs_offset: 14,
+            rhs_offset: 14,
+            rows: 2,
+            contracted: 1,
+            cols: 2,
+        },
+    ];
+    let runs = strided_batch_runs(&jobs);
+    assert_eq!(
+        runs,
+        vec![2, 2, 1],
+        "batch must present three runs, none >= cutoff"
+    );
+
+    // Storage large enough for every lhs/rhs/dst range referenced above.
+    let buf_len = 16usize;
+    let lhs: Vec<f64> = (0..buf_len).map(|i| 1.0 + i as f64).collect();
+    let rhs: Vec<f64> = (0..buf_len).map(|i| 2.0 + 0.5 * i as f64).collect();
+    let mut output = vec![-99.0; buf_len];
+    let flat_shape = [buf_len];
+    let flat_strides = [1usize];
+
+    let mut executor = DefaultDenseExecutor::new();
+    executor.reset_seam_dispatches();
+    executor
+        .matmul_batch_axpby_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &flat_shape, &flat_strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &flat_shape, &flat_strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &flat_shape, &flat_strides, 0).unwrap()),
+            &jobs,
+            &runs,
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        executor.seam_dispatches(),
+        1,
+        "three sub-cutoff runs must bundle into one grouped seam dispatch, got {}",
+        executor.seam_dispatches()
+    );
+    assert!(
+        executor.seam_dispatches() < runs.len(),
+        "seam dispatch count must not scale with the number of runs"
+    );
+
+    // Byte-for-byte correctness of every bundled job.
+    for job in &jobs {
+        let lhs_block = &lhs[job.lhs_offset..job.lhs_offset + job.rows * job.contracted];
+        let rhs_block = &rhs[job.rhs_offset..job.rhs_offset + job.contracted * job.cols];
+        let expected = matmul_f64(lhs_block, rhs_block, job.rows, job.contracted, job.cols);
+        let got = &output[job.dst_offset..job.dst_offset + job.rows * job.cols];
+        for (actual, expected) in got.iter().zip(expected) {
+            assert_f64_close(*actual, expected, 1.0e-12);
         }
     }
 }

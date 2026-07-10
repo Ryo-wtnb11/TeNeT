@@ -1,6 +1,6 @@
 use num_complex::{Complex32, Complex64};
 
-use crate::executor::{batch_offset, has_strided_batch_run, matrix_len, strided_batch_run_len};
+use crate::executor::{batch_offset, matrix_len};
 use crate::layout::strides_to_isize;
 use crate::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
@@ -15,6 +15,22 @@ use tenferro_tensor::{
     TensorView, TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
 };
 
+/// Minimum plan-time run length routed to the strided-batch seam; shorter runs
+/// and singletons are bundled into one grouped-gemm call. The strided seam's
+/// per-call setup (`analyse_gemm_cached`, stride normalization, layout checks)
+/// only amortizes over a long run — and tenferro loops internally either way
+/// (no true batched BLAS), so short runs pay that setup for no fusion win.
+///
+/// Derivation (issue #103 A/B measurements, Apple M4 Max, Accelerate, 1 thread):
+/// forcing the small d=4 5-group batch through grouped restored U1 compose from
+/// 6.3 to ~4.2 us and swap+out to ~12.6 us, while d=8/d=16 showed no strided
+/// advantage for short runs; the only case where strided wins is a long run
+/// (the SU2 recoupling run=7). 4 is the empirically-validated old
+/// `STRIDED_BATCH_MIN_JOBS` threshold (pre-b8bb92e), re-derived here as a
+/// plan-time cost-model constant (peer of the contraction-order cost model),
+/// not a runtime kernel knob.
+const STRIDED_RUN_MIN: usize = 4;
+
 #[derive(Debug)]
 pub struct DefaultDenseExecutor {
     backend: CpuBackend,
@@ -22,8 +38,11 @@ pub struct DefaultDenseExecutor {
     strided_batch_matmul_config: DotGeneralConfig,
     grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache,
     grouped_jobs: Vec<GroupedGemmJob>,
+    // Test-only count of low-level seam dispatches (one per grouped-gemm call,
+    // one per strided-batch call). A structural proxy that stays flat as a
+    // batch fragments into more runs — see the dispatch-count test for #103.
     #[cfg(test)]
-    logical_gemm_dispatches: usize,
+    seam_dispatches: usize,
 }
 
 impl DefaultDenseExecutor {
@@ -72,48 +91,112 @@ impl DefaultDenseExecutor {
             grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache::default(),
             grouped_jobs: Vec::new(),
             #[cfg(test)]
-            logical_gemm_dispatches: 0,
+            seam_dispatches: 0,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn reset_logical_gemm_dispatches(&mut self) {
-        self.logical_gemm_dispatches = 0;
+    pub(crate) fn reset_seam_dispatches(&mut self) {
+        self.seam_dispatches = 0;
     }
 
     #[cfg(test)]
-    pub(crate) fn logical_gemm_dispatches(&self) -> usize {
-        self.logical_gemm_dispatches
+    pub(crate) fn seam_dispatches(&self) -> usize {
+        self.seam_dispatches
     }
 
+    /// Routes one typed batch by its plan-time run partition (see issue #103).
+    /// Runs of length >= [`STRIDED_RUN_MIN`] go to the strided-batch seam; every
+    /// shorter run and singleton is bundled — preserving original job order —
+    /// into ONE grouped-gemm call. Because a batch's destination ranges are
+    /// pairwise disjoint (a [`DenseGemmBatchJob`] invariant), job order never
+    /// affects results, so this bundling is byte-identical to the per-run
+    /// dispatch it replaces while never fragmenting a small batch into one seam
+    /// call per run — which was the d=4 regression this fixes.
     #[allow(clippy::too_many_arguments)]
-    fn matmul_batch_axpby_grouped(
+    fn matmul_batch_axpby_route_typed<T, W, R>(
         &mut self,
-        output: DenseWrite<'_>,
-        lhs: DenseRead<'_>,
-        rhs: DenseRead<'_>,
+        output: &mut DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
         jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
         alpha: DenseScalar,
         beta: DenseScalar,
-    ) -> Result<(), DenseError> {
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
+        T: 'static,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
+    {
+        debug_assert_eq!(
+            runs.iter().sum::<usize>(),
+            jobs.len(),
+            "run partition must cover every job"
+        );
+        self.grouped_jobs.clear();
+        let mut start = 0usize;
+        for &run_len in runs {
+            let run = &jobs[start..start + run_len];
+            if run_len >= STRIDED_RUN_MIN {
+                self.matmul_strided_batch_run_typed(
+                    output, lhs, rhs, run, start, alpha, beta, wrap_write, wrap_read,
+                )?;
+            } else {
+                // Bundle short-run/singleton jobs, in order, for one grouped call.
+                self.grouped_jobs.extend(run.iter().map(|job| {
+                    GroupedGemmJob::new(
+                        job.dst_offset,
+                        job.lhs_offset,
+                        job.rhs_offset,
+                        job.rows,
+                        job.contracted,
+                        job.cols,
+                    )
+                }));
+            }
+            start += run_len;
+        }
+        if !self.grouped_jobs.is_empty() {
+            self.matmul_grouped_bundle_typed(output, lhs, rhs, alpha, beta, wrap_write, wrap_read)?;
+        }
+        Ok(())
+    }
+
+    /// Single grouped-gemm call over the jobs already staged in
+    /// `self.grouped_jobs` (the bundled short runs and singletons). One seam
+    /// dispatch regardless of how many runs fed it.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_grouped_bundle_typed<T, W, R>(
+        &mut self,
+        output: &mut DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
+        T: 'static,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
+    {
         #[cfg(test)]
         {
-            self.logical_gemm_dispatches += jobs.len();
+            self.seam_dispatches += 1;
         }
-        let lhs = TensorRead::from_view(tenferro_view(lhs)?);
-        let rhs = TensorRead::from_view(tenferro_view(rhs)?);
-        let output = TensorWrite::from_view(tenferro_view_mut(output)?);
-        self.grouped_jobs.clear();
-        self.grouped_jobs.extend(jobs.iter().map(|job| {
-            GroupedGemmJob::new(
-                job.dst_offset,
-                job.lhs_offset,
-                job.rhs_offset,
-                job.rows,
-                job.contracted,
-                job.cols,
-            )
-        }));
+        // shape/strides carry the view's own 'a lifetime, so capture them before
+        // the mutable data borrow when rebuilding the full-buffer write view.
+        let shape = output.shape();
+        let strides = output.strides();
+        let offset = output.offset();
+        let out_view = DenseViewMut::new(output.data_mut(), shape, strides, offset)?;
+        let lhs = TensorRead::from_view(tenferro_view(wrap_read(lhs))?);
+        let rhs = TensorRead::from_view(tenferro_view(wrap_read(rhs))?);
+        let output = TensorWrite::from_view(tenferro_view_mut(wrap_write(out_view))?);
         let accumulation = tenferro_tensor::DotGeneralAccumulation {
             lhs_conj: false,
             rhs_conj: false,
@@ -131,74 +214,6 @@ impl DefaultDenseExecutor {
             output,
         )
         .map_err(|err| tenferro_error("grouped_gemm", err))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn matmul_batch_axpby_strided_typed<T, W, R>(
-        &mut self,
-        output: &mut DenseViewMut<'_, T>,
-        lhs: DenseView<'_, T>,
-        rhs: DenseView<'_, T>,
-        jobs: &[DenseGemmBatchJob],
-        alpha: DenseScalar,
-        beta: DenseScalar,
-        wrap_write: W,
-        wrap_read: R,
-    ) -> Result<bool, DenseError>
-    where
-        T: 'static,
-        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
-        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
-    {
-        if jobs.len() < 2 {
-            return Ok(false);
-        }
-
-        if has_strided_batch_run(jobs) {
-            self.matmul_batch_axpby_strided_runs_typed(
-                output, lhs, rhs, jobs, 0, alpha, beta, wrap_write, wrap_read,
-            )?;
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn matmul_batch_axpby_strided_runs_typed<T, W, R>(
-        &mut self,
-        output: &mut DenseViewMut<'_, T>,
-        lhs: DenseView<'_, T>,
-        rhs: DenseView<'_, T>,
-        jobs: &[DenseGemmBatchJob],
-        cache_slot_base: usize,
-        alpha: DenseScalar,
-        beta: DenseScalar,
-        wrap_write: W,
-        wrap_read: R,
-    ) -> Result<(), DenseError>
-    where
-        T: 'static,
-        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x> + Copy,
-        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x> + Copy,
-    {
-        let mut start = 0usize;
-        while start < jobs.len() {
-            let run_len = strided_batch_run_len(jobs, start);
-            self.matmul_strided_batch_run_typed(
-                output,
-                lhs,
-                rhs,
-                &jobs[start..start + run_len],
-                cache_slot_base + start,
-                alpha,
-                beta,
-                wrap_write,
-                wrap_read,
-            )?;
-            start += run_len;
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -221,7 +236,7 @@ impl DefaultDenseExecutor {
     {
         #[cfg(test)]
         {
-            self.logical_gemm_dispatches += 1;
+            self.seam_dispatches += 1;
         }
         let first = &run[0];
         let run_len = run.len();
@@ -446,98 +461,59 @@ impl DenseExecutor for DefaultDenseExecutor {
         lhs: DenseRead<'_>,
         rhs: DenseRead<'_>,
         jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
         alpha: DenseScalar,
         beta: DenseScalar,
     ) -> Result<(), DenseError> {
         match (output, lhs, rhs) {
-            (DenseWrite::F32(mut out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => {
-                if self.matmul_batch_axpby_strided_typed(
+            (DenseWrite::F32(mut out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => self
+                .matmul_batch_axpby_route_typed(
                     &mut out,
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     alpha,
                     beta,
                     |view: DenseViewMut<'_, f32>| DenseWrite::F32(view),
                     |view: DenseView<'_, f32>| DenseRead::F32(view),
-                )? {
-                    return Ok(());
-                }
-                self.matmul_batch_axpby_grouped(
-                    DenseWrite::F32(out),
-                    DenseRead::F32(lhs),
-                    DenseRead::F32(rhs),
-                    jobs,
-                    alpha,
-                    beta,
-                )
-            }
-            (DenseWrite::F64(mut out), DenseRead::F64(lhs), DenseRead::F64(rhs)) => {
-                if self.matmul_batch_axpby_strided_typed(
+                ),
+            (DenseWrite::F64(mut out), DenseRead::F64(lhs), DenseRead::F64(rhs)) => self
+                .matmul_batch_axpby_route_typed(
                     &mut out,
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     alpha,
                     beta,
                     |view: DenseViewMut<'_, f64>| DenseWrite::F64(view),
                     |view: DenseView<'_, f64>| DenseRead::F64(view),
-                )? {
-                    return Ok(());
-                }
-                self.matmul_batch_axpby_grouped(
-                    DenseWrite::F64(out),
-                    DenseRead::F64(lhs),
-                    DenseRead::F64(rhs),
-                    jobs,
-                    alpha,
-                    beta,
-                )
-            }
-            (DenseWrite::C32(mut out), DenseRead::C32(lhs), DenseRead::C32(rhs)) => {
-                if self.matmul_batch_axpby_strided_typed(
+                ),
+            (DenseWrite::C32(mut out), DenseRead::C32(lhs), DenseRead::C32(rhs)) => self
+                .matmul_batch_axpby_route_typed(
                     &mut out,
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     alpha,
                     beta,
                     |view: DenseViewMut<'_, Complex32>| DenseWrite::C32(view),
                     |view: DenseView<'_, Complex32>| DenseRead::C32(view),
-                )? {
-                    return Ok(());
-                }
-                self.matmul_batch_axpby_grouped(
-                    DenseWrite::C32(out),
-                    DenseRead::C32(lhs),
-                    DenseRead::C32(rhs),
-                    jobs,
-                    alpha,
-                    beta,
-                )
-            }
-            (DenseWrite::C64(mut out), DenseRead::C64(lhs), DenseRead::C64(rhs)) => {
-                if self.matmul_batch_axpby_strided_typed(
+                ),
+            (DenseWrite::C64(mut out), DenseRead::C64(lhs), DenseRead::C64(rhs)) => self
+                .matmul_batch_axpby_route_typed(
                     &mut out,
                     lhs,
                     rhs,
                     jobs,
+                    runs,
                     alpha,
                     beta,
                     |view: DenseViewMut<'_, Complex64>| DenseWrite::C64(view),
                     |view: DenseView<'_, Complex64>| DenseRead::C64(view),
-                )? {
-                    return Ok(());
-                }
-                self.matmul_batch_axpby_grouped(
-                    DenseWrite::C64(out),
-                    DenseRead::C64(lhs),
-                    DenseRead::C64(rhs),
-                    jobs,
-                    alpha,
-                    beta,
-                )
-            }
+                ),
             _ => Err(DenseError::Backend {
                 backend: DenseBackend::Tenferro,
                 op: "matmul_batch_axpby_into",
