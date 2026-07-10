@@ -3579,4 +3579,229 @@ mod tests {
         assert_eq!(su2.twist_scalar(half), 1.0);
         assert_eq!(su2.frobenius_schur_phase_scalar(half), -1.0);
     }
+
+    // --- Stage A: outer-multiplicity (Generic fusion) foundation ----------
+    //
+    // `ToyOmRule` is purely synthetic (following `AsymmetricAnyonicRule`
+    // above as a template): sector 1 ("a") fuses with itself to sector 3
+    // ("c") via two independent channels, i.e. N(a,a,c) = 2. It exists only
+    // to exercise the `GenericFusionSymbols` wiring and the
+    // `FusionTreeKey::has_multiplicity` gate added in this stage.
+    // Pentagon/hexagon are NOT required to hold — see
+    // scratchpad/toy-om-stageA-plan.md, this is wiring validation only, not
+    // a physical anyon model. The recoupling engine (recouple wrapper,
+    // `UnsupportedFusionStyle` guards) does not consume this rule; that is
+    // explicitly Stage B.
+    #[derive(Clone, Copy, Debug)]
+    struct ToyOmRule;
+
+    impl ToyOmRule {
+        const VACUUM: usize = 0;
+        const A: usize = 1;
+        const C: usize = 3;
+    }
+
+    impl FusionRule for ToyOmRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(Self::VACUUM)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (Self::VACUUM, x) | (x, Self::VACUUM) => smallvec![SectorId::new(x)],
+                (Self::A, Self::A) => smallvec![SectorId::new(Self::C)],
+                (Self::A, Self::C) | (Self::C, Self::A) => smallvec![SectorId::new(Self::A)],
+                _ => smallvec![SectorId::new(Self::VACUUM)],
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            // The one artificial outer multiplicity this toy rule carries:
+            // a (x) a -> c has two independent fusion channels (N=2). Every
+            // other triple falls back to the multiplicity-free default (0
+            // or 1, from whether `coupled` is a fusion channel of
+            // `left (x) right`) — this is the override the design doc calls
+            // for instead of trying to encode multiplicity through repeated
+            // `fusion_channels` entries.
+            if (left.id(), right.id(), coupled.id()) == (Self::A, Self::A, Self::C) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for ToyOmRule {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let n_mu = self.nsymbol(a, b, e);
+            let n_nu = self.nsymbol(e, c, d);
+            let n_kappa = self.nsymbol(b, c, f);
+            let n_lambda = self.nsymbol(a, f, d);
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            if ids == (Self::A, Self::A, Self::VACUUM, Self::C, Self::C, Self::A) {
+                // mu and lambda both range over the N(a,a,c)=2 channel here
+                // (nu = N(c,0,c) = 1, kappa = N(a,0,a) = 1 are trivial), so
+                // this F-block is genuinely a 2x2 matrix. Filled with a
+                // pi/4 rotation — an actual orthogonal matrix, not just
+                // shape-correct filler — because the design doc wants F's
+                // (mu, lambda) block orthogonal so a later (Stage B)
+                // braid * inverse == identity self-consistency check has
+                // something real to check.
+                let s = std::f64::consts::FRAC_1_SQRT_2;
+                GenericFArray::new(vec![s, -s, s, s], (n_mu, n_nu, n_kappa, n_lambda))
+            } else {
+                let total = n_mu * n_nu * n_kappa * n_lambda;
+                GenericFArray::new(vec![1.0; total], (n_mu, n_nu, n_kappa, n_lambda))
+            }
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let rows = self.nsymbol(a, b, c);
+            let cols = self.nsymbol(b, a, c);
+            if (a.id(), b.id(), c.id()) == (Self::A, Self::A, Self::C) {
+                GenericRMatrix::new(vec![1.0, 0.0, 0.0, 1.0], rows, cols)
+            } else {
+                GenericRMatrix::new(vec![1.0; rows * cols], rows, cols)
+            }
+        }
+    }
+
+    #[test]
+    fn toy_om_rule_nsymbol_reports_outer_multiplicity() {
+        let rule = ToyOmRule;
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let vacuum = SectorId::new(ToyOmRule::VACUUM);
+
+        assert_eq!(rule.fusion_style(), FusionStyleKind::Generic);
+        assert_eq!(rule.nsymbol(a, a, c), 2);
+        // Everything else in this toy rule stays multiplicity-free (0 or 1).
+        assert_eq!(rule.nsymbol(a, vacuum, a), 1);
+        assert_eq!(rule.nsymbol(a, a, vacuum), 0);
+    }
+
+    #[test]
+    fn toy_om_rule_f_symbol_generic_has_nsymbol_shaped_block() {
+        let rule = ToyOmRule;
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let vacuum = SectorId::new(ToyOmRule::VACUUM);
+
+        // F(a,a,0,c,c,a): shape (N(a,a,c), N(c,0,c), N(a,0,a), N(a,a,c))
+        // = (2, 1, 1, 2).
+        let f = rule.f_symbol_generic(a, a, vacuum, c, c, a);
+        assert_eq!(f.shape(), (2, 1, 1, 2));
+        assert_eq!(f.data().len(), 4);
+
+        // The (mu, lambda) 2x2 block (nu = kappa = 0) is an orthogonal
+        // rotation: R^T R == I.
+        let m = [
+            [*f.get(0, 0, 0, 0), *f.get(0, 0, 0, 1)],
+            [*f.get(1, 0, 0, 0), *f.get(1, 0, 0, 1)],
+        ];
+        for col in 0..2 {
+            for other in 0..2 {
+                let dot: f64 = (0..2).map(|row| m[row][col] * m[row][other]).sum();
+                let expected = if col == other { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-12,
+                    "F (mu,lambda) block is not orthogonal at columns {col},{other}: {dot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn toy_om_rule_r_symbol_generic_has_nsymbol_shaped_matrix() {
+        let rule = ToyOmRule;
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+
+        let r = rule.r_symbol_generic(a, a, c);
+        assert_eq!(r.shape(), (2, 2));
+        assert_eq!(r.data().len(), 4);
+    }
+
+    fn generic_tree_pair(vertices_first: usize, vertices_second: usize) -> (FusionTreeKey, FusionTreeKey) {
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let first = FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(vertices_first)]);
+        let second = FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(vertices_second)]);
+        (first, second)
+    }
+
+    #[test]
+    fn fusion_tree_key_mult_free_equality_ignores_vertices() {
+        // Zero-cost-degeneration gate: with has_multiplicity left at its
+        // default (false, as every existing rule in this crate produces),
+        // two keys that agree on (uncoupled, coupled, is_dual, innerlines)
+        // but disagree on vertices are still `==`/same hash/`Ordering::Equal`
+        // — unchanged from before `has_multiplicity` existed.
+        let (first, second) = generic_tree_pair(0, 1);
+        assert!(!first.has_multiplicity());
+        assert!(!second.has_multiplicity());
+        assert_eq!(first, second);
+        assert_eq!(first.cmp(&second), std::cmp::Ordering::Equal);
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(first);
+        set.insert(second);
+        assert_eq!(set.len(), 1, "mult-free keys differing only in vertices must collapse to one");
+    }
+
+    #[test]
+    fn fusion_tree_key_generic_distinguishes_vertices() {
+        // OM-distinction gate: the same two keys as above, but flagged
+        // has_multiplicity=true (as a Generic-fusion tree from ToyOmRule
+        // would be) are now distinct: vertices participates in Hash/Eq/Ord.
+        let (first, second) = generic_tree_pair(0, 1);
+        let first = first.with_has_multiplicity(true);
+        let second = second.with_has_multiplicity(true);
+        assert!(first.has_multiplicity());
+        assert!(second.has_multiplicity());
+        assert_ne!(first, second);
+        assert_ne!(first.cmp(&second), std::cmp::Ordering::Equal);
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(first);
+        set.insert(second);
+        assert_eq!(set.len(), 2, "Generic keys differing in vertices must stay distinct");
+    }
+
+    #[test]
+    fn fusion_tree_key_has_multiplicity_is_itself_part_of_identity() {
+        // A key with has_multiplicity=false and one with true, but
+        // otherwise-identical fields including vertices, must not compare
+        // equal either direction (see the Hash impl comment: gating the
+        // vertices comparison on only one side's flag would be asymmetric).
+        let (mult_free, _) = generic_tree_pair(0, 0);
+        let generic = mult_free.clone().with_has_multiplicity(true);
+        assert_ne!(mult_free, generic);
+        assert_ne!(generic, mult_free);
+        assert_ne!(mult_free.cmp(&generic), std::cmp::Ordering::Equal);
+        assert_ne!(generic.cmp(&mult_free), std::cmp::Ordering::Equal);
+    }
 }
