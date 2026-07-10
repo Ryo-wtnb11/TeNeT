@@ -212,6 +212,77 @@ pub trait GenericFusionSymbols: FusionRule {
         -> GenericRMatrix<Self::Scalar>;
 }
 
+/// Scalar arithmetic the Generic-fusion (outer-multiplicity) Artin braid needs
+/// when summing the `R · F̄ · R̄` inner-index contraction
+/// (`braiding_manipulations.jl:181-182`:
+/// `coeff += Rmat1[ν,ρ] * conj(Fmat[κ,λ,μ,ρ]) * conj(Rmat2[σ,κ])`).
+///
+/// [`GenericFusionSymbols`] deliberately fixes only `type Scalar: Clone + Send +
+/// Sync` — Stage A never *computed* with the scalar, it only stored toy F/R
+/// blocks — so the braid layer needs `conj` / `+` / `*` / `zero` / `one` /
+/// `iszero` as an extra capability. Expressing that as a bound on `R::Scalar`
+/// here (a NEW trait, implemented for the concrete scalar types) keeps the
+/// Stage A `GenericFusionSymbols` trait byte-for-byte untouched (pure
+/// addition), while mirroring the `scalar_one` / `scalar_conj` that the
+/// multiplicity-free [`MultiplicityFreeFusionSymbols`] carries on the rule.
+/// `Add`/`Mul` are supertraits so the braid can use the `+`/`*` operators
+/// exactly as TensorKit writes them.
+pub trait GenericBraidScalar: Clone + Add<Output = Self> + Mul<Output = Self> {
+    /// Additive identity — the `coeff = zero(oneT)` accumulator seed at
+    /// `braiding_manipulations.jl:179`.
+    fn braid_zero() -> Self;
+
+    /// Multiplicative identity — the `oneT` unit-braid / seed coefficient
+    /// (`braiding_manipulations.jl:96`, `:117`).
+    fn braid_one() -> Self;
+
+    /// Complex conjugation — TensorKit's `conj(...)` and the matrix adjoint
+    /// `'` (`braiding_manipulations.jl:139`, `:172-173`, `:181-182`). Real for
+    /// real scalars.
+    fn braid_conj(&self) -> Self;
+
+    /// Whether this coefficient is exactly zero — the `iszero(R) && continue`
+    /// / `iszero(coeff) && continue` prune (`braiding_manipulations.jl:142`,
+    /// `:184`). Exact compare mirrors Julia's `iszero`.
+    fn braid_is_zero(&self) -> bool;
+}
+
+impl GenericBraidScalar for f64 {
+    fn braid_zero() -> Self {
+        0.0
+    }
+
+    fn braid_one() -> Self {
+        1.0
+    }
+
+    fn braid_conj(&self) -> Self {
+        *self
+    }
+
+    fn braid_is_zero(&self) -> bool {
+        *self == 0.0
+    }
+}
+
+impl GenericBraidScalar for Complex64 {
+    fn braid_zero() -> Self {
+        Complex64::new(0.0, 0.0)
+    }
+
+    fn braid_one() -> Self {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn braid_conj(&self) -> Self {
+        Complex64::conj(self)
+    }
+
+    fn braid_is_zero(&self) -> bool {
+        self.re == 0.0 && self.im == 0.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ProductSector<Left, Right> {
     left: Left,
