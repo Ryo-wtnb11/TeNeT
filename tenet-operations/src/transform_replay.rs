@@ -155,14 +155,20 @@ fn recoupling_multi_block<C>(
     structure: &TreeTransformStructure<C>,
     block_index: usize,
 ) -> Result<&TreeTransformBlock, OperationError> {
-    let block = structure
-        .blocks
-        .get(block_index)
-        .ok_or(OperationError::BlockIndexOutOfBounds {
-            tensor: "recoupling block",
-            index: block_index,
-            count: structure.blocks.len(),
-        })?;
+    // Lazy error construction: recoupling_multi_block is called per block on the
+    // hot replay path (pack/recouple/scatter). Eager .ok_or built the
+    // BlockIndexOutOfBounds struct on every success too, which the d=4 bisect
+    // (see issue #103) attributed to the compose regression. .ok_or_else only
+    // builds it on the never-taken out-of-bounds path.
+    let block =
+        structure
+            .blocks
+            .get(block_index)
+            .ok_or_else(|| OperationError::BlockIndexOutOfBounds {
+                tensor: "recoupling block",
+                index: block_index,
+                count: structure.blocks.len(),
+            })?;
     match block {
         TreeTransformBlock::Multi { .. } => Ok(block),
         TreeTransformBlock::Single { .. } => Err(OperationError::BlockIndexOutOfBounds {
