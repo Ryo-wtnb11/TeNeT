@@ -108,25 +108,35 @@ where
 /// keys (one per vertex-label combination) via
 /// [`collect_generic_fusion_trees_for_coupled`]. `R: FusionRule` (not
 /// `MultiplicityFreeFusionRule`) so SU(3)/SO(N≥7)/Sp(N) rules can drive the
-/// Space layer. `reachable` uses only `fusion_channels`/`vacuum`, which for a
-/// table provider (SU(3)) panics loudly on an escaping intermediate — the
-/// documented hard-error boundary.
+/// Space layer.
+///
+/// Escape semantics (Option A, refute/b3b-verify): the coupled candidates of
+/// each leg tuple are classified by [`FusionRule::coupled_sector_fold`]. Trees
+/// are enumerated for CLEAN sectors only (their tree set is exactly the
+/// full-SU(3) set); tainted / escaped / poisoned candidates are reported in the
+/// returned aggregate so the caller can refuse construction with an `Err` —
+/// block dimensions are either exactly right or an error, never silently
+/// truncated. A sector clean in one tuple but tainted in another is tainted
+/// overall (its block would mix complete and incomplete tree sets).
 fn fusion_trees_by_coupled_for_space_generic<R>(
     rule: &R,
     space: &FusionProductSpace,
-) -> Vec<CoupledFusionTrees>
+) -> (Vec<CoupledFusionTrees>, CoupledSectorFold)
 where
     R: FusionRule,
 {
     let mut grouped = Vec::<CoupledFusionTrees>::new();
     let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
+    let mut aggregate = CoupledSectorFold::default();
+    let mut clean_set: Vec<SectorId> = Vec::new();
     for tuple in space.selected_leg_tuples() {
         // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
         // rule); inlined here to avoid its mult-free bound.
         let uncoupled: Vec<SectorId> = tuple.iter().map(|leg| leg.sector()).collect();
         let effective = uncoupled.clone();
         let is_dual: Vec<bool> = tuple.iter().map(|leg| leg.is_dual()).collect();
-        for coupled in reachable_coupled_sectors_generic(rule, &effective) {
+        let fold = rule.coupled_sector_fold(&effective);
+        for &coupled in &fold.clean {
             let trees = collect_generic_fusion_trees_for_coupled(
                 rule, &uncoupled, &is_dual, &effective, coupled,
             );
@@ -138,32 +148,94 @@ where
                 }
             }
         }
+        clean_set.extend(fold.clean);
+        aggregate.tainted.extend(fold.tainted);
+        aggregate.out_of_table.extend(fold.out_of_table);
+        aggregate.poisoned |= fold.poisoned;
     }
+    aggregate.tainted.sort_unstable();
+    aggregate.tainted.dedup();
+    aggregate.out_of_table.sort();
+    aggregate.out_of_table.dedup();
+    clean_set.sort_unstable();
+    clean_set.dedup();
+    // Tainted-anywhere wins over clean-somewhere.
+    clean_set.retain(|s| !aggregate.tainted.contains(s));
+    aggregate.clean = clean_set;
+    if aggregate.poisoned {
+        // Same conservative contract as the per-tuple fold.
+        let mut demoted = std::mem::take(&mut aggregate.clean);
+        aggregate.tainted.append(&mut demoted);
+        aggregate.tainted.sort_unstable();
+        aggregate.tainted.dedup();
+    }
+    // Drop tree groups of sectors that lost their clean status across tuples.
+    grouped.retain(|group| aggregate.clean.contains(&group.coupled));
     grouped.sort_by_key(|group| group.coupled);
-    grouped
+    (grouped, aggregate)
 }
 
-/// `R: FusionRule` sibling of [`reachable_coupled_sectors`] (identical body —
-/// only `fusion_channels`/`vacuum` are used, which every `FusionRule` provides).
-fn reachable_coupled_sectors_generic<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
-where
-    R: FusionRule,
-{
-    let mut acc: Vec<SectorId> = match effective.first() {
-        None => vec![rule.vacuum()],
-        Some(&first) => vec![first],
-    };
-    for &last in effective.iter().skip(1) {
-        acc = acc
-            .iter()
-            .flat_map(|&front| rule.fusion_channels(front, last))
-            .collect();
-        acc.sort_unstable();
-        acc.dedup();
+/// Shared codomain×domain merge on equal coupled sectors (the generic sibling
+/// of the loop in `fusion_tree_keys_uncached`).
+fn merge_generic_tree_groups(
+    codomain: &[CoupledFusionTrees],
+    domain: &[CoupledFusionTrees],
+) -> Vec<FusionTreeBlockKey> {
+    let mut keys = Vec::new();
+    let mut codomain_index = 0usize;
+    let mut domain_index = 0usize;
+    while codomain_index < codomain.len() && domain_index < domain.len() {
+        match codomain[codomain_index]
+            .coupled
+            .cmp(&domain[domain_index].coupled)
+        {
+            std::cmp::Ordering::Less => codomain_index += 1,
+            std::cmp::Ordering::Greater => domain_index += 1,
+            std::cmp::Ordering::Equal => {
+                for domain_tree in &domain[domain_index].trees {
+                    for codomain_tree in &codomain[codomain_index].trees {
+                        keys.push(FusionTreeBlockKey::pair(
+                            codomain_tree.clone(),
+                            domain_tree.clone(),
+                        ));
+                    }
+                }
+                codomain_index += 1;
+                domain_index += 1;
+            }
+        }
     }
-    acc.sort_unstable();
-    acc.dedup();
-    acc
+    keys
+}
+
+/// Human-readable summary of a non-clean coupled fold, for the construction
+/// `Err` (names the escaping sectors — never silently dropped).
+fn fusion_fold_error_message(side: &str, fold: &CoupledSectorFold) -> String {
+    let mut parts = Vec::new();
+    if !fold.out_of_table.is_empty() {
+        parts.push(format!(
+            "out-of-table coupled candidates on the {side} side: {}",
+            fold.out_of_table.join(", ")
+        ));
+    }
+    if !fold.tainted.is_empty() {
+        parts.push(format!(
+            "sectors requiring out-of-table intermediates on the {side} side: {:?}",
+            fold.tainted
+        ));
+    }
+    if fold.poisoned {
+        parts.push(format!(
+            "the {side}-side fold left the one-hop frontier shell (conservative)"
+        ));
+    }
+    format!(
+        "SU(3) dim<=27 table cannot represent this space exactly ({}); block \
+         dimensions are either exact or an error, never truncated. Use \
+         fusion_tree_keys_generic_for_coupled for provably-clean sectors, or \
+         extend the table (Stage B3c).",
+        parts.join("; ")
+    )
 }
 
 /// Coupled sectors reachable by fusing all legs — TensorKit's `blocksectors`.
@@ -2227,7 +2299,14 @@ where
     // for c′ in intersect(a ⊗ d, e ⊗ conj(b))  (:171). `c' ∈ a⊗d` filtered by
     // N(c',b,e) > 0 is exactly that intersection (N(c',b,e) > 0 ⟺ c' ∈ e⊗conj(b)),
     // the same rewrite the mult-free branch uses.
-    for c_prime in rule.fusion_channels(a, d) {
+    //
+    // `fusion_channels_in_table` (not `fusion_channels`): for a bounded table
+    // rule (SU(3)) the pair (a, d) can escape even on a legal tree (e.g.
+    // a=27, d=8). Skipped frontier c′ are provably dead: transforms only run
+    // on structures whose sectors the coupled fold admitted as clean, and a
+    // nonzero frontier-c′ term would be a full-SU(3) tree through an
+    // out-of-table inner line — contradicting cleanness.
+    for c_prime in rule.fusion_channels_in_table(a, d) {
         if rule.nsymbol(c_prime, b, e) == 0 {
             continue;
         }
@@ -2904,7 +2983,11 @@ fn visit_generic_fusion_trees<R, F>(
             // Inner line ranges over `coupled ⊗ dual(last)`; the top vertex
             // `front_coupled ⊗ last → coupled` has `N(front_coupled,last,coupled)`
             // labels. (Same `vertexiterN` structure as the mult-free walker.)
-            for front_coupled in rule.fusion_channels(coupled, rule.dual(last)) {
+            // `fusion_channels_in_table`: only clean sectors are ever walked
+            // (tainted/escaped are an Err upstream), and clean sectors have no
+            // tree through a frontier inner line — skipping frontier
+            // `front_coupled` candidates drops only provably-dead branches.
+            for front_coupled in rule.fusion_channels_in_table(coupled, rule.dual(last)) {
                 let n_last = rule.nsymbol(front_coupled, last, coupled);
                 if n_last == 0 {
                     continue;
@@ -3097,7 +3180,9 @@ where
     let tail_uncoupled = &tree.uncoupled()[1..];
     let tail_is_dual = &tree.is_dual()[1..];
     let mut terms = Vec::new();
-    for tail_coupled in rule.fusion_channels(rule.dual(first), coupled) {
+    // `fusion_channels_in_table`: same clean-sector argument as the braid
+    // above — frontier tail_coupled candidates are dead on clean trees.
+    for tail_coupled in rule.fusion_channels_in_table(rule.dual(first), coupled) {
         let tail_effective = effective_sectors_for_uncoupled(rule, tail_uncoupled, tail_is_dual)?;
         for tail_tree in collect_generic_fusion_trees_for_coupled(
             rule,

@@ -66,32 +66,58 @@ fn su3_braid_round_trip_is_identity() {
     }
 }
 
-// REFUTE b3b (attack A): the enumerator panic is reachable from the public
-// Tensor API. A codomain of three adjoint (8) legs has valid in-table fusion
-// trees, but construction panics in fusion_tree_keys_generic (10⊗8 / 27⊗8
-// escape the dim<=27 table during the reachable-coupled fold). Documents the
-// confirmed limitation at the top level; not covered by the shipping tests,
-// which only build rank-2 codomains.
+// FLIPPED refute test (Option A fix): a codomain of three adjoint (8) legs has
+// out-of-table coupled candidates (35, 35̄, 64), so full-space construction from
+// the PUBLIC Tensor API now returns a clean Err naming them — it neither panics
+// (the refuted behavior) nor silently truncates the block structure. Per-sector
+// exactness of the same space is pinned against TK in tenet-core
+// (b3b_fix_enum_rank3_888_per_sector_matches_tensorkit, 24 trees).
 #[test]
-#[should_panic(expected = "escapes the dim<=27 table")]
-fn refute_su3_rank3_adjoint_codomain_panics() {
+fn su3_rank3_adjoint_codomain_errs_cleanly() {
     let rt = Runtime::builder().build().unwrap();
     let a8 = Space::su3([((1, 1), 1)]).unwrap(); // the adjoint 8
-    let _ = Tensor::rand_with_seed(&rt, Dtype::F64, [&a8, &a8, &a8], [], 1).unwrap();
+    let err = Tensor::rand_with_seed(&rt, Dtype::F64, [&a8, &a8, &a8], [], 1).unwrap_err();
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("cannot represent this space exactly"),
+        "want the bounded-table Err, got: {message}"
+    );
 }
 
-// REFUTE b3b (attack A/C): the escape is not rank-specific — even a RANK-2
-// tensor whose two legs pairwise-escape (27⊗8 ∋ 35,64) panics deep inside
-// fusion_tree_keys_generic, instead of returning the Result::Err that this
-// fallible constructor already threads. covers() exists as a pre-check but the
-// construction path never consults it. A user handling Err would still crash.
+// FLIPPED refute test: the rank-2 escaping leg pair (27⊗8 ∋ 35, 35̄, 64) also
+// returns Err through the fallible constructor instead of panicking.
 #[test]
-#[should_panic(expected = "escapes the dim<=27 table")]
-fn refute_su3_rank2_escaping_legpair_panics_not_err() {
+fn su3_rank2_escaping_legpair_errs_cleanly() {
     let rt = Runtime::builder().build().unwrap();
     let s27 = Space::su3([((2, 2), 1)]).unwrap(); // 27
     let s8 = Space::su3([((1, 1), 1)]).unwrap(); // 8
-    let _ = Tensor::rand_with_seed(&rt, Dtype::F64, [&s27, &s8], [], 1);
+    let err = Tensor::rand_with_seed(&rt, Dtype::F64, [&s27, &s8], [], 1).unwrap_err();
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("cannot represent this space exactly"),
+        "want the bounded-table Err, got: {message}"
+    );
+}
+
+// Positive shield check: the flagship physics shape [8,8] <- [8,8] is fully
+// in-table (8⊗8 closes), so construction AND a same-sides permute round-trip
+// work — and because construction admits only clean spaces, the transform layer
+// can never reach an escaping pair (the panic-freedom argument in su3.rs).
+#[test]
+fn su3_adjoint_rank4_constructs_and_permutes() {
+    let rt = Runtime::builder().build().unwrap();
+    let a8 = Space::su3([((1, 1), 1)]).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&a8, &a8], [&a8, &a8], 5).unwrap();
+    assert!(!a.data().is_empty());
+    let swapped = a.permute(&[1, 0], &[2, 3]).unwrap();
+    let back = swapped.permute(&[1, 0], &[2, 3]).unwrap();
+    assert_eq!(back.data().len(), a.data().len());
+    for (x, y) in back.data().iter().zip(a.data().iter()) {
+        assert!(
+            (x - y).abs() < 1e-12,
+            "rank-4 permute round-trip: {x} vs {y}"
+        );
+    }
 }
 
 #[test]

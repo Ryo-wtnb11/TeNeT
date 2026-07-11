@@ -507,7 +507,9 @@ fn build_space_generic<R: FusionRule>(
             Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
         })
     };
-    let keys = hom.fusion_tree_keys_generic(rule);
+    let keys = hom
+        .fusion_tree_keys_generic(rule)
+        .map_err(tenet_tensors::OperationError::from_core_preserving_context)?;
     let mut shapes = Vec::with_capacity(keys.len());
     for key in keys.iter() {
         let mut shape = Vec::with_capacity(hom.rank());

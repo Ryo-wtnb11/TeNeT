@@ -263,7 +263,9 @@ impl DynamicFusionMapSpace {
     {
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
-        let keys = homspace.fusion_tree_keys_generic(rule);
+        let keys = homspace
+            .fusion_tree_keys_generic(rule)
+            .map_err(OperationError::from_core_preserving_context)?;
         let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
         if keys.len() != shapes.len() {
             return Err(OperationError::from_core_preserving_context(
@@ -321,7 +323,9 @@ impl DynamicFusionMapSpace {
             .iter()
             .map(|&src_axis| source.homspace().external_axis_leg(rule, src_axis))
             .collect::<Vec<_>>();
-        let keys = homspace.fusion_tree_keys_generic(rule);
+        let keys = homspace
+            .fusion_tree_keys_generic(rule)
+            .map_err(OperationError::from_core_preserving_context)?;
         let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
         for key in keys.iter() {
             let sectors = key.external_sectors(rule);

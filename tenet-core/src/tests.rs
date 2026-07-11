@@ -6759,7 +6759,9 @@ mod tests {
             FusionProductSpace::new(legs.clone()),
             FusionProductSpace::new(legs),
         );
-        let keys = hom.fusion_tree_keys_generic(rule);
+        let keys = hom
+            .fusion_tree_keys_generic(rule)
+            .expect("helper is only used on fully in-table spaces");
         let mut set = std::collections::BTreeSet::new();
         for k in &keys {
             let t = k.codomain_tree();
@@ -6807,23 +6809,158 @@ mod tests {
         assert_eq!(trees, oracle, "rank-3 [3,3,3] enumeration mismatch vs TK");
     }
 
+    // FLIPPED refute test (Option A fix): the [8,8,8] full-space enumeration
+    // now returns Err (never panics, never truncates) because out-of-table
+    // coupled candidates (35, 35̄, 64) exist — while every in-table sector is
+    // still constructible per-sector with its exact full-SU(3) tree set (the
+    // 24-tree TK pin below).
     #[test]
-    #[should_panic(expected = "escapes the dim<=27 table")]
-    fn refute_a_enum_rank3_888_panics_despite_valid_intable_trees() {
-        // CONFIRMED LIMITATION (attack A): a codomain [8,8,8] has 24 valid
-        // in-table fusion trees (TensorKit oracle), yet fusion_tree_keys_generic
-        // PANICS — reachable_coupled_sectors_generic folds forward through 10⊗8 /
-        // 27⊗8, which escape the dim<=27 table, and the per-coupled walker hits
-        // fusion_channels(27,8) as well. The enumerator cannot represent a space
-        // that is physically representable (all 24 trees have in-table inner +
-        // coupled lines). Fails loudly (consistent with the hard-error policy),
-        // but for a case that should succeed. Reachable from the public Tensor
-        // API for any SU(3) tensor with >=3 adjoint legs on one side (the stated
-        // adjoint-Heisenberg motivation). Not covered by the shipping tests,
-        // which only use rank-2 codomains / fundamentals.
+    fn b3b_fix_enum_rank3_888_full_space_errs_not_panics() {
         let rule = su3();
         let eight = su3_id(1, 1);
-        let _ = refute_enum_codomain_trees(&rule, &[eight, eight, eight]);
+        let leg = SectorLeg::new([(eight, 1usize)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg.clone(), leg.clone()]),
+            FusionProductSpace::new([leg]),
+        );
+        let err = hom.fusion_tree_keys_generic(&rule).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("cannot represent this space exactly"),
+            "unexpected message: {message}"
+        );
+        // The escaping sectors are NAMED, never silently dropped: 35=(4,1),
+        // 35̄=(1,4), 64=(3,3) are the out-of-table candidates of [8,8,8].
+        for label in ["(1,4) dim 35", "(4,1) dim 35", "(3,3) dim 64"] {
+            assert!(message.contains(label), "missing {label} in: {message}");
+        }
+    }
+
+    // Per-sector construction of every in-table coupled sector of [8,8,8],
+    // pinned tree-by-tree against TensorKit's own fusiontrees((8,8,8), c)
+    // (TK 0.17.0 + SUNRepresentations 0.4.0; ids: 8=5, 10̄=6, 10=7, 27=16).
+    // 24 trees total — the complete full-SU(3) set for these sectors, proving
+    // "exact, not truncated" for the clean classification.
+    #[test]
+    fn b3b_fix_enum_rank3_888_per_sector_matches_tensorkit() {
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        // (coupled, [(inner, mu, nu)]) — verbatim TK fusiontrees dump.
+        let oracle: [(usize, &[(usize, usize, usize)]); 5] = [
+            (0, &[(5, 1, 1), (5, 2, 1)]),
+            (
+                5,
+                &[
+                    (0, 1, 1),
+                    (5, 1, 1),
+                    (5, 2, 1),
+                    (5, 1, 2),
+                    (5, 2, 2),
+                    (16, 1, 1),
+                    (6, 1, 1),
+                    (7, 1, 1),
+                ],
+            ),
+            (6, &[(5, 1, 1), (5, 2, 1), (16, 1, 1), (6, 1, 1)]),
+            (7, &[(5, 1, 1), (5, 2, 1), (16, 1, 1), (7, 1, 1)]),
+            (16, &[(5, 1, 1), (5, 2, 1), (16, 1, 1), (16, 1, 2), (6, 1, 1), (7, 1, 1)]),
+        ];
+        let mut total = 0usize;
+        for (coupled, trees) in oracle {
+            let c = SectorId::new(coupled);
+            let cod_leg = SectorLeg::new([(eight, 1usize)], false);
+            let dom_leg = SectorLeg::new([(c, 1usize)], false);
+            let hom = FusionTreeHomSpace::new(
+                FusionProductSpace::new([cod_leg.clone(), cod_leg.clone(), cod_leg]),
+                FusionProductSpace::new([dom_leg]),
+            );
+            let keys = hom.fusion_tree_keys_generic_for_coupled(&rule, c).unwrap();
+            let got: std::collections::BTreeSet<(usize, usize, usize)> = keys
+                .iter()
+                .map(|k| {
+                    let t = k.codomain_tree();
+                    assert_eq!(t.coupled(), Some(c));
+                    (
+                        t.innerlines()[0].id(),
+                        t.vertices()[0].id(),
+                        t.vertices()[1].id(),
+                    )
+                })
+                .collect();
+            let want: std::collections::BTreeSet<(usize, usize, usize)> =
+                trees.iter().copied().collect();
+            assert_eq!(got, want, "coupled {coupled}: tree set mismatch vs TK");
+            assert_eq!(keys.len(), trees.len(), "coupled {coupled}: multiplicity lost");
+            total += keys.len();
+        }
+        assert_eq!(total, 24, "[8,8,8] has 24 in-table trees (TK oracle)");
+    }
+
+    // FLIPPED refute test: rank-2 [27,8] — the pair itself escapes (∋ 35, 35̄,
+    // 64), so full-space enumeration is Err; but each in-table coupled sector
+    // is clean (escapes happen only at the final fold = coupled candidates) and
+    // constructs with the exact TK multiplicities: N(27,8,c) = {8:1, 27:2,
+    // 10̄:1, 10:1} (TK directproduct dump).
+    #[test]
+    fn b3b_fix_enum_rank2_278_per_sector_works_full_space_errs() {
+        let rule = su3();
+        let t27 = su3_id(2, 2);
+        let eight = su3_id(1, 1);
+        let cod = || {
+            FusionProductSpace::new([
+                SectorLeg::new([(t27, 1usize)], false),
+                SectorLeg::new([(eight, 1usize)], false),
+            ])
+        };
+        // Full space (domain [8]) errs — never panics, names the escapes.
+        let dom_leg = SectorLeg::new([(eight, 1usize)], false);
+        let hom = FusionTreeHomSpace::new(cod(), FusionProductSpace::new([dom_leg]));
+        let message = hom.fusion_tree_keys_generic(&rule).unwrap_err().to_string();
+        assert!(message.contains("cannot represent this space exactly"), "{message}");
+        // Per-sector: exact multiplicities.
+        for (coupled, n) in [(5usize, 1usize), (16, 2), (6, 1), (7, 1)] {
+            let c = SectorId::new(coupled);
+            let hom = FusionTreeHomSpace::new(
+                cod(),
+                FusionProductSpace::new([SectorLeg::new([(c, 1usize)], false)]),
+            );
+            let keys = hom.fusion_tree_keys_generic_for_coupled(&rule, c).unwrap();
+            assert_eq!(keys.len(), n, "N(27,8,{coupled}) mismatch vs TK");
+        }
+    }
+
+    // Rank-4 one-hop return path: [8,8,8,8] reaches frontier states (35, 35̄,
+    // 64) at the intermediate step 3; the final fold consults the v2 one-hop
+    // table N(f, 8, c).
+    //  * coupled = vacuum: NOT a one-hop return (N(35,8,1)=0 — vac ∉ 35⊗8), so
+    //    it stays clean and enumerates exactly 8 trees — pinned against TK's
+    //    length(fusiontrees((8,8,8,8), vac)) = 8.
+    //  * coupled = 27: IS a one-hop return (N(35,8,27)=1, TK), so its full-SU(3)
+    //    tree set includes trees through the out-of-table inner line 35 → the
+    //    table cannot enumerate it → Err ("out-of-table intermediates"), never
+    //    a truncated block.
+    #[test]
+    fn b3b_fix_enum_rank4_8888_one_hop_clean_vs_tainted() {
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let vac = SectorId::new(0);
+        let t27 = su3_id(2, 2);
+        let leg = || SectorLeg::new([(eight, 1usize)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg(), leg(), leg()]),
+            FusionProductSpace::new(std::iter::empty::<SectorLeg>()),
+        );
+        // Full space errs (escaped candidates + tainted sectors exist).
+        assert!(hom.fusion_tree_keys_generic(&rule).is_err());
+        // Clean sector: exact TK tree count.
+        let keys = hom.fusion_tree_keys_generic_for_coupled(&rule, vac).unwrap();
+        assert_eq!(keys.len(), 8, "TK: length(fusiontrees((8,8,8,8), vac)) == 8");
+        // Tainted sector: Err naming the cause, not a truncated enumeration.
+        let err = hom
+            .fusion_tree_keys_generic_for_coupled(&rule, t27)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("out-of-table intermediates"), "{err}");
     }
 
     // Attack B: independent END-TO-END spot-checks of su3_table.bin through the
