@@ -2090,6 +2090,34 @@ impl Tensor {
                 rhs_axes,
             );
         }
+        // SU(N) (Generic), Stage B3c-2 source-transform route: the direct GEMM
+        // engine only accepts core/compose form (lhs contracted axes == its whole
+        // domain in order, rhs contracted axes == its whole codomain in order).
+        // Any other arrangement is canonicalized here by composing ALREADY
+        // TK-pinned primitives — one generic permute per operand (the B3a tree
+        // transform, which carries all the recoupling) followed by the core
+        // contract — so this wiring adds no mathematics of its own; the route-
+        // equivalence gate pins `contract == explicit permute + core contract`.
+        // Recursion is bounded: the permuted arrangement is canonical by
+        // construction, so the recursive call falls through to the seam below.
+        // Placed after the diagonal fast paths so a diagonal bond operand keeps
+        // its O(d·n) scaling route, and after the adjoint materialization so
+        // operands here are plain dense tensors.
+        if self.rule == RuleKind::Su3 {
+            let canonical_lhs = (self.codomain_rank()..self.rank()).collect::<Vec<_>>();
+            let canonical_rhs = (0..rhs.codomain_rank()).collect::<Vec<_>>();
+            if lhs_axes != canonical_lhs.as_slice() || rhs_axes != canonical_rhs.as_slice() {
+                let lhs_open: Vec<usize> =
+                    (0..self.rank()).filter(|a| !lhs_axes.contains(a)).collect();
+                let rhs_open: Vec<usize> =
+                    (0..rhs.rank()).filter(|a| !rhs_axes.contains(a)).collect();
+                let lhs = self.permute(&lhs_open, lhs_axes)?;
+                let rhs = rhs.permute(rhs_axes, &rhs_open)?;
+                let contracted = (lhs_open.len()..lhs.rank()).collect::<Vec<_>>();
+                let rhs_contracted = (0..rhs_axes.len()).collect::<Vec<_>>();
+                return lhs.contract(&rhs, &contracted, &rhs_contracted);
+            }
+        }
         // Fold a lazy-adjoint operand into the GEMM with no copy. The adjoint is
         // transpose (codomain<->domain) + elementwise conjugate; both fold into
         // the contraction seam: feed it the shared PARENT buffer + parent space,
@@ -2199,16 +2227,18 @@ impl Tensor {
         let mut state = self.rt.lock();
         // SU(N) (Generic): dedicated non-macro core/compose route — the mult-free
         // `with_rule_ctx!` binding cannot host a Generic rule. Only the
-        // fully-direct GEMM (compose) route is wired: the block GEMM is
+        // fully-direct GEMM (compose) route runs here: the block GEMM is
         // symmetry-agnostic and the outer-multiplicity vertices ride in the
         // fusion-tree keys, so an OM vertex is summed by the contracted-tree
-        // GEMM. A conjugated/adjoint operand, or a contraction needing source
-        // tree-pair transforms, is Stage B3c-2 (clear error, no silent path).
+        // GEMM. `contract` guarantees the operands arrive in core/compose form
+        // (non-core arrangements are canonicalized by generic permutes upstream,
+        // Stage B3c-2) and materializes lazy adjoints, so a conjugate flag here
+        // is a routing bug, not user input.
         if self.rule == RuleKind::Su3 {
             if lhs_conj || rhs_conj {
                 return Err(Error::InvalidArgument(
-                    "SU(N) contraction with a conjugated / lazy-adjoint operand is not yet \
-                     supported (Stage B3c-2); materialize the adjoint explicitly"
+                    "internal: SU(N) contraction reached the seam with a conjugate flag; \
+                     lazy adjoints must be materialized upstream (contract() does this)"
                         .to_string(),
                 ));
             }
