@@ -98,12 +98,13 @@ pub use tensortrace::{
 };
 pub use tree_context::TreeTransformExecutionContext;
 pub use tree_transform::{
-    build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    build_tree_transform_group_plan, TreePairTransformCache, TreeTransformBlockSpec,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformCache, TreeTransformCacheStats,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
-    TreeTransformOperation, TreeTransformPlanScope, TreeTransformProductRuleCacheKey,
-    TreeTransformRuleCacheKey, TreeTransformSectorPlanKey, TreeTransformSourceGroupKey,
+    build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
+    build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreePairTransformCache,
+    TreeTransformBlockSpec, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
+    TreeTransformCacheStats, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformPlanScope,
+    TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSectorPlanKey,
+    TreeTransformSourceGroupKey,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{
