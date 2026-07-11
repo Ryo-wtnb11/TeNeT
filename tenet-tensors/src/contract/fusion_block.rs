@@ -740,6 +740,22 @@ pub(crate) fn compile_fusion_block_contract_plan_generic<R>(
 where
     R: FusionRule,
 {
+    // Hardening guard (adversarial review, Stage B3c-1 refute pass): the
+    // per-subblock `coefficient` computed below in `finish_generic` is
+    // hardcoded to `1.0`, which assumes a bosonic rule (no supertrace twist).
+    // That assumption is correct for every Generic rule shipped today
+    // (SU(N) is bosonic), but silently drops a twist for a hypothetical
+    // future non-bosonic Generic rule instead of failing loudly. Guard it
+    // here so a non-bosonic rule gets the same explicit B3c-2 scope error as
+    // any other unsupported generic-contract shape, rather than a silently
+    // wrong coefficient.
+    if rule.braiding_style() != tenet_core::BraidingStyleKind::Bosonic {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "non-bosonic Generic fusion contraction requires twist handling; \
+                      the core/compose (fully-direct GEMM) route assumes bosonic braiding \
+                      (coefficient = 1.0), which is Stage B3c-2, not this stage",
+        });
+    }
     reject_fusion_contract_conjugation(axes)?;
     if !is_core_form_fusion_block_contract_generic(rule, dst_space, lhs_space, rhs_space, axes)? {
         return Err(OperationError::UnsupportedTensorContractScope {
@@ -1160,7 +1176,10 @@ impl FusionBlockMatrixGroupBuilder {
                 .ok_or(OperationError::ElementCountOverflow)?;
             let matrix_offset = offset_to_isize(matrix_offset)?;
             // SU(N) bosonic: no supertrace twist → coefficient 1.0 (TensorKit
-            // mul! parity, matching the mult-free `rule.scalar_one()`).
+            // mul! parity, matching the mult-free `rule.scalar_one()`). This
+            // assumes a bosonic rule; `compile_fusion_block_contract_plan_generic`
+            // guards the entry against non-bosonic rules so that assumption is
+            // never silently violated here.
             let coefficient = 1.0_f64;
             subblocks.push(FusionSubblockMatrixLayout {
                 block: FusionStridedBlockLayout {
