@@ -6742,4 +6742,156 @@ mod tests {
             assert!((totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10);
         }
     }
+
+    // ============ REFUTE b3b: enumeration completeness (attack A) ============
+
+    // Dump every codomain tree that fusion_tree_keys_generic enumerates for a
+    // given uncoupled list, across ALL coupled sectors. Uses domain == codomain
+    // so each coupled group is a codomain×domain cross product; we recover pure
+    // codomain trees by taking the unique codomain_tree of each key.
+    fn refute_enum_codomain_trees(
+        rule: &Su3FusionRule,
+        uncoupled: &[SectorId],
+    ) -> Vec<(usize, Vec<usize>, Vec<usize>)> {
+        let leg = |s: SectorId| SectorLeg::new([(s, 1usize)], false);
+        let legs: Vec<_> = uncoupled.iter().map(|&s| leg(s)).collect();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new(legs.clone()),
+            FusionProductSpace::new(legs),
+        );
+        let keys = hom.fusion_tree_keys_generic(rule);
+        let mut set = std::collections::BTreeSet::new();
+        for k in &keys {
+            let t = k.codomain_tree();
+            let c = t.coupled().unwrap().id();
+            let inner: Vec<usize> = t.innerlines().iter().map(|x| x.id()).collect();
+            let vtx: Vec<usize> = t.vertices().iter().map(|x| x.id()).collect();
+            set.insert((c, inner, vtx));
+        }
+        set.into_iter().collect()
+    }
+
+    #[test]
+    fn refute_a_enum_rank2_88() {
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let trees = refute_enum_codomain_trees(&rule, &[eight, eight]);
+        // TensorKit in-table oracle for uncoupled (8,8): 6 trees.
+        let oracle: Vec<(usize, Vec<usize>, Vec<usize>)> = vec![
+            (0, vec![], vec![1]),
+            (5, vec![], vec![1]),
+            (5, vec![], vec![2]),
+            (6, vec![], vec![1]),
+            (7, vec![], vec![1]),
+            (16, vec![], vec![1]),
+        ];
+        assert_eq!(trees, oracle, "rank-2 [8,8] enumeration mismatch vs TK");
+    }
+
+    #[test]
+    fn refute_a_enum_rank3_333_fundamentals_ok() {
+        // Rank-3 codomain that stays fully in-table at every fold: [3,3,3].
+        // (3⊗3=3̄+6, 3̄⊗3=1+8, 6⊗3=8+10 — no escaping intermediate.) The
+        // enumerator handles this correctly and matches TK exactly. This
+        // isolates the rank-3 [8,8,8] failure below to escaping *intermediates*,
+        // not a generic rank-3 defect.
+        let rule = su3();
+        let three = su3_id(1, 0);
+        let trees = refute_enum_codomain_trees(&rule, &[three, three, three]);
+        let oracle: Vec<(usize, Vec<usize>, Vec<usize>)> = vec![
+            (0, vec![1], vec![1, 1]),
+            (5, vec![1], vec![1, 1]),
+            (5, vec![4], vec![1, 1]),
+            (7, vec![4], vec![1, 1]),
+        ];
+        assert_eq!(trees, oracle, "rank-3 [3,3,3] enumeration mismatch vs TK");
+    }
+
+    #[test]
+    #[should_panic(expected = "escapes the dim<=27 table")]
+    fn refute_a_enum_rank3_888_panics_despite_valid_intable_trees() {
+        // CONFIRMED LIMITATION (attack A): a codomain [8,8,8] has 24 valid
+        // in-table fusion trees (TensorKit oracle), yet fusion_tree_keys_generic
+        // PANICS — reachable_coupled_sectors_generic folds forward through 10⊗8 /
+        // 27⊗8, which escape the dim<=27 table, and the per-coupled walker hits
+        // fusion_channels(27,8) as well. The enumerator cannot represent a space
+        // that is physically representable (all 24 trees have in-table inner +
+        // coupled lines). Fails loudly (consistent with the hard-error policy),
+        // but for a case that should succeed. Reachable from the public Tensor
+        // API for any SU(3) tensor with >=3 adjoint legs on one side (the stated
+        // adjoint-Heisenberg motivation). Not covered by the shipping tests,
+        // which only use rank-2 codomains / fundamentals.
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let _ = refute_enum_codomain_trees(&rule, &[eight, eight, eight]);
+    }
+
+    // Attack B: independent END-TO-END spot-checks of su3_table.bin through the
+    // Rust parser. Each value is fresh SUNRepresentations 0.4.0 output (via
+    // /tmp/combenv), row-major flattened the SAME way gen.jl claims to write it.
+    // Asymmetric shapes ((2,1,2,1), (1,2,1,1)) + distinct irreps (15, 27) make a
+    // transposed axis order or wrong flatten detectable (would break these).
+    #[test]
+    fn refute_b_table_spot_checks() {
+        let rule = su3();
+        let sid = |p, q| su3_id(p, q);
+        // F(8,8,8; d=27, e=8, f=8) shape (2,1,2,1): OM on μ,κ; involves 27.
+        let f1 = rule.f_symbol_generic(
+            sid(1, 1),
+            sid(1, 1),
+            sid(1, 1),
+            sid(2, 2),
+            sid(1, 1),
+            sid(1, 1),
+        );
+        assert_eq!(f1.shape(), (2, 1, 2, 1));
+        for (k, want) in [
+            -0.1428571428571427,
+            0.2555506259999756,
+            0.2555506259999759,
+            0.00952380952380997,
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!((f1.data()[k] - want).abs() < 1e-10, "F(8,8,8,27,8,8)[{k}]");
+        }
+        // F(8,8,8; d=8, e=27, f=27) shape (1,1,1,1).
+        let f2 = rule.f_symbol_generic(
+            sid(1, 1),
+            sid(1, 1),
+            sid(1, 1),
+            sid(1, 1),
+            sid(2, 2),
+            sid(2, 2),
+        );
+        assert_eq!(f2.shape(), (1, 1, 1, 1));
+        assert!((f2.data()[0] - -0.1749999999999999).abs() < 1e-10);
+        // F(8,8,8; d=10, e=10, f=27) shape (1,1,1,1).
+        let f3 = rule.f_symbol_generic(
+            sid(1, 1),
+            sid(1, 1),
+            sid(1, 1),
+            sid(3, 0),
+            sid(3, 0),
+            sid(2, 2),
+        );
+        assert!((f3.data()[0] - 0.3872983346207417).abs() < 1e-10);
+        // F(3̄,3,15; d=15, e=8, f=27) shape (1,2,1,1): ν axis length 2, 15+27.
+        let f4 = rule.f_symbol_generic(
+            sid(0, 1),
+            sid(1, 0),
+            sid(1, 2),
+            sid(1, 2),
+            sid(1, 1),
+            sid(2, 2),
+        );
+        assert_eq!(f4.shape(), (1, 2, 1, 1));
+        assert!((f4.data()[0] - -0.36018013511259883).abs() < 1e-10, "F4[0]");
+        assert!((f4.data()[1] - 0.5198752449100368).abs() < 1e-10, "F4[1]");
+        // R(8,8,10) = -1.
+        let r = rule.r_symbol_generic(sid(1, 1), sid(1, 1), sid(3, 0));
+        assert_eq!(r.shape(), (1, 1));
+        assert!((r.data()[0] - -1.0).abs() < 1e-10);
+    }
 }

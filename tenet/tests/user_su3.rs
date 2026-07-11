@@ -66,6 +66,20 @@ fn su3_braid_round_trip_is_identity() {
     }
 }
 
+// REFUTE b3b (attack A): the enumerator panic is reachable from the public
+// Tensor API. A codomain of three adjoint (8) legs has valid in-table fusion
+// trees, but construction panics in fusion_tree_keys_generic (10⊗8 / 27⊗8
+// escape the dim<=27 table during the reachable-coupled fold). Documents the
+// confirmed limitation at the top level; not covered by the shipping tests,
+// which only build rank-2 codomains.
+#[test]
+#[should_panic(expected = "escapes the dim<=27 table")]
+fn refute_su3_rank3_adjoint_codomain_panics() {
+    let rt = Runtime::builder().build().unwrap();
+    let a8 = Space::su3([((1, 1), 1)]).unwrap(); // the adjoint 8
+    let _ = Tensor::rand_with_seed(&rt, Dtype::F64, [&a8, &a8, &a8], [], 1).unwrap();
+}
+
 #[test]
 fn su3_rand_seed_is_reproducible() {
     let rt = Runtime::builder().build().unwrap();
