@@ -80,6 +80,20 @@ fn refute_su3_rank3_adjoint_codomain_panics() {
     let _ = Tensor::rand_with_seed(&rt, Dtype::F64, [&a8, &a8, &a8], [], 1).unwrap();
 }
 
+// REFUTE b3b (attack A/C): the escape is not rank-specific — even a RANK-2
+// tensor whose two legs pairwise-escape (27⊗8 ∋ 35,64) panics deep inside
+// fusion_tree_keys_generic, instead of returning the Result::Err that this
+// fallible constructor already threads. covers() exists as a pre-check but the
+// construction path never consults it. A user handling Err would still crash.
+#[test]
+#[should_panic(expected = "escapes the dim<=27 table")]
+fn refute_su3_rank2_escaping_legpair_panics_not_err() {
+    let rt = Runtime::builder().build().unwrap();
+    let s27 = Space::su3([((2, 2), 1)]).unwrap(); // 27
+    let s8 = Space::su3([((1, 1), 1)]).unwrap(); // 8
+    let _ = Tensor::rand_with_seed(&rt, Dtype::F64, [&s27, &s8], [], 1);
+}
+
 #[test]
 fn su3_rand_seed_is_reproducible() {
     let rt = Runtime::builder().build().unwrap();
