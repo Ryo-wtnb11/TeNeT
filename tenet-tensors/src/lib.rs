@@ -54,6 +54,11 @@ pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
 };
+// Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
+pub use facade::{
+    braid_into_generic, permute_into_generic, transpose_into_generic, tree_transform_into_generic,
+    tree_transform_into_with_generic, tree_transform_structure_generic,
+};
 pub use facade::{
     copy_into, scaled_add_into, scaled_assign_into, tensoradd_add_into, tensoradd_assign_into,
     tensoradd_execute_with, tensoradd_fusion_into, tensoradd_fusion_into_with,
