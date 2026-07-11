@@ -7,17 +7,29 @@
 // TensorKitSectors sector interface), serialised to `su3_table.bin`, and
 // embedded with `include_bytes!`.
 //
-// Hard-error boundary (fail loudly, never truncate):
+// Bounded-table semantics (exact or Err, never silently truncated):
 //
 // SU(3) fusion does not close over any finite set: `dim ≤ 27` is a cut, and a
-// pair whose product escapes it (e.g. `8⊗10 ∋ 35`) is simply not representable
-// here. Because `FusionRule::fusion_channels` returns a `SectorVec`, not a
-// `Result`, the only physically honest options are "answer completely" or
-// "refuse loudly" — returning a *partial* channel list would silently corrupt
-// the fusion category (associativity, block structure, recoupling all break).
-// So an escaping pair panics with a clear message, and `Su3FusionRule::covers`
-// is the cheap pre-check callers use to stay inside the table. The unbounded
-// successor (build CGCs in Rust, no `dim` cut) is Stage B3c.
+// pair whose product escapes it (e.g. `8⊗10 ∋ 35`) is not fully representable
+// here. The contract is: **block dimensions are either exactly full-SU(3) or an
+// `Err` — never silently truncated.** Concretely (Option A, refute/b3b-verify):
+//
+// * `coupled_sector_fold` classifies each coupled-sector candidate of a leg
+//   list using the v2 frontier shell (in-table channels of escaping pairs +
+//   one-hop return N-symbols): `clean` sectors have their COMPLETE full-SU(3)
+//   tree set inside the table and enumerate exactly; `tainted` sectors have
+//   full-SU(3) trees through out-of-table inner lines (no F/R data for those)
+//   and are a construction `Err`; escaped coupled candidates make full-space
+//   construction an `Err` that names them. One frontier hop is tracked
+//   exactly (rank ≤ 4 with a single escape); anything deeper is conservatively
+//   poisoned → `Err`. Stage B3c (unbounded CGC construction) removes the cut.
+// * `fusion_channels` (infallible enumeration, `SectorVec` not `Result`) still
+//   panics on an escaping pair — but no public construction path can reach it:
+//   space/tensor construction goes through the fold and returns `Err` first,
+//   and tree transforms only run on structures the fold admitted as clean,
+//   whose fold pairs are all covered (a clean space has no reachable escaping
+//   pair by construction).
+// * `Su3FusionRule::covers` stays as the cheap public pairwise pre-check.
 //
 // `SectorId` is the dense index into the irrep list sorted by `(dim, p, q)`, so
 // vacuum `(0,0)` is id 0.
@@ -59,9 +71,35 @@ pub struct Su3SymbolTable {
     nsym: FxHashMap<(u8, u8, u8), usize>,
     fsymbols: FxHashMap<[u8; 6], GenericFArray<f64>>,
     rsymbols: FxHashMap<[u8; 3], GenericRMatrix<f64>>,
+    /// v2 frontier shell: Dynkin label + dim of every out-of-table channel of
+    /// an in-table pair (indexed by frontier id). Labels only — no F/R symbols
+    /// exist for these, which is exactly why sectors reached through them are
+    /// an `Err`, not enumerable.
+    frontier: Vec<(u8, u8, u32)>,
+    /// v2: escaping in-table pairs → (in-table channels, frontier channel ids).
+    escaping: FxHashMap<(u8, u8), Su3EscapingPair>,
+    /// v2: one-hop returns `frontier f ⊗ in-table x` → in-table channels + how
+    /// far the rest of the product strays.
+    one_hop: FxHashMap<(u16, u8), Su3OneHop>,
     /// FNV-1a-64 of the table payload; doubles as the cache-key identity so a
     /// swapped table can never reuse another table's compiled plans.
     provenance: u64,
+}
+
+#[derive(Debug)]
+struct Su3EscapingPair {
+    in_channels: SectorVec,
+    frontier: Vec<u16>,
+}
+
+#[derive(Debug)]
+struct Su3OneHop {
+    /// In-table channels `(c, N(f, x, c))`.
+    returns: Vec<(u8, u8)>,
+    /// `f⊗x` has channels beyond table ∪ first shell.
+    beyond_shell: bool,
+    /// `f⊗x` has first-shell (frontier) channels.
+    has_frontier: bool,
 }
 
 /// Minimal little-endian cursor over the embedded blob. Panics on truncation —
@@ -80,6 +118,12 @@ impl<'a> Cursor<'a> {
     }
     fn i8(&mut self) -> i8 {
         self.u8() as i8
+    }
+    fn u16(&mut self) -> u16 {
+        let mut b = [0u8; 2];
+        b.copy_from_slice(&self.bytes[self.pos..self.pos + 2]);
+        self.pos += 2;
+        u16::from_le_bytes(b)
     }
     fn u32(&mut self) -> u32 {
         let mut b = [0u8; 4];
@@ -115,7 +159,7 @@ impl Su3SymbolTable {
         assert_eq!(&bytes[0..4], b"SU3T", "su3_table.bin: bad magic");
         let mut c = Cursor { bytes, pos: 4 };
         let version = c.u32();
-        assert_eq!(version, 1, "su3_table.bin: unsupported version {version}");
+        assert_eq!(version, 2, "su3_table.bin: unsupported version {version}");
         let provenance = c.u64();
         // Self-check: recompute the payload hash. Catches truncation and — the
         // Stage B2b hazard — a row/column transpose mistake in the generator or
@@ -187,12 +231,74 @@ impl Su3SymbolTable {
             fsymbols.insert(key, GenericFArray::new(data, (s0, s1, s2, s3)));
         }
 
+        // ---- v2 frontier shell ----
+        let n_frontier = c.u32() as usize;
+        let mut frontier = Vec::with_capacity(n_frontier);
+        for _ in 0..n_frontier {
+            let p = c.u8();
+            let q = c.u8();
+            let dim = c.u32();
+            let _dual_fid = c.u16(); // recorded for completeness; labels suffice here
+            frontier.push((p, q, dim));
+        }
+
+        let n_escaping = c.u32() as usize;
+        let mut escaping = FxHashMap::default();
+        for _ in 0..n_escaping {
+            let a = c.u8();
+            let b = c.u8();
+            let n_in = c.u8() as usize;
+            let mut in_channels: SectorVec = SectorVec::new();
+            for _ in 0..n_in {
+                let cc = c.u8();
+                let _nmul = c.u8(); // multiplicity lives in `nsym` (R rows)
+                in_channels.push(SectorId::new(cc as usize));
+            }
+            let n_fr = c.u8() as usize;
+            let mut fr = Vec::with_capacity(n_fr);
+            for _ in 0..n_fr {
+                fr.push(c.u16());
+            }
+            escaping.insert(
+                (a, b),
+                Su3EscapingPair {
+                    in_channels,
+                    frontier: fr,
+                },
+            );
+        }
+
+        let n_hops = c.u32() as usize;
+        let mut one_hop = FxHashMap::default();
+        for _ in 0..n_hops {
+            let fid = c.u16();
+            let x = c.u8();
+            let flags = c.u8();
+            let n_ret = c.u8() as usize;
+            let mut returns = Vec::with_capacity(n_ret);
+            for _ in 0..n_ret {
+                returns.push((c.u8(), c.u8()));
+            }
+            one_hop.insert(
+                (fid, x),
+                Su3OneHop {
+                    returns,
+                    beyond_shell: flags & 1 != 0,
+                    has_frontier: flags & 2 != 0,
+                },
+            );
+        }
+        assert_eq!(c.pos, bytes.len(), "su3_table.bin: trailing bytes");
+
         Su3SymbolTable {
             irreps,
             fusion,
             nsym,
             fsymbols,
             rsymbols,
+            frontier,
+            escaping,
+            one_hop,
             provenance,
         }
     }
@@ -347,6 +453,150 @@ impl FusionRule for Su3FusionRule {
             .get(&(left.id() as u8, right.id() as u8, coupled.id() as u8))
             .copied()
             .unwrap_or(0)
+    }
+
+    fn fusion_channels_in_table(&self, left: SectorId, right: SectorId) -> SectorVec {
+        // In-table channels of ANY in-table pair, covered or escaping. Safe to
+        // use only where out-of-table branches provably vanish — i.e. on trees
+        // of `clean` sectors (see the trait doc): a clean sector has no
+        // full-SU(3) tree through an out-of-table line, so the skipped frontier
+        // channels are dead branches, not truncation.
+        let key = (left.id() as u8, right.id() as u8);
+        if let Some(channels) = self.table.fusion.get(&key) {
+            return channels.clone();
+        }
+        if let Some(esc) = self.table.escaping.get(&key) {
+            return esc.in_channels.clone();
+        }
+        let (pl, ql) = self.dynkin_or_oob(left);
+        let (pr, qr) = self.dynkin_or_oob(right);
+        panic!(
+            "Su3FusionRule: sector pair ({pl},{ql}) ⊗ ({pr},{qr}) is not in the \
+             dim<=27 table (invalid sector id)"
+        )
+    }
+
+    fn coupled_sector_fold(&self, effective: &[SectorId]) -> CoupledSectorFold {
+        // Escape-tracking forward fold (Option A, refute/b3b-verify). States:
+        //   clean    — reached only through in-table lines; their trees are
+        //              exactly the full-SU(3) set (enumerable);
+        //   tainted  — in-table, but some full-SU(3) tree reaches them through
+        //              an out-of-table line (one-hop return) → must be Err;
+        //   frontier — out-of-table intermediate states, folded via the v2
+        //              one-hop table for exactly one more step.
+        // A frontier surviving PAST one hop (or leaving the first shell) sets
+        // `poisoned`: the clean/tainted split is unknown → everything Err.
+        // ponytail: exact for one frontier hop (rank<=4 single escape, all the
+        // physics cases B3b targets); deeper folds are conservative Err until
+        // B3c lifts the dim cut.
+        use std::collections::BTreeSet;
+        let t = &self.table;
+        let mut clean: BTreeSet<u8> = BTreeSet::new();
+        let mut tainted: BTreeSet<u8> = BTreeSet::new();
+        let mut frontier: BTreeSet<u16> = BTreeSet::new();
+        let mut escaped: BTreeSet<u16> = BTreeSet::new();
+        let mut unknown_escape = false;
+        let mut poisoned = false;
+
+        match effective.first() {
+            None => {
+                clean.insert(self.vacuum().id() as u8);
+            }
+            Some(&first) => {
+                let _ = t.irrep(first); // range check, panics on bogus id
+                clean.insert(first.id() as u8);
+            }
+        }
+
+        for (step, &x) in effective.iter().enumerate().skip(1) {
+            let _ = t.irrep(x); // range check
+            let xg = x.id() as u8;
+            let is_last = step == effective.len() - 1;
+            let mut new_clean: BTreeSet<u8> = BTreeSet::new();
+            let mut new_tainted: BTreeSet<u8> = BTreeSet::new();
+            let mut new_frontier: BTreeSet<u16> = BTreeSet::new();
+
+            let fold_in_table = |s: u8, out: &mut BTreeSet<u8>,
+                                     new_frontier: &mut BTreeSet<u16>,
+                                     escaped: &mut BTreeSet<u16>| {
+                if let Some(channels) = t.fusion.get(&(s, xg)) {
+                    out.extend(channels.iter().map(|c| c.id() as u8));
+                } else if let Some(esc) = t.escaping.get(&(s, xg)) {
+                    out.extend(esc.in_channels.iter().map(|c| c.id() as u8));
+                    for &fid in &esc.frontier {
+                        if is_last {
+                            escaped.insert(fid); // out-of-table coupled candidate
+                        } else {
+                            new_frontier.insert(fid);
+                        }
+                    }
+                } else {
+                    unreachable!("every in-table pair is covered or escaping");
+                }
+            };
+            for &s in &clean {
+                fold_in_table(s, &mut new_clean, &mut new_frontier, &mut escaped);
+            }
+            for &s in &tainted {
+                // taint propagates: trees through a tainted state stay incomplete.
+                fold_in_table(s, &mut new_tainted, &mut new_frontier, &mut escaped);
+            }
+            for &f in &frontier {
+                let hop = t.one_hop.get(&(f, xg)).unwrap_or_else(|| {
+                    unreachable!("one-hop table covers every (frontier, in-table) pair")
+                });
+                // In-table returns: candidates whose enumeration would need the
+                // out-of-table intermediate `f` — incomplete with our F/R data.
+                new_tainted.extend(hop.returns.iter().map(|&(c, _)| c));
+                if is_last {
+                    if hop.beyond_shell || hop.has_frontier {
+                        // Out-of-table coupled candidates with unrecorded labels.
+                        unknown_escape = true;
+                    }
+                } else if hop.beyond_shell || hop.has_frontier {
+                    // A frontier product would have to fold AGAIN; the one-hop
+                    // table doesn't identify those states → conservative.
+                    poisoned = true;
+                }
+            }
+
+            clean = new_clean;
+            tainted = new_tainted;
+            frontier = new_frontier;
+            if poisoned {
+                break;
+            }
+        }
+
+        if poisoned {
+            // Split unknown: report every known candidate as tainted.
+            tainted.extend(clean.iter().copied());
+            clean.clear();
+        } else {
+            // A sector reached both cleanly and through a frontier is incomplete.
+            clean.retain(|s| !tainted.contains(s));
+        }
+
+        let mut out_of_table: Vec<String> = escaped
+            .iter()
+            .map(|&fid| {
+                let (p, q, dim) = t.frontier[fid as usize];
+                format!("({p},{q}) dim {dim}")
+            })
+            .collect();
+        if unknown_escape {
+            out_of_table.push("(beyond one-hop frontier products)".to_string());
+        }
+
+        CoupledSectorFold {
+            clean: clean.into_iter().map(|s| SectorId::new(s as usize)).collect(),
+            tainted: tainted
+                .into_iter()
+                .map(|s| SectorId::new(s as usize))
+                .collect(),
+            out_of_table,
+            poisoned,
+        }
     }
 }
 

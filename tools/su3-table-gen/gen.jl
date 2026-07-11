@@ -25,7 +25,7 @@
 # stored in the header so the Rust loader can self-check against corruption /
 # a transpose mistake:
 #   magic         : 4  bytes = b"SU3T"
-#   version       : u32 = 1
+#   version       : u32 = 2
 #   provenance    : u64  (FNV-1a-64 of every byte after this field)
 #   n_irreps      : u32
 #   irreps        : n_irreps × { p:u8, q:u8, dim:u32, dual:u8, fs:i8 }
@@ -35,7 +35,19 @@
 #   r             : n_r × { a:u8,b:u8,c:u8, rows:u8, cols:u8, [f64]×rows*cols }
 #   n_f           : u32
 #   f             : n_f × { a,b,c,d,e,f:u8, s0,s1,s2,s3:u8, [f64]×∏s }
-# (sector ids are u8: only 17 in-set irreps, so 0..16 fit a byte.)
+# --- v2 frontier shell (integers only, no frontier F/R symbols) ---
+#   n_frontier    : u32   (out-of-table channels of in-table pairs)
+#   frontier      : n × { p:u8, q:u8, dim:u32, dual_fid:u16 }
+#   n_escaping    : u32   (in-table pairs with >=1 out-of-table channel)
+#   escaping      : n × { a:u8, b:u8, n_in:u8, [c:u8,N:u8]×, n_fr:u8, [fid:u16]× }
+#   n_hops        : u32   (one-hop returns: frontier f ⊗ in-table x)
+#   hops          : n × { fid:u16, x:u8, flags:u8, n_ret:u8, [c:u8,N:u8]× }
+#                   flags bit0 = f⊗x has channels beyond table ∪ frontier
+#                   flags bit1 = f⊗x has frontier (first-shell) channels
+# (sector ids are u8: only 17 in-set irreps, so 0..16 fit a byte; frontier ids
+#  are u16 indices into the frontier list. The v2 shell lets the Rust-side
+#  coupled-sector fold classify sectors as clean / tainted / escaped instead of
+#  panicking — see su3.rs `coupled_sector_fold`.)
 #
 # Regenerate:  julia --project=/path/to/sunenv tools/su3-table-gen/gen.jl
 # (an env with SUNRepresentations 0.4.0 + TensorKitSectors). See README.md for
@@ -152,11 +164,80 @@ function main()
         end
     end
 
+    # ---- v2: frontier shell (Option A escape classification) --------------
+    # Frontier = every out-of-table channel of an in-table pair. Recorded so
+    # the Rust coupled-sector fold can (a) keep the in-table channels of an
+    # escaping pair (they are legitimate clean intermediates), (b) know WHICH
+    # frontier states appear, and (c) fold a frontier state one more step via
+    # the one-hop return table N(f, x, c) — enough for exact classification up
+    # to one frontier hop (rank ≤ 4 single-escape); anything deeper is flagged
+    # and treated conservatively (Err) on the Rust side. Integers only: no
+    # frontier F/R symbols exist, which is exactly why returned-through-frontier
+    # sectors are Err, not enumerable.
+    frontier_set = Set{SUNIrrep{3}}()
+    for a in irreps, b in irreps, (c, _) in directproduct(a, b)
+        inset(c) || push!(frontier_set, c)
+    end
+    frontier = sort!(collect(frontier_set),
+                     by = s -> (dim(s), dynkin_label(s)[1], dynkin_label(s)[2]))
+    fid = Dict(f => i - 1 for (i, f) in enumerate(frontier))
+    shell(s) = inset(s) || haskey(fid, s)
+    pu32!(payload, length(frontier))
+    for f in frontier
+        p, q = dynkin_label(f)
+        pu8!(payload, p); pu8!(payload, q)
+        pu32!(payload, dim(f))
+        pu16!(payload, fid[dual(f)])   # frontier is closed under dual
+    end
+
+    # escaping pairs: in-table channels (with N) + frontier channel ids
+    escrecs = Vector{Tuple{Int,Int,Vector{Tuple{Int,Int}},Vector{Int}}}()
+    for a in irreps, b in irreps
+        chans = collect(directproduct(a, b))
+        any(!inset(first(cn)) for cn in chans) || continue
+        ins = sort!([(id[c], nmul) for (c, nmul) in chans if inset(c)])
+        frs = sort!([fid[c] for (c, _) in chans if !inset(c)])
+        push!(escrecs, (id[a], id[b], ins, frs))
+    end
+    pu32!(payload, length(escrecs))
+    for (a, b, ins, frs) in escrecs
+        pu8!(payload, a); pu8!(payload, b)
+        pu8!(payload, length(ins))
+        for (c, nmul) in ins
+            pu8!(payload, c); pu8!(payload, nmul)
+        end
+        pu8!(payload, length(frs))
+        for f in frs
+            pu16!(payload, f)
+        end
+    end
+
+    # one-hop returns: frontier f ⊗ in-table x
+    nhops = 0
+    hoprecs = Vector{Tuple{Int,Int,Int,Vector{Tuple{Int,Int}}}}()
+    for f in frontier, x in irreps
+        chans = collect(directproduct(f, x))
+        rets = sort!([(id[c], nmul) for (c, nmul) in chans if inset(c)])
+        beyond = any(!shell(first(cn)) for cn in chans)
+        hasfr = any(haskey(fid, first(cn)) for cn in chans)
+        flags = (beyond ? 1 : 0) | (hasfr ? 2 : 0)
+        push!(hoprecs, (fid[f], id[x], flags, rets))
+        nhops += 1
+    end
+    pu32!(payload, nhops)
+    for (f, x, flags, rets) in hoprecs
+        pu16!(payload, f); pu8!(payload, x); pu8!(payload, flags)
+        pu8!(payload, length(rets))
+        for (c, nmul) in rets
+            pu8!(payload, c); pu8!(payload, nmul)
+        end
+    end
+
     # ---- assemble file: header + payload ----
     prov = fnv1a(payload)
     out = UInt8[]
     append!(out, Vector{UInt8}("SU3T"))
-    pu32!(out, 1)          # version
+    pu32!(out, 2)          # version (2 = v1 + frontier shell)
     pu64!(out, prov)       # provenance / cache-identity hash
     append!(out, payload)
 
@@ -164,8 +245,10 @@ function main()
     write(dest, out)
     println("wrote ", dest)
     println("  irreps=", n, " covered_pairs=", length(pairs),
-            " R=", length(rrecs), " F=", nf,
-            " bytes=", length(out), " (", round(length(out) / 1e6, digits = 3), " MB)")
+            " R=", length(rrecs), " F=", nf)
+    println("  frontier=", length(frontier), " escaping_pairs=", length(escrecs),
+            " one_hop=", nhops)
+    println("  bytes=", length(out), " (", round(length(out) / 1e6, digits = 3), " MB)")
     println("  provenance FNV-1a-64 = 0x", string(prov, base = 16))
 end
 

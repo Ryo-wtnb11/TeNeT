@@ -14,10 +14,31 @@ Every `SUNIrrep{3}` with `dim ≤ 27` — 17 irreps:
 `1, 3, 3̄, 6, 6̄, 8, 10, 10̄, 15, 15̄, 15′, 15̄′, 21, 21̄, 24, 24̄, 27`.
 This cut closes `8⊗8 = 1+8+8+10+10̄+27` (the SU(3) adjoint / Heisenberg
 motivation). Pairs whose fusion escapes the set (e.g. `8⊗10 ∋ 35`) are the
-provider's hard-error boundary: `fusion_channels` panics, it never truncates.
+provider's hard-error boundary: block dimensions are either exactly full-SU(3)
+or an `Err` — never silently truncated.
 
 `SectorId` is the dense index into the irrep list sorted by `(dim, p, q)`, so
 vacuum `(0,0)` is id 0 (matches `FusionRule::vacuum`).
+
+## Frontier shell (format v2)
+
+Version 2 appends an integer-only *frontier shell* so the Rust coupled-sector
+fold (`su3.rs coupled_sector_fold`) can classify sectors instead of panicking
+mid-enumeration:
+
+- **frontier irreps** (41): every out-of-table channel of an in-table pair,
+  with Dynkin label, dim, and dual index;
+- **escaping pairs** (207): for each in-table pair with an out-of-table
+  channel, its in-table channels (with N) and its frontier channel ids;
+- **one-hop returns** (697): for each `frontier f ⊗ in-table x`, the in-table
+  channels `N(f, x, c)` plus two flags (has first-shell channels / has channels
+  beyond the shell).
+
+No frontier F/R symbols are stored — deliberately: a coupled sector whose trees
+pass through a frontier inner line cannot be recoupled with this table, so the
+provider reports it as `Err` ("requires out-of-table intermediates", Stage B3c
+lifts the cut) rather than silently enumerating a truncated tree set. The shell
+adds 8 231 bytes.
 
 ## Row-major
 
@@ -47,11 +68,13 @@ FNV self-check and the TK oracle tests re-validate the new blob.
 | TensorKitSectors | 0.3.4 |
 | Julia | 1.11.6 |
 | tenet git commit | 816c35ac4bf735ee0a9799dab912672785590bd5 |
+| format version | 2 (v1 + frontier shell) |
 | irreps / covered pairs / R / F | 17 / 82 / 731 / 76853 |
-| size | 1 866 475 bytes (1.866 MB) |
-| payload FNV-1a-64 | `0xbfd30b91b8a025fd` |
+| frontier / escaping pairs / one-hop | 41 / 207 / 697 |
+| size | 1 874 706 bytes (1.875 MB) |
+| payload FNV-1a-64 | `0x7274b209c9676316` |
 
-> Size note (Stage B3b STOP condition): the full `dim ≤ 27` table is 1.866 MB,
+> Size note (Stage B3b STOP condition): the full `dim ≤ 27` table is 1.87 MB,
 > above the ~1.5 MB threshold for a checked-in `.rs` constant. It is therefore
 > stored as a compact little-endian binary blob and loaded with `include_bytes!`
 > + a one-pass parser (see `su3.rs`), not emitted as Rust source. The F-symbol
