@@ -1,61 +1,68 @@
-# SU(3) fusion-symbol table generator (Stage B3b, tenet #97).
+# SU(N) fusion-symbol table generator (Stage B3b/B3c, tenet #97/#113).
 #
-# Emits `tenet-core/src/su3_table.bin`, the checked-in table the Rust
-# `Su3FusionRule` provider (tenet-core/src/su3.rs) loads via `include_bytes!`.
-# The data is produced by SUNRepresentations' own Nsymbol/Fsymbol/Rsymbol/dim/
-# dual/frobeniusschur (the TensorKitSectors sector interface) — never hand-typed
-# — so the numbers are the reference, not a reproduction of it.
+# Emits a group-agnostic tabulated fusion-symbol blob loaded by the Rust
+# `TabulatedFusionRule` provider (tenet-core/src/su3.rs) via `include_bytes!`
+# (the checked-in SU(3) table) or `from_bytes` (any other group, e.g. the
+# SU(4) smoke table). The N-/F-/R-/dim/dual/Frobenius–Schur values come
+# straight from SUNRepresentations' implementation of the TensorKitSectors
+# sector interface for `SUNIrrep{N}` — they are the reference, never hand-typed.
 #
-# Irrep set: every SUNIrrep{3} with dim <= 27 (17 irreps: 1,3,3̄,6,6̄,8,10,10̄,
-# 15,15̄,15′,15̄′,21,21̄,24,24̄,27). This closes 8⊗8 = 1+8+8+10+10̄+27, the
-# adjoint (SU(3) Heisenberg) physics motivation. Pairs whose fusion escapes the
-# set (e.g. 8⊗10 ∋ 35) are the hard-error boundary: the provider panics, it
-# never silently truncates.
+# N-PARAMETRIC: the only group-specific inputs are `N` and the `dim` cut; every
+# fusion/F/R/frontier computation goes through the group-agnostic sector
+# interface. A new group is DATA ONLY — no Rust changes.
+#
+#   julia --project=<combenv> gen.jl [N] [dim_cut] [out_path]
+#   julia --project=<combenv> gen.jl 3 27                 # canonical SU(3) table
+#   julia --project=<combenv> gen.jl 4 20 su4_table.bin   # small SU(4) smoke table
+#
+# Defaults: N=3, dim_cut=27, out = tenet-core/src/su3_table.bin.
 #
 # SectorId encoding is DENSE: id = position in the irrep list sorted by
-# (dim, p, q). Vacuum (0,0) sorts first → id 0 (matches FusionRule::vacuum).
+# (dim, dynkin_label...). Vacuum (all-zero label) sorts first → id 0
+# (matches FusionRule::vacuum).
 #
 # ROW-MAJOR OUTPUT (important): Julia arrays are column-major. A column-major
-# transcription bug bit Stage B2b, so the transpose is handled HERE, on the
-# generator side — every F/R block is flattened row-major to match the Rust
-# reader's `GenericFArray::get` / `GenericRMatrix::get` indexing. The reader does
-# a byte-for-byte copy and MUST NOT re-transpose.
+# transcription bug bit Stage B2b, so the transpose is handled HERE — every F/R
+# block is flattened row-major to match the Rust reader's `GenericFArray::get` /
+# `GenericRMatrix::get` indexing. The reader copies bytes verbatim and must NOT
+# re-transpose.
 #
-# Binary format (little-endian). A trailing FNV-1a-64 of the whole payload is
-# stored in the header so the Rust loader can self-check against corruption /
-# a transpose mistake:
-#   magic         : 4  bytes = b"SU3T"
-#   version       : u32 = 2
-#   provenance    : u64  (FNV-1a-64 of every byte after this field)
+# Binary format v3 (little-endian). `rank = N - 1` Dynkin labels per irrep. A
+# trailing FNV-1a-64 of the whole payload is stored in the header so the Rust
+# loader can self-check against corruption / a transpose mistake:
+#   magic         : 4  bytes = b"TFR3"
+#   version       : u32 = 3
+#   group_n       : u32   (N of SU(N); rank = N-1 = labels per irrep)
+#   provenance    : u64   (FNV-1a-64 of every byte after this field)
 #   n_irreps      : u32
-#   irreps        : n_irreps × { p:u8, q:u8, dim:u32, dual:u8, fs:i8 }
+#   irreps        : n_irreps × { label: rank×u8, dim:u32, dual:u8, fs:i8 }
 #   n_pairs       : u32   (COVERED pairs only: all channels in-set)
-#   pairs         : n_pairs × { a:u8, b:u8, n_ch:u8, [c:u8, n:u8]×n_ch }
+#   pairs         : n_pairs × { a:u8, b:u8, n_ch:u8, [c:u8, N:u8]×n_ch }
 #   n_r           : u32
 #   r             : n_r × { a:u8,b:u8,c:u8, rows:u8, cols:u8, [f64]×rows*cols }
 #   n_f           : u32
 #   f             : n_f × { a,b,c,d,e,f:u8, s0,s1,s2,s3:u8, [f64]×∏s }
-# --- v2 frontier shell (integers only, no frontier F/R symbols) ---
+# --- frontier shell (integers only, no frontier F/R symbols) ---
 #   n_frontier    : u32   (out-of-table channels of in-table pairs)
-#   frontier      : n × { p:u8, q:u8, dim:u32, dual_fid:u16 }
+#   frontier      : n × { label: rank×u8, dim:u32, dual_fid:u16 }
 #   n_escaping    : u32   (in-table pairs with >=1 out-of-table channel)
 #   escaping      : n × { a:u8, b:u8, n_in:u8, [c:u8,N:u8]×, n_fr:u8, [fid:u16]× }
 #   n_hops        : u32   (one-hop returns: frontier f ⊗ in-table x)
 #   hops          : n × { fid:u16, x:u8, flags:u8, n_ret:u8, [c:u8,N:u8]× }
 #                   flags bit0 = f⊗x has channels beyond table ∪ frontier
 #                   flags bit1 = f⊗x has frontier (first-shell) channels
-# (sector ids are u8: only 17 in-set irreps, so 0..16 fit a byte; frontier ids
-#  are u16 indices into the frontier list. The v2 shell lets the Rust-side
-#  coupled-sector fold classify sectors as clean / tainted / escaped instead of
-#  panicking — see su3.rs `coupled_sector_fold`.)
-#
-# Regenerate:  julia --project=/path/to/sunenv tools/su3-table-gen/gen.jl
-# (an env with SUNRepresentations 0.4.0 + TensorKitSectors). See README.md for
-# the exact provenance recorded at generation time.
+# (sector ids are u8: small tables have <256 in-set irreps; frontier ids are
+#  u16 indices into the frontier list. The shell lets the Rust coupled-sector
+#  fold classify sectors as clean / tainted / escaped instead of panicking —
+#  see su3.rs `coupled_sector_fold`.)
 
 using SUNRepresentations, TensorKitSectors
 
-const DIM_CUT = 27
+const N       = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 3
+const DIM_CUT = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 27
+const RANK    = N - 1
+const DEST    = length(ARGS) >= 3 ? ARGS[3] :
+    joinpath(@__DIR__, "..", "..", "tenet-core", "src", "su3_table.bin")
 
 fnv1a(bytes::Vector{UInt8}) = begin
     h = 0xcbf29ce484222325
@@ -73,26 +80,34 @@ pu32!(v, x) = append!(v, reinterpret(UInt8, [UInt32(x)]))
 pu64!(v, x) = append!(v, reinterpret(UInt8, [UInt64(x)]))
 pf64!(v, x) = append!(v, reinterpret(UInt8, [Float64(x)]))
 
+# label as a RANK-tuple of ints (group-agnostic Dynkin coordinates)
+label_of(s) = collect(Int, dynkin_label(s))
+plabel!(v, s) = for c in label_of(s); pu8!(v, c); end
+
 function main()
-    # ---- irrep set (dim <= 27), dense id = sorted position ----
-    irreps = SUNIrrep{3}[]
-    for p in 0:12, q in 0:12
-        s = SUNIrrep{3}((UInt8(p), UInt8(q)))
+    Irr = SUNIrrep{N}
+
+    # ---- irrep set (dim <= cut), dense id = sorted position ----
+    # Each Dynkin component p_i gives dim >= p_i + 1, so p_i <= DIM_CUT - 1 is a
+    # safe (loose) bound; the dim filter does the real cut.
+    irreps = Irr[]
+    maxc = DIM_CUT - 1
+    for coords in Iterators.product(ntuple(_ -> 0:maxc, RANK)...)
+        s = Irr(UInt8.(coords))
         dim(s) <= DIM_CUT && push!(irreps, s)
     end
-    sort!(irreps, by = s -> (dim(s), dynkin_label(s)[1], dynkin_label(s)[2]))
+    sort!(irreps, by = s -> (dim(s), label_of(s)...))
     id = Dict(s => i - 1 for (i, s) in enumerate(irreps))
     inset(s) = haskey(id, s)
     n = length(irreps)
-    @assert dynkin_label(irreps[1]) == (0, 0) "vacuum must be id 0"
+    @assert all(==(0), label_of(irreps[1])) "vacuum must be id 0"
 
     payload = UInt8[]
 
     # ---- irreps ----
     pu32!(payload, n)
     for s in irreps
-        p, q = dynkin_label(s)
-        pu8!(payload, p); pu8!(payload, q)
+        plabel!(payload, s)
         pu32!(payload, dim(s))
         pu8!(payload, id[dual(s)])
         pi8!(payload, round(Int, frobeniusschur(s)))
@@ -146,7 +161,6 @@ function main()
                     inset(f) || continue
                     Nsymbol(a, f, d) == 0 && continue
                     F = Fsymbol(a, b, c, d, e, f)   # Array{Float64,4}
-                    frecs = frecs   # keep type stable
                     push!(frecs, ((id[a], id[b], id[c], id[d], id[e], id[f], size(F)...), F))
                     nf += 1
                 end
@@ -164,28 +178,20 @@ function main()
         end
     end
 
-    # ---- v2: frontier shell (Option A escape classification) --------------
-    # Frontier = every out-of-table channel of an in-table pair. Recorded so
-    # the Rust coupled-sector fold can (a) keep the in-table channels of an
-    # escaping pair (they are legitimate clean intermediates), (b) know WHICH
-    # frontier states appear, and (c) fold a frontier state one more step via
-    # the one-hop return table N(f, x, c) — enough for exact classification up
-    # to one frontier hop (rank ≤ 4 single-escape); anything deeper is flagged
-    # and treated conservatively (Err) on the Rust side. Integers only: no
-    # frontier F/R symbols exist, which is exactly why returned-through-frontier
-    # sectors are Err, not enumerable.
-    frontier_set = Set{SUNIrrep{3}}()
+    # ---- frontier shell (Option A escape classification) ------------------
+    # Frontier = every out-of-table channel of an in-table pair. Integers only:
+    # no frontier F/R symbols exist, which is exactly why returned-through-
+    # frontier sectors are Err, not enumerable.
+    frontier_set = Set{Irr}()
     for a in irreps, b in irreps, (c, _) in directproduct(a, b)
         inset(c) || push!(frontier_set, c)
     end
-    frontier = sort!(collect(frontier_set),
-                     by = s -> (dim(s), dynkin_label(s)[1], dynkin_label(s)[2]))
+    frontier = sort!(collect(frontier_set), by = s -> (dim(s), label_of(s)...))
     fid = Dict(f => i - 1 for (i, f) in enumerate(frontier))
     shell(s) = inset(s) || haskey(fid, s)
     pu32!(payload, length(frontier))
     for f in frontier
-        p, q = dynkin_label(f)
-        pu8!(payload, p); pu8!(payload, q)
+        plabel!(payload, f)
         pu32!(payload, dim(f))
         pu16!(payload, fid[dual(f)])   # frontier is closed under dual
     end
@@ -236,14 +242,14 @@ function main()
     # ---- assemble file: header + payload ----
     prov = fnv1a(payload)
     out = UInt8[]
-    append!(out, Vector{UInt8}("SU3T"))
-    pu32!(out, 2)          # version (2 = v1 + frontier shell)
+    append!(out, Vector{UInt8}("TFR3"))
+    pu32!(out, 3)          # version 3 (group-agnostic labels + group tag)
+    pu32!(out, N)          # group tag: N of SU(N)
     pu64!(out, prov)       # provenance / cache-identity hash
     append!(out, payload)
 
-    dest = joinpath(@__DIR__, "..", "..", "tenet-core", "src", "su3_table.bin")
-    write(dest, out)
-    println("wrote ", dest)
+    write(DEST, out)
+    println("wrote ", DEST, "  (SU(", N, "), dim<=", DIM_CUT, ")")
     println("  irreps=", n, " covered_pairs=", length(pairs),
             " R=", length(rrecs), " F=", nf)
     println("  frontier=", length(frontier), " escaping_pairs=", length(escrecs),

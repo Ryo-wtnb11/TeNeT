@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
 use tenet_core::{
-    BlockStructure, CoreError, HostReadableStorage, HostWritableStorage,
+    BlockStructure, CoreError, FusionRule, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
     TensorStorage,
 };
@@ -1022,6 +1022,60 @@ where
             lhs_space.structure(),
             lhs_data,
             Some(rhs_space),
+            rhs_space.structure(),
+            rhs_data,
+            alpha,
+            beta,
+        )
+    }
+
+    /// Generic-fusion (Stage B3c-1) sibling of [`Self::tensorcontract_fusion_dyn_into`]:
+    /// the SU(N) core/compose (fully-direct GEMM) route. Non-memoized (mirrors
+    /// the generic tree-transform path) — the block GEMM is symmetry-agnostic,
+    /// so it just needs the group-agnostic block plan. A contraction that would
+    /// need source tree-pair transforms (open contracted legs) or conjugated
+    /// operands is an explicit B3c-2 error; there is NO change to the dense GEMM
+    /// seam. `dst_data` must be sized for `dst_space.required_len()` and
+    /// zero-filled for `beta == 0` (blocks without a contributing GEMM stay).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_into_generic<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: &mut [D],
+        lhs_space: &DynamicFusionMapSpace,
+        lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: FusionRule,
+    {
+        let plan = super::fusion_block::compile_fusion_block_contract_plan_generic(
+            rule, dst_space, lhs_space, rhs_space, axes,
+        )?;
+        let Self {
+            contract_backend,
+            contract_workspace,
+            fusion_block_workspace,
+            ..
+        } = self;
+        let mut kernels = crate::StridedHostKernelAdapter;
+        let mut gemm = super::fusion_block::BackendRank2Gemm {
+            backend: contract_backend,
+            workspace: contract_workspace,
+        };
+        plan.execute_raw(
+            &mut kernels,
+            &mut gemm,
+            fusion_block_workspace,
+            dst_space.structure(),
+            dst_data,
+            lhs_space.structure(),
+            lhs_data,
             rhs_space.structure(),
             rhs_data,
             alpha,

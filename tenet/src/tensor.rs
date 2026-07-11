@@ -696,6 +696,65 @@ where
     Ok(total)
 }
 
+/// Generic-fusion (Stage B3c-1) sibling of [`weighted_inner`] for an
+/// outer-multiplicity rule (SU(N)): `sum_c dim(c) * <a_c, b_c>`. Identical block
+/// loop; the only difference is the coupled-sector weight. [`GenericRigidSymbols`]
+/// exposes `sqrt_dim` rather than `dim`, and `dim(c) = sqrt_dim(c)^2` (an
+/// integer for SU(N)) — so a Frobenius norm sums every multiplicity block
+/// (e.g. both SU(3) `N(8,8,8)=2` vertices) weighted by the quantum dimension,
+/// exactly matching TensorKit's `norm`. No Unique fast path: Generic is never
+/// abelian.
+fn weighted_inner_generic<R, D>(
+    rule: &R,
+    structure: &BlockStructure,
+    a: &[D],
+    b: &[D],
+) -> Result<Complex64, Error>
+where
+    R: tenet_core::GenericRigidSymbols<Scalar = f64>,
+    D: UserScalar,
+{
+    let mut total = Complex64::new(0.0, 0.0);
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let weight = match block.key() {
+            BlockKey::FusionTree(key) => {
+                let coupled = key
+                    .codomain_tree()
+                    .coupled()
+                    .unwrap_or_else(|| rule.vacuum());
+                let sqrt = rule.sqrt_dim_scalar(coupled);
+                sqrt * sqrt
+            }
+            _ => 1.0,
+        };
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        let mut partial = D::from_real(0.0);
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            partial = partial + FactorScalar::adjoint(a[position]) * b[position];
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+        total += partial.widen_complex() * weight;
+    }
+    Ok(total)
+}
+
 /// Quantum-dimension-weighted block trace of an endomorphism:
 /// `sum_c dim(c) * tr(b_c)`, matching TensorKit's `tr` (`linalg.jl`, the
 /// native `sum_c dim(c) * tr(block)`). Only fusion-tree blocks whose codomain
@@ -1944,9 +2003,13 @@ impl Tensor {
         // pre-twist `rhs`'s dual contracted leg: when `rhs` is the diagonal, fold
         // θ into the spectrum (no densify); when `rhs` is the dense operand,
         // `twist` it. θ = ±1 by charge parity, identity for bosonic rules.
-        let fermionic = with_rule!(self.rule, rule, {
-            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
-        });
+        // SU(N) (Generic) is bosonic and cannot ride the mult-free `with_rule!`
+        // binding; short-circuit the twist probe (the diagonal fast path below
+        // never fires for it — SU(N) has no `Data::Diagonal` factors yet).
+        let fermionic = self.rule != RuleKind::Su3
+            && with_rule!(self.rule, rule, {
+                rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
+            });
         if lhs_axes.len() == 1 && rhs_axes.len() == 1 {
             let twist_rhs_leg = fermionic && rhs.leg_is_dual(rhs_axes[0]);
             match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
@@ -2095,6 +2158,51 @@ impl Tensor {
         rhs_axes: &[usize],
     ) -> Result<Self, Error> {
         let mut state = self.rt.lock();
+        // SU(N) (Generic): dedicated non-macro core/compose route — the mult-free
+        // `with_rule_ctx!` binding cannot host a Generic rule. Only the
+        // fully-direct GEMM (compose) route is wired: the block GEMM is
+        // symmetry-agnostic and the outer-multiplicity vertices ride in the
+        // fusion-tree keys, so an OM vertex is summed by the contracted-tree
+        // GEMM. A conjugated/adjoint operand, or a contraction needing source
+        // tree-pair transforms, is Stage B3c-2 (clear error, no silent path).
+        if self.rule == RuleKind::Su3 {
+            if lhs_conj || rhs_conj {
+                return Err(Error::InvalidArgument(
+                    "SU(N) contraction with a conjugated / lazy-adjoint operand is not yet \
+                     supported (Stage B3c-2); materialize the adjoint explicitly"
+                        .to_string(),
+                ));
+            }
+            let rule = Su3FusionRule::new();
+            let dst_space = DynamicFusionMapSpace::contracted_generic(
+                &rule,
+                lhs_space,
+                rhs_space,
+                lhs_axes_seam,
+                rhs_axes_seam,
+            )?;
+            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
+            D::ctx_of(&mut state.su3).tensorcontract_fusion_dyn_into_generic(
+                &rule,
+                &dst_space,
+                &mut data,
+                lhs_space,
+                lhs_data,
+                rhs_space,
+                rhs_data,
+                TensorContractSpec::new_with_conjugation(
+                    lhs_axes_seam,
+                    rhs_axes_seam,
+                    OutputAxisOrder::identity(),
+                    false,
+                    false,
+                ),
+                D::from_real(1.0),
+                D::from_real(0.0),
+            )?;
+            drop(state);
+            return Ok(self.with(dst_space, D::lift(data)));
+        }
         let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             // `dst` is the user-facing result: a lazy-adjoint operand contributes
             // its adjoint space (`self.space`/`rhs.space` already are adjoint), so
@@ -2489,6 +2597,15 @@ impl Tensor {
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return Ok(self.weighted_inner_cuda(storage, storage)?.re.sqrt());
+        }
+        // SU(N) (Generic): dedicated non-macro path — the Frobenius norm is a
+        // storage-level block sum weighted by dim(c) = sqrt_dim(c)², so it needs
+        // only `GenericRigidSymbols`, no contract. Sums over OM vertices.
+        if self.rule == RuleKind::Su3 {
+            let value = with_data!(self, data, {
+                weighted_inner_generic(&Su3FusionRule::new(), self.space.structure(), data, data)
+            })?;
+            return Ok(value.re.sqrt());
         }
         let value = with_data!(self, data, {
             with_rule!(self.rule, rule, {

@@ -1,11 +1,13 @@
-// SU(3) table-driven fusion-symbol provider (Stage B3b, #97).
+// Table-driven SU(N) fusion-symbol provider (Stage B3b SU(3), #97; Stage B3c-1
+// group-agnostic generalisation, #113).
 //
-// `Su3FusionRule` is a cheap `Arc<Su3SymbolTable>` handle over a checked-in
-// table of N-/F-/R-/dim/dual/Frobenius–Schur data for the 17 `SUNIrrep{3}`
-// irreps with `dim ≤ 27`. The table is generated offline by
-// `tools/su3-table-gen/gen.jl` straight from SUNRepresentations (the
-// TensorKitSectors sector interface), serialised to `su3_table.bin`, and
-// embedded with `include_bytes!`.
+// [`TabulatedFusionRule`] is a cheap `Arc<TabulatedSymbolTable>` handle over a
+// checked-in blob of N-/F-/R-/dim/dual/Frobenius–Schur data for the `SUNIrrep{N}`
+// irreps under a `dim` cut. The blob is generated offline by
+// `tools/sun-table-gen/gen.jl` straight from SUNRepresentations (the
+// TensorKitSectors sector interface). The SU(3) `dim ≤ 27` table is embedded
+// with `include_bytes!` (`Su3FusionRule` = the alias over it); any other group
+// is loaded from bytes with `from_bytes` — a new group is DATA ONLY, no Rust.
 //
 // Bounded-table semantics (exact or Err, never silently truncated):
 //
@@ -44,9 +46,10 @@ static SU3_TABLE_BYTES: &[u8] = include_bytes!("su3_table.bin");
 
 /// Per-irrep scalar data, indexed by dense `SectorId`.
 #[derive(Clone, Debug)]
-struct Su3Irrep {
-    p: u8,
-    q: u8,
+struct TabulatedIrrep {
+    /// Group-agnostic Dynkin coordinates (`rank = N-1` components for `SU(N)`).
+    /// SU(3) is `[p, q]`; the reader stays generic so a new group is data only.
+    label: Vec<u8>,
     dim: f64,
     dual: SectorId,
     /// Frobenius–Schur phase, `±1` (a bare scalar for every fusion style — the
@@ -54,11 +57,16 @@ struct Su3Irrep {
     fs: f64,
 }
 
-/// The immutable SU(3) symbol table. Shared behind an `Arc`; `Su3FusionRule`
-/// is a cheap clone of the handle, never of the table.
+/// The immutable tabulated symbol table for one `SU(N)` group (Stage B3c-1:
+/// group-agnostic generalisation of the Stage B3b SU(3) table). Shared behind
+/// an `Arc`; [`TabulatedFusionRule`] is a cheap clone of the handle, never of
+/// the table. A new group is a new `su{N}_table.bin` blob — zero Rust changes.
 #[derive(Debug)]
-pub struct Su3SymbolTable {
-    irreps: Vec<Su3Irrep>,
+pub struct TabulatedSymbolTable {
+    /// `N` of `SU(N)` (the group tag from the blob header). `rank = N - 1` is
+    /// the number of Dynkin components per irrep label, recomputed where needed.
+    group_n: u32,
+    irreps: Vec<TabulatedIrrep>,
     /// Covered `(a,b)` → sorted channel list. A pair *absent* here (with both
     /// ids in range) escapes the `dim ≤ 27` cut: `fusion_channels` (which must
     /// ENUMERATE every channel) then panics. This is the ONLY hard error at the
@@ -75,25 +83,25 @@ pub struct Su3SymbolTable {
     /// an in-table pair (indexed by frontier id). Labels only — no F/R symbols
     /// exist for these, which is exactly why sectors reached through them are
     /// an `Err`, not enumerable.
-    frontier: Vec<(u8, u8, u32)>,
+    frontier: Vec<(Vec<u8>, u32)>,
     /// v2: escaping in-table pairs → (in-table channels, frontier channel ids).
-    escaping: FxHashMap<(u8, u8), Su3EscapingPair>,
+    escaping: FxHashMap<(u8, u8), TabulatedEscapingPair>,
     /// v2: one-hop returns `frontier f ⊗ in-table x` → in-table channels + how
     /// far the rest of the product strays.
-    one_hop: FxHashMap<(u16, u8), Su3OneHop>,
+    one_hop: FxHashMap<(u16, u8), TabulatedOneHop>,
     /// FNV-1a-64 of the table payload; doubles as the cache-key identity so a
     /// swapped table can never reuse another table's compiled plans.
     provenance: u64,
 }
 
 #[derive(Debug)]
-struct Su3EscapingPair {
+struct TabulatedEscapingPair {
     in_channels: SectorVec,
     frontier: Vec<u16>,
 }
 
 #[derive(Debug)]
-struct Su3OneHop {
+struct TabulatedOneHop {
     /// In-table channels `(c, N(f, x, c))`.
     returns: Vec<(u8, u8)>,
     /// `f⊗x` has channels beyond table ∪ first shell.
@@ -145,6 +153,17 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Group-agnostic Dynkin label as `(p,q,…)` for diagnostics — the SU(3)
+/// `(p,q)` shape generalises to any `rank = N-1` without a special case.
+fn fmt_label(label: &[u8]) -> String {
+    let inner = label
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("({inner})")
+}
+
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for &b in bytes {
@@ -153,13 +172,19 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
-impl Su3SymbolTable {
-    fn load() -> Self {
-        let bytes = SU3_TABLE_BYTES;
-        assert_eq!(&bytes[0..4], b"SU3T", "su3_table.bin: bad magic");
+impl TabulatedSymbolTable {
+    /// Parse a group-agnostic tabulated-fusion blob (format v3, magic `TFR3`).
+    /// Panics on any malformation: the SU(3) blob is a compile-time constant and
+    /// any test/smoke blob is a checked-in asset, so a failure is a build/asset
+    /// bug, never runtime input. `label` is `panic_name` for the error prefix.
+    fn load_from(bytes: &[u8], panic_name: &str) -> Self {
+        assert_eq!(&bytes[0..4], b"TFR3", "{panic_name}: bad magic");
         let mut c = Cursor { bytes, pos: 4 };
         let version = c.u32();
-        assert_eq!(version, 2, "su3_table.bin: unsupported version {version}");
+        assert_eq!(version, 3, "{panic_name}: unsupported version {version}");
+        let group_n = c.u32();
+        assert!(group_n >= 2, "{panic_name}: SU(N) needs N>=2, got {group_n}");
+        let rank = (group_n - 1) as usize;
         let provenance = c.u64();
         // Self-check: recompute the payload hash. Catches truncation and — the
         // Stage B2b hazard — a row/column transpose mistake in the generator or
@@ -167,18 +192,22 @@ impl Su3SymbolTable {
         let payload_hash = fnv1a64(&bytes[c.pos..]);
         assert_eq!(
             payload_hash, provenance,
-            "su3_table.bin: payload FNV-1a mismatch (corrupt or transposed table)"
+            "{panic_name}: payload FNV-1a mismatch (corrupt or transposed table)"
         );
 
         let n_irreps = c.u32() as usize;
         let mut irreps = Vec::with_capacity(n_irreps);
         for _ in 0..n_irreps {
-            let p = c.u8();
-            let q = c.u8();
+            let label: Vec<u8> = (0..rank).map(|_| c.u8()).collect();
             let dim = c.u32() as f64;
             let dual = SectorId::new(c.u8() as usize);
             let fs = c.i8() as f64;
-            irreps.push(Su3Irrep { p, q, dim, dual, fs });
+            irreps.push(TabulatedIrrep {
+                label,
+                dim,
+                dual,
+                fs,
+            });
         }
 
         let n_pairs = c.u32() as usize;
@@ -235,11 +264,10 @@ impl Su3SymbolTable {
         let n_frontier = c.u32() as usize;
         let mut frontier = Vec::with_capacity(n_frontier);
         for _ in 0..n_frontier {
-            let p = c.u8();
-            let q = c.u8();
+            let label: Vec<u8> = (0..rank).map(|_| c.u8()).collect();
             let dim = c.u32();
             let _dual_fid = c.u16(); // recorded for completeness; labels suffice here
-            frontier.push((p, q, dim));
+            frontier.push((label, dim));
         }
 
         let n_escaping = c.u32() as usize;
@@ -261,7 +289,7 @@ impl Su3SymbolTable {
             }
             escaping.insert(
                 (a, b),
-                Su3EscapingPair {
+                TabulatedEscapingPair {
                     in_channels,
                     frontier: fr,
                 },
@@ -281,16 +309,17 @@ impl Su3SymbolTable {
             }
             one_hop.insert(
                 (fid, x),
-                Su3OneHop {
+                TabulatedOneHop {
                     returns,
                     beyond_shell: flags & 1 != 0,
                     has_frontier: flags & 2 != 0,
                 },
             );
         }
-        assert_eq!(c.pos, bytes.len(), "su3_table.bin: trailing bytes");
+        assert_eq!(c.pos, bytes.len(), "{panic_name}: trailing bytes");
 
-        Su3SymbolTable {
+        TabulatedSymbolTable {
+            group_n,
             irreps,
             fusion,
             nsym,
@@ -304,11 +333,12 @@ impl Su3SymbolTable {
     }
 
     #[inline]
-    fn irrep(&self, sector: SectorId) -> &Su3Irrep {
+    fn irrep(&self, sector: SectorId) -> &TabulatedIrrep {
         self.irreps.get(sector.id()).unwrap_or_else(|| {
             panic!(
-                "Su3FusionRule: sector id {} is outside the dim<=27 table \
-                 (0..{}); this label escaped the SU(3) hard-error boundary",
+                "TabulatedFusionRule(SU({})): sector id {} is outside the table \
+                 (0..{}); this label escaped the hard-error boundary",
+                self.group_n,
                 sector.id(),
                 self.irreps.len()
             )
@@ -322,39 +352,67 @@ impl Su3SymbolTable {
     }
 }
 
-/// Process-global table, parsed once on first use.
-fn table() -> &'static Arc<Su3SymbolTable> {
-    static TABLE: OnceLock<Arc<Su3SymbolTable>> = OnceLock::new();
-    TABLE.get_or_init(|| Arc::new(Su3SymbolTable::load()))
+/// Process-global SU(3) table, parsed once on first use.
+fn table() -> &'static Arc<TabulatedSymbolTable> {
+    static TABLE: OnceLock<Arc<TabulatedSymbolTable>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        Arc::new(TabulatedSymbolTable::load_from(
+            SU3_TABLE_BYTES,
+            "su3_table.bin",
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
 // The rule handle
 // ---------------------------------------------------------------------------
 
-/// Table-driven SU(3) (`FusionStyleKind::Generic`, `dim ≤ 27`) fusion rule.
-/// A cheap `Arc` handle: `Clone` copies the pointer, never the table.
+/// Table-driven `SU(N)` (`FusionStyleKind::Generic`) fusion rule over a
+/// group-agnostic tabulated symbol blob (Stage B3c-1). A cheap `Arc` handle:
+/// `Clone` copies the pointer, never the table. The checked-in SU(3) table is
+/// the process-global default ([`Self::new`]); any other group loads from a
+/// blob with [`Self::from_bytes`] — a new group is DATA ONLY, no Rust changes.
 #[derive(Clone, Debug)]
-pub struct Su3FusionRule {
-    table: Arc<Su3SymbolTable>,
+pub struct TabulatedFusionRule {
+    table: Arc<TabulatedSymbolTable>,
 }
 
-impl Default for Su3FusionRule {
+/// Thin public alias kept for the SU(3) call sites (Stage B3b): the SU(3)
+/// provider is just a [`TabulatedFusionRule`] over the checked-in SU(3) blob.
+pub type Su3FusionRule = TabulatedFusionRule;
+
+impl Default for TabulatedFusionRule {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Su3FusionRule {
-    /// A handle to the process-global SU(3) table.
+impl TabulatedFusionRule {
+    /// A handle to the process-global SU(3) table (the checked-in default).
     pub fn new() -> Self {
         Self {
             table: Arc::clone(table()),
         }
     }
 
+    /// A handle over an arbitrary tabulated-fusion blob (e.g. the small SU(4)
+    /// smoke table). The blob is parsed and self-checked (FNV) once here; the
+    /// returned handle owns its own `Arc<TabulatedSymbolTable>`, independent of
+    /// the SU(3) global. Panics on a malformed blob (a checked-in asset bug).
+    pub fn from_bytes(bytes: &[u8], name: &'static str) -> Self {
+        Self {
+            table: Arc::new(TabulatedSymbolTable::load_from(bytes, name)),
+        }
+    }
+
+    /// `N` of the `SU(N)` group this rule tabulates.
     #[inline]
-    pub fn table(&self) -> &Arc<Su3SymbolTable> {
+    pub fn group_n(&self) -> u32 {
+        self.table.group_n
+    }
+
+    #[inline]
+    pub fn table(&self) -> &Arc<TabulatedSymbolTable> {
         &self.table
     }
 
@@ -366,20 +424,33 @@ impl Su3FusionRule {
         self.table.provenance
     }
 
-    /// The dense id of the irrep with Dynkin label `(p, q)`, if it is in the
-    /// `dim ≤ 27` table. `None` for out-of-table irreps.
-    pub fn sector_of(&self, p: u8, q: u8) -> Option<SectorId> {
+    /// The dense id of the irrep with the given Dynkin label, if it is in the
+    /// table. `None` for out-of-table irreps. Group-agnostic: `label` is the
+    /// full `rank = N-1` coordinate list.
+    pub fn sector_of_label(&self, label: &[u8]) -> Option<SectorId> {
         self.table
             .irreps
             .iter()
-            .position(|ir| ir.p == p && ir.q == q)
+            .position(|ir| ir.label == label)
             .map(SectorId::new)
     }
 
-    /// Dynkin label `(p, q)` of an in-table sector (for Debug / diagnostics).
+    /// SU(3) convenience: the dense id of the irrep with Dynkin label `(p, q)`.
+    /// A thin wrapper over [`Self::sector_of_label`] for the rank-2 SU(3) table.
+    pub fn sector_of(&self, p: u8, q: u8) -> Option<SectorId> {
+        self.sector_of_label(&[p, q])
+    }
+
+    /// Dynkin label of an in-table sector (for Debug / diagnostics), the full
+    /// `rank = N-1` coordinate list.
+    pub fn label(&self, sector: SectorId) -> &[u8] {
+        &self.table.irrep(sector).label
+    }
+
+    /// SU(3) convenience: Dynkin label `(p, q)` of an in-table sector.
     pub fn dynkin(&self, sector: SectorId) -> (u8, u8) {
-        let ir = self.table.irrep(sector);
-        (ir.p, ir.q)
+        let label = &self.table.irrep(sector).label;
+        (label[0], label[1])
     }
 
     /// Whether `left ⊗ right` is fully inside the table (both ids in range and
@@ -397,7 +468,7 @@ impl Su3FusionRule {
     }
 }
 
-impl FusionRule for Su3FusionRule {
+impl FusionRule for TabulatedFusionRule {
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Generic
     }
@@ -420,13 +491,13 @@ impl FusionRule for Su3FusionRule {
         match self.table.fusion.get(&key) {
             Some(channels) => channels.clone(),
             None => {
-                let (pl, ql) = self.dynkin_or_oob(left);
-                let (pr, qr) = self.dynkin_or_oob(right);
+                let (l, r) = (self.label_or_oob(left), self.label_or_oob(right));
+                let n = self.table.group_n;
                 panic!(
-                    "Su3FusionRule: {pl:?}⊗{qr:?} — the fusion of ({pl},{ql}) ⊗ \
-                     ({pr},{qr}) escapes the dim<=27 table (a channel exceeds \
-                     dim 27). This pair is outside the SU(3) hard-error boundary; \
-                     use `covers(a, b)` to pre-check. Unbounded fusion is Stage B3c."
+                    "TabulatedFusionRule(SU({n})): the fusion of {l} ⊗ {r} escapes \
+                     the table (a channel exceeds the dim cut). This pair is outside \
+                     the hard-error boundary; use `covers(a, b)` to pre-check. \
+                     Unbounded fusion is Stage B3c."
                 )
             }
         }
@@ -441,7 +512,7 @@ impl FusionRule for Su3FusionRule {
         let n = self.table.irreps.len();
         assert!(
             left.id() < n && right.id() < n,
-            "Su3FusionRule::nsymbol: sector id {} or {} is outside the dim<=27 table",
+            "TabulatedFusionRule::nsymbol: sector id {} or {} is outside the table",
             left.id(),
             right.id()
         );
@@ -468,11 +539,11 @@ impl FusionRule for Su3FusionRule {
         if let Some(esc) = self.table.escaping.get(&key) {
             return esc.in_channels.clone();
         }
-        let (pl, ql) = self.dynkin_or_oob(left);
-        let (pr, qr) = self.dynkin_or_oob(right);
+        let (l, r) = (self.label_or_oob(left), self.label_or_oob(right));
         panic!(
-            "Su3FusionRule: sector pair ({pl},{ql}) ⊗ ({pr},{qr}) is not in the \
-             dim<=27 table (invalid sector id)"
+            "TabulatedFusionRule(SU({})): sector pair {l} ⊗ {r} is not in the \
+             table (invalid sector id)",
+            self.table.group_n
         )
     }
 
@@ -580,8 +651,8 @@ impl FusionRule for Su3FusionRule {
         let mut out_of_table: Vec<String> = escaped
             .iter()
             .map(|&fid| {
-                let (p, q, dim) = t.frontier[fid as usize];
-                format!("({p},{q}) dim {dim}")
+                let (label, dim) = &t.frontier[fid as usize];
+                format!("{} dim {dim}", fmt_label(label))
             })
             .collect();
         if unknown_escape {
@@ -600,18 +671,19 @@ impl FusionRule for Su3FusionRule {
     }
 }
 
-impl Su3FusionRule {
-    /// Dynkin label, or a sentinel for an out-of-range id (used only inside
-    /// panic messages, so it must never itself panic).
-    fn dynkin_or_oob(&self, sector: SectorId) -> (i32, i32) {
+impl TabulatedFusionRule {
+    /// Dynkin label as a debug string, or a sentinel for an out-of-range id
+    /// (used only inside panic messages, so it must never itself panic).
+    /// Group-agnostic: prints the full `rank = N-1` coordinate list.
+    fn label_or_oob(&self, sector: SectorId) -> String {
         match self.table.irreps.get(sector.id()) {
-            Some(ir) => (ir.p as i32, ir.q as i32),
-            None => (-1, -1),
+            Some(ir) => fmt_label(&ir.label),
+            None => "<out-of-table>".to_string(),
         }
     }
 }
 
-impl GenericFusionSymbols for Su3FusionRule {
+impl GenericFusionSymbols for TabulatedFusionRule {
     type Scalar = f64;
 
     fn f_symbol_generic(
@@ -665,7 +737,7 @@ impl GenericFusionSymbols for Su3FusionRule {
     }
 }
 
-impl GenericRigidSymbols for Su3FusionRule {
+impl GenericRigidSymbols for TabulatedFusionRule {
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         self.table.irrep(sector).dim.sqrt()
     }

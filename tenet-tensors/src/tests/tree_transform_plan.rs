@@ -3671,3 +3671,105 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
 
     assert_eq!(dst_cache.data(), dst_facade.data());
 }
+
+// ===================== Stage B3c-1: SU(4) DATA-ONLY smoke ==================
+//
+// The identical Generic pipeline — the `R: FusionRule` / `GenericRigidSymbols`
+// tree-transform and contract siblings — driven from a *different* group's
+// checked-in blob (a small SU(4), dim ≤ 15) via `TabulatedFusionRule::from_bytes`,
+// with ZERO Rust changes. Proves permute (real SU(4) F-symbol recoupling) and
+// contract (core/compose GEMM) are group-agnostic: a new group is data only.
+#[cfg(test)]
+mod b3c1_su4_smoke {
+    use super::*;
+    use crate::permute_into_generic;
+    use crate::{DynamicFusionMapSpace, HostTreeFusionExecutionContext};
+    use tenet_core::{
+        FusionProductSpace, FusionTreeHomSpace, FusionTreeKey, SectorLeg, TabulatedFusionRule,
+    };
+
+    static SU4_BYTES: &[u8] = include_bytes!("../../../tenet-core/src/testdata/su4_table.bin");
+
+    fn su4() -> TabulatedFusionRule {
+        TabulatedFusionRule::from_bytes(SU4_BYTES, "su4_table.bin")
+    }
+
+    // Construction + permute: a `[4,4̄] <- vac` singlet tensor; swapping the two
+    // codomain legs genuinely recouples through the SU(4) F-symbol, and swapping
+    // back returns the original data (invertibility over the su4 table).
+    #[test]
+    fn su4_permute_round_trip_is_data_only() {
+        let rule = su4();
+        let four = rule.sector_of_label(&[1, 0, 0]).unwrap();
+        let fourbar = rule.dual(four); // 4 ⊗ 4̄ ∋ 1 (covered), and 4 ≠ 4̄.
+        let vac = SectorId::new(0);
+        // `[a, b] <- vac` singlet map. The two codomain sectors differ, so a
+        // leg swap really reorders the fusion tree (recouples via SU(4) F/R).
+        let make = |a: SectorId, b: SectorId, value: f64| {
+            let cod = FusionTreeKey::new([a, b], Some(vac), [false, false], [], [SectorId::new(1)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([], Some(vac), [], [], []).with_has_multiplicity(true);
+            let key = BlockKey::from(FusionTreeBlockKey::pair(cod, dom));
+            let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
+            let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure).unwrap()
+        };
+        let src = make(four, fourbar, 3.5);
+        let mut swapped = make(fourbar, four, 0.0); // permuted leg order
+        permute_into_generic(&rule, [1, 0], [], &mut swapped, &src, 1.0, 0.0).unwrap();
+        let mut back = make(four, fourbar, 0.0);
+        permute_into_generic(&rule, [1, 0], [], &mut back, &swapped, 1.0, 0.0).unwrap();
+        assert_eq!(back.data().len(), src.data().len());
+        for (x, y) in back.data().iter().zip(src.data().iter()) {
+            assert!((x - y).abs() < 1e-12, "su4 permute round-trip: {x} vs {y}");
+        }
+    }
+
+    // Contract (core/compose): `A:[4]<-[4]` composed with `B:[4]<-[4]` over the
+    // shared coupled-4 leg. Proves the generic block-GEMM contract plan compiles
+    // and executes on SU(4) data. Value = a·b in the single 1×1 coupled block.
+    #[test]
+    fn su4_contract_core_route_is_data_only() {
+        let rule = su4();
+        let four = rule.sector_of_label(&[1, 0, 0]).unwrap();
+        let map4 = |value: f64| {
+            let leg = SectorLeg::new([(four, 1usize)], false);
+            let hom = FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg.clone()]),
+                FusionProductSpace::new([leg]),
+            );
+            let keys = hom.fusion_tree_keys_generic(&rule).unwrap();
+            let shapes: Vec<Vec<usize>> = keys.iter().map(|_| vec![1, 1]).collect();
+            let space =
+                DynamicFusionMapSpace::from_degeneracy_shapes_generic(&rule, hom, shapes).unwrap();
+            let data = vec![value; space.required_len().unwrap()];
+            (space, data)
+        };
+        let (a_space, a_data) = map4(2.0);
+        let (b_space, b_data) = map4(5.0);
+        // A domain leg 0 with B codomain leg 0 (compose): [4]<-[4].
+        let dst = DynamicFusionMapSpace::contracted_generic(&rule, &a_space, &b_space, &[1], &[0])
+            .unwrap();
+        let mut dst_data = vec![0.0f64; dst.required_len().unwrap()];
+        let mut ctx = HostTreeFusionExecutionContext::<f64, u64>::default();
+        ctx.tensorcontract_fusion_dyn_into_generic(
+            &rule,
+            &dst,
+            &mut dst_data,
+            &a_space,
+            &a_data,
+            &b_space,
+            &b_data,
+            tenet_operations::TensorContractSpec::with_default_output_order(&[1], &[0]),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(dst_data.len(), 1, "single coupled-4 block");
+        assert!(
+            (dst_data[0] - 10.0).abs() < 1e-12,
+            "A∘B = 2·5 = 10, got {}",
+            dst_data[0]
+        );
+    }
+}
