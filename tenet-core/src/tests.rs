@@ -5210,4 +5210,1049 @@ mod tests {
             );
         }
     }
+
+    // ================= Stage B2b: Generic fold / multi_Fmove =================
+    //
+    // ORACLE PROVENANCE. All numeric constants below are TensorKit's own values
+    // for `A4Irrep(3)`, extracted by running the mirrored source:
+    //   TensorKit.jl @ git cfaa073 (v0.17.0), TensorKitSectors v0.3.9
+    //   (Fsymbol values identical to v0.3.6, the version the B2a A4 constants
+    //   cite — the A4 category data is version-stable).
+    // The `multi_Fmove` tables come from `TensorKit.multi_Fmove(f)` and the
+    // `foldright` tables from `TensorKit.foldright(FusionTreeBlock)`, both called
+    // directly on A4 fusion trees. F-symbol arrays are transcribed ROW-MAJOR
+    // over the TK axis order (μ, ν, κ, λ) — Julia's `vec()` is column-major, so
+    // the transcription applies `permutedims(F,(4,3,2,1))` first. (The B2a
+    // A4BendRule blocks are all transpose-symmetric, so they never exposed this;
+    // the non-trivial F(3,3,3,3,3,3) block below does.)
+
+    // Full A4Irrep(3) fusion rule with the COMPLETE F(3,3,3,3,e,f) table — the
+    // B2a A4BendRule only modelled the handful of bend/A-symbol tuples, which is
+    // insufficient for multi_Fmove/associator (they consult every (e,f)).
+    #[derive(Clone, Copy, Debug)]
+    struct A4FoldRule;
+    impl FusionRule for A4FoldRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            match sector.id() {
+                1 => SectorId::new(2),
+                2 => SectorId::new(1),
+                _ => sector,
+            }
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (3, 3) => smallvec![
+                    SectorId::new(0),
+                    SectorId::new(1),
+                    SectorId::new(2),
+                    SectorId::new(3)
+                ],
+                (3, _) | (_, 3) => smallvec![SectorId::new(3)],
+                (1, 1) => smallvec![SectorId::new(2)],
+                (2, 2) => smallvec![SectorId::new(1)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(0)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    impl GenericFusionSymbols for A4FoldRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let s = 1.0 / 3.0_f64.sqrt(); // 1/√3
+            let m = -1.0 / (2.0 * 3.0_f64.sqrt()); // -1/(2√3)
+            let hs = 3.0_f64.sqrt() / 2.0; // √3/2
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            // The only non-trivial family: F(3,3,3,3,e,f). ROW-MAJOR (μ,ν,κ,λ).
+            match ids {
+                (3, 3, 3, 3, 0, 0) | (3, 3, 3, 3, 0, 1) | (3, 3, 3, 3, 0, 2)
+                | (3, 3, 3, 3, 1, 0) | (3, 3, 3, 3, 1, 1) | (3, 3, 3, 3, 1, 2)
+                | (3, 3, 3, 3, 2, 0) | (3, 3, 3, 3, 2, 1) | (3, 3, 3, 3, 2, 2) => {
+                    GenericFArray::new(vec![1.0 / 3.0], (1, 1, 1, 1))
+                }
+                // A-symbol reshape F(3,3,b,b,0,3) for b∈{1,2}: TK gives [1] (1×1).
+                (3, 3, 1, 1, 0, 3) | (3, 3, 2, 2, 0, 3) => {
+                    GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+                }
+                (3, 3, 3, 3, 0, 3) => GenericFArray::new(vec![s, 0.0, 0.0, s], (1, 1, 2, 2)),
+                (3, 3, 3, 3, 1, 3) => GenericFArray::new(vec![m, -0.5, 0.5, m], (1, 1, 2, 2)),
+                (3, 3, 3, 3, 2, 3) => GenericFArray::new(vec![m, 0.5, -0.5, m], (1, 1, 2, 2)),
+                (3, 3, 3, 3, 3, 0) => GenericFArray::new(vec![s, 0.0, 0.0, s], (2, 2, 1, 1)),
+                (3, 3, 3, 3, 3, 1) => GenericFArray::new(vec![m, 0.5, -0.5, m], (2, 2, 1, 1)),
+                (3, 3, 3, 3, 3, 2) => GenericFArray::new(vec![m, -0.5, 0.5, m], (2, 2, 1, 1)),
+                (3, 3, 3, 3, 3, 3) => GenericFArray::new(
+                    vec![
+                        0.5, 0.0, 0.0, -0.5, 0.0, -0.5, -0.5, 0.0, 0.0, -0.5, -0.5, 0.0, -0.5, 0.0,
+                        0.0, 0.5,
+                    ],
+                    (2, 2, 2, 2),
+                ),
+                // The 9 non-trivial off-family blocks the CYCLE bends reach
+                // (√3/2 = 0.8660254038). TK row-major (μ,ν,κ,λ) values.
+                (1, 3, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (1, 2, 2, 1))
+                }
+                (2, 3, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (1, 2, 2, 1))
+                }
+                (3, 1, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (1, 2, 1, 2))
+                }
+                (3, 2, 3, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (1, 2, 1, 2))
+                }
+                (3, 3, 1, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (2, 1, 1, 2))
+                }
+                (3, 3, 2, 3, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (2, 1, 1, 2))
+                }
+                (3, 3, 3, 0, 3, 3) => {
+                    GenericFArray::new(vec![1.0, 0.0, 0.0, 1.0], (2, 1, 2, 1))
+                }
+                (3, 3, 3, 1, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, hs, -hs, -0.5], (2, 1, 2, 1))
+                }
+                (3, 3, 3, 2, 3, 3) => {
+                    GenericFArray::new(vec![-0.5, -hs, hs, -0.5], (2, 1, 2, 1))
+                }
+                // Everything else valid in A4 is a singleton block equal to [1]:
+                // any F with a vacuum a/b/c leg, and the residual all-singleton
+                // triples (e.g. F(3,1,3,0,3,3)). Shape-aware so a genuinely
+                // unmodelled MULTI-dim block still panics instead of silently
+                // returning a wrong scalar.
+                _ => {
+                    let shape = (
+                        self.nsymbol(a, b, e),
+                        self.nsymbol(e, c, d),
+                        self.nsymbol(b, c, f),
+                        self.nsymbol(a, f, d),
+                    );
+                    if shape == (1, 1, 1, 1) {
+                        GenericFArray::new(vec![1.0], shape)
+                    } else {
+                        panic!("A4FoldRule: unmodelled non-singleton F{ids:?} shape={shape:?}");
+                    }
+                }
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for A4FoldRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 { 3.0_f64.sqrt() } else { 1.0 }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 { 1.0 / 3.0_f64.sqrt() } else { 1.0 }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
+        let t = SectorId::new(3);
+        FusionTreeKey::new(
+            [t, t, t],
+            Some(t),
+            [false, false, false],
+            [SectorId::new(inner)],
+            [SectorId::new(v1), SectorId::new(v2)],
+        )
+        .with_has_multiplicity(true)
+    }
+
+    // Look up the coeff vector for the multi_Fmove output tree with the given
+    // coupled sector and (single) vertex label.
+    fn find_coeff(
+        out: &[(FusionTreeKey, Vec<f64>)],
+        coupled: usize,
+        vtx: usize,
+    ) -> Vec<f64> {
+        out.iter()
+            .find(|(tr, _)| {
+                tr.coupled().unwrap().id() == coupled && tr.vertices()[0].id() == vtx
+            })
+            .unwrap_or_else(|| panic!("no output tree coupled={coupled} vtx={vtx}"))
+            .1
+            .clone()
+    }
+
+    fn assert_vec(got: &[f64], want: &[f64], label: &str) {
+        assert_eq!(got.len(), want.len(), "{label}: length {} != {}", got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!((g - w).abs() < 1e-10, "{label}[{i}]: {g} != {w}");
+        }
+    }
+
+    // Gate 4a (A4 oracle): multi_Fmove of every rank-3 A4 (3,3,3)->3 tree matches
+    // TensorKit.multi_Fmove exactly, INCLUDING the coefficient VECTORS. The
+    // inner=3 rows exercise the non-trivial F(3,3,3,3,3,3) block, so the vector
+    // machinery (F-slice selection, μ/ν/κ vertex indexing, λ free axis) is fully
+    // discriminated here — unlike the B2a bend oracle whose A/B are I₂.
+    #[test]
+    fn b2b_a4_multi_fmove_matches_tensorkit() {
+        let rule = A4FoldRule;
+        let s = 1.0 / 3.0_f64.sqrt();
+        let m = -1.0 / (2.0 * 3.0_f64.sqrt());
+        let o = 1.0 / 3.0;
+        // (inner,v1,v2) -> [(coupled, vtx, coeff)]. TK.multi_Fmove gold values.
+        type Row = (usize, usize, usize, Vec<(usize, usize, Vec<f64>)>);
+        let table: Vec<Row> = vec![
+            (0, 1, 1, vec![
+                (0, 1, vec![o]), (1, 1, vec![o]), (2, 1, vec![o]),
+                (3, 1, vec![s, 0.0]), (3, 2, vec![0.0, s])]),
+            (1, 1, 1, vec![
+                (0, 1, vec![o]), (1, 1, vec![o]), (2, 1, vec![o]),
+                (3, 1, vec![m, -0.5]), (3, 2, vec![0.5, m])]),
+            (2, 1, 1, vec![
+                (0, 1, vec![o]), (1, 1, vec![o]), (2, 1, vec![o]),
+                (3, 1, vec![m, 0.5]), (3, 2, vec![-0.5, m])]),
+            (3, 1, 1, vec![
+                (0, 1, vec![s]), (1, 1, vec![m]), (2, 1, vec![m]),
+                (3, 1, vec![0.5, 0.0]), (3, 2, vec![0.0, -0.5])]),
+            (3, 1, 2, vec![
+                (0, 1, vec![0.0]), (1, 1, vec![0.5]), (2, 1, vec![-0.5]),
+                (3, 1, vec![0.0, -0.5]), (3, 2, vec![-0.5, 0.0])]),
+            (3, 2, 1, vec![
+                (0, 1, vec![0.0]), (1, 1, vec![-0.5]), (2, 1, vec![0.5]),
+                (3, 1, vec![0.0, -0.5]), (3, 2, vec![-0.5, 0.0])]),
+            (3, 2, 2, vec![
+                (0, 1, vec![s]), (1, 1, vec![m]), (2, 1, vec![m]),
+                (3, 1, vec![-0.5, 0.0]), (3, 2, vec![0.0, 0.5])]),
+        ];
+        for (inner, v1, v2, outputs) in table {
+            let out = generic_multi_fmove_tree(&rule, &a4f_rank3(inner, v1, v2)).unwrap();
+            assert_eq!(out.len(), 5, "in({inner},{v1},{v2}): 5 tails");
+            for (coupled, vtx, want) in outputs {
+                let got = find_coeff(&out, coupled, vtx);
+                assert_vec(&got, &want, &format!("in({inner},{v1},{v2}) out(c={coupled},v={vtx})"));
+            }
+        }
+    }
+
+    // Build the full foldright coefficient map keyed by output tree pair. The
+    // output collapses multiple (codomain', domain') paths per pair (the A-matrix
+    // contraction) — the accumulator already summed them.
+    fn foldright_map(
+        rule: &A4FoldRule,
+        pair: &FusionTreeBlockKey,
+    ) -> std::collections::HashMap<FusionTreeBlockKey, f64> {
+        let mut map = std::collections::HashMap::new();
+        for (out, coeff) in generic_foldright_tree_pair(rule, pair).unwrap() {
+            *map.entry(out).or_insert(0.0) += coeff;
+        }
+        map
+    }
+
+    // Gate 4b (A4 oracle): tree-level foldright U-matrix vs TensorKit.foldright.
+    // rank-2 codomain: dst domain first leg dualized, U == I₂ (A4 Asymbol=I₂).
+    #[test]
+    fn b2b_a4_foldright_rank2_matches_tensorkit() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        for mu in 1..=2 {
+            // src: cod [3,3]->3 (vtx μ), dom [3]->3.
+            let cod = FusionTreeKey::new([t, t], Some(t), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+            let map = foldright_map(&rule, &FusionTreeBlockKey::pair(cod, dom));
+            // TK dst: cod [3]->3, dom [3,3]->3 (isdual=(true,false)) vtx μ, U[μ,μ]=1.
+            let exp_cod =
+                FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+            let exp_dom =
+                FusionTreeKey::new([t, t], Some(t), [true, false], [], [SectorId::new(mu)])
+                    .with_has_multiplicity(true);
+            let exp = FusionTreeBlockKey::pair(exp_cod, exp_dom);
+            for (key, coeff) in &map {
+                let want = if key == &exp { 1.0 } else { 0.0 };
+                assert!((coeff - want).abs() < 1e-10, "rank2 μ={mu}: coeff {coeff} want {want}");
+            }
+            assert!((map.get(&exp).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10, "rank2 μ={mu} self");
+        }
+    }
+
+    // Gate 4b (A4 oracle): rank-3 foldright — the 7×7 U-matrix that fully
+    // exercises F(3,3,3,3,3,3) combined with the √dim coeff factors (the ±√3/2 =
+    // ±0.8660 entries). This is the strongest fold discriminator available.
+    #[test]
+    fn b2b_a4_foldright_rank3_matches_tensorkit() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        // src columns (cod [3,3,3]->3 inner=x vtx=(v1,v2), dom [3]->3).
+        let cols: [(usize, usize, usize); 7] = [
+            (0, 1, 1), (1, 1, 1), (2, 1, 1), (3, 1, 1), (3, 2, 1), (3, 1, 2), (3, 2, 2),
+        ];
+        // dst rows: (cod_coupled, cod_vtx, dom_coupled, dom_vtx). dom isdual=(true,false).
+        let rows: [(usize, usize, usize, usize); 7] = [
+            (0, 1, 0, 1), (1, 1, 1, 1), (2, 1, 2, 1),
+            (3, 1, 3, 1), (3, 2, 3, 1), (3, 1, 3, 2), (3, 2, 3, 2),
+        ];
+        let sq = 1.0 / 3.0_f64.sqrt(); // 0.57735
+        let hs = 3.0_f64.sqrt() / 2.0; // 0.86603
+        // TK.foldright U (row,col) nonzeros; zeros elsewhere. 1-based -> 0-based.
+        let u: [[f64; 7]; 7] = [
+            [sq, sq, sq, 1.0, 0.0, 0.0, 1.0],
+            [sq, sq, sq, -0.5, -hs, hs, -0.5],
+            [sq, sq, sq, -0.5, hs, -hs, -0.5],
+            [sq, -0.5 * sq, -0.5 * sq, 0.5, 0.0, 0.0, -0.5],
+            [0.0, 0.5, -0.5, 0.0, -0.5, -0.5, 0.0],
+            [0.0, -0.5, 0.5, 0.0, -0.5, -0.5, 0.0],
+            [sq, -0.5 * sq, -0.5 * sq, -0.5, 0.0, 0.0, 0.5],
+        ];
+        for (ci, &(inner, v1, v2)) in cols.iter().enumerate() {
+            let cod = a4f_rank3(inner, v1, v2);
+            let pair = FusionTreeBlockKey::pair(cod, dom.clone());
+            let map = foldright_map(&rule, &pair);
+            for (ri, &(cc, cv, dc, dv)) in rows.iter().enumerate() {
+                let ex_cod = FusionTreeKey::new(
+                    [t, t], Some(SectorId::new(cc)), [false, false], [], [SectorId::new(cv)],
+                )
+                .with_has_multiplicity(true);
+                let ex_dom = FusionTreeKey::new(
+                    [t, t], Some(SectorId::new(dc)), [true, false], [], [SectorId::new(dv)],
+                )
+                .with_has_multiplicity(true);
+                let key = FusionTreeBlockKey::pair(ex_cod, ex_dom);
+                let got = map.get(&key).copied().unwrap_or(0.0);
+                assert!(
+                    (got - u[ri][ci]).abs() < 1e-10,
+                    "U[row{ri},col{ci}] (in={inner},{v1},{v2}) got {got} want {}",
+                    u[ri][ci]
+                );
+            }
+        }
+    }
+
+    // Gate 1: fold round-trip identity. foldright then foldleft returns the
+    // original pair with coefficient 1 (A-unitarity: A A† = I on the bent
+    // triple). Enumerated over all rank-3 A4 vertex assignments.
+    #[test]
+    fn b2b_a4_fold_round_trip_identity() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        for (inner, v1, v2) in
+            [(0, 1, 1), (1, 1, 1), (2, 1, 1), (3, 1, 1), (3, 2, 1), (3, 1, 2), (3, 2, 2)]
+        {
+            let pair = FusionTreeBlockKey::pair(a4f_rank3(inner, v1, v2), dom.clone());
+            let mut totals = std::collections::HashMap::new();
+            for (mid, c1) in generic_foldright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_foldleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(0.0) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { 1.0 } else { 0.0 };
+                assert!(
+                    (coeff - want).abs() < 1e-10,
+                    "fold rt in({inner},{v1},{v2}): coeff {coeff} want {want}"
+                );
+            }
+            assert!(
+                (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                "fold rt in({inner},{v1},{v2}): self missing"
+            );
+        }
+    }
+
+    // Gate 2: cycle round-trip. cycleclockwise then cycleanticlockwise == id.
+    #[test]
+    fn b2b_a4_cycle_round_trip_identity() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        for (inner, v1, v2) in [(0, 1, 1), (3, 1, 1), (3, 2, 1), (3, 1, 2), (3, 2, 2)] {
+            let pair = FusionTreeBlockKey::pair(a4f_rank3(inner, v1, v2), dom.clone());
+            let mut totals = std::collections::HashMap::new();
+            for (mid, c1) in generic_cycle_clockwise_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_cycle_anticlockwise_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(0.0) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { 1.0 } else { 0.0 };
+                assert!(
+                    (coeff - want).abs() < 1e-10,
+                    "cycle rt in({inner},{v1},{v2}): coeff {coeff} want {want}"
+                );
+            }
+            assert!(
+                (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                "cycle rt in({inner},{v1},{v2}): self missing"
+            );
+        }
+    }
+
+    // Residual (c): domain-rank ≥ 2. All prior generic bend/fold tests use a
+    // rank-1 domain; these exercise multi_Fmove_inv on a rank-2 domain (its
+    // candidates are rank-3, so the associator F-chain runs on the domain side)
+    // and the rank-2-domain bend surgery. Round-trip identities, all A4 vertex
+    // assignments enumerated.
+    #[test]
+    fn b2b_a4_fold_round_trip_domain_rank2() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        for cod_mu in 1..=2 {
+            for (dom_inner, dv) in [(0, 1), (1, 1), (2, 1), (3, 1), (3, 2)] {
+                // cod [3,3]->3 (vtx cod_mu); dom [3,3]->3 inner=dom_inner (vtx dv).
+                let cod = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(cod_mu)],
+                )
+                .with_has_multiplicity(true);
+                let dom = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(dv)],
+                )
+                .with_has_multiplicity(true);
+                let _ = dom_inner; // rank-2 dom has no innerline; kept for label clarity
+                let pair = FusionTreeBlockKey::pair(cod, dom);
+                let mut totals = std::collections::HashMap::new();
+                for (mid, c1) in generic_foldright_tree_pair(&rule, &pair).unwrap() {
+                    for (out, c2) in generic_foldleft_tree_pair(&rule, &mid).unwrap() {
+                        *totals.entry(out).or_insert(0.0) += c1 * c2;
+                    }
+                }
+                for (key, coeff) in &totals {
+                    let want = if key == &pair { 1.0 } else { 0.0 };
+                    assert!(
+                        (coeff - want).abs() < 1e-10,
+                        "fold rt dom-rank2 cod_mu={cod_mu} dv={dv}: {coeff} want {want}"
+                    );
+                }
+                assert!(
+                    (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                    "fold rt dom-rank2 cod_mu={cod_mu} dv={dv}: self missing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b2b_a4_bend_round_trip_domain_rank2() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        for cod_mu in 1..=2 {
+            for dv in 1..=2 {
+                let cod = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(cod_mu)],
+                )
+                .with_has_multiplicity(true);
+                let dom = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(dv)],
+                )
+                .with_has_multiplicity(true);
+                let pair = FusionTreeBlockKey::pair(cod, dom);
+                let mut totals = std::collections::HashMap::new();
+                for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
+                    for (out, c2) in generic_bendleft_tree_pair(&rule, &mid).unwrap() {
+                        *totals.entry(out).or_insert(0.0) += c1 * c2;
+                    }
+                }
+                for (key, coeff) in &totals {
+                    let want = if key == &pair { 1.0 } else { 0.0 };
+                    assert!(
+                        (coeff - want).abs() < 1e-10,
+                        "bend rt dom-rank2 cod_mu={cod_mu} dv={dv}: {coeff} want {want}"
+                    );
+                }
+                assert!(
+                    (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                    "bend rt dom-rank2 cod_mu={cod_mu} dv={dv}: self missing"
+                );
+            }
+        }
+    }
+
+    // ===================== Residual (b): complex conj path =====================
+    //
+    // The B2a complex path (`GenericBraidScalar for Complex64`, the fold's
+    // `coeff₂.braid_conj()`, and `a_symbol_generic`'s inner `conj`) was only
+    // verified by source-matching. This closes it numerically: a synthetic
+    // Complex64 Generic rule whose A-move / B-move are a genuinely complex 2×2
+    // UNITARY U (non-Hermitian, non-real). Self-dual sector 1, N(1,1,1)=2,
+    // dim=1 (all coeff factors = 1). U = (1/√2)[[1, i],[i, 1]].
+    //
+    // From `a_symbol_generic`: A[κ,λ] = conj(κ_a · F(1,1,1,1,0,1)[0,0,κ,λ]) with
+    // κ_a=1, so setting the F block to conj(U) gives A = U. Likewise B = U from
+    // the F(1,1,1,1,1,0) block. A wrong conj (missing/extra) or a μ↔ν transpose
+    // flips the sign of the imaginary parts and fails both the direct check and
+    // the round-trip (which needs U U† = I).
+    #[derive(Clone, Copy, Debug)]
+    struct ComplexUnitaryRule;
+    impl FusionRule for ComplexUnitaryRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // 0 and 1 self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    fn cx(re: f64, im: f64) -> Complex64 {
+        Complex64::new(re, im)
+    }
+    // U = (1/√2)[[1, i],[i, 1]], row-major.
+    fn cx_u() -> [Complex64; 4] {
+        let r = 1.0 / 2.0_f64.sqrt();
+        [cx(r, 0.0), cx(0.0, r), cx(0.0, r), cx(r, 0.0)]
+    }
+    impl GenericFusionSymbols for ComplexUnitaryRule {
+        type Scalar = Complex64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let u = cx_u();
+            match (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) {
+                // A block: A = conj(U) reshaped => set F = conj(U). shape (1,1,2,2).
+                (1, 1, 1, 1, 0, 1) => GenericFArray::new(
+                    vec![u[0].conj(), u[1].conj(), u[2].conj(), u[3].conj()],
+                    (1, 1, 2, 2),
+                ),
+                // B block: B = U reshaped. shape (2,2,1,1).
+                (1, 1, 1, 1, 1, 0) => {
+                    GenericFArray::new(vec![u[0], u[1], u[2], u[3]], (2, 2, 1, 1))
+                }
+                (aa, bb, cc, _, _, _) if aa == 0 || bb == 0 || cc == 0 => {
+                    GenericFArray::new(vec![cx(1.0, 0.0)], (1, 1, 1, 1))
+                }
+                other => panic!("ComplexUnitaryRule: unmodelled F{other:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![cx(1.0, 0.0)], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for ComplexUnitaryRule {
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+    }
+
+    // Direct: foldright distributes ROW μ of the COMPLEX A-matrix (=U) to the
+    // domain vertices ν. coeff(out ν) = coeff0·A[μ,ν] = U[μ,ν]. A missing conj
+    // or a μ↔ν swap would produce conj(U)/Uᵀ — distinct complex numbers.
+    #[test]
+    fn refute_b2b_complex_foldright_reads_a_row_unconjugated() {
+        let rule = ComplexUnitaryRule;
+        let s = SectorId::new(1);
+        let u = cx_u();
+        // Sanity: U genuinely complex and non-Hermitian.
+        assert!(u[1].im.abs() > 0.1, "U must be complex");
+        assert!((u[1] - u[2].conj()).norm() > 0.1, "U must be non-Hermitian");
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let out = generic_foldright_tree_pair(&rule, &pair).unwrap();
+            let mut got = [cx(0.0, 0.0); 2];
+            for (key, coeff) in &out {
+                let nu = key.domain_tree().vertices()[0].id();
+                got[nu - 1] = *coeff;
+            }
+            for nu in 0..2 {
+                let want = u[(mu - 1) * 2 + nu]; // ROW μ of U
+                assert!(
+                    (got[nu] - want).norm() < 1e-10,
+                    "μ={mu} ν={nu}: {} want ROW-μ {} (conj/transpose?)",
+                    got[nu],
+                    want
+                );
+            }
+            // Distinguishable from the conjugated reading.
+            let want_conj = u[(mu - 1) * 2].conj();
+            assert!(
+                (got[0] - want_conj).norm() > 1e-9 || u[(mu - 1) * 2].im.abs() < 1e-12,
+                "conj reading coincides — test cannot discriminate"
+            );
+        }
+    }
+
+    // Round-trip with a COMPLEX unitary A: foldright∘foldleft == id requires
+    // U U† = I, so the conj in the return fold must be exactly right.
+    #[test]
+    fn b2b_complex_fold_round_trip_identity() {
+        let rule = ComplexUnitaryRule;
+        let s = SectorId::new(1);
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let mut totals: std::collections::HashMap<FusionTreeBlockKey, Complex64> =
+                std::collections::HashMap::new();
+            for (mid, c1) in generic_foldright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_foldleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(cx(0.0, 0.0)) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { cx(1.0, 0.0) } else { cx(0.0, 0.0) };
+                assert!(
+                    (coeff - want).norm() < 1e-10,
+                    "cx fold rt μ={mu}: {coeff} want {want}"
+                );
+            }
+            assert!(
+                (totals.get(&pair).copied().unwrap_or(cx(0.0, 0.0)) - cx(1.0, 0.0)).norm() < 1e-10,
+                "cx fold rt μ={mu}: self missing"
+            );
+        }
+    }
+
+    // Bend round-trip with a COMPLEX unitary B: bendright∘bendleft == id.
+    #[test]
+    fn b2b_complex_bend_round_trip_identity() {
+        let rule = ComplexUnitaryRule;
+        let s = SectorId::new(1);
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let mut totals: std::collections::HashMap<FusionTreeBlockKey, Complex64> =
+                std::collections::HashMap::new();
+            for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_bendleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(cx(0.0, 0.0)) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { cx(1.0, 0.0) } else { cx(0.0, 0.0) };
+                assert!(
+                    (coeff - want).norm() < 1e-10,
+                    "cx bend rt μ={mu}: {coeff} want {want}"
+                );
+            }
+        }
+    }
+
+    // ==== REFUTE (adversarial): coeff2 adjoint conj on GENUINELY complex data ====
+    //
+    // Gap found by the verifier: in `ComplexUnitaryRule` the domain vector
+    // `coeff2` is always a real UNIT vector (rank-1 domain → seed case), so the
+    // `coeff₂'` adjoint (TK `duality_manipulations.jl:279`) and the
+    // `multi_Fmove_inv = conj(associator)` step (TK `basic_manipulations.jl:
+    // 439/462`) are NEVER exercised on complex data by any existing test — the
+    // A4 oracle is fully real, and the complex fold round-trip cancels a
+    // consistent double conj error.
+    //
+    // This synthetic (deliberately NOT pentagon-consistent — a pure algebraic
+    // fixture) rule drives one COMPLEX interior F into `coeff2` while keeping the
+    // A-matrix REAL, isolating the two conj sites:
+    //   * F(1,1,2,2,0,3) = 1  (real)  ⇒ Asymbol(1,2,3) is real, = 1.
+    //   * F(1,3,3,2,2,3) = w  (complex) ⇒ multi_associator seed = w.
+    // TK's `multi_Fmove_inv` returns conj(associator) = conj(w); TK's foldright
+    // contracts coeff₂' (a SECOND conj) against transpose(A)·coeff₁, so the two
+    // conjs cancel and the observable foldright coefficient is the RAW
+    // associator w. Test A pins `multi_Fmove_inv = conj(w)` alone (breaks the
+    // double-error symmetry); Test B pins the foldright net = w. Together they
+    // rule out both a single and a double conj slip. A single missing conj at
+    // EITHER site flips the observable to conj(w) ≠ w.
+    #[derive(Clone, Copy, Debug)]
+    struct Coeff2ConjRule;
+    fn c2c_w() -> Complex64 {
+        Complex64::new(0.6, 0.8) // |w| = 1, genuinely complex
+    }
+    impl FusionRule for Coeff2ConjRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // all self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(3)],
+                (1, 3) | (3, 1) => smallvec![SectorId::new(2)],
+                (2, 3) | (3, 2) => smallvec![SectorId::new(2)],
+                (3, 3) => smallvec![SectorId::new(3)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            usize::from(self.fusion_channels(left, right).contains(&coupled))
+        }
+    }
+    impl GenericFusionSymbols for Coeff2ConjRule {
+        type Scalar = Complex64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            match ids {
+                // Asymbol(1,2,3) reads F(dual1,1,2,2,0,3) = F(1,1,2,2,0,3): REAL.
+                (1, 1, 2, 2, 0, 3) => {
+                    GenericFArray::new(vec![Complex64::new(1.0, 0.0)], (1, 1, 1, 1))
+                }
+                // multi_associator seed for domain [3,3]->3 folded onto b=2: COMPLEX.
+                (1, 3, 3, 2, 2, 3) => GenericFArray::new(vec![c2c_w()], (1, 1, 1, 1)),
+                _ => {
+                    let shape = (
+                        self.nsymbol(a, b, e),
+                        self.nsymbol(e, c, d),
+                        self.nsymbol(b, c, f),
+                        self.nsymbol(a, f, d),
+                    );
+                    if shape == (1, 1, 1, 1) {
+                        GenericFArray::new(vec![Complex64::new(1.0, 0.0)], shape)
+                    } else {
+                        panic!("Coeff2ConjRule: unmodelled non-singleton F{ids:?} shape={shape:?}");
+                    }
+                }
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![Complex64::new(1.0, 0.0)], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for Coeff2ConjRule {
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+    }
+
+    // Test A: `multi_Fmove_inv` alone returns conj(associator) on complex F.
+    #[test]
+    fn refute_b2b_multi_fmove_inv_is_conj_associator_complex() {
+        let rule = Coeff2ConjRule;
+        let s1 = SectorId::new(1);
+        let s3 = SectorId::new(3);
+        let w = c2c_w();
+        // domain tree [3,3] -> 3 (single vertex); leading dual(a)=1, target b=2.
+        let domain = FusionTreeKey::new(
+            [s3, s3],
+            Some(s3),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .with_has_multiplicity(true);
+        let terms =
+            generic_multi_fmove_inv_tree(&rule, s1, SectorId::new(2), &domain, true).unwrap();
+        assert_eq!(terms.len(), 1, "expected a single recoupled candidate");
+        let (_, coeff) = &terms[0];
+        assert_eq!(coeff.len(), 1, "coeff2 must be length-1 here");
+        // Independent TK reading: inv coeff = conj(seed associator) = conj(w).
+        assert!(
+            (coeff[0] - w.conj()).norm() < 1e-12,
+            "multi_Fmove_inv gave {} want conj(w)={} (A2 conj missing?)",
+            coeff[0],
+            w.conj()
+        );
+        // Discriminating: conj(w) must differ from w so the check has teeth.
+        assert!((w - w.conj()).norm() > 0.1, "w not complex enough");
+    }
+
+    // Test B: foldright net observable = raw associator w (the two conjs cancel).
+    // A single dropped conj at EITHER site would surface as conj(w).
+    #[test]
+    fn refute_b2b_foldright_net_is_raw_associator_complex() {
+        let rule = Coeff2ConjRule;
+        let s1 = SectorId::new(1);
+        let s2 = SectorId::new(2);
+        let s3 = SectorId::new(3);
+        let w = c2c_w();
+        // codomain [1,2] -> 3 (coeff1 = unit, A = Asymbol(1,2,3) real = 1),
+        // domain [3,3] -> 3 (drives complex coeff2).
+        let codomain =
+            FusionTreeKey::new([s1, s2], Some(s3), [false, false], [], [SectorId::new(1)])
+                .with_has_multiplicity(true);
+        let domain =
+            FusionTreeKey::new([s3, s3], Some(s3), [false, false], [], [SectorId::new(1)])
+                .with_has_multiplicity(true);
+        let pair = FusionTreeBlockKey::pair(codomain, domain);
+        let out = generic_foldright_tree_pair(&rule, &pair).unwrap();
+        assert_eq!(out.len(), 1, "expected a single folded term");
+        let coeff = out[0].1;
+        assert!(
+            (coeff - w).norm() < 1e-12,
+            "foldright net = {coeff} want raw associator w={w} (odd # of conj slips ⇒ conj(w))"
+        );
+        // The wrong (single-conj-dropped) answer is conj(w); prove distinguishable.
+        assert!(
+            (coeff - w.conj()).norm() > 0.1,
+            "test cannot discriminate conj(w) from w"
+        );
+    }
+
+    // ============ Residual (a): real non-diagonal SU(3) B-symbol ============
+    //
+    // B2a's A4 bend oracle could NOT discriminate a μ↔ν B-matrix transpose:
+    // A4Irrep(3)'s Bsymbol is I₂ (its own transpose). It flagged that a
+    // *non-diagonal Bsymbol from a real category* (SU(3)) was needed. Extracted
+    // from SUNRepresentations.jl v0.4.0 + TensorKitSectors v0.3.9:
+    //   Bsymbol((4,2,0),(3,1,0),(3,1,0)) = [[-1/(2√2), -√(7/8)], [√(7/8), -1/(2√2)]]
+    //   Bsymbol((3,1,0),(3,2,0),(4,2,0)) = its inverse (real orthogonal, so the
+    //   transpose): [[-1/(2√2), √(7/8)], [-√(7/8), -1/(2√2)]]
+    // (B_fwd · B_ret = I₂, verified in Julia). These are GENUINELY non-diagonal
+    // and non-symmetric, so they discriminate the μ↔ν indexing in the real bend,
+    // not just the F→B reshape (which TransposeProbeRule already pins).
+    //
+    // dim((4,2,0))=27, dim((3,1,0))=dim((3,2,0))=15, all FS phases +1.
+    // b_symbol_generic is overridden directly (the full SU(3) F-table is not
+    // transcribed), so the bend surgery, coeff₀ = √dim(c)/√dim(a), μ→ν row
+    // distribution and round-trip are all exercised against real categorical B.
+    #[derive(Clone, Copy, Debug)]
+    struct Su3BendRule;
+    // ids: 1 = (4,2,0) self-dual, 2 = (3,1,0), 3 = (3,2,0) = dual((3,1,0)).
+    impl FusionRule for Su3BendRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            match sector.id() {
+                2 => SectorId::new(3),
+                3 => SectorId::new(2),
+                _ => sector, // 0, 1 self-dual
+            }
+        }
+        // bendright/bendleft never consult these (they use only dual, dims, fs,
+        // and b_symbol_generic); provide honest N(a,b,c)=2 for the bent triples.
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(2)],
+                (2, 3) | (3, 2) => smallvec![SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            match (left.id(), right.id(), coupled.id()) {
+                (1, 2, 2) | (2, 3, 1) => 2,
+                _ => usize::from(self.fusion_channels(left, right).contains(&coupled)),
+            }
+        }
+    }
+    impl GenericFusionSymbols for Su3BendRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+            _d: SectorId,
+            _e: SectorId,
+            _f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            unreachable!("b_symbol_generic is overridden; F is never read")
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for Su3BendRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            match sector.id() {
+                1 => 27.0_f64.sqrt(),
+                2 | 3 => 15.0_f64.sqrt(),
+                _ => 1.0,
+            }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            1.0 / self.sqrt_dim_scalar(sector)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+        fn b_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let e = -1.0 / (2.0 * 2.0_f64.sqrt()); // -1/(2√2) = -0.35355339
+            let g = (7.0_f64 / 8.0).sqrt(); //  √(7/8)  =  0.93541435
+            match (a.id(), b.id(), c.id()) {
+                (1, 2, 2) => GenericRMatrix::new(vec![e, -g, g, e], 2, 2), // B_fwd
+                (2, 3, 1) => GenericRMatrix::new(vec![e, g, -g, e], 2, 2), // B_ret
+                other => panic!("Su3BendRule: unmodelled B{other:?}"),
+            }
+        }
+    }
+
+    fn su3_bfwd() -> [[f64; 2]; 2] {
+        let e = -1.0 / (2.0 * 2.0_f64.sqrt());
+        let g = (7.0_f64 / 8.0).sqrt();
+        [[e, -g], [g, e]]
+    }
+
+    // Real-categorical bend oracle: bendright distributes coeff₀·ROW μ of the
+    // NON-DIAGONAL SU(3) B to the domain vertices ν. A μ↔ν swap would emit
+    // COLUMN μ; B is non-symmetric (B[0,1]≠B[1,0]) so the two are distinct.
+    #[test]
+    fn b2b_su3_bendright_uses_b_row_not_column() {
+        let rule = Su3BendRule;
+        let s42 = SectorId::new(1);
+        let s31 = SectorId::new(2);
+        let b = su3_bfwd();
+        let coeff0 = 15.0_f64.sqrt() / 27.0_f64.sqrt(); // √dim(31)/√dim(42)
+        for mu in 1..=2usize {
+            // cod [42,31]->31 (vtx μ), dom [31]->31.
+            let cod = FusionTreeKey::new(
+                [s42, s31], Some(s31), [false, false], [], [SectorId::new(mu)],
+            )
+            .with_has_multiplicity(true);
+            let dom =
+                FusionTreeKey::new([s31], Some(s31), [false], [], []).with_has_multiplicity(true);
+            let out = generic_bendright_tree_pair(&rule, &FusionTreeBlockKey::pair(cod, dom))
+                .unwrap();
+            let mut got = [0.0f64; 2];
+            for (key, coeff) in &out {
+                let nu = key.domain_tree().vertices().last().unwrap().id();
+                got[nu - 1] = *coeff;
+            }
+            for nu in 0..2 {
+                let want = coeff0 * b[mu - 1][nu]; // ROW μ
+                assert!(
+                    (got[nu] - want).abs() < 1e-10,
+                    "μ={mu} ν={nu}: {} want coeff0·ROW-μ {} (transpose ⇒ column)",
+                    got[nu],
+                    want
+                );
+            }
+            // Distinguishable from the transposed (column) reading.
+            let col = coeff0 * b[if mu == 1 { 1 } else { 0 }][mu - 1];
+            assert!((got[0] - col).abs() > 1e-9, "μ={mu}: row/column coincide");
+        }
+    }
+
+    // Round-trip with a real non-diagonal SU(3) B: bendright∘bendleft == id
+    // (B_fwd · B_ret = I₂), exercising the non-trivial off-diagonal mixing.
+    #[test]
+    fn b2b_su3_bend_round_trip_identity() {
+        let rule = Su3BendRule;
+        let s42 = SectorId::new(1);
+        let s31 = SectorId::new(2);
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new(
+                [s42, s31], Some(s31), [false, false], [], [SectorId::new(mu)],
+            )
+            .with_has_multiplicity(true);
+            let dom =
+                FusionTreeKey::new([s31], Some(s31), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let mut totals = std::collections::HashMap::new();
+            for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_bendleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(0.0) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { 1.0 } else { 0.0 };
+                assert!(
+                    (coeff - want).abs() < 1e-10,
+                    "su3 bend rt μ={mu}: {coeff} want {want}"
+                );
+            }
+            assert!(
+                (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                "su3 bend rt μ={mu}: self missing"
+            );
+        }
+    }
 }
