@@ -5894,4 +5894,191 @@ mod tests {
             }
         }
     }
+
+    // ============ Residual (a): real non-diagonal SU(3) B-symbol ============
+    //
+    // B2a's A4 bend oracle could NOT discriminate a μ↔ν B-matrix transpose:
+    // A4Irrep(3)'s Bsymbol is I₂ (its own transpose). It flagged that a
+    // *non-diagonal Bsymbol from a real category* (SU(3)) was needed. Extracted
+    // from SUNRepresentations.jl v0.4.0 + TensorKitSectors v0.3.9:
+    //   Bsymbol((4,2,0),(3,1,0),(3,1,0)) = [[-1/(2√2), -√(7/8)], [√(7/8), -1/(2√2)]]
+    //   Bsymbol((3,1,0),(3,2,0),(4,2,0)) = its inverse (real orthogonal, so the
+    //   transpose): [[-1/(2√2), √(7/8)], [-√(7/8), -1/(2√2)]]
+    // (B_fwd · B_ret = I₂, verified in Julia). These are GENUINELY non-diagonal
+    // and non-symmetric, so they discriminate the μ↔ν indexing in the real bend,
+    // not just the F→B reshape (which TransposeProbeRule already pins).
+    //
+    // dim((4,2,0))=27, dim((3,1,0))=dim((3,2,0))=15, all FS phases +1.
+    // b_symbol_generic is overridden directly (the full SU(3) F-table is not
+    // transcribed), so the bend surgery, coeff₀ = √dim(c)/√dim(a), μ→ν row
+    // distribution and round-trip are all exercised against real categorical B.
+    #[derive(Clone, Copy, Debug)]
+    struct Su3BendRule;
+    // ids: 1 = (4,2,0) self-dual, 2 = (3,1,0), 3 = (3,2,0) = dual((3,1,0)).
+    impl FusionRule for Su3BendRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            match sector.id() {
+                2 => SectorId::new(3),
+                3 => SectorId::new(2),
+                _ => sector, // 0, 1 self-dual
+            }
+        }
+        // bendright/bendleft never consult these (they use only dual, dims, fs,
+        // and b_symbol_generic); provide honest N(a,b,c)=2 for the bent triples.
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(2)],
+                (2, 3) | (3, 2) => smallvec![SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            match (left.id(), right.id(), coupled.id()) {
+                (1, 2, 2) | (2, 3, 1) => 2,
+                _ => usize::from(self.fusion_channels(left, right).contains(&coupled)),
+            }
+        }
+    }
+    impl GenericFusionSymbols for Su3BendRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+            _d: SectorId,
+            _e: SectorId,
+            _f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            unreachable!("b_symbol_generic is overridden; F is never read")
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for Su3BendRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            match sector.id() {
+                1 => 27.0_f64.sqrt(),
+                2 | 3 => 15.0_f64.sqrt(),
+                _ => 1.0,
+            }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            1.0 / self.sqrt_dim_scalar(sector)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+        fn b_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let e = -1.0 / (2.0 * 2.0_f64.sqrt()); // -1/(2√2) = -0.35355339
+            let g = (7.0_f64 / 8.0).sqrt(); //  √(7/8)  =  0.93541435
+            match (a.id(), b.id(), c.id()) {
+                (1, 2, 2) => GenericRMatrix::new(vec![e, -g, g, e], 2, 2), // B_fwd
+                (2, 3, 1) => GenericRMatrix::new(vec![e, g, -g, e], 2, 2), // B_ret
+                other => panic!("Su3BendRule: unmodelled B{other:?}"),
+            }
+        }
+    }
+
+    fn su3_bfwd() -> [[f64; 2]; 2] {
+        let e = -1.0 / (2.0 * 2.0_f64.sqrt());
+        let g = (7.0_f64 / 8.0).sqrt();
+        [[e, -g], [g, e]]
+    }
+
+    // Real-categorical bend oracle: bendright distributes coeff₀·ROW μ of the
+    // NON-DIAGONAL SU(3) B to the domain vertices ν. A μ↔ν swap would emit
+    // COLUMN μ; B is non-symmetric (B[0,1]≠B[1,0]) so the two are distinct.
+    #[test]
+    fn b2b_su3_bendright_uses_b_row_not_column() {
+        let rule = Su3BendRule;
+        let s42 = SectorId::new(1);
+        let s31 = SectorId::new(2);
+        let b = su3_bfwd();
+        let coeff0 = 15.0_f64.sqrt() / 27.0_f64.sqrt(); // √dim(31)/√dim(42)
+        for mu in 1..=2usize {
+            // cod [42,31]->31 (vtx μ), dom [31]->31.
+            let cod = FusionTreeKey::new(
+                [s42, s31], Some(s31), [false, false], [], [SectorId::new(mu)],
+            )
+            .with_has_multiplicity(true);
+            let dom =
+                FusionTreeKey::new([s31], Some(s31), [false], [], []).with_has_multiplicity(true);
+            let out = generic_bendright_tree_pair(&rule, &FusionTreeBlockKey::pair(cod, dom))
+                .unwrap();
+            let mut got = [0.0f64; 2];
+            for (key, coeff) in &out {
+                let nu = key.domain_tree().vertices().last().unwrap().id();
+                got[nu - 1] = *coeff;
+            }
+            for nu in 0..2 {
+                let want = coeff0 * b[mu - 1][nu]; // ROW μ
+                assert!(
+                    (got[nu] - want).abs() < 1e-10,
+                    "μ={mu} ν={nu}: {} want coeff0·ROW-μ {} (transpose ⇒ column)",
+                    got[nu],
+                    want
+                );
+            }
+            // Distinguishable from the transposed (column) reading.
+            let col = coeff0 * b[if mu == 1 { 1 } else { 0 }][mu - 1];
+            assert!((got[0] - col).abs() > 1e-9, "μ={mu}: row/column coincide");
+        }
+    }
+
+    // Round-trip with a real non-diagonal SU(3) B: bendright∘bendleft == id
+    // (B_fwd · B_ret = I₂), exercising the non-trivial off-diagonal mixing.
+    #[test]
+    fn b2b_su3_bend_round_trip_identity() {
+        let rule = Su3BendRule;
+        let s42 = SectorId::new(1);
+        let s31 = SectorId::new(2);
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new(
+                [s42, s31], Some(s31), [false, false], [], [SectorId::new(mu)],
+            )
+            .with_has_multiplicity(true);
+            let dom =
+                FusionTreeKey::new([s31], Some(s31), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let mut totals = std::collections::HashMap::new();
+            for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_bendleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(0.0) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { 1.0 } else { 0.0 };
+                assert!(
+                    (coeff - want).abs() < 1e-10,
+                    "su3 bend rt μ={mu}: {coeff} want {want}"
+                );
+            }
+            assert!(
+                (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                "su3 bend rt μ={mu}: self missing"
+            );
+        }
+    }
 }
