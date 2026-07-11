@@ -546,6 +546,44 @@ impl FusionTreeHomSpace {
         keys
     }
 
+    /// Generic-fusion (outer-multiplicity) sibling of [`Self::fusion_tree_keys`]:
+    /// enumerates multiplicity-aware block keys (codomain × domain tree pairs)
+    /// for a `FusionRule` whose `nsymbol` can exceed 1 (SU(3), …). Not cached —
+    /// the Generic path is not on any hot loop yet (mirrors the non-memoized
+    /// Stage B3b cache siblings); add a cache when a Generic workload measures it.
+    pub fn fusion_tree_keys_generic<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
+    where
+        R: FusionRule,
+    {
+        let codomain = fusion_trees_by_coupled_for_space_generic(rule, &self.codomain);
+        let domain = fusion_trees_by_coupled_for_space_generic(rule, &self.domain);
+        let mut keys = Vec::new();
+        let mut codomain_index = 0usize;
+        let mut domain_index = 0usize;
+        while codomain_index < codomain.len() && domain_index < domain.len() {
+            match codomain[codomain_index]
+                .coupled
+                .cmp(&domain[domain_index].coupled)
+            {
+                std::cmp::Ordering::Less => codomain_index += 1,
+                std::cmp::Ordering::Greater => domain_index += 1,
+                std::cmp::Ordering::Equal => {
+                    for domain_tree in &domain[domain_index].trees {
+                        for codomain_tree in &codomain[codomain_index].trees {
+                            keys.push(FusionTreeBlockKey::pair(
+                                codomain_tree.clone(),
+                                domain_tree.clone(),
+                            ));
+                        }
+                    }
+                    codomain_index += 1;
+                    domain_index += 1;
+                }
+            }
+        }
+        keys
+    }
+
     pub fn sector_structure<R>(&self, rule: &R) -> Result<SectorStructure, CoreError>
     where
         R: MultiplicityFreeFusionRule,

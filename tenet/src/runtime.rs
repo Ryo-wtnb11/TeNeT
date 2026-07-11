@@ -11,6 +11,7 @@ use num_complex::Complex64;
 use tenet_tensors::{
     DenseTreeTransformOperations, TensorContractFusionExecutionContext,
     TreeTransformBuiltinRuleCacheKey, TreeTransformProductRuleCacheKey,
+    TreeTransformSu3RuleCacheKey,
 };
 
 use crate::error::Error;
@@ -21,6 +22,8 @@ pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
 pub(crate) type ProductKey = TreeTransformProductRuleCacheKey<BuiltinKey, BuiltinKey>;
 /// Cache key of the left-associated triple product `(fZ2 ⊠ U1) ⊠ SU2`.
 pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, BuiltinKey>;
+/// Cache key of the Stage B3b SU(3) table provider (its provenance hash).
+pub(crate) type Su3Key = TreeTransformSu3RuleCacheKey;
 
 /// The pair of per-scalar execution contexts for one fusion rule: tensor
 /// operations dispatch on the stored dtype once per call and pick one side.
@@ -104,6 +107,10 @@ pub(crate) struct RuntimeState {
     pub(crate) su2: Ctxs<BuiltinKey>,
     pub(crate) u1_fz2: Ctxs<ProductKey>,
     pub(crate) fz2_u1_su2: Ctxs<TripleKey>,
+    /// Stage B3b: SU(3) generic-fusion execution context (permute/braid/
+    /// transpose). Keyed by the table provenance hash, so a swapped table never
+    /// reuses another table's compiled plans.
+    pub(crate) su3: Ctxs<Su3Key>,
     /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
     /// coupled-sector matrices), shared by all decomposition methods. Boxed
     /// behind [`tenet_dense::DenseExecutor`] so the CPU linear-algebra backend
@@ -134,6 +141,7 @@ impl RuntimeState {
             su2: Ctxs::default(),
             u1_fz2: Ctxs::default(),
             fz2_u1_su2: Ctxs::default(),
+            su3: Ctxs::default(),
             dense,
             #[cfg(feature = "cuda")]
             cuda: None,
@@ -154,6 +162,7 @@ impl RuntimeState {
             su2: Ctxs::with_config(threads, gemm_kind)?,
             u1_fz2: Ctxs::with_config(threads, gemm_kind)?,
             fz2_u1_su2: Ctxs::with_config(threads, gemm_kind)?,
+            su3: Ctxs::with_config(threads, gemm_kind)?,
             dense,
             #[cfg(feature = "cuda")]
             cuda: None,
@@ -247,6 +256,14 @@ macro_rules! with_rule_ctx {
                 );
                 let $ctx = &mut $state.fz2_u1_su2;
                 $body
+            }
+            // See `with_rule!`: SU(3) is Generic and takes dedicated `*_generic`
+            // paths that branch on `RuleKind::Su3` before reaching this macro.
+            $crate::space::RuleKind::Su3 => {
+                unimplemented!(
+                    "this operation is not yet supported for SU(3) tensors \
+                     (Stage B3b implements permute/braid/transpose)"
+                )
             }
         }
     };

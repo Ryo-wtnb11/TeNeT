@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockKey, BlockStructure, CoreError, FusionTensorMapSpace, FusionTreeHomSpace,
+    BlockKey, BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols,
 };
 
@@ -57,6 +57,10 @@ fn transformed_space_cache(
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
 /// spaces enumerate the full tree set of their hom spaces, so the coupled
 /// grid is always complete; there is no other layout.
+// `R: FusionRule` (not mult-free): the coupled-sector matrix layout only needs
+// fusion channels/dual, so this helper serves both the mult-free and the
+// Generic (SU(3)) space builders. Relaxing the bound leaves the mult-free
+// callers unchanged.
 fn scratch_subblock_structure<R>(
     rule: &R,
     nout: usize,
@@ -64,7 +68,7 @@ fn scratch_subblock_structure<R>(
     blocks: Vec<(BlockKey, Vec<usize>)>,
 ) -> Result<BlockStructure, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
 {
     let mut tree_blocks = Vec::with_capacity(blocks.len());
     for (index, (key, shape)) in blocks.iter().enumerate() {
@@ -241,6 +245,105 @@ impl DynamicFusionMapSpace {
             map.insert(cache_key, space.clone());
         }
         Ok(space)
+    }
+
+    /// Generic-fusion (SU(3)) sibling of [`Self::from_degeneracy_shapes`]:
+    /// builds the multiplicity-aware block structure from a `FusionRule` whose
+    /// `nsymbol` can exceed 1. Only `fusion_tree_keys_generic` differs from the
+    /// mult-free path (every other step is rule-agnostic or `FusionRule`-bound).
+    pub fn from_degeneracy_shapes_generic<R, Shapes>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let keys = homspace.fusion_tree_keys_generic(rule);
+        let shapes = shapes.into_iter().map(Into::into).collect::<Vec<_>>();
+        if keys.len() != shapes.len() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::BlockCountMismatch {
+                    expected: keys.len(),
+                    actual: shapes.len(),
+                },
+            ));
+        }
+        homspace
+            .validate_degeneracy_shapes(&keys, &shapes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let blocks = keys
+            .iter()
+            .cloned()
+            .map(BlockKey::from)
+            .zip(shapes)
+            .collect::<Vec<_>>();
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+        })
+    }
+
+    /// Generic-fusion (SU(3)) sibling of [`Self::transformed`]: the permuted /
+    /// braided / transposed result space, enumerated with multiplicity-aware
+    /// keys. Not cached (the Generic path is not on a hot loop yet — same
+    /// non-memoized rationale as the Stage B3b cache siblings).
+    pub fn transformed_generic<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+    {
+        let source = self;
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let nout = codomain_axes.len();
+        let nin = domain_axes.len();
+        let homspace = source
+            .homspace()
+            .permute(rule, codomain_axes, domain_axes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let src_axes = codomain_axes
+            .iter()
+            .chain(domain_axes.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        let src_legs = src_axes
+            .iter()
+            .map(|&src_axis| source.homspace().external_axis_leg(rule, src_axis))
+            .collect::<Vec<_>>();
+        let keys = homspace.fusion_tree_keys_generic(rule);
+        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
+        for key in keys.iter() {
+            let sectors = key.external_sectors(rule);
+            let mut shape = Vec::with_capacity(src_axes.len());
+            for (out_axis, leg) in src_legs.iter().enumerate() {
+                let dim =
+                    leg.degeneracy(sectors[out_axis])
+                        .ok_or(OperationError::StructureMismatch {
+                            tensor: "transformed scratch",
+                        })?;
+                shape.push(dim);
+            }
+            blocks.push((BlockKey::from(key.clone()), shape));
+        }
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+        })
     }
 
     /// Space of the contraction result in the default output order (`lhs`

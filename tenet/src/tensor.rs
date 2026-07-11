@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock};
 use num_complex::Complex64;
 use tenet_core::{
     BlockKey, BlockStructure, FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreeKey,
-    MultiplicityFreeRigidSymbols, Placement, SectorId,
+    MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -495,6 +495,56 @@ fn build_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, shapes).map_err(Into::into)
 }
 
+/// Generic-fusion (SU(3)) sibling of [`build_space`]: builds the
+/// multiplicity-aware coupled space. Same body, but enumerates via
+/// `fusion_tree_keys_generic` and the Generic `from_degeneracy_shapes`.
+fn build_space_generic<R: FusionRule>(
+    rule: &R,
+    hom: FusionTreeHomSpace,
+) -> Result<DynamicFusionMapSpace, Error> {
+    let leg_deg = |leg: &tenet_core::SectorLeg, sector: SectorId| -> Result<usize, Error> {
+        leg.degeneracy(sector).ok_or_else(|| {
+            Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
+        })
+    };
+    let keys = hom.fusion_tree_keys_generic(rule);
+    let mut shapes = Vec::with_capacity(keys.len());
+    for key in keys.iter() {
+        let mut shape = Vec::with_capacity(hom.rank());
+        for (leg, &sector) in hom.codomain().legs().iter().zip(key.codomain_uncoupled()) {
+            shape.push(leg_deg(leg, sector)?);
+        }
+        for (leg, &sector) in hom.domain().legs().iter().zip(key.domain_uncoupled()) {
+            shape.push(leg_deg(leg, sector)?);
+        }
+        shapes.push(shape);
+    }
+    DynamicFusionMapSpace::from_degeneracy_shapes_generic(rule, hom, shapes).map_err(Into::into)
+}
+
+/// Fills a freshly-built coupled space (rule-agnostic: only touches the block
+/// structure). Shared by the mult-free and SU(3) construction paths.
+fn apply_fill<S: UserScalar>(
+    space: &DynamicFusionMapSpace,
+    fill: Fill<'_, S>,
+) -> Result<Vec<S>, Error> {
+    let len = space.required_len()?;
+    let mut data = vec![S::from_real(0.0); len];
+    match fill {
+        Fill::Zeros => {}
+        Fill::Rand(seed) => {
+            let mut state = seed;
+            for value in &mut data {
+                *value = S::rand_unit(&mut state);
+            }
+        }
+        Fill::BlockFn(fill) => {
+            fill_block_elements(space.structure(), &mut data, fill)?;
+        }
+    }
+    Ok(data)
+}
+
 /// Fills every symmetry-allowed block element via `fill(key, indices)`,
 /// mirroring [`tenet_core::TensorMap::from_block_fn_with_fusion_space`]
 /// (degeneracy coordinates local to the block, codomain axes first, first
@@ -852,24 +902,19 @@ impl Tensor {
             FusionProductSpace::new(codomain.iter().map(|space| space.sector_leg())),
             FusionProductSpace::new(domain.iter().map(|space| space.sector_leg())),
         );
-        let (space, data) = with_rule!(rule_kind, rule, {
-            let space = build_space(rule, hom)?;
-            let len = space.required_len()?;
-            let mut data = vec![S::from_real(0.0); len];
-            match fill {
-                Fill::Zeros => {}
-                Fill::Rand(seed) => {
-                    let mut state = seed;
-                    for value in &mut data {
-                        *value = S::rand_unit(&mut state);
-                    }
-                }
-                Fill::BlockFn(fill) => {
-                    fill_block_elements(space.structure(), &mut data, fill)?;
-                }
-            }
-            Ok::<_, Error>((space, S::lift(data)))
-        })?;
+        let (space, data) = if rule_kind == RuleKind::Su3 {
+            // SU(3) is Generic: build the multiplicity-aware space directly (the
+            // mult-free `with_rule!` binding cannot host a Generic rule).
+            let space = build_space_generic(&Su3FusionRule::new(), hom)?;
+            let data = apply_fill(&space, fill)?;
+            (space, S::lift(data))
+        } else {
+            with_rule!(rule_kind, rule, {
+                let space = build_space(rule, hom)?;
+                let data = apply_fill(&space, fill)?;
+                Ok::<_, Error>((space, S::lift(data)))
+            })?
+        };
         Ok(Self {
             rt: rt.clone(),
             rule: rule_kind,
@@ -2249,6 +2294,30 @@ impl Tensor {
         operation: TreeTransformOperation,
     ) -> Result<Self, Error> {
         let mut state = self.rt.lock();
+        // SU(3) (Generic): dedicated non-macro path — build the generic result
+        // space and drive the non-memoized generic tree-transform. The recoupling
+        // coefficient scalar is f64 for either data dtype, so the generic braid
+        // math is identical to the tree-level layer this stage proved against TK.
+        if self.rule == RuleKind::Su3 {
+            let rule = Su3FusionRule::new();
+            let dst_space = self.space.transformed_generic(&rule, &operation)?;
+            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
+            D::ctx_of(&mut state.su3)
+                .tree_context_mut()
+                .tree_transform_dyn_into_generic(
+                    &rule,
+                    operation,
+                    &Arc::clone(dst_space.structure()),
+                    self.space.structure(),
+                    &mut data,
+                    src_data,
+                    D::from_real(1.0),
+                    D::from_real(0.0),
+                )?;
+            let out = (dst_space, D::lift(data));
+            drop(state);
+            return Ok(self.with(out.0, out.1));
+        }
         let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
             let dst_space = self.space.transformed(rule, &operation)?;
             let mut data = vec![D::from_real(0.0); dst_space.required_len()?];

@@ -103,6 +103,69 @@ where
     Ok(grouped)
 }
 
+/// Generic-fusion (outer-multiplicity) sibling of
+/// [`fusion_trees_by_coupled_for_space`]: emits multiplicity-aware fusion-tree
+/// keys (one per vertex-label combination) via
+/// [`collect_generic_fusion_trees_for_coupled`]. `R: FusionRule` (not
+/// `MultiplicityFreeFusionRule`) so SU(3)/SO(N≥7)/Sp(N) rules can drive the
+/// Space layer. `reachable` uses only `fusion_channels`/`vacuum`, which for a
+/// table provider (SU(3)) panics loudly on an escaping intermediate — the
+/// documented hard-error boundary.
+fn fusion_trees_by_coupled_for_space_generic<R>(
+    rule: &R,
+    space: &FusionProductSpace,
+) -> Vec<CoupledFusionTrees>
+where
+    R: FusionRule,
+{
+    let mut grouped = Vec::<CoupledFusionTrees>::new();
+    let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
+    for tuple in space.selected_leg_tuples() {
+        // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
+        // rule); inlined here to avoid its mult-free bound.
+        let uncoupled: Vec<SectorId> = tuple.iter().map(|leg| leg.sector()).collect();
+        let effective = uncoupled.clone();
+        let is_dual: Vec<bool> = tuple.iter().map(|leg| leg.is_dual()).collect();
+        for coupled in reachable_coupled_sectors_generic(rule, &effective) {
+            let trees = collect_generic_fusion_trees_for_coupled(
+                rule, &uncoupled, &is_dual, &effective, coupled,
+            );
+            match index.get(&coupled) {
+                Some(&i) => grouped[i].trees.extend(trees),
+                None => {
+                    index.insert(coupled, grouped.len());
+                    grouped.push(CoupledFusionTrees { coupled, trees });
+                }
+            }
+        }
+    }
+    grouped.sort_by_key(|group| group.coupled);
+    grouped
+}
+
+/// `R: FusionRule` sibling of [`reachable_coupled_sectors`] (identical body —
+/// only `fusion_channels`/`vacuum` are used, which every `FusionRule` provides).
+fn reachable_coupled_sectors_generic<R>(rule: &R, effective: &[SectorId]) -> Vec<SectorId>
+where
+    R: FusionRule,
+{
+    let mut acc: Vec<SectorId> = match effective.first() {
+        None => vec![rule.vacuum()],
+        Some(&first) => vec![first],
+    };
+    for &last in effective.iter().skip(1) {
+        acc = acc
+            .iter()
+            .flat_map(|&front| rule.fusion_channels(front, last))
+            .collect();
+        acc.sort_unstable();
+        acc.dedup();
+    }
+    acc.sort_unstable();
+    acc.dedup();
+    acc
+}
+
 /// Coupled sectors reachable by fusing all legs — TensorKit's `blocksectors`.
 /// Computed once per leg tuple (not per enumeration node): the forward fold
 /// `⊗` over the legs with dedup. Used only to drive the per-coupled grouping;
