@@ -2000,6 +2000,31 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
+        // SU(N) (Generic): a lazy-adjoint operand is materialized to plain
+        // coupled data BEFORE contracting, rather than folded into the GEMM seam.
+        // The mult-free seam folds a conjugate via its Structure route, whose
+        // non-self-dual coupled-sector mislabel was the historical bug; SU(3) is
+        // non-self-dual (3 <-> 3̄), so we route it through the mislabel-proof
+        // eager materialization (`materialize_adjoint`, generic block-relabel)
+        // instead. `scale(1.0)` reads `coupled_data` — the materialization point —
+        // and returns an ordinary (non-lazy) tensor, so both operands then take
+        // the direct core/compose GEMM with no conjugate flag. Gated on `Su3` to
+        // keep the mult-free seam byte-for-byte unchanged (the χ32 guarantee).
+        if self.rule == RuleKind::Su3
+            && (self.adjoint_source.is_some() || rhs.adjoint_source.is_some())
+        {
+            let lhs = if self.adjoint_source.is_some() {
+                self.scale(1.0)?
+            } else {
+                self.clone()
+            };
+            let rhs = if rhs.adjoint_source.is_some() {
+                rhs.scale(1.0)?
+            } else {
+                rhs.clone()
+            };
+            return lhs.contract(&rhs, lhs_axes, rhs_axes);
+        }
         // Order-parity fast path for a real diagonal operand (#75): instead of
         // densifying it to an O(d²) block-diagonal and running an O(d²·n) GEMM,
         // scale the OTHER operand's contracted leg by the spectrum (O(d·n)) and

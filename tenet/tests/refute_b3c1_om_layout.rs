@@ -122,6 +122,49 @@ fn refute_su3_om_layout_independent_eval() {
     }
 }
 
+/// Stage B3c-2 adjoint axiom `(A∘B)† == B†∘A†` on OM-vertex SU(3) tensors.
+/// A lazy-adjoint operand is materialized (not folded) inside the SU(N)
+/// contract path, so both sides ride the direct core/compose GEMM.
+#[test]
+fn su3_om_adjoint_reverses_composition() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = eight2();
+    let a = Tensor::from_block_fn(&rt, [&v], [&v, &v], |key, idx| match key {
+        BlockKey::FusionTree(k) => a_fill(vertex(k.domain_tree()), idx[0], idx[1], idx[2]),
+        _ => 0.0,
+    })
+    .unwrap();
+    let b = Tensor::from_block_fn(&rt, [&v, &v], [&v], |key, idx| match key {
+        BlockKey::FusionTree(k) => b_fill(vertex(k.codomain_tree()), idx[0], idx[1], idx[2]),
+        _ => 0.0,
+    })
+    .unwrap();
+
+    // LHS: (A∘B)† — compose over the two 8-legs, then dagger. [8] <- [8].
+    let lhs = a
+        .contract(&b, &[1, 2], &[0, 1])
+        .unwrap()
+        .adjoint()
+        .unwrap()
+        .scale(1.0)
+        .unwrap();
+    // RHS: B†∘A† — dagger each, then compose. B†:[8]<-[8,8], A†:[8,8]<-[8].
+    let rhs = b
+        .adjoint()
+        .unwrap()
+        .contract(&a.adjoint().unwrap(), &[1, 2], &[0, 1])
+        .unwrap()
+        .scale(1.0)
+        .unwrap();
+
+    assert_eq!(lhs.codomain_rank(), 1);
+    assert_eq!(lhs.data().len(), rhs.data().len());
+    assert!(lhs.data().iter().any(|&x| x.abs() > 1e-9), "non-trivial");
+    for (x, y) in lhs.data().iter().zip(rhs.data().iter()) {
+        assert!((x - y).abs() < 1e-10, "(A∘B)† vs B†∘A†: {x} vs {y}");
+    }
+}
+
 /// FLIPPED (Stage B3c-2): the B3c-1 boundary pinned `.adjoint()` on an SU(3)
 /// tensor as a loud panic. B3c-2 implements it via the generic block-relabel
 /// materialization, so the adjoint now SUCCEEDS on an OM-vertex tensor — it
