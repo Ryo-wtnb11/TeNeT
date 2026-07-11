@@ -3,8 +3,9 @@ use std::hash::Hash;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockView, BlockViewMut, CoreError, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
+    BlockView, BlockViewMut, CoreError, GenericBraidScalar, GenericRigidSymbols,
+    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
+    TensorStorage,
 };
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
@@ -14,7 +15,8 @@ use crate::tensortrace::{
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{
-    build_tree_pair_transform_group_plan, TreeTransformOperation, TreeTransformRuleCacheKey,
+    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
+    TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformStructure;
@@ -1314,6 +1316,273 @@ where
 {
     tree_transform_into_with_context(
         context,
+        rule,
+        TreeTransformOperation::transpose(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+// ======================================================================
+// Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
+//
+// These lift the Stage B2c plan builder
+// (`build_generic_tree_pair_transform_group_plan`) to the TensorMap facade so
+// SU(3)/SO(N≥7)/Sp(N) rules can drive `permute`/`braid`/`transpose` at the same
+// level as the multiplicity-free API. They are *siblings*, not runtime
+// branches: `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never
+// both implemented by a real rule, so a mult-free rule can never name these
+// bounds and the mult-free facade functions above stay byte-for-byte untouched
+// (the structural zero-cost guarantee). `TreeTransformGroupPlan::compile` is
+// coefficient-generic (`T: Copy`) and execution
+// (`tree_transform_execute_with`) is generic over the coefficient type, so no
+// recoupling math is added here — the wiring only swaps the plan builder.
+//
+// Deferred to Stage B3b (recorded rather than built, since nothing can exercise
+// them yet — no keyed Generic rule provider exists):
+//   * The `_with_context` / cache path (`TreeTransformCache::get_or_compile_*`)
+//     requires `TreeTransformRuleCacheKey`, which no Generic rule implements
+//     until the B3b SU(3) table provider lands. A Generic cache sibling now
+//     would be untestable dead code. When B3b adds a keyed Generic rule its
+//     `Key` is a fresh associated type, so the cache — monomorphized per
+//     `RuleKey` — shares no map with the mult-free
+//     `TreeTransformBuiltinRuleCacheKey` instance and cannot collide.
+//   * The top-level `tenet::Tensor` erases its rule behind the closed
+//     `RuleKind` enum (mult-free variants only); reaching Generic from there
+//     needs a new `RuleKind` variant + provider, which is B3b.
+//   * The all-codomain Generic lowering (plan.rs guards #4/#5) is only reached
+//     via the cache (`get_or_compile_all_codomain`); the non-cached facade
+//     path here only does tree-pair, so it stays deferred as in B2c.
+// ======================================================================
+
+/// Generic-fusion sibling of [`tree_transform_structure`]: builds the Stage B2c
+/// [`build_generic_tree_pair_transform_group_plan`] and compiles it against the
+/// live `dst`/`src` block structures.
+pub fn tree_transform_structure_generic<
+    R,
+    TDst,
+    TSrc,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Copy + Zero,
+    DDst: TensorStorage<TDst>,
+    DSrc: TensorStorage<TSrc>,
+{
+    let plan = build_generic_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+    plan.compile(dst, src)
+}
+
+/// Generic-fusion sibling of [`tree_transform_into_with`] with caller-owned
+/// backend/workspace.
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_into_with_generic<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Copy + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let structure = tree_transform_structure_generic(rule, operation, dst, src)?;
+    tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
+}
+
+/// Generic-fusion sibling of [`tree_transform_into`]: compile-and-execute a
+/// tree-pair transform with a default dense backend.
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_into_generic<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Copy + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_into_with_generic(
+        &mut backend,
+        &mut workspace,
+        rule,
+        operation,
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// Generic-fusion sibling of [`permute_into`].
+#[allow(clippy::too_many_arguments)]
+pub fn permute_into_generic<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Copy + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_generic(
+        rule,
+        TreeTransformOperation::permute(codomain_permutation, domain_permutation),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// Generic-fusion sibling of [`braid_into`].
+#[allow(clippy::too_many_arguments)]
+pub fn braid_into_generic<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    codomain_levels: impl IntoIterator<Item = usize>,
+    domain_levels: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Copy + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_generic(
+        rule,
+        TreeTransformOperation::braid(
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        dst,
+        src,
+        alpha,
+        beta,
+    )
+}
+
+/// Generic-fusion sibling of [`transpose_into`].
+#[allow(clippy::too_many_arguments)]
+pub fn transpose_into_generic<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    codomain_permutation: impl IntoIterator<Item = usize>,
+    domain_permutation: impl IntoIterator<Item = usize>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Copy + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    tree_transform_into_generic(
         rule,
         TreeTransformOperation::transpose(codomain_permutation, domain_permutation),
         dst,
