@@ -3264,6 +3264,197 @@ where
     }
 }
 
+/// Generic-fusion sibling of [`multiplicity_free_repartition_terms`]: repartition
+/// a whole term list to `target_codomain_rank` legs, composing the bend
+/// coefficient matrices. Same accumulate-and-compose loop, different rule bound.
+fn generic_repartition_terms<R>(
+    rule: &R,
+    terms: Vec<(FusionTreeBlockKey, R::Scalar)>,
+    target_codomain_rank: usize,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let mut current = terms;
+    let Some((first_key, _)) = current.first() else {
+        return Ok(current);
+    };
+    let total_rank =
+        first_key.codomain_tree().uncoupled().len() + first_key.domain_tree().uncoupled().len();
+    if target_codomain_rank > total_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: total_rank,
+            actual: target_codomain_rank,
+        });
+    }
+    let mut current_codomain_rank = first_key.codomain_tree().uncoupled().len();
+    while current_codomain_rank < target_codomain_rank {
+        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+            generic_bendleft_tree_pair(rule, key)
+        })?;
+        current_codomain_rank += 1;
+    }
+    while current_codomain_rank > target_codomain_rank {
+        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+            generic_bendright_tree_pair(rule, key)
+        })?;
+        current_codomain_rank -= 1;
+    }
+    Ok(current)
+}
+
+/// Generic-fusion `braid` on a full tree pair: bend everything into the codomain,
+/// braid there, bend back — the TensorKit `braid`/`fsbraid` decomposition.
+/// Structural twin of [`multiplicity_free_braid_tree_pair`] (:829): the only
+/// difference is the primitive family (`generic_repartition_tree_pair` /
+/// `generic_braid_tree` / `generic_repartition_terms`) and the `braid_one` seed;
+/// no new recoupling formula is introduced.
+pub fn generic_braid_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        });
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        });
+    }
+
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+
+    let all_rank = codomain_rank + domain_rank;
+    let mut current = generic_repartition_tree_pair(rule, tree_pair, all_rank)?;
+    current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+        generic_braid_tree(rule, key.codomain_tree(), &permutation, &levels).map(|terms| {
+            terms
+                .into_iter()
+                .map(|(codomain_tree, coefficient)| {
+                    (
+                        FusionTreeBlockKey::pair(codomain_tree, key.domain_tree().clone()),
+                        coefficient,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    })?;
+    generic_repartition_terms(rule, current, codomain_permutation.len())
+}
+
+/// Generic-fusion `permute` = [`generic_braid_tree_pair`] with the identity
+/// level order (symmetric braiding only). Structural twin of
+/// [`multiplicity_free_permute_tree_pair`] (:886).
+pub fn generic_permute_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    generic_braid_tree_pair(
+        rule,
+        tree_pair,
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )
+}
+
+/// Generic-fusion `transpose` (planar cyclic permutation): bend into the target
+/// partition, then cycle the coupled tree into place via fold/bend. Structural
+/// twin of [`multiplicity_free_transpose_tree_pair`] (:916); braid-free, so it
+/// runs on planar (non-symmetric) Generic rules too.
+pub fn generic_transpose_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    if !is_cyclic_permutation(&permutation) {
+        return Err(CoreError::InvalidPermutation {
+            permutation,
+            rank: codomain_rank + domain_rank,
+        });
+    }
+
+    let mut position = match permutation.iter().position(|&axis| axis == 0) {
+        Some(position) => position,
+        None => return Ok(vec![(tree_pair.clone(), R::Scalar::braid_one())]),
+    };
+    let mut current =
+        generic_repartition_tree_pair(rule, tree_pair, codomain_permutation.len())?;
+    let total_rank = codomain_rank + domain_rank;
+    if total_rank == 0 || position == 0 {
+        return Ok(current);
+    }
+
+    let half_rank = total_rank >> 1;
+    while position > 0 && position < half_rank {
+        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+            generic_cycle_anticlockwise_tree_pair(rule, key)
+        })?;
+        position -= 1;
+    }
+    while position >= half_rank && position > 0 {
+        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
+            generic_cycle_clockwise_tree_pair(rule, key)
+        })?;
+        position = (position + 1) % total_rank;
+    }
+
+    Ok(current)
+}
+
 fn multiplicity_free_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,

@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
+    generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair,
     multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_braid_tree_pair_block, multiplicity_free_permute_tree,
     multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
     multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block, BlockKey,
     BlockStructure, FusionRule, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols,
 };
 #[cfg(test)]
 use tenet_core::{
@@ -667,6 +669,97 @@ where
         src_structure,
         |operation, src_key| transformed_tree_pair_rows(rule, operation, src_key).map(Arc::new),
     )
+}
+
+/// Recoupling rows for one source tree pair under one operation, Generic-fusion
+/// (outer-multiplicity) path. Generic sibling of [`transformed_tree_pair_rows`]:
+/// identical operation → primitive dispatch, over the adversarially-verified
+/// `generic_*_tree_pair` family (Stage B1/B2a/B2b). Adds no recoupling math.
+pub(crate) fn transformed_generic_tree_pair_rows<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    src_key: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let rows = match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            domain_permutation,
+        } => generic_permute_tree_pair(rule, src_key, codomain_permutation, domain_permutation),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        } => generic_braid_tree_pair(
+            rule,
+            src_key,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        TreeTransformOperation::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => generic_transpose_tree_pair(rule, src_key, codomain_permutation, domain_permutation),
+    };
+    rows.map_err(OperationError::from_core_preserving_context)
+}
+
+/// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
+/// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
+/// [`build_multiplicity_free_tree_pair_transform_group_plan`]: it reuses the
+/// exact same group-spec assembly ([`assemble_tree_pair_group_spec`], generic
+/// over the coefficient type) and differs only in the recoupling-row source
+/// (`transformed_generic_tree_pair_rows`).
+///
+/// This is a SEPARATE entry rather than a runtime branch inside the mult-free
+/// builder because the two are disjoint at the type level:
+/// `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never both
+/// implemented by a real rule, so a mult-free rule can never name this
+/// function's bound, let alone reach its body. The mult-free builders and their
+/// eight `UnsupportedFusionStyle` guards are therefore left byte-for-byte
+/// untouched (the structural zero-cost guarantee). The runtime
+/// `has_multiplicity` gate below is the symmetric sibling of those guards,
+/// defending against a `GenericRigidSymbols` rule that reports a
+/// multiplicity-free style at runtime. A `has_multiplicity()` dispatch over a
+/// dyn-style entry is a Stage B3 concern (the SU(3) provider / generic-capable
+/// facade), where a caller can hold a rule of unknown style.
+pub fn build_generic_tree_pair_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Zero,
+{
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation,
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    let source_axes = operation_source_axes(&operation);
+
+    let mut specs = Vec::new();
+    for group in src_structure.fusion_tree_groups() {
+        specs.push(assemble_tree_pair_group_spec(
+            src_structure,
+            &group,
+            &source_axes,
+            &mut |src_key| {
+                transformed_generic_tree_pair_rows(rule, &operation, src_key).map(Arc::new)
+            },
+        )?);
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
 }
 
 /// Memoized plan build: recoupling rows come from a shape-independent
