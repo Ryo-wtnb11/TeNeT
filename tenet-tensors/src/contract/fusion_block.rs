@@ -4,8 +4,8 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, SectorId,
+    BlockKey, FusionRule, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, SectorId,
 };
 
 use crate::strided::{
@@ -185,6 +185,48 @@ where
             message: "core fusion-block contraction requires core source and output axes",
         })
     }
+}
+
+/// Generic-fusion (Stage B3c-1) sibling of [`is_core_form_fusion_block_contract`]:
+/// identical predicate, relaxed to any [`FusionRule`]. The homspace-shape check
+/// (`tensorcontract_homspace`) and the axis-form checks are already fully
+/// symmetry-agnostic — only the mult-free trait bound differed.
+fn is_core_form_fusion_block_contract_generic<R>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_space: &DynamicFusionMapSpace,
+    rhs_space: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<bool, OperationError>
+where
+    R: FusionRule,
+{
+    reject_fusion_contract_conjugation(axes)?;
+    let axis_plan = TensorContractAxisPlan::compile(
+        lhs_space.rank(),
+        rhs_space.rank(),
+        dst_space.rank(),
+        axes,
+    )?;
+    if !is_core_form_source(lhs_space, rhs_space, &axis_plan)
+        || !is_core_form_output(dst_space, lhs_space, rhs_space, &axis_plan)
+    {
+        return Ok(false);
+    }
+    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs_space.homspace(),
+        rhs_space.homspace(),
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axis_plan.output_axes.as_slice(),
+        dst_space.nout(),
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    if expected_homspace != *dst_space.homspace() {
+        return Err(OperationError::StructureMismatch { tensor: "dst" });
+    }
+    Ok(true)
 }
 
 fn is_core_form_source(
@@ -676,6 +718,71 @@ where
     )
 }
 
+/// Generic-fusion (Stage B3c-1) sibling of [`compile_fusion_block_contract_plan`]:
+/// the SU(N) core/compose (fully-direct GEMM) route. Byte-identical plan
+/// structure to the mult-free path — the coupled-block GEMM is symmetry-
+/// agnostic, so the ONLY difference is that outer-multiplicity fusion trees
+/// (vertex-labelled blocks, e.g. SU(3) `N(8,8,8)=2`) are grouped/paired
+/// correctly by the group-agnostic block structure. The per-subblock
+/// coefficient is `1.0` (SU(N) is bosonic → no supertrace twist, exactly what
+/// the mult-free `rule.scalar_one()` returns for a bosonic rule).
+///
+/// A contraction whose source or output is NOT in core form (open contracted
+/// legs needing a source tree-pair transform) is an explicit B3c-2 error: the
+/// generic source-transform contract path is Stage B3c-2, not this stage.
+pub(crate) fn compile_fusion_block_contract_plan_generic<R>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_space: &DynamicFusionMapSpace,
+    rhs_space: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionBlockContractPlan, OperationError>
+where
+    R: FusionRule,
+{
+    reject_fusion_contract_conjugation(axes)?;
+    if !is_core_form_fusion_block_contract_generic(rule, dst_space, lhs_space, rhs_space, axes)? {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "generic (SU(N)) fusion contraction supports only the core/compose \
+                      (fully-direct GEMM) route; source tree-pair transforms are Stage B3c-2",
+        });
+    }
+
+    let lhs_layout = FusionBlockMatrixLayout::compile_generic(rule, lhs_space)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile_generic(rule, rhs_space)?;
+    let dst_layout = FusionBlockMatrixLayout::compile_generic(rule, dst_space)?;
+
+    let mut groups = Vec::new();
+    let mut active_dst_blocks = HashSet::<usize>::new();
+    for lhs_group in lhs_layout.groups {
+        let Some(rhs_group) = rhs_layout.group(lhs_group.coupled) else {
+            continue;
+        };
+        let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
+            continue;
+        };
+        for block_index in &dst_group.block_indices {
+            debug_assert!(
+                !active_dst_blocks.contains(block_index),
+                "core fusion-block dst subblock must be scattered exactly once"
+            );
+        }
+        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
+        groups.push(FusionBlockContractGroupPlan::new(
+            lhs_group,
+            rhs_group.clone(),
+            dst_group.clone(),
+        )?);
+    }
+    FusionBlockContractPlan::from_parts(
+        Arc::clone(dst_space.structure()),
+        Arc::clone(lhs_space.structure()),
+        Arc::clone(rhs_space.structure()),
+        fusion_scale_block_layouts_excluding(dst_space.structure(), &active_dst_blocks)?,
+        groups,
+    )
+}
+
 /// Host implementation of [`StorageGemm`] over host-readable storages.
 #[allow(dead_code)]
 pub(crate) struct HostStorageGemm<'a, B, W> {
@@ -774,6 +881,57 @@ impl FusionBlockMatrixLayout {
         let mut groups = Vec::with_capacity(builders.len());
         for builder in builders {
             groups.push(builder.finish(rule, space)?);
+        }
+        Ok(Self { groups })
+    }
+
+    /// Generic-fusion (Stage B3c-1) sibling of [`Self::compile`]: relaxed to any
+    /// [`FusionRule`] (the layout only needs `coupled()`/`vacuum()` to group
+    /// blocks by coupled sector — no F/R symbols). Outer-multiplicity vertex
+    /// labels ride in the fusion-tree keys, so multiplicity blocks land in the
+    /// right coupled group automatically.
+    fn compile_generic<R>(rule: &R, space: &DynamicFusionMapSpace) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+    {
+        let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
+        let mut group_indices = FxHashMap::<SectorId, usize>::default();
+        for block_index in 0..space.structure().block_count() {
+            let block = space.structure().block(block_index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "fusion",
+                    index: block_index,
+                });
+            };
+            let coupled = coupled_sector_generic(rule, key.codomain_tree());
+            if coupled != coupled_sector_generic(rule, key.domain_tree()) {
+                return Err(OperationError::FusionTreeGroupMismatch {
+                    tensor: "fusion",
+                    index: block_index,
+                });
+            }
+            let group_index = if let Some(&group_index) = group_indices.get(&coupled) {
+                group_index
+            } else {
+                let group_index = builders.len();
+                group_indices.insert(coupled, group_index);
+                builders.push(FusionBlockMatrixGroupBuilder::new(coupled));
+                group_index
+            };
+            let row_dim = element_count(&block.shape()[..space.nout()])?;
+            let col_dim = element_count(&block.shape()[space.nout()..])?;
+            builders[group_index].add_tree_pair(
+                key.codomain_tree().clone(),
+                row_dim,
+                key.domain_tree().clone(),
+                col_dim,
+                block_index,
+            )?;
+        }
+        let mut groups = Vec::with_capacity(builders.len());
+        for builder in builders {
+            groups.push(builder.finish_generic(space)?);
         }
         Ok(Self { groups })
     }
@@ -953,6 +1111,84 @@ impl FusionBlockMatrixGroupBuilder {
             subblocks,
         })
     }
+
+    /// Generic-fusion (Stage B3c-1) sibling of [`Self::finish`]: byte-for-byte
+    /// the same block/matrix layout, with the coefficient fixed to `1.0`.
+    /// SU(N) is bosonic, so there is no supertrace twist — exactly the value
+    /// `rule.scalar_one()` returns on the mult-free path. Takes no rule (the
+    /// layout math is symmetry-agnostic once blocks are grouped by coupled
+    /// sector).
+    fn finish_generic(
+        self,
+        space: &DynamicFusionMapSpace,
+    ) -> Result<FusionBlockMatrixGroup, OperationError> {
+        let mut subblocks = Vec::with_capacity(self.blocks.len());
+        let block_indices = self.blocks;
+        for &block_index in &block_indices {
+            let block = space.structure().block(block_index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "fusion",
+                    index: block_index,
+                });
+            };
+            let row = self
+                .row_offsets
+                .get(key.codomain_tree())
+                .expect("row tree offset collected before finish");
+            let col = self
+                .col_offsets
+                .get(key.domain_tree())
+                .expect("column tree offset collected before finish");
+            let mut matrix_strides = Vec::<isize>::with_capacity(block.shape().len());
+            matrix_strides.extend(column_major_strides_isize(&block.shape()[..space.nout()])?);
+            let domain_strides = column_major_strides_usize(&block.shape()[space.nout()..])?;
+            for stride in domain_strides {
+                let matrix_stride = stride
+                    .checked_mul(self.rows)
+                    .ok_or(OperationError::ElementCountOverflow)?;
+                matrix_strides.push(isize::try_from(matrix_stride).map_err(|_| {
+                    OperationError::StrideOverflow {
+                        value: matrix_stride,
+                    }
+                })?);
+            }
+            let matrix_offset = col
+                .offset
+                .checked_mul(self.rows)
+                .and_then(|offset| offset.checked_add(row.offset))
+                .ok_or(OperationError::ElementCountOverflow)?;
+            let matrix_offset = offset_to_isize(matrix_offset)?;
+            // SU(N) bosonic: no supertrace twist → coefficient 1.0 (TensorKit
+            // mul! parity, matching the mult-free `rule.scalar_one()`).
+            let coefficient = 1.0_f64;
+            subblocks.push(FusionSubblockMatrixLayout {
+                block: FusionStridedBlockLayout {
+                    shape: block.shape().to_vec(),
+                    strides: strides_to_isize(block.strides())?,
+                    offset: offset_to_isize(block.offset())?,
+                },
+                matrix_offset,
+                matrix_strides,
+                coefficient,
+            });
+        }
+        let matrix_elements = self
+            .rows
+            .checked_mul(self.cols)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let covers_matrix = self.occupied_elements == matrix_elements;
+        let direct_offset = direct_group_matrix_offset(&subblocks, covers_matrix);
+        Ok(FusionBlockMatrixGroup {
+            coupled: self.coupled,
+            rows: self.rows,
+            cols: self.cols,
+            needs_clear: !covers_matrix,
+            direct_offset,
+            block_indices,
+            subblocks,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -964,6 +1200,14 @@ struct TreeMatrixOffset {
 fn coupled_sector<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    tree.coupled().unwrap_or_else(|| rule.vacuum())
+}
+
+/// Generic-fusion sibling of [`coupled_sector`], relaxed to any [`FusionRule`].
+fn coupled_sector_generic<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
+where
+    R: FusionRule,
 {
     tree.coupled().unwrap_or_else(|| rule.vacuum())
 }

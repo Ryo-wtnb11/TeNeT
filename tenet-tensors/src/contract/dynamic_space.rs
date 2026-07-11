@@ -489,6 +489,97 @@ impl DynamicFusionMapSpace {
         })
     }
 
+    /// Generic-fusion (Stage B3c-1) sibling of [`Self::contracted`]: the
+    /// contraction result space for an outer-multiplicity rule, enumerated with
+    /// multiplicity-aware fusion-tree keys (`fusion_tree_keys_generic`). Not
+    /// cached (the Generic path is not on a hot loop yet — same non-memoized
+    /// rationale as the B3b transform siblings). Every other step
+    /// (`tensorcontract_homspace`, leg degeneracies, `scratch_subblock_structure`)
+    /// is already rule-agnostic or `FusionRule`-bound.
+    pub fn contracted_generic<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, OperationError>
+    where
+        R: FusionRule,
+    {
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(OperationError::ContractAxisCountMismatch {
+                lhs: lhs_axes.len(),
+                rhs: rhs_axes.len(),
+            });
+        }
+        let nout = lhs
+            .rank()
+            .checked_sub(lhs_axes.len())
+            .ok_or(OperationError::RankMismatch {
+                expected: lhs_axes.len(),
+                actual: lhs.rank(),
+            })?;
+        let nin = rhs
+            .rank()
+            .checked_sub(rhs_axes.len())
+            .ok_or(OperationError::RankMismatch {
+                expected: rhs_axes.len(),
+                actual: rhs.rank(),
+            })?;
+        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
+        let output_axes = (0..nout + nin).collect::<Vec<_>>();
+        let homspace = FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs.homspace(),
+            rhs.homspace(),
+            axes.lhs_contracting_axes(),
+            axes.rhs_contracting_axes(),
+            &output_axes,
+            nout,
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+
+        let open_legs = axis_plan
+            .lhs_open_axes
+            .iter()
+            .map(|&axis| lhs.homspace().external_axis_leg(rule, axis))
+            .chain(
+                axis_plan
+                    .rhs_open_axes
+                    .iter()
+                    .map(|&axis| rhs.homspace().external_axis_leg(rule, axis)),
+            )
+            .collect::<Vec<_>>();
+        let keys = homspace
+            .fusion_tree_keys_generic(rule)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let mut blocks = Vec::<(BlockKey, Vec<usize>)>::with_capacity(keys.len());
+        for key in keys.iter() {
+            let sectors = key.external_sectors(rule);
+            let shape = sectors
+                .iter()
+                .zip(&open_legs)
+                .map(|(&sector, leg)| {
+                    leg.degeneracy(sector)
+                        .ok_or(OperationError::StructureMismatch {
+                            tensor: "contracted result",
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            blocks.push((BlockKey::from(key.clone()), shape));
+        }
+        let subblock_structure =
+            Arc::new(scratch_subblock_structure(rule, nout, nout + nin, blocks)?);
+
+        Ok(Self {
+            nout,
+            nin,
+            homspace: Arc::new(homspace),
+            subblock_structure,
+        })
+    }
+
     /// Adjoint view: codomain and domain swap (spaces and per-block shapes),
     /// no data movement implied. The block layout is a strided view into the
     /// source layout, so this space is for replay bookkeeping, not for
