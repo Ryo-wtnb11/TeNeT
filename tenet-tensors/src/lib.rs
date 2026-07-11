@@ -109,7 +109,7 @@ pub use tree_transform::{
     TreeTransformCacheStats, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
     TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformPlanScope,
     TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSectorPlanKey,
-    TreeTransformSourceGroupKey,
+    TreeTransformSourceGroupKey, TreeTransformSu3RuleCacheKey,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{

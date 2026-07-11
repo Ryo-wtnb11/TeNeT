@@ -3,7 +3,7 @@ use std::hash::Hash;
 
 use tenet_core::{
     FermionParityFusionRule, FusionRule, ProductFusionRule, ProductSectorCodec, SU2FusionRule,
-    U1FusionRule, Z2FusionRule,
+    Su3FusionRule, U1FusionRule, Z2FusionRule,
 };
 
 use crate::OperationError;
@@ -83,6 +83,27 @@ impl TreeTransformRuleCacheKey for SU2FusionRule {
 
     fn tree_transform_rule_cache_key(&self) -> Self::Key {
         TreeTransformBuiltinRuleCacheKey::SU2
+    }
+}
+
+/// Cache identity for the Stage B3b SU(3) table provider. Keyed by the table's
+/// provenance hash (payload FNV-1a-64), NOT a unit marker: a regenerated /
+/// swapped table produces different recoupling coefficients, so its compiled
+/// plans must never be reused. A distinct `Key` type also means the SU(3)
+/// cache — monomorphized per `RuleKey` — shares no map with the mult-free
+/// `TreeTransformBuiltinRuleCacheKey` instance and cannot collide with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct TreeTransformSu3RuleCacheKey {
+    provenance: u64,
+}
+
+impl TreeTransformRuleCacheKey for Su3FusionRule {
+    type Key = TreeTransformSu3RuleCacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        TreeTransformSu3RuleCacheKey {
+            provenance: self.provenance(),
+        }
     }
 }
 

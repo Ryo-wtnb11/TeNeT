@@ -3602,3 +3602,64 @@ fn generic_facade_structure_rejects_multiplicity_free_style() {
     .unwrap_err();
     assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
 }
+
+// Stage B3b: the non-memoized generic cache sibling
+// (`get_or_compile_tree_pair_generic`) drives the REAL SU(3) table provider and
+// must reproduce the (proven) non-cached facade path byte-for-byte, keyed by the
+// table's provenance hash.
+#[test]
+fn b3b_su3_cache_generic_sibling_matches_facade() {
+    use tenet_core::Su3FusionRule;
+
+    let rule = Su3FusionRule::new();
+    let eight = rule.sector_of(1, 1).unwrap();
+    let vac = tenet_core::SectorId::new(0);
+    // codomain [8,8]->vac (single vertex), domain []->vac: one 1-element block.
+    let make = |value: f64| {
+        let cod = FusionTreeKey::new(
+            [eight, eight],
+            Some(vac),
+            [false, false],
+            [],
+            [tenet_core::SectorId::new(1)],
+        )
+        .with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([], Some(vac), [], [], []).with_has_multiplicity(true);
+        let key = BlockKey::from(FusionTreeBlockKey::pair(cod, dom));
+        let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
+        let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure).unwrap()
+    };
+
+    let src = make(7.0);
+    // Facade (non-cached) reference.
+    let mut dst_facade = make(0.0);
+    permute_into_generic(&rule, [1, 0], [], &mut dst_facade, &src, 1.0, 0.0).unwrap();
+
+    // Cache sibling: compile via get_or_compile_tree_pair_generic, then execute.
+    let mut cache =
+        TreeTransformCache::<f64, crate::tree_transform::TreeTransformSu3RuleCacheKey>::new();
+    let mut dst_cache = make(0.0);
+    let structure = cache
+        .get_or_compile_tree_pair_generic(
+            &rule,
+            TreeTransformOperation::permute([1, 0], []),
+            &dst_cache,
+            &src,
+        )
+        .unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &structure,
+        &mut dst_cache,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst_cache.data(), dst_facade.data());
+}

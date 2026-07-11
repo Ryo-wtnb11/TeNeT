@@ -10,8 +10,8 @@ use std::sync::{Arc, RwLock};
 use num_traits::Zero;
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
-    FusionTreeKey, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, SectorId,
-    TensorMap, TensorStorage,
+    FusionTreeKey, GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -25,7 +25,8 @@ use super::operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use super::plan::{
-    build_tree_pair_transform_group_plan, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
+    TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -1490,6 +1491,79 @@ where
             src_structure,
             storage_conjugate,
         )
+    }
+
+    /// Generic-fusion (outer-multiplicity, e.g. SU(3)) sibling of
+    /// [`Self::get_or_compile_tree_pair`].
+    ///
+    /// ponytail: NON-MEMOIZED to start — it rebuilds and compiles the generic
+    /// plan on every call. Generic (SU(3)) recoupling is not yet on any hot
+    /// path, and correctness-before-perf is the Stage B rule; the memoized
+    /// builder (the generic analogue of `TreePairRowMemo` / the plan/row cache
+    /// the mult-free sibling above uses) is deferred until a real Generic
+    /// workload measures the recompile cost (the B3c / perf handoff). The
+    /// `TreeTransformRuleCacheKey` bound is still required: the Su3 `Key` embeds
+    /// the table's provenance hash, so once memoization lands a swapped table
+    /// can never reuse another table's plans.
+    pub fn get_or_compile_tree_pair_generic<
+        R,
+        TDst,
+        TSrc,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+        DDst,
+        DSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
+    where
+        R: GenericRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R::Scalar: GenericBraidScalar,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        RuleKey: 'static + Send + Sync,
+        DDst: TensorStorage<TDst>,
+        DSrc: TensorStorage<TSrc>,
+    {
+        self.stats.plan_misses += 1;
+        self.stats.structure_misses += 1;
+        let plan = build_generic_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+        Ok(Arc::new(plan.compile(dst, src)?))
+    }
+
+    /// Structure-only generic sibling for the dynamic-rank (raw-slice) path —
+    /// the top-level `tenet::Tensor` SU(3) `permute`/`braid`/`transpose` route.
+    /// Same non-memoized rationale as [`Self::get_or_compile_tree_pair_generic`].
+    pub fn get_or_compile_tree_pair_structures_generic<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
+    where
+        R: GenericRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R::Scalar: GenericBraidScalar,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        RuleKey: 'static + Send + Sync,
+    {
+        self.stats.plan_misses += 1;
+        self.stats.structure_misses += 1;
+        let plan = build_generic_tree_pair_transform_group_plan(rule, operation, src_structure)?;
+        Ok(Arc::new(
+            plan.compile_shared_structures_with_storage_conjugation(
+                Arc::clone(dst_structure),
+                Arc::clone(src_structure),
+                false,
+            )?,
+        ))
     }
 
     pub fn get_or_compile_all_codomain<
