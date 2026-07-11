@@ -1572,19 +1572,33 @@ impl Tensor {
     /// takes (`convert(TensorMap, ::AdjointTensorMap)`) when an adjoint is
     /// consumed by something other than a contraction.
     fn materialize_adjoint(&self, parent_space: &DynamicFusionMapSpace) -> Data {
+        // SU(N) (Generic): materialize through the generic block-relabel sibling.
+        // The result is a genuine (non-lazy) SU(N) tensor's coupled data, so a
+        // downstream consumer (norm/svd/contract) never has to fold a conjugate
+        // through the mult-free-only Structure route — the route whose
+        // non-self-dual coupled-sector mislabel bug the mult-free lazy-adjoint
+        // fold was fixed for. SU(3) is non-self-dual (3 <-> 3̄), so materializing
+        // here (rather than folding) is the deliberate, mislabel-proof choice.
+        macro_rules! adjoint_dyn_dispatch {
+            ($rule:ident, $parent:expr) => {
+                if self.rule == RuleKind::Su3 {
+                    tenet_tensors::adjoint_dyn_generic(&Su3FusionRule::new(), parent_space, $parent)
+                } else {
+                    with_rule!(self.rule, $rule, {
+                        tenet_tensors::adjoint_dyn($rule, parent_space, $parent)
+                    })
+                }
+            };
+        }
         match self.data.as_ref() {
             Data::F64(parent) => {
-                let (_space, out) = with_rule!(self.rule, rule, {
-                    tenet_tensors::adjoint_dyn(rule, parent_space, parent)
-                })
-                .expect("adjoint_dyn is total on a tensor's own space");
+                let (_space, out) = adjoint_dyn_dispatch!(rule, parent)
+                    .expect("adjoint_dyn is total on a tensor's own space");
                 Data::F64(out)
             }
             Data::C64(parent) => {
-                let (_space, out) = with_rule!(self.rule, rule, {
-                    tenet_tensors::adjoint_dyn(rule, parent_space, parent)
-                })
-                .expect("adjoint_dyn is total on a tensor's own space");
+                let (_space, out) = adjoint_dyn_dispatch!(rule, parent)
+                    .expect("adjoint_dyn is total on a tensor's own space");
                 Data::C64(out)
             }
             Data::Diagonal(_) => unreachable!("adjoint() densifies diagonal storage first"),
@@ -2577,9 +2591,18 @@ impl Tensor {
                 materialized: OnceLock::new(),
             });
         }
-        let adjoint_space = with_rule!(self.rule, rule, {
-            tenet_tensors::adjoint_space_dyn(rule, &self.space)
-        })?;
+        // SU(N) (Generic): the adjoint space is a pure codomain/domain swap +
+        // per-block transpose (no leg bending, no recoupling), so it takes the
+        // generic key-enumeration sibling. The lazy `adjoint_source` machinery
+        // is symmetry-agnostic (metadata only) and shared with the mult-free
+        // path below.
+        let adjoint_space = if self.rule == RuleKind::Su3 {
+            tenet_tensors::adjoint_space_dyn_generic(&Su3FusionRule::new(), &self.space)?
+        } else {
+            with_rule!(self.rule, rule, {
+                tenet_tensors::adjoint_space_dyn(rule, &self.space)
+            })?
+        };
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,

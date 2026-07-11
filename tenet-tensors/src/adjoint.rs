@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, CoreError, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace,
+    BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
@@ -80,6 +80,141 @@ where
     let nin = space.nin();
     let structure = Arc::clone(space.structure());
     let adjoint_space = adjoint_space_dyn(rule, space)?;
+    let len = adjoint_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut result = vec![D::zero(); len];
+
+    let result_structure = Arc::clone(adjoint_space.structure());
+    for index in 0..result_structure.block_count() {
+        let block = result_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+            key.domain_tree().clone(),
+            key.codomain_tree().clone(),
+        ));
+        let source_index = structure
+            .find_block_index_by_key(&source_key)
+            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+        let source_block = structure
+            .block(source_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+
+        let shape = block.shape().to_vec();
+        let strides = block.strides().to_vec();
+        let offset = block.offset();
+        let source_strides = source_block.strides().to_vec();
+        let source_offset = source_block.offset();
+        // Adjoint index map: result (j[..nin], i[..nout]) reads
+        // conj(source(i, j)).
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(&strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            let source_position = source_offset
+                + indices[nin..]
+                    .iter()
+                    .zip(&source_strides[..nout])
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>()
+                + indices[..nin]
+                    .iter()
+                    .zip(&source_strides[nout..])
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            result[position] = data[source_position].maybe_conj(true);
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    Ok((adjoint_space, result))
+}
+
+/// Generic-fusion (SU(N)) sibling of [`adjoint_space_dyn`]. The adjoint is a
+/// pure per-block relabel — codomain and domain trees swap wholesale and each
+/// coupled block is transposed — with NO leg bending and NO recoupling, so it
+/// is self-duality-independent and identical for a Generic (outer-multiplicity)
+/// rule: the only difference from the mult-free path is that the block keys are
+/// enumerated multiplicity-aware (vertex-labelled fusion trees). Bound relaxes
+/// to [`FusionRule`] accordingly (no F/R symbols are touched).
+pub fn adjoint_space_dyn_generic<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: FusionRule,
+{
+    let nout = space.nout();
+    let homspace = space.homspace();
+    let adjoint_hom =
+        FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+
+    let structure = Arc::clone(space.structure());
+    let keys = adjoint_hom
+        .fusion_tree_keys_generic(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+                key.domain_tree().clone(),
+                key.codomain_tree().clone(),
+            ));
+            let index = structure.find_block_index_by_key(&source_key).ok_or(
+                OperationError::MissingBlockKey {
+                    key: source_key.clone(),
+                },
+            )?;
+            let source_shape = structure
+                .block(index)
+                .map_err(OperationError::from_core_preserving_context)?
+                .shape();
+            let mut shape = source_shape[nout..].to_vec();
+            shape.extend_from_slice(&source_shape[..nout]);
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+
+    Ok(DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+        rule,
+        adjoint_hom,
+        shapes,
+    )?)
+}
+
+/// Generic-fusion (SU(N)) sibling of [`adjoint_dyn`]: same block relabel +
+/// conjugate-transpose, over the multiplicity-aware adjoint space (see
+/// [`adjoint_space_dyn_generic`]). The data movement is byte-identical to the
+/// mult-free path — no recoupling coefficients enter — so this is the eager
+/// materialization TensorKit takes when an SU(N) adjoint is consumed by
+/// something other than a contraction.
+pub fn adjoint_dyn_generic<R, D>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
+where
+    R: FusionRule,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    let nout = space.nout();
+    let nin = space.nin();
+    let structure = Arc::clone(space.structure());
+    let adjoint_space = adjoint_space_dyn_generic(rule, space)?;
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;

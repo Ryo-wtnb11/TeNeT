@@ -142,6 +142,61 @@ fn su3_adjoint_rank4_constructs_and_permutes() {
     }
 }
 
+// Stage B3c-2 adjoint axioms on SU(3), which is NON-self-dual (3 <-> 3̄). The
+// adjoint materializes through the generic block-relabel sibling (never the
+// mult-free conjugate/Structure fold whose non-self-dual coupled-sector
+// mislabel was the historical bug), so `.scale(1.0)` is used to force the lazy
+// adjoint to materialize into owned coupled data before comparing.
+#[test]
+fn su3_adjoint_axioms_real() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    // Rank-2 endomorphism V <- V so the adjoint lands on the same coupled space.
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 21).unwrap();
+    assert!(!a.data().is_empty());
+
+    // norm(A†) == norm(A): materializes the adjoint (norm reads coupled data).
+    let ah = a.adjoint().unwrap();
+    assert!(
+        (ah.norm().unwrap() - a.norm().unwrap()).abs() < 1e-12,
+        "norm(A†) must equal norm(A)"
+    );
+
+    // A†† == A at the data level. Force materialization at each dagger with
+    // scale(1.0) so this exercises the block-relabel path, not the lazy
+    // involution short-circuit.
+    let ah_mat = a.adjoint().unwrap().scale(1.0).unwrap();
+    assert_ne!(ah_mat.data(), a.data(), "adjoint must move data");
+    let ahh = ah_mat.adjoint().unwrap().scale(1.0).unwrap();
+    assert_eq!(ahh.data().len(), a.data().len());
+    for (x, y) in ahh.data().iter().zip(a.data().iter()) {
+        assert!((x - y).abs() < 1e-12, "A†† round-trip: {x} vs {y}");
+    }
+}
+
+#[test]
+fn su3_adjoint_axioms_complex() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    // Complex tensor: adjoint conjugates, so A†† round-trips only if the
+    // generic materialization applies (and un-applies) the conjugate.
+    let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 22).unwrap();
+    assert!(!a.data_c64().is_empty());
+
+    let ah = a.adjoint().unwrap();
+    assert!(
+        (ah.norm().unwrap() - a.norm().unwrap()).abs() < 1e-12,
+        "norm(A†) must equal norm(A) for c64"
+    );
+
+    let ah_mat = a.adjoint().unwrap().scale(1.0).unwrap();
+    let ahh = ah_mat.adjoint().unwrap().scale(1.0).unwrap();
+    assert_eq!(ahh.data_c64().len(), a.data_c64().len());
+    for (x, y) in ahh.data_c64().iter().zip(a.data_c64().iter()) {
+        assert!((x - y).norm() < 1e-12, "c64 A†† round-trip: {x} vs {y}");
+    }
+}
+
 #[test]
 fn su3_rand_seed_is_reproducible() {
     let rt = Runtime::builder().build().unwrap();

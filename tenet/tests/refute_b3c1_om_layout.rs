@@ -122,16 +122,39 @@ fn refute_su3_om_layout_independent_eval() {
     }
 }
 
-/// The task's Attack C: is a lazy-adjoint SU(3) operand a CLEAR failure, or could
-/// `conj` be silently dropped? `.adjoint()` on an SU(3) tensor hits the
-/// `unimplemented!` Su3 arm of `with_rule!` and PANICS — loud, before any
-/// adjoint_source is set — so the f64 `adjoint_view` (conj=false) contract path
-/// is unreachable. This pins that the failure is loud, not a silent wrong answer.
+/// FLIPPED (Stage B3c-2): the B3c-1 boundary pinned `.adjoint()` on an SU(3)
+/// tensor as a loud panic. B3c-2 implements it via the generic block-relabel
+/// materialization, so the adjoint now SUCCEEDS on an OM-vertex tensor — it
+/// swaps codomain/domain, preserves the quantum-dim-weighted norm, and is an
+/// involution (A†† == A). The `8` leg carries the `N(8,8,8)=2` outer
+/// multiplicity, so this exercises the OM-sector adjoint, not just an abelian
+/// relabel.
 #[test]
-#[should_panic(expected = "not yet supported for SU(3)")]
-fn refute_su3_adjoint_panics_loudly() {
+fn su3_om_adjoint_swaps_and_is_involution() {
     let rt = Runtime::builder().build().unwrap();
     let v = eight2();
-    let a = Tensor::from_block_fn(&rt, [&v], [&v, &v], |_, _| 0.0).unwrap();
-    let _ = a.adjoint(); // panics in with_rule! Su3 arm
+    // A : [8] <- [8,8], genuinely non-zero on both OM vertices.
+    let a = Tensor::from_block_fn(&rt, [&v], [&v, &v], |key, idx| match key {
+        BlockKey::FusionTree(k) => {
+            let mu = vertex(k.domain_tree());
+            a_fill(mu, idx[0], idx[1], idx[2])
+        }
+        _ => 0.0,
+    })
+    .unwrap();
+
+    // Adjoint swaps the sides: [8] <- [8,8]  ==>  [8,8] <- [8].
+    let ah = a.adjoint().unwrap();
+    assert_eq!(ah.rank(), 3);
+    assert_eq!(ah.codomain_rank(), 2);
+    assert!((ah.norm().unwrap() - a.norm().unwrap()).abs() < 1e-12);
+
+    // A†† == A at the data level (force materialization with scale(1.0) so the
+    // block-relabel path runs, not the lazy involution short-circuit).
+    let ahh = a.adjoint().unwrap().scale(1.0).unwrap().adjoint().unwrap();
+    let ahh = ahh.scale(1.0).unwrap();
+    assert_eq!(ahh.data().len(), a.data().len());
+    for (x, y) in ahh.data().iter().zip(a.data().iter()) {
+        assert!((x - y).abs() < 1e-12, "OM A†† round-trip: {x} vs {y}");
+    }
 }
