@@ -2718,6 +2718,552 @@ where
     Ok(current)
 }
 
+// ======================================================================
+// Stage B2b: Generic-fusion coefficient-vector layer (multi_Fmove /
+// multi_associator) plus foldright/foldleft/cycle. Outer-multiplicity
+// mirror of the multiplicity-free tree functions below, and of TensorKit
+// `basic_manipulations.jl` / `duality_manipulations.jl` (the GenericFusion
+// else-branches).
+//
+// COEFFICIENT-VECTOR INDEX CONVENTION (documented once, referenced below).
+// A `multi_Fmove` / `multi_associator` on a splitting tree that splits off
+// the leftmost sector `a` leaves a family of standard-form trees, each
+// carrying a coefficient *vector* rather than a scalar. The vector index is
+// the label `λ` of the TOPMOST fusion vertex `a ⊗ b → c`, where
+//   a = tree.uncoupled[0]      (the split-off sector, fixed),
+//   b = tail_tree.coupled      (the coupled sector of the (N-1)-leg tail),
+//   c = tree.coupled           (the overall coupled sector, fixed),
+// so the vector has length `Nsymbol(a, b, c)`. This is exactly TensorKit's
+// convention (`basic_manipulations.jl:133-135, 186-187, 346-347`): "vectors
+// of length Nsymbol(a,b,c), representing the coefficients associated with the
+// different vertex labels λ of the topmost vertex". The λ vertex is NOT part
+// of the emitted tail tree — it is the *free* index that a downstream
+// operation (fold: the A-move; a further recoupling) contracts against. At
+// completion the vector is distributed to scalar coefficients (fold's
+// A-matrix contraction collapses it to one scalar per output tree pair).
+// ======================================================================
+
+/// A generic `multi_Fmove` / `multi_Fmove_inv` result: each recoupled
+/// standard-form tree paired with its coefficient VECTOR (indexed by the
+/// topmost `a ⊗ b → c` vertex `λ`; see the convention block above). Aliased to
+/// keep the tree-function signatures readable and satisfy
+/// `clippy::type_complexity`.
+type GenericFmoveTerms<S> = Vec<(FusionTreeKey, Vec<S>)>;
+
+/// Enumerate every standard-form fusion tree with the given `uncoupled` legs,
+/// `is_dual` flags and `coupled` sector, INCLUDING all outer-multiplicity
+/// vertex-label assignments. Generic sibling of
+/// [`collect_fusion_trees_for_coupled`] (which hard-codes `SectorId::new(1)`
+/// for every vertex and is bounded on `MultiplicityFreeFusionRule`): here each
+/// vertex with `Nsymbol > 1` branches over its `1..=N` labels, producing one
+/// tree per (innerlines, vertices) combination. This is the enumeration
+/// TensorKit's `multi_Fmove` Stage 1 performs inline (`for μ in 1:Nbce′` at
+/// `basic_manipulations.jl:265`); factoring it out keeps `generic_multi_fmove_*`
+/// structurally identical to the multiplicity-free tree functions.
+fn collect_generic_fusion_trees_for_coupled<R>(
+    rule: &R,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Vec<FusionTreeKey>
+where
+    R: FusionRule,
+{
+    let mut out = Vec::new();
+    // `inner_rev` / `vtx_rev` accumulate outermost-first as the walk descends
+    // (the top vertex/innerline is pushed first); the stored key wants
+    // innermost-first, so emit reverses both — same discipline as
+    // `visit_fusion_trees`, extended to vertex labels.
+    let mut inner_rev: Vec<SectorId> = Vec::new();
+    let mut vtx_rev: Vec<usize> = Vec::new();
+    visit_generic_fusion_trees(
+        rule,
+        effective,
+        coupled,
+        &mut inner_rev,
+        &mut vtx_rev,
+        &mut |inner_rev, vtx_rev| {
+            out.push(
+                FusionTreeKey::new(
+                    uncoupled.iter().copied(),
+                    Some(coupled),
+                    is_dual.iter().copied(),
+                    inner_rev.iter().rev().copied(),
+                    vtx_rev.iter().rev().map(|&label| SectorId::new(label)),
+                )
+                .with_has_multiplicity(true),
+            );
+        },
+    );
+    out
+}
+
+/// Recursive walker for [`collect_generic_fusion_trees_for_coupled`]. Mirrors
+/// [`visit_fusion_trees`] (peels the LAST leg, recursing inward), but at every
+/// vertex it iterates `1..=Nsymbol(...)` and records the 1-based label. Vertex
+/// labels are stored 1-based (`SectorId::new(label)`, the same convention
+/// [`mu_index`] decodes).
+fn visit_generic_fusion_trees<R, F>(
+    rule: &R,
+    effective: &[SectorId],
+    coupled: SectorId,
+    inner_rev: &mut Vec<SectorId>,
+    vtx_rev: &mut Vec<usize>,
+    emit: &mut F,
+) where
+    R: FusionRule,
+    F: FnMut(&[SectorId], &[usize]),
+{
+    match effective.len() {
+        0 => {
+            if coupled == rule.vacuum() {
+                emit(inner_rev, vtx_rev);
+            }
+        }
+        1 => {
+            if effective[0] == coupled {
+                emit(inner_rev, vtx_rev);
+            }
+        }
+        2 => {
+            // Base vertex `e0 ⊗ e1 → coupled`, labels 1..=N(e0,e1,coupled).
+            let n = rule.nsymbol(effective[0], effective[1], coupled);
+            for label in 1..=n {
+                vtx_rev.push(label);
+                emit(inner_rev, vtx_rev);
+                vtx_rev.pop();
+            }
+        }
+        _ => {
+            let last = effective[effective.len() - 1];
+            let front_effective = &effective[..effective.len() - 1];
+            // Inner line ranges over `coupled ⊗ dual(last)`; the top vertex
+            // `front_coupled ⊗ last → coupled` has `N(front_coupled,last,coupled)`
+            // labels. (Same `vertexiterN` structure as the mult-free walker.)
+            for front_coupled in rule.fusion_channels(coupled, rule.dual(last)) {
+                let n_last = rule.nsymbol(front_coupled, last, coupled);
+                if n_last == 0 {
+                    continue;
+                }
+                inner_rev.push(front_coupled);
+                for label in 1..=n_last {
+                    vtx_rev.push(label);
+                    visit_generic_fusion_trees(
+                        rule,
+                        front_effective,
+                        front_coupled,
+                        inner_rev,
+                        vtx_rev,
+                        emit,
+                    );
+                    vtx_rev.pop();
+                }
+                inner_rev.pop();
+            }
+        }
+    }
+}
+
+/// Generic-fusion `multi_associator`: the coefficient VECTOR relating a long
+/// (`N`-leg) splitting tree to a short (`N-1`-leg) tail tree, indexed by the
+/// topmost `a ⊗ short.coupled → long.coupled` vertex `λ` (see the module
+/// convention block above). Verbatim mirror of TensorKit `multi_associator`
+/// GenericFusion branch (`basic_manipulations.jl:144-166`); the
+/// multiplicity-free sibling [`multiplicity_free_multi_associator_scalar`]
+/// returns a bare scalar (this is that scalar chain lifted to a length-`Nλ`
+/// vector).
+///
+/// Returns `None` iff the uncoupled/dual tails do not match (the `zero(...)`
+/// early return at TK `:141-142`), so callers filter exactly as the mult-free
+/// tree functions do.
+fn generic_multi_associator<R>(
+    rule: &R,
+    long: &FusionTreeKey,
+    short: &FusionTreeKey,
+) -> Result<Option<Vec<R::Scalar>>, CoreError>
+where
+    R: GenericFusionSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let rank = long.uncoupled().len();
+    if short.uncoupled().len() + 1 != rank {
+        return Ok(None);
+    }
+    if long.uncoupled()[1..] != *short.uncoupled() || long.is_dual()[1..] != *short.is_dual() {
+        return Ok(None);
+    }
+    let first = long.uncoupled()[0];
+
+    // Base case `rank == 2` (TK's `2:(N-1)` loop is empty): there is no F to
+    // apply, and the topmost vertex IS `long`'s single vertex μ. The vector is
+    // the unit vector `e_μ` over `a ⊗ b → c`, length `N(a,b,c)`. This is the
+    // `μ = f.vertices[1]; coeff = e_μ` special case TK's `multi_Fmove`
+    // (`:229-232`) and `multi_Fmove_inv` N==1 (`:373-377`) inline; here it lives
+    // in the associator so the inv path (which reuses this associator on a
+    // rank-2 candidate over a rank-1 tail) gets the right seed too.
+    if rank == 2 {
+        let b = long.uncoupled()[1];
+        let c = coupled_or_vacuum(rule, long);
+        let n = rule.nsymbol(first, b, c);
+        let mu0 = mu_index(long, 0)?;
+        let mut coeff = vec![R::Scalar::braid_zero(); n];
+        if let Some(slot) = coeff.get_mut(mu0) {
+            *slot = R::Scalar::braid_one();
+        } else {
+            return Err(CoreError::MalformedFusionTree {
+                message: "multi_associator: vertex label exceeds Nsymbol",
+            });
+        }
+        return Ok(Some(coeff));
+    }
+
+    // General chain (TK `:150-165`). `coeff` starts as the length-1 seed and is
+    // transformed by one F-slice per interior leg. After each step it is indexed
+    // by the current step's `λ` axis (F axis 4, `N(a, e′, d)`), which becomes
+    // the next step's `μ` axis (F axis 1, `N(a, b, e)`) — the associator chain.
+    let mut coeff = vec![R::Scalar::braid_one()];
+    for tensor_kit_k in 2..rank {
+        let right_sector = long.uncoupled()[tensor_kit_k]; // c
+        // vertex_info(long, k+1) = (e, d); ν = its vertex label.
+        let (middle_left, middle_right) = fusion_tree_vertex_neighbors(long, tensor_kit_k)?;
+        let nu0 = mu_index(long, tensor_kit_k - 1)?;
+        // vertex_info(short, k) = (b, e′); κ = its vertex label.
+        let (short_left, short_right) = fusion_tree_vertex_neighbors(short, tensor_kit_k - 1)?;
+        let kappa0 = mu_index(short, tensor_kit_k - 2)?;
+        // F = Fsymbol(a, b, c, d, e, e′); axis order (μ, ν, κ, λ) =
+        // (N(a,b,e), N(e,c,d), N(b,c,e′), N(a,e′,d)). Same argument order the
+        // mult-free scalar associator passes to `f_symbol_scalar`.
+        let f = rule.f_symbol_generic(
+            first,
+            short_left,
+            right_sector,
+            middle_right,
+            middle_left,
+            short_right,
+        );
+        let n_lambda = f.shape().3;
+        let mut next = vec![R::Scalar::braid_zero(); n_lambda];
+        if tensor_kit_k == 2 {
+            // `transpose(view(F, μ:μ, ν, κ, :)) * coeff` (TK `:159-160`): the μ
+            // axis is fixed to `long.vertices[0]`, seed has length 1.
+            let mu0 = mu_index(long, 0)?;
+            for (lambda, slot) in next.iter_mut().enumerate() {
+                *slot = f.get(mu0, nu0, kappa0, lambda).clone() * coeff[0].clone();
+            }
+        } else {
+            // `transpose(view(F, :, ν, κ, :)) * coeff` (TK `:162`): sum over the
+            // μ axis (= incoming vector index) into the λ axis.
+            for (lambda, slot) in next.iter_mut().enumerate() {
+                let mut acc = R::Scalar::braid_zero();
+                for (mu, coeff_mu) in coeff.iter().enumerate() {
+                    acc = acc + f.get(mu, nu0, kappa0, lambda).clone() * coeff_mu.clone();
+                }
+                *slot = acc;
+            }
+        }
+        coeff = next;
+    }
+    Ok(Some(coeff))
+}
+
+/// Generic-fusion `multi_Fmove`: recouple a splitting tree to split off its
+/// first uncoupled sector, returning `(tail_tree, coeff_vector)` pairs. Mirror
+/// of TensorKit `multi_Fmove` GenericFusion branch (`basic_manipulations.jl:
+/// 218-232, 234-327`) and structural twin of
+/// [`multiplicity_free_multi_fmove_tree`] — same Stage 1 tail enumeration, but
+/// coefficients are the `generic_multi_associator` vectors (see the convention
+/// block above for the vector index).
+fn generic_multi_fmove_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+) -> Result<GenericFmoveTerms<R::Scalar>, CoreError>
+where
+    R: GenericFusionSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let rank = tree.uncoupled().len();
+    if rank == 0 {
+        return Err(CoreError::MalformedFusionTree {
+            message: "multi_Fmove requires at least one uncoupled sector",
+        });
+    }
+    if rank == 1 {
+        // TK `:218-220`: empty tail coupled to the unit, coeff `ones(T, 1)`.
+        return Ok(vec![(
+            FusionTreeKey::new(
+                Vec::<SectorId>::new(),
+                Some(rule.vacuum()),
+                Vec::<bool>::new(),
+                Vec::<SectorId>::new(),
+                Vec::<SectorId>::new(),
+            )
+            .with_has_multiplicity(true),
+            vec![R::Scalar::braid_one()],
+        )]);
+    }
+    if rank == 2 {
+        // TK `:221-232`: single tail `(b,) → b`, coeff = unit vector `e_μ` over
+        // the (unchanged) topmost vertex `a ⊗ b → c`, μ = tree.vertices[0].
+        let a = tree.uncoupled()[0];
+        let b = tree.uncoupled()[1];
+        let c = coupled_or_vacuum(rule, tree);
+        let n = rule.nsymbol(a, b, c);
+        let mu0 = mu_index(tree, 0)?;
+        let mut coeff = vec![R::Scalar::braid_zero(); n];
+        if let Some(slot) = coeff.get_mut(mu0) {
+            *slot = R::Scalar::braid_one();
+        } else {
+            return Err(CoreError::MalformedFusionTree {
+                message: "multi_Fmove: vertex label exceeds Nsymbol",
+            });
+        }
+        let tail = FusionTreeKey::new(
+            vec![b],
+            Some(b),
+            vec![tree.is_dual()[1]],
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        )
+        .with_has_multiplicity(true);
+        return Ok(vec![(tail, coeff)]);
+    }
+
+    let first = tree.uncoupled()[0];
+    let coupled = coupled_or_vacuum(rule, tree);
+    let tail_uncoupled = &tree.uncoupled()[1..];
+    let tail_is_dual = &tree.is_dual()[1..];
+    let mut terms = Vec::new();
+    for tail_coupled in rule.fusion_channels(rule.dual(first), coupled) {
+        let tail_effective = effective_sectors_for_uncoupled(rule, tail_uncoupled, tail_is_dual)?;
+        for tail_tree in collect_generic_fusion_trees_for_coupled(
+            rule,
+            tail_uncoupled,
+            tail_is_dual,
+            &tail_effective,
+            tail_coupled,
+        ) {
+            if let Some(coeff) = generic_multi_associator(rule, tree, &tail_tree)? {
+                terms.push((tail_tree, coeff));
+            }
+        }
+    }
+    Ok(terms)
+}
+
+/// Generic-fusion `multi_Fmove_inv`: fuse a leading sector `a` onto an existing
+/// tree (coupled `b`) to a coupled sector `c`, recoupling into standard-form
+/// trees with per-tree coefficient vectors indexed by the topmost INPUT vertex
+/// `a ⊗ b → c` (TK `:343-347`). Structural twin of
+/// [`multiplicity_free_multi_fmove_inv_tree`].
+///
+/// Like the mult-free version, the per-candidate coefficient is the
+/// `generic_multi_associator(candidate, tree)` vector, CONJUGATED. This is
+/// exact because TensorKit's inverse Stage 2 applies the adjoint of the same
+/// F-slices in the same order: with `Tₖ = transpose(view(F,:,ν,κ,:))` the
+/// forward associator computes `v = Tₙ⋯T₂·seed`, while the inverse computes
+/// `w = conj(Tₙ)⋯conj(T₃)·conj(T₂·seed) = conj(v)` (TK `:437-439, 460-462`,
+/// the `conj!`/`'` on each factor). No separate inverse F-chain is needed.
+fn generic_multi_fmove_inv_tree<R>(
+    rule: &R,
+    leading_sector: SectorId,
+    coupled: SectorId,
+    tree: &FusionTreeKey,
+    leading_is_dual: bool,
+) -> Result<GenericFmoveTerms<R::Scalar>, CoreError>
+where
+    R: GenericFusionSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let tree_coupled = coupled_or_vacuum(rule, tree);
+    if rule.nsymbol(leading_sector, tree_coupled, coupled) == 0 {
+        return Err(CoreError::SectorMismatch {
+            expected: coupled,
+            actual: tree_coupled,
+        });
+    }
+
+    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
+    uncoupled.push(leading_sector);
+    uncoupled.extend_from_slice(tree.uncoupled());
+    let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
+    is_dual.push(leading_is_dual);
+    is_dual.extend_from_slice(tree.is_dual());
+    let effective = effective_sectors_for_uncoupled(rule, &uncoupled, &is_dual)?;
+    let candidates =
+        collect_generic_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
+
+    let mut terms = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if let Some(coeff) = generic_multi_associator(rule, &candidate, tree)? {
+            terms.push((
+                candidate,
+                coeff.into_iter().map(|value| value.braid_conj()).collect(),
+            ));
+        }
+    }
+    Ok(terms)
+}
+
+/// Generic-fusion `foldright`: bend the first codomain vertex `a ⊗ b ← c` to a
+/// domain vertex `b ← dual(a) ⊗ c`. Verbatim mirror of TensorKit `foldright`
+/// GenericFusion branch (`duality_manipulations.jl:238-289`), especially the
+/// coefficient-vector × A × coefficient-vector contraction at `:277-284`:
+///   `coeff₀ · (coeff₂' · (transpose(A) · coeff₁))`.
+/// Structural twin of [`multiplicity_free_foldright_tree_pair`], with the scalar
+/// `coeff₁ · A · conj(coeff₂)` promoted to the vector–matrix–vector contraction
+/// through the A-move matrix (which connects the two topmost `λ` vertices).
+pub fn generic_foldright_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let codomain = tree_pair.codomain_tree();
+    let codomain_rank = codomain.uncoupled().len();
+    if codomain_rank == 0 {
+        return Err(CoreError::MalformedFusionTree {
+            message: "foldright requires at least one codomain leg",
+        });
+    }
+    let a = codomain.uncoupled()[0];
+    let is_dual_a = codomain
+        .is_dual()
+        .first()
+        .copied()
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing the first duality flag",
+        })?;
+    let kappa = rule.frobenius_schur_phase_scalar(a);
+    let c = coupled_or_vacuum(rule, codomain);
+
+    let mut terms = FusionTermAccumulator::new();
+    for (codomain_prime, coeff1) in generic_multi_fmove_tree(rule, codomain)? {
+        let b = coupled_or_vacuum(rule, &codomain_prime);
+        // A = Asymbol(a, b, c): rows = topmost codomain vertex λ₁ ∈ N(a,b,c)
+        // (indexes coeff1), cols = topmost domain vertex λ₂ ∈ N(dual(a),c,b)
+        // (indexes coeff2). `a_symbol_generic` already bakes in κ_a and the
+        // outer conj per TK `Asymbol_from_Fsymbol`.
+        let a_matrix = rule.a_symbol_generic(a, b, c);
+        let (rows, cols) = a_matrix.shape();
+        let coeff0 = rule.sqrt_dim_scalar(c) * rule.inv_sqrt_dim_scalar(b);
+        for (domain_prime, coeff2) in generic_multi_fmove_inv_tree(
+            rule,
+            rule.dual(a),
+            b,
+            tree_pair.domain_tree(),
+            !is_dual_a,
+        )? {
+            if coeff1.len() != rows || coeff2.len() != cols {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "foldright: coefficient-vector length disagrees with A-matrix shape",
+                });
+            }
+            // coeff₂' · (transpose(A) · coeff₁)
+            //   = Σ_j conj(coeff₂[j]) · Σ_i A[i,j] · coeff₁[i].
+            let mut inner = R::Scalar::braid_zero();
+            for (j, coeff2_j) in coeff2.iter().enumerate() {
+                let mut a_transpose_coeff1 = R::Scalar::braid_zero();
+                for (i, coeff1_i) in coeff1.iter().enumerate() {
+                    a_transpose_coeff1 =
+                        a_transpose_coeff1 + a_matrix.get(i, j).clone() * coeff1_i.clone();
+                }
+                inner = inner + coeff2_j.braid_conj() * a_transpose_coeff1;
+            }
+            let mut coefficient = coeff0.clone() * inner;
+            if is_dual_a {
+                coefficient = coefficient * kappa.clone();
+            }
+            terms.push(
+                FusionTreeBlockKey::pair(codomain_prime.clone(), domain_prime),
+                coefficient,
+            );
+        }
+    }
+    Ok(terms.into_vec())
+}
+
+/// Generic-fusion `foldleft` = swap + conjugate of `foldright`, verbatim mirror
+/// of TensorKit `foldleft((f₁,f₂))` (`duality_manipulations.jl:315-319`).
+/// Structural twin of [`multiplicity_free_foldleft_tree_pair`].
+pub fn generic_foldleft_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let swapped = FusionTreeBlockKey::pair(
+        tree_pair.domain_tree().clone(),
+        tree_pair.codomain_tree().clone(),
+    );
+    Ok(generic_foldright_tree_pair(rule, &swapped)?
+        .into_iter()
+        .map(|(folded, coefficient)| {
+            (
+                FusionTreeBlockKey::pair(
+                    folded.domain_tree().clone(),
+                    folded.codomain_tree().clone(),
+                ),
+                coefficient.braid_conj(),
+            )
+        })
+        .collect())
+}
+
+/// Generic-fusion `cycleclockwise` = foldright ∘ bendleft (or the reverse order
+/// when the codomain is empty), composing coefficient matrices. Verbatim mirror
+/// of TensorKit `cycleclockwise` (`duality_manipulations.jl:401-410`) and
+/// structural twin of [`multiplicity_free_cycle_clockwise_tree_pair`].
+pub fn generic_cycle_clockwise_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if tree_pair.codomain_tree().uncoupled().is_empty() {
+        let first = generic_bendleft_tree_pair(rule, tree_pair)?;
+        compose_generic_tree_pair_terms(rule, first, |rule, key| {
+            generic_foldright_tree_pair(rule, key)
+        })
+    } else {
+        let first = generic_foldright_tree_pair(rule, tree_pair)?;
+        compose_generic_tree_pair_terms(rule, first, |rule, key| {
+            generic_bendleft_tree_pair(rule, key)
+        })
+    }
+}
+
+/// Generic-fusion `cycleanticlockwise` = foldleft ∘ bendright (or the reverse
+/// order when the domain is empty). Verbatim mirror of TensorKit
+/// `cycleanticlockwise` (`duality_manipulations.jl:431-440`) and structural
+/// twin of [`multiplicity_free_cycle_anticlockwise_tree_pair`].
+pub fn generic_cycle_anticlockwise_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if tree_pair.domain_tree().uncoupled().is_empty() {
+        let first = generic_bendright_tree_pair(rule, tree_pair)?;
+        compose_generic_tree_pair_terms(rule, first, |rule, key| {
+            generic_foldleft_tree_pair(rule, key)
+        })
+    } else {
+        let first = generic_foldleft_tree_pair(rule, tree_pair)?;
+        compose_generic_tree_pair_terms(rule, first, |rule, key| {
+            generic_bendright_tree_pair(rule, key)
+        })
+    }
+}
+
 fn multiplicity_free_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
