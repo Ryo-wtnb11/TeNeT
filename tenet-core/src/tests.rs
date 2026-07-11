@@ -5615,4 +5615,283 @@ mod tests {
             );
         }
     }
+
+    // Residual (c): domain-rank ≥ 2. All prior generic bend/fold tests use a
+    // rank-1 domain; these exercise multi_Fmove_inv on a rank-2 domain (its
+    // candidates are rank-3, so the associator F-chain runs on the domain side)
+    // and the rank-2-domain bend surgery. Round-trip identities, all A4 vertex
+    // assignments enumerated.
+    #[test]
+    fn b2b_a4_fold_round_trip_domain_rank2() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        for cod_mu in 1..=2 {
+            for (dom_inner, dv) in [(0, 1), (1, 1), (2, 1), (3, 1), (3, 2)] {
+                // cod [3,3]->3 (vtx cod_mu); dom [3,3]->3 inner=dom_inner (vtx dv).
+                let cod = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(cod_mu)],
+                )
+                .with_has_multiplicity(true);
+                let dom = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(dv)],
+                )
+                .with_has_multiplicity(true);
+                let _ = dom_inner; // rank-2 dom has no innerline; kept for label clarity
+                let pair = FusionTreeBlockKey::pair(cod, dom);
+                let mut totals = std::collections::HashMap::new();
+                for (mid, c1) in generic_foldright_tree_pair(&rule, &pair).unwrap() {
+                    for (out, c2) in generic_foldleft_tree_pair(&rule, &mid).unwrap() {
+                        *totals.entry(out).or_insert(0.0) += c1 * c2;
+                    }
+                }
+                for (key, coeff) in &totals {
+                    let want = if key == &pair { 1.0 } else { 0.0 };
+                    assert!(
+                        (coeff - want).abs() < 1e-10,
+                        "fold rt dom-rank2 cod_mu={cod_mu} dv={dv}: {coeff} want {want}"
+                    );
+                }
+                assert!(
+                    (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                    "fold rt dom-rank2 cod_mu={cod_mu} dv={dv}: self missing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b2b_a4_bend_round_trip_domain_rank2() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        for cod_mu in 1..=2 {
+            for dv in 1..=2 {
+                let cod = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(cod_mu)],
+                )
+                .with_has_multiplicity(true);
+                let dom = FusionTreeKey::new(
+                    [t, t], Some(t), [false, false], [], [SectorId::new(dv)],
+                )
+                .with_has_multiplicity(true);
+                let pair = FusionTreeBlockKey::pair(cod, dom);
+                let mut totals = std::collections::HashMap::new();
+                for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
+                    for (out, c2) in generic_bendleft_tree_pair(&rule, &mid).unwrap() {
+                        *totals.entry(out).or_insert(0.0) += c1 * c2;
+                    }
+                }
+                for (key, coeff) in &totals {
+                    let want = if key == &pair { 1.0 } else { 0.0 };
+                    assert!(
+                        (coeff - want).abs() < 1e-10,
+                        "bend rt dom-rank2 cod_mu={cod_mu} dv={dv}: {coeff} want {want}"
+                    );
+                }
+                assert!(
+                    (totals.get(&pair).copied().unwrap_or(0.0) - 1.0).abs() < 1e-10,
+                    "bend rt dom-rank2 cod_mu={cod_mu} dv={dv}: self missing"
+                );
+            }
+        }
+    }
+
+    // ===================== Residual (b): complex conj path =====================
+    //
+    // The B2a complex path (`GenericBraidScalar for Complex64`, the fold's
+    // `coeff₂.braid_conj()`, and `a_symbol_generic`'s inner `conj`) was only
+    // verified by source-matching. This closes it numerically: a synthetic
+    // Complex64 Generic rule whose A-move / B-move are a genuinely complex 2×2
+    // UNITARY U (non-Hermitian, non-real). Self-dual sector 1, N(1,1,1)=2,
+    // dim=1 (all coeff factors = 1). U = (1/√2)[[1, i],[i, 1]].
+    //
+    // From `a_symbol_generic`: A[κ,λ] = conj(κ_a · F(1,1,1,1,0,1)[0,0,κ,λ]) with
+    // κ_a=1, so setting the F block to conj(U) gives A = U. Likewise B = U from
+    // the F(1,1,1,1,1,0) block. A wrong conj (missing/extra) or a μ↔ν transpose
+    // flips the sign of the imaginary parts and fails both the direct check and
+    // the round-trip (which needs U U† = I).
+    #[derive(Clone, Copy, Debug)]
+    struct ComplexUnitaryRule;
+    impl FusionRule for ComplexUnitaryRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // 0 and 1 self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    fn cx(re: f64, im: f64) -> Complex64 {
+        Complex64::new(re, im)
+    }
+    // U = (1/√2)[[1, i],[i, 1]], row-major.
+    fn cx_u() -> [Complex64; 4] {
+        let r = 1.0 / 2.0_f64.sqrt();
+        [cx(r, 0.0), cx(0.0, r), cx(0.0, r), cx(r, 0.0)]
+    }
+    impl GenericFusionSymbols for ComplexUnitaryRule {
+        type Scalar = Complex64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let u = cx_u();
+            match (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) {
+                // A block: A = conj(U) reshaped => set F = conj(U). shape (1,1,2,2).
+                (1, 1, 1, 1, 0, 1) => GenericFArray::new(
+                    vec![u[0].conj(), u[1].conj(), u[2].conj(), u[3].conj()],
+                    (1, 1, 2, 2),
+                ),
+                // B block: B = U reshaped. shape (2,2,1,1).
+                (1, 1, 1, 1, 1, 0) => {
+                    GenericFArray::new(vec![u[0], u[1], u[2], u[3]], (2, 2, 1, 1))
+                }
+                (aa, bb, cc, _, _, _) if aa == 0 || bb == 0 || cc == 0 => {
+                    GenericFArray::new(vec![cx(1.0, 0.0)], (1, 1, 1, 1))
+                }
+                other => panic!("ComplexUnitaryRule: unmodelled F{other:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![cx(1.0, 0.0)], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for ComplexUnitaryRule {
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            cx(1.0, 0.0)
+        }
+    }
+
+    // Direct: foldright distributes ROW μ of the COMPLEX A-matrix (=U) to the
+    // domain vertices ν. coeff(out ν) = coeff0·A[μ,ν] = U[μ,ν]. A missing conj
+    // or a μ↔ν swap would produce conj(U)/Uᵀ — distinct complex numbers.
+    #[test]
+    fn refute_b2b_complex_foldright_reads_a_row_unconjugated() {
+        let rule = ComplexUnitaryRule;
+        let s = SectorId::new(1);
+        let u = cx_u();
+        // Sanity: U genuinely complex and non-Hermitian.
+        assert!(u[1].im.abs() > 0.1, "U must be complex");
+        assert!((u[1] - u[2].conj()).norm() > 0.1, "U must be non-Hermitian");
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let out = generic_foldright_tree_pair(&rule, &pair).unwrap();
+            let mut got = [cx(0.0, 0.0); 2];
+            for (key, coeff) in &out {
+                let nu = key.domain_tree().vertices()[0].id();
+                got[nu - 1] = *coeff;
+            }
+            for nu in 0..2 {
+                let want = u[(mu - 1) * 2 + nu]; // ROW μ of U
+                assert!(
+                    (got[nu] - want).norm() < 1e-10,
+                    "μ={mu} ν={nu}: {} want ROW-μ {} (conj/transpose?)",
+                    got[nu],
+                    want
+                );
+            }
+            // Distinguishable from the conjugated reading.
+            let want_conj = u[(mu - 1) * 2].conj();
+            assert!(
+                (got[0] - want_conj).norm() > 1e-9 || u[(mu - 1) * 2].im.abs() < 1e-12,
+                "conj reading coincides — test cannot discriminate"
+            );
+        }
+    }
+
+    // Round-trip with a COMPLEX unitary A: foldright∘foldleft == id requires
+    // U U† = I, so the conj in the return fold must be exactly right.
+    #[test]
+    fn b2b_complex_fold_round_trip_identity() {
+        let rule = ComplexUnitaryRule;
+        let s = SectorId::new(1);
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let mut totals: std::collections::HashMap<FusionTreeBlockKey, Complex64> =
+                std::collections::HashMap::new();
+            for (mid, c1) in generic_foldright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_foldleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(cx(0.0, 0.0)) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { cx(1.0, 0.0) } else { cx(0.0, 0.0) };
+                assert!(
+                    (coeff - want).norm() < 1e-10,
+                    "cx fold rt μ={mu}: {coeff} want {want}"
+                );
+            }
+            assert!(
+                (totals.get(&pair).copied().unwrap_or(cx(0.0, 0.0)) - cx(1.0, 0.0)).norm() < 1e-10,
+                "cx fold rt μ={mu}: self missing"
+            );
+        }
+    }
+
+    // Bend round-trip with a COMPLEX unitary B: bendright∘bendleft == id.
+    #[test]
+    fn b2b_complex_bend_round_trip_identity() {
+        let rule = ComplexUnitaryRule;
+        let s = SectorId::new(1);
+        for mu in 1..=2usize {
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let mut totals: std::collections::HashMap<FusionTreeBlockKey, Complex64> =
+                std::collections::HashMap::new();
+            for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
+                for (out, c2) in generic_bendleft_tree_pair(&rule, &mid).unwrap() {
+                    *totals.entry(out).or_insert(cx(0.0, 0.0)) += c1 * c2;
+                }
+            }
+            for (key, coeff) in &totals {
+                let want = if key == &pair { cx(1.0, 0.0) } else { cx(0.0, 0.0) };
+                assert!(
+                    (coeff - want).norm() < 1e-10,
+                    "cx bend rt μ={mu}: {coeff} want {want}"
+                );
+            }
+        }
+    }
 }
