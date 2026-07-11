@@ -27,8 +27,8 @@ julia -e 'push!(ARGS,"<d>","<min_ms>"); using AppleAccelerate; include("benchmar
 
 ## Results (2026-07-11)
 
-- tenet commit: `906447dd80f8dbaa03af8c804d6b1a3764d17f0c` (`main`, includes #102
-  Stage B1 generic-fusion braid and the #104 d=4 per-call-overhead fix)
+- tenet commit: `b5b5d82f4ec5495a25f05ef0d55686a4c616701e` (`main`, includes the
+  #106 plan-time per-run GEMM routing fix)
 - tenferro-rs pairing: `main` worktree at `d5c768c7` (path-dep symlink target)
 - Julia 1.11.6, TensorKit v0.16.2 (`QuantumKitHub/TensorKit.jl#ld-mooncakerules`), AppleAccelerate.jl v0.7.0
   — TensorKit columns unchanged from the 2026-07-11 measurement (TK side has no
@@ -42,59 +42,47 @@ julia -e 'push!(ARGS,"<d>","<min_ms>"); using AppleAccelerate; include("benchmar
 
 | symmetry | workload | TeNeT | TensorKit | ratio |
 |---|---|---:|---:|---:|
-| U1 | compose | 6.50 | 3.96 | 1.64 |
-| U1 | swap | 12.63 | 18.82 | **0.67** |
-| U1 | swap+out | 14.57 | 34.21 | **0.43** |
-| fZ2 | compose | 2.34 | 1.86 | 1.26 |
-| fZ2 | swap | 4.39 | 8.30 | **0.53** |
-| fZ2 | swap+out | 7.30 | 14.17 | **0.52** |
-| SU2 | compose | 10.62 | 7.45 | 1.43 |
-| SU2 | swap | 33.32 | 44.78 | **0.74** |
-| SU2 | swap+out | 49.65 | 78.02 | **0.64** |
-| U1⊠fZ2 | compose | 6.37 | 3.96 | 1.61 |
-| U1⊠fZ2 | swap | 12.64 | 19.25 | **0.66** |
-| U1⊠fZ2 | swap+out | 14.64 | 34.21 | **0.43** |
+| U1 | compose | 4.10 | 3.96 | 1.04 |
+| U1 | swap | 9.72 | 18.82 | **0.52** |
+| U1 | swap+out | 12.43 | 34.21 | **0.36** |
+| fZ2 | compose | 2.09 | 1.86 | 1.12 |
+| fZ2 | swap | 4.19 | 8.30 | **0.50** |
+| fZ2 | swap+out | 7.01 | 14.17 | **0.49** |
+| SU2 | compose | 7.19 | 7.45 | 0.97 |
+| SU2 | swap | 30.02 | 44.78 | **0.67** |
+| SU2 | swap+out | 44.63 | 78.02 | **0.57** |
+| U1⊠fZ2 | compose | 3.93 | 3.96 | 0.99 |
+| U1⊠fZ2 | swap | 9.70 | 19.25 | **0.50** |
+| U1⊠fZ2 | swap+out | 12.27 | 34.21 | **0.36** |
 
 ### d = 16 (large blocks)
 
 | symmetry | workload | TeNeT | TensorKit | ratio |
 |---|---|---:|---:|---:|
-| U1 | compose | 1 977.3 | 1 928.6 | 1.03 |
-| U1 | swap | 2 721.8 | 4 167.2 | **0.65** |
-| U1 | swap+out | 3 348.0 | 5 141.5 | **0.65** |
-| fZ2 | compose | 689.6 | 695.1 | 0.99 |
-| fZ2 | swap | 1 003.1 | 1 429.9 | **0.70** |
-| fZ2 | swap+out | 1 272.4 | 1 993.1 | **0.64** |
-| SU2 | compose | 8 242.7 | 7 953.3 | 1.04 |
-| SU2 | swap | 12 239.2 | 17 040.7 | **0.72** |
-| SU2 | swap+out | 15 598.5 | 19 519.4 | **0.80** |
-| U1⊠fZ2 | compose | 1 981.4 | 1 935.9 | 1.02 |
-| U1⊠fZ2 | swap | 2 782.6 | 3 736.3 | **0.74** |
-| U1⊠fZ2 | swap+out | 3 517.2 | 5 364.8 | **0.66** |
+| U1 | compose | 1 886.1 | 1 928.6 | 0.98 |
+| U1 | swap | 2 645.3 | 4 167.2 | **0.63** |
+| U1 | swap+out | 3 281.0 | 5 141.5 | **0.64** |
+| fZ2 | compose | 678.6 | 695.1 | 0.98 |
+| fZ2 | swap | 988.7 | 1 429.9 | **0.69** |
+| fZ2 | swap+out | 1 265.9 | 1 993.1 | **0.64** |
+| SU2 | compose | 7 741.3 | 7 953.3 | 0.97 |
+| SU2 | swap | 11 915.0 | 17 040.7 | **0.70** |
+| SU2 | swap+out | 15 075.6 | 19 519.4 | **0.77** |
+| U1⊠fZ2 | compose | 1 881.4 | 1 935.9 | 0.97 |
+| U1⊠fZ2 | swap | 2 662.0 | 3 736.3 | **0.71** |
+| U1⊠fZ2 | swap+out | 3 283.2 | 5 364.8 | **0.61** |
 
 At d=16 every workload is at parity or faster than TensorKit (compose is
-GEMM-bound and matches `mul!` to ~4%; swap/swap+out beat TensorKit by
-20–36% via the GEMM-based recoupling replay — swap/swap+out improved
-another 8–13% over the pre-#104 measurement from the hybrid
-stack/thread_local fused-pair dispatch). At d=4, compose is 1.26–1.64x
-TensorKit (unchanged by #104 — see the residual note below); swap/swap+out
-are 0.43–0.74x (faster than TensorKit), recovered from 0.57–0.84x pre-#104
-now that the thread_local-scratch regression from #101/12748cf is fixed
-for rank ≤ 8 (the d=4/d=16 workloads here).
+GEMM-bound and matches `mul!` to ~3%; swap/swap+out beat TensorKit by
+23–39% via the GEMM-based recoupling replay). At d=4, compose is now at
+TensorKit parity (0.97–1.12x) and swap/swap+out are 0.36–0.67x (faster
+than TensorKit).
 
-**Known residual ([issue #103](https://github.com/Ryo-wtnb11/TeNeT/issues/103)):**
-d=4 compose (and part of swap) still carries roughly +2.7µs / +1.4µs from an
-unrelated change bundled in the same original commit: `tenet-dense` dropped
-its `STRIDED_BATCH_MIN_JOBS` floor and loosened the strided-batch GEMM
-routing condition to `jobs.len() >= 2` / `run_len > 1`, so d=4's small
-5-group GEMMs now take the strided-batch seam, which is ~60% slower
-per-call than the direct path at this size. Bisect first misattributed this
-to eager error-struct construction in `recoupling_multi_block`; profiling
-during the #104 fix showed that path never executes for U1 d=4 and traced
-the regression to `core_matmul` itself, i.e. the GEMM-routing threshold.
-#104 fixed the larger, independent thread_local-scratch regression
-(swap/swap+out) via a hybrid dispatch; this GEMM-routing threshold is a
-separate design decision left open in #103.
+The former d=4 compose residual (the strided-batch GEMM-routing seam,
+[issue #103](https://github.com/Ryo-wtnb11/TeNeT/issues/103)) was eliminated
+by the plan-time per-run GEMM routing in
+[#106](https://github.com/Ryo-wtnb11/TeNeT/pull/106), restoring d=4 compose
+to TensorKit parity and closing #103.
 
 ### Cold (structure compile) baseline
 
