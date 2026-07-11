@@ -5895,6 +5895,180 @@ mod tests {
         }
     }
 
+    // ==== REFUTE (adversarial): coeff2 adjoint conj on GENUINELY complex data ====
+    //
+    // Gap found by the verifier: in `ComplexUnitaryRule` the domain vector
+    // `coeff2` is always a real UNIT vector (rank-1 domain → seed case), so the
+    // `coeff₂'` adjoint (TK `duality_manipulations.jl:279`) and the
+    // `multi_Fmove_inv = conj(associator)` step (TK `basic_manipulations.jl:
+    // 439/462`) are NEVER exercised on complex data by any existing test — the
+    // A4 oracle is fully real, and the complex fold round-trip cancels a
+    // consistent double conj error.
+    //
+    // This synthetic (deliberately NOT pentagon-consistent — a pure algebraic
+    // fixture) rule drives one COMPLEX interior F into `coeff2` while keeping the
+    // A-matrix REAL, isolating the two conj sites:
+    //   * F(1,1,2,2,0,3) = 1  (real)  ⇒ Asymbol(1,2,3) is real, = 1.
+    //   * F(1,3,3,2,2,3) = w  (complex) ⇒ multi_associator seed = w.
+    // TK's `multi_Fmove_inv` returns conj(associator) = conj(w); TK's foldright
+    // contracts coeff₂' (a SECOND conj) against transpose(A)·coeff₁, so the two
+    // conjs cancel and the observable foldright coefficient is the RAW
+    // associator w. Test A pins `multi_Fmove_inv = conj(w)` alone (breaks the
+    // double-error symmetry); Test B pins the foldright net = w. Together they
+    // rule out both a single and a double conj slip. A single missing conj at
+    // EITHER site flips the observable to conj(w) ≠ w.
+    #[derive(Clone, Copy, Debug)]
+    struct Coeff2ConjRule;
+    fn c2c_w() -> Complex64 {
+        Complex64::new(0.6, 0.8) // |w| = 1, genuinely complex
+    }
+    impl FusionRule for Coeff2ConjRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // all self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0)],
+                (1, 2) | (2, 1) => smallvec![SectorId::new(3)],
+                (1, 3) | (3, 1) => smallvec![SectorId::new(2)],
+                (2, 3) | (3, 2) => smallvec![SectorId::new(2)],
+                (3, 3) => smallvec![SectorId::new(3)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            usize::from(self.fusion_channels(left, right).contains(&coupled))
+        }
+    }
+    impl GenericFusionSymbols for Coeff2ConjRule {
+        type Scalar = Complex64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            match ids {
+                // Asymbol(1,2,3) reads F(dual1,1,2,2,0,3) = F(1,1,2,2,0,3): REAL.
+                (1, 1, 2, 2, 0, 3) => {
+                    GenericFArray::new(vec![Complex64::new(1.0, 0.0)], (1, 1, 1, 1))
+                }
+                // multi_associator seed for domain [3,3]->3 folded onto b=2: COMPLEX.
+                (1, 3, 3, 2, 2, 3) => GenericFArray::new(vec![c2c_w()], (1, 1, 1, 1)),
+                _ => {
+                    let shape = (
+                        self.nsymbol(a, b, e),
+                        self.nsymbol(e, c, d),
+                        self.nsymbol(b, c, f),
+                        self.nsymbol(a, f, d),
+                    );
+                    if shape == (1, 1, 1, 1) {
+                        GenericFArray::new(vec![Complex64::new(1.0, 0.0)], shape)
+                    } else {
+                        panic!("Coeff2ConjRule: unmodelled non-singleton F{ids:?} shape={shape:?}");
+                    }
+                }
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![Complex64::new(1.0, 0.0)], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for Coeff2ConjRule {
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+    }
+
+    // Test A: `multi_Fmove_inv` alone returns conj(associator) on complex F.
+    #[test]
+    fn refute_b2b_multi_fmove_inv_is_conj_associator_complex() {
+        let rule = Coeff2ConjRule;
+        let s1 = SectorId::new(1);
+        let s3 = SectorId::new(3);
+        let w = c2c_w();
+        // domain tree [3,3] -> 3 (single vertex); leading dual(a)=1, target b=2.
+        let domain = FusionTreeKey::new(
+            [s3, s3],
+            Some(s3),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .with_has_multiplicity(true);
+        let terms =
+            generic_multi_fmove_inv_tree(&rule, s1, SectorId::new(2), &domain, true).unwrap();
+        assert_eq!(terms.len(), 1, "expected a single recoupled candidate");
+        let (_, coeff) = &terms[0];
+        assert_eq!(coeff.len(), 1, "coeff2 must be length-1 here");
+        // Independent TK reading: inv coeff = conj(seed associator) = conj(w).
+        assert!(
+            (coeff[0] - w.conj()).norm() < 1e-12,
+            "multi_Fmove_inv gave {} want conj(w)={} (A2 conj missing?)",
+            coeff[0],
+            w.conj()
+        );
+        // Discriminating: conj(w) must differ from w so the check has teeth.
+        assert!((w - w.conj()).norm() > 0.1, "w not complex enough");
+    }
+
+    // Test B: foldright net observable = raw associator w (the two conjs cancel).
+    // A single dropped conj at EITHER site would surface as conj(w).
+    #[test]
+    fn refute_b2b_foldright_net_is_raw_associator_complex() {
+        let rule = Coeff2ConjRule;
+        let s1 = SectorId::new(1);
+        let s2 = SectorId::new(2);
+        let s3 = SectorId::new(3);
+        let w = c2c_w();
+        // codomain [1,2] -> 3 (coeff1 = unit, A = Asymbol(1,2,3) real = 1),
+        // domain [3,3] -> 3 (drives complex coeff2).
+        let codomain =
+            FusionTreeKey::new([s1, s2], Some(s3), [false, false], [], [SectorId::new(1)])
+                .with_has_multiplicity(true);
+        let domain =
+            FusionTreeKey::new([s3, s3], Some(s3), [false, false], [], [SectorId::new(1)])
+                .with_has_multiplicity(true);
+        let pair = FusionTreeBlockKey::pair(codomain, domain);
+        let out = generic_foldright_tree_pair(&rule, &pair).unwrap();
+        assert_eq!(out.len(), 1, "expected a single folded term");
+        let coeff = out[0].1;
+        assert!(
+            (coeff - w).norm() < 1e-12,
+            "foldright net = {coeff} want raw associator w={w} (odd # of conj slips ⇒ conj(w))"
+        );
+        // The wrong (single-conj-dropped) answer is conj(w); prove distinguishable.
+        assert!(
+            (coeff - w.conj()).norm() > 0.1,
+            "test cannot discriminate conj(w) from w"
+        );
+    }
+
     // ============ Residual (a): real non-diagonal SU(3) B-symbol ============
     //
     // B2a's A4 bend oracle could NOT discriminate a μ↔ν B-matrix transpose:
