@@ -23,9 +23,31 @@ fn su3_space_construction_and_dim() {
     // dual is an involution and preserves the total dim.
     assert_eq!(v.dual().dim(), v.dim());
     assert_eq!(v.dual().dual(), v);
-    // Out-of-table irrep is rejected (label API — sectors()/degeneracy() — is
-    // deferred to B3c to avoid a breaking public SectorLabel variant).
+    // Out-of-table irrep is rejected.
     assert!(Space::su3([((5, 5), 1)]).is_err()); // dim(5,5) > 27
+}
+
+#[test]
+fn su3_sector_readback_is_nonbreaking() {
+    // Stage B3c-2: SU(3) read-back rides dedicated `(p, q)` accessors, NOT an
+    // `SectorLabel::Su3` variant — the public enum (and every downstream
+    // exhaustive match on it, e.g. finite-torus) stays untouched.
+    let v = v();
+    // Sorted by internal sector id; `((p, q), deg)` round-trips the constructor.
+    let mut got = v.su3_sectors().unwrap();
+    got.sort();
+    assert_eq!(got, vec![((0, 1), 1), ((1, 0), 2)]);
+    // Per-label degeneracy lookups.
+    assert_eq!(v.su3_degeneracy(1, 0).unwrap(), Some(2));
+    assert_eq!(v.su3_degeneracy(0, 1).unwrap(), Some(1));
+    assert_eq!(v.su3_degeneracy(1, 1).unwrap(), None); // 8 absent from this leg
+    assert!(v.su3_degeneracy(5, 5).is_err()); // out of table
+                                              // dual() reports the dualized external sectors (3 <-> 3̄).
+    let mut dual = v.dual().su3_sectors().unwrap();
+    dual.sort();
+    assert_eq!(dual, vec![((0, 1), 2), ((1, 0), 1)]);
+    // Rule guard: SU(3) accessor on a non-SU(3) space errors, and vice versa.
+    assert!(Space::su2([(0, 1)]).su3_sectors().is_err());
 }
 
 #[test]

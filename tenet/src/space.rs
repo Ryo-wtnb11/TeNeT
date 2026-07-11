@@ -32,8 +32,9 @@ pub enum SectorLabel {
     },
     // NOTE: no SU(3) variant. Adding one would break every downstream
     // exhaustive `match` on this public enum (a real consumer does exactly
-    // that), so the SU(3) label read-back API (`sectors`/`degeneracy`) is
-    // deferred to Stage B3c — it is not needed by permute/braid/transpose. The
+    // that). The SU(3) label read-back is therefore a *separate*, non-breaking
+    // accessor — [`Space::su3_sectors`] / [`Space::su3_degeneracy`], returning
+    // the concrete `(p, q)` Dynkin labels — instead of an enum variant. The
     // internal `RuleKind::Su3` (pub(crate)) does not leak, so the shared
     // dispatch enum can grow without a downstream break.
 }
@@ -481,9 +482,9 @@ impl Space {
                 }
             }
             RuleKind::Su3 => unimplemented!(
-                "SU(3) sector label read-back (`sectors`/`degeneracy`) is Stage B3c; \
-                 it would require a public `SectorLabel::Su3` variant, which breaks \
-                 downstream exhaustive matches. permute/braid/transpose do not need it."
+                "SU(3) sectors do not fit the `SectorLabel` enum without a breaking \
+                 `Su3` variant; use the dedicated non-breaking accessors \
+                 `Space::su3_sectors` / `Space::su3_degeneracy` instead."
             ),
         }
     }
@@ -553,6 +554,49 @@ impl Space {
             .iter()
             .find(|&&(s, _)| s == sector)
             .map(|&(_, deg)| deg)
+    }
+
+    /// SU(3) sector read-back: the `((p, q), degeneracy)` content of an SU(3)
+    /// space in the same `(p, q)` Dynkin-label form [`Self::su3`] accepts,
+    /// sorted by internal sector id (external sectors, as [`Self::sectors`]).
+    ///
+    /// This is the SU(3) analog of [`Self::sectors`]. It is a *separate*
+    /// accessor rather than an `SectorLabel::Su3` variant on purpose: adding a
+    /// variant to the public [`SectorLabel`] enum breaks every downstream
+    /// exhaustive `match` (a real consumer does exactly that), so the
+    /// non-breaking read-back is a dedicated method returning the concrete
+    /// `(p, q)` labels. [`Error::RuleMismatch`] on a non-SU(3) space.
+    pub fn su3_sectors(&self) -> Result<Vec<((u8, u8), usize)>, Error> {
+        if self.rule != RuleKind::Su3 {
+            return Err(Error::RuleMismatch);
+        }
+        let rule = Su3FusionRule::new();
+        Ok(self
+            .sectors
+            .iter()
+            .map(|&(sector, deg)| (rule.dynkin(sector), deg))
+            .collect())
+    }
+
+    /// SU(3) sibling of [`Self::degeneracy`]: degeneracy of the `(p, q)` irrep
+    /// (external label), `None` when the sector is absent from this space.
+    /// [`Error::RuleMismatch`] on a non-SU(3) space, [`Error::InvalidArgument`]
+    /// for a `(p, q)` outside the `dim <= 27` table.
+    pub fn su3_degeneracy(&self, p: u8, q: u8) -> Result<Option<usize>, Error> {
+        if self.rule != RuleKind::Su3 {
+            return Err(Error::RuleMismatch);
+        }
+        let rule = Su3FusionRule::new();
+        let sector = rule.sector_of(p, q).ok_or_else(|| {
+            Error::InvalidArgument(format!(
+                "SU(3) irrep ({p},{q}) is outside the dim<=27 table"
+            ))
+        })?;
+        Ok(self
+            .sectors
+            .iter()
+            .find(|&&(s, _)| s == sector)
+            .map(|&(_, deg)| deg))
     }
 
     /// The fused space `V1 ⊗ V2` collapsed to a single leg: every fusion
