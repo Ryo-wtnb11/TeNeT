@@ -755,6 +755,71 @@ where
     Ok(total)
 }
 
+/// Generic-fusion (Stage B3c-2) sibling of [`weighted_trace`] for an
+/// outer-multiplicity rule (SU(N)): identical diagonal-block walk; the weight
+/// is `dim(c) = sqrt_dim(c)²` and the twist is 1 (SU(N) is bosonic —
+/// `GenericRigidSymbols` deliberately carries no twist because no non-bosonic
+/// Generic rule ships; the contraction engine guards the same assumption).
+/// A vertex-labelled (OM) block contributes only when its codomain and domain
+/// trees coincide INCLUDING the vertex labels — off-diagonal vertex pairs are
+/// off the coupled-block diagonal exactly like any other tree mismatch.
+fn weighted_trace_generic<R, D>(
+    rule: &R,
+    structure: &BlockStructure,
+    nout: usize,
+    data: &[D],
+) -> Result<Complex64, Error>
+where
+    R: tenet_core::GenericRigidSymbols<Scalar = f64>,
+    D: UserScalar,
+{
+    let mut total = Complex64::new(0.0, 0.0);
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let key = match block.key() {
+            BlockKey::FusionTree(key) => key,
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "tr() requires fusion-tree blocks".to_string(),
+                ))
+            }
+        };
+        if key.codomain_tree() != key.domain_tree() {
+            continue;
+        }
+        let coupled = key
+            .codomain_tree()
+            .coupled()
+            .unwrap_or_else(|| rule.vacuum());
+        let sqrt = rule.sqrt_dim_scalar(coupled);
+        let weight = sqrt * sqrt;
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let count: usize = shape[..nout].iter().product();
+        let mut indices = vec![0usize; nout];
+        let mut partial = D::from_real(0.0);
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, &i)| i * strides[axis] + i * strides[nout + axis])
+                    .sum::<usize>();
+            partial = partial + data[position];
+            for axis in 0..nout {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+        total += partial.widen_complex() * weight;
+    }
+    Ok(total)
+}
+
 /// Quantum-dimension-weighted block trace of an endomorphism:
 /// `sum_c dim(c) * tr(b_c)`, matching TensorKit's `tr` (`linalg.jl`, the
 /// native `sum_c dim(c) * tr(block)`). Only fusion-tree blocks whose codomain
@@ -1572,19 +1637,33 @@ impl Tensor {
     /// takes (`convert(TensorMap, ::AdjointTensorMap)`) when an adjoint is
     /// consumed by something other than a contraction.
     fn materialize_adjoint(&self, parent_space: &DynamicFusionMapSpace) -> Data {
+        // SU(N) (Generic): materialize through the generic block-relabel sibling.
+        // The result is a genuine (non-lazy) SU(N) tensor's coupled data, so a
+        // downstream consumer (norm/svd/contract) never has to fold a conjugate
+        // through the mult-free-only Structure route — the route whose
+        // non-self-dual coupled-sector mislabel bug the mult-free lazy-adjoint
+        // fold was fixed for. SU(3) is non-self-dual (3 <-> 3̄), so materializing
+        // here (rather than folding) is the deliberate, mislabel-proof choice.
+        macro_rules! adjoint_dyn_dispatch {
+            ($rule:ident, $parent:expr) => {
+                if self.rule == RuleKind::Su3 {
+                    tenet_tensors::adjoint_dyn_generic(&Su3FusionRule::new(), parent_space, $parent)
+                } else {
+                    with_rule!(self.rule, $rule, {
+                        tenet_tensors::adjoint_dyn($rule, parent_space, $parent)
+                    })
+                }
+            };
+        }
         match self.data.as_ref() {
             Data::F64(parent) => {
-                let (_space, out) = with_rule!(self.rule, rule, {
-                    tenet_tensors::adjoint_dyn(rule, parent_space, parent)
-                })
-                .expect("adjoint_dyn is total on a tensor's own space");
+                let (_space, out) = adjoint_dyn_dispatch!(rule, parent)
+                    .expect("adjoint_dyn is total on a tensor's own space");
                 Data::F64(out)
             }
             Data::C64(parent) => {
-                let (_space, out) = with_rule!(self.rule, rule, {
-                    tenet_tensors::adjoint_dyn(rule, parent_space, parent)
-                })
-                .expect("adjoint_dyn is total on a tensor's own space");
+                let (_space, out) = adjoint_dyn_dispatch!(rule, parent)
+                    .expect("adjoint_dyn is total on a tensor's own space");
                 Data::C64(out)
             }
             Data::Diagonal(_) => unreachable!("adjoint() densifies diagonal storage first"),
@@ -1941,10 +2020,12 @@ impl Tensor {
         let rhs_axes: Vec<usize> = (0..rhs.codomain_rank()).collect();
         // `contract` twists the dual contracted rhs legs (tensorcontract!
         // parity); the twist is involutive (θ = ±1), so pre-twisting those
-        // legs cancels it exactly and yields mul! semantics.
-        let fermionic = with_rule!(self.rule, rule, {
-            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
-        });
+        // legs cancels it exactly and yields mul! semantics. SU(N) (Generic)
+        // is bosonic and cannot ride the mult-free `with_rule!` binding.
+        let fermionic = self.rule != RuleKind::Su3
+            && with_rule!(self.rule, rule, {
+                rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
+            });
         if fermionic {
             let hom = rhs.space.homspace();
             let dual_legs: Vec<usize> = rhs_axes
@@ -1986,6 +2067,31 @@ impl Tensor {
         }
         open_axes(lhs_axes, self.rank())?;
         open_axes(rhs_axes, rhs.rank())?;
+        // SU(N) (Generic): a lazy-adjoint operand is materialized to plain
+        // coupled data BEFORE contracting, rather than folded into the GEMM seam.
+        // The mult-free seam folds a conjugate via its Structure route, whose
+        // non-self-dual coupled-sector mislabel was the historical bug; SU(3) is
+        // non-self-dual (3 <-> 3̄), so we route it through the mislabel-proof
+        // eager materialization (`materialize_adjoint`, generic block-relabel)
+        // instead. `scale(1.0)` reads `coupled_data` — the materialization point —
+        // and returns an ordinary (non-lazy) tensor, so both operands then take
+        // the direct core/compose GEMM with no conjugate flag. Gated on `Su3` to
+        // keep the mult-free seam byte-for-byte unchanged (the χ32 guarantee).
+        if self.rule == RuleKind::Su3
+            && (self.adjoint_source.is_some() || rhs.adjoint_source.is_some())
+        {
+            let lhs = if self.adjoint_source.is_some() {
+                self.scale(1.0)?
+            } else {
+                self.clone()
+            };
+            let rhs = if rhs.adjoint_source.is_some() {
+                rhs.scale(1.0)?
+            } else {
+                rhs.clone()
+            };
+            return lhs.contract(&rhs, lhs_axes, rhs_axes);
+        }
         // Order-parity fast path for a real diagonal operand (#75): instead of
         // densifying it to an O(d²) block-diagonal and running an O(d²·n) GEMM,
         // scale the OTHER operand's contracted leg by the spectrum (O(d·n)) and
@@ -2050,6 +2156,34 @@ impl Tensor {
                 lhs_axes,
                 rhs_axes,
             );
+        }
+        // SU(N) (Generic), Stage B3c-2 source-transform route: the direct GEMM
+        // engine only accepts core/compose form (lhs contracted axes == its whole
+        // domain in order, rhs contracted axes == its whole codomain in order).
+        // Any other arrangement is canonicalized here by composing ALREADY
+        // TK-pinned primitives — one generic permute per operand (the B3a tree
+        // transform, which carries all the recoupling) followed by the core
+        // contract — so this wiring adds no mathematics of its own; the route-
+        // equivalence gate pins `contract == explicit permute + core contract`.
+        // Recursion is bounded: the permuted arrangement is canonical by
+        // construction, so the recursive call falls through to the seam below.
+        // Placed after the diagonal fast paths so a diagonal bond operand keeps
+        // its O(d·n) scaling route, and after the adjoint materialization so
+        // operands here are plain dense tensors.
+        if self.rule == RuleKind::Su3 {
+            let canonical_lhs = (self.codomain_rank()..self.rank()).collect::<Vec<_>>();
+            let canonical_rhs = (0..rhs.codomain_rank()).collect::<Vec<_>>();
+            if lhs_axes != canonical_lhs.as_slice() || rhs_axes != canonical_rhs.as_slice() {
+                let lhs_open: Vec<usize> =
+                    (0..self.rank()).filter(|a| !lhs_axes.contains(a)).collect();
+                let rhs_open: Vec<usize> =
+                    (0..rhs.rank()).filter(|a| !rhs_axes.contains(a)).collect();
+                let lhs = self.permute(&lhs_open, lhs_axes)?;
+                let rhs = rhs.permute(rhs_axes, &rhs_open)?;
+                let contracted = (lhs_open.len()..lhs.rank()).collect::<Vec<_>>();
+                let rhs_contracted = (0..rhs_axes.len()).collect::<Vec<_>>();
+                return lhs.contract(&rhs, &contracted, &rhs_contracted);
+            }
         }
         // Fold a lazy-adjoint operand into the GEMM with no copy. The adjoint is
         // transpose (codomain<->domain) + elementwise conjugate; both fold into
@@ -2160,16 +2294,18 @@ impl Tensor {
         let mut state = self.rt.lock();
         // SU(N) (Generic): dedicated non-macro core/compose route — the mult-free
         // `with_rule_ctx!` binding cannot host a Generic rule. Only the
-        // fully-direct GEMM (compose) route is wired: the block GEMM is
+        // fully-direct GEMM (compose) route runs here: the block GEMM is
         // symmetry-agnostic and the outer-multiplicity vertices ride in the
         // fusion-tree keys, so an OM vertex is summed by the contracted-tree
-        // GEMM. A conjugated/adjoint operand, or a contraction needing source
-        // tree-pair transforms, is Stage B3c-2 (clear error, no silent path).
+        // GEMM. `contract` guarantees the operands arrive in core/compose form
+        // (non-core arrangements are canonicalized by generic permutes upstream,
+        // Stage B3c-2) and materializes lazy adjoints, so a conjugate flag here
+        // is a routing bug, not user input.
         if self.rule == RuleKind::Su3 {
             if lhs_conj || rhs_conj {
                 return Err(Error::InvalidArgument(
-                    "SU(N) contraction with a conjugated / lazy-adjoint operand is not yet \
-                     supported (Stage B3c-2); materialize the adjoint explicitly"
+                    "internal: SU(N) contraction reached the seam with a conjugate flag; \
+                     lazy adjoints must be materialized upstream (contract() does this)"
                         .to_string(),
                 ));
             }
@@ -2454,6 +2590,16 @@ impl Tensor {
     /// rules apply the categorical trace coefficients (quantum-dimension
     /// factors, and twists for fermionic rules: the supertrace).
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        // SU(N) (Generic): the partial-trace engine rides the mult-free
+        // recoupling (`multiplicity_free_permute_tree_pair`); its generic
+        // sibling is Stage B3c-3. Full trace (`tr`) IS wired generically.
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::InvalidArgument(
+                "SU(3) partial trace (trace_pairs) is not yet wired (Stage B3c-3); \
+                 tr() supports SU(3)"
+                    .to_string(),
+            ));
+        }
         let rank = self.rank();
         let mut seen = vec![false; rank];
         for &(lhs, rhs) in pairs {
@@ -2533,6 +2679,24 @@ impl Tensor {
         // compile, rank-0 destination allocation, and kernel dispatch that the
         // former `trace_pairs` route paid to produce a single scalar.
         let nout = self.codomain_rank();
+        // SU(N) (Generic): same block-local weighted trace through the
+        // generic-dim sibling (mult-free `with_rule!` cannot host it).
+        if self.rule == RuleKind::Su3 {
+            let rule = Su3FusionRule::new();
+            return match self.coupled_data() {
+                Data::F64(data) => {
+                    weighted_trace_generic(&rule, self.space.structure(), nout, data)
+                        .map(|v| Scalar::F64(v.re))
+                }
+                Data::C64(data) => {
+                    weighted_trace_generic(&rule, self.space.structure(), nout, data)
+                        .map(Scalar::C64)
+                }
+                Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
+                #[cfg(feature = "cuda")]
+                Data::CudaF64(_) => Err(device_unsupported("tr()")),
+            };
+        }
         match self.coupled_data() {
             Data::F64(data) => with_rule!(self.rule, rule, {
                 weighted_trace(rule, self.space.structure(), nout, data).map(|v| Scalar::F64(v.re))
@@ -2577,9 +2741,18 @@ impl Tensor {
                 materialized: OnceLock::new(),
             });
         }
-        let adjoint_space = with_rule!(self.rule, rule, {
-            tenet_tensors::adjoint_space_dyn(rule, &self.space)
-        })?;
+        // SU(N) (Generic): the adjoint space is a pure codomain/domain swap +
+        // per-block transpose (no leg bending, no recoupling), so it takes the
+        // generic key-enumeration sibling. The lazy `adjoint_source` machinery
+        // is symmetry-agnostic (metadata only) and shared with the mult-free
+        // path below.
+        let adjoint_space = if self.rule == RuleKind::Su3 {
+            tenet_tensors::adjoint_space_dyn_generic(&Su3FusionRule::new(), &self.space)?
+        } else {
+            with_rule!(self.rule, rule, {
+                tenet_tensors::adjoint_space_dyn(rule, &self.space)
+            })?
+        };
         Ok(Self {
             rt: self.rt.clone(),
             rule: self.rule,
@@ -2805,9 +2978,15 @@ impl Tensor {
         spectrum: Vec<SectorSpectrum<f64>>,
         complex: bool,
     ) -> Result<Self, Error> {
-        let space = with_rule!(self.rule, rule, {
-            tenet_matrixalgebra::diagonal_bond_space(rule, &spectrum)
-        })?;
+        // SU(N) (Generic): the bond space is a rank-1/rank-1 hom whose trees
+        // are trivial, but the key enumeration must still be the generic one.
+        let space = if self.rule == RuleKind::Su3 {
+            tenet_matrixalgebra::diagonal_bond_space_generic(&Su3FusionRule::new(), &spectrum)
+        } else {
+            with_rule!(self.rule, rule, {
+                tenet_matrixalgebra::diagonal_bond_space(rule, &spectrum)
+            })
+        }?;
         let data = if complex {
             DiagonalData::RealC64(spectrum)
         } else {
@@ -2948,14 +3127,25 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
-            let (u, vh, spectrum) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_compact_factors_dyn(
+            // SU(N) (Generic): the block-level SVD engine is symmetry-agnostic;
+            // only the factor-space builders differ (multiplicity-aware keys).
+            let (u, vh, spectrum) = if self.rule == RuleKind::Su3 {
+                tenet_matrixalgebra::svd_compact_factors_dyn_generic(
                     &mut *state.dense,
-                    rule,
+                    &Su3FusionRule::new(),
                     &self.space,
                     data,
                 )
-            })?;
+            } else {
+                with_rule!(self.rule, rule, {
+                    tenet_matrixalgebra::svd_compact_factors_dyn(
+                        &mut *state.dense,
+                        rule,
+                        &self.space,
+                        data,
+                    )
+                })
+            }?;
             Ok((
                 self.from_dyn(u),
                 self.from_diagonal_real_spectrum(spectrum, complex)?,
@@ -2967,6 +3157,15 @@ impl Tensor {
     /// Full SVD `t = u * s * vh` (MatrixAlgebraKit `svd_full`): square
     /// unitaries per sector, rectangular diagonal `s`.
     pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
+        // ponytail: the square-unitary completion path has no generic sibling
+        // yet — svd_compact/svd_trunc cover the physics workflows; add the
+        // `build_left_right_pair_generic` chain in B3c-3 if a caller needs it.
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::InvalidArgument(
+                "SU(3) svd_full is not yet wired (Stage B3c-3); use svd_compact or svd_trunc"
+                    .to_string(),
+            ));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -2994,15 +3193,27 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
-            let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_trunc_dyn(
+            // SU(N) (Generic): same engine, generic factor spaces, and the
+            // integer-rounded sqrt_dim² truncation weight.
+            let out = if self.rule == RuleKind::Su3 {
+                tenet_matrixalgebra::svd_trunc_dyn_generic(
                     &mut *state.dense,
-                    rule,
+                    &Su3FusionRule::new(),
                     &self.space,
                     data,
                     truncation,
                 )
-            })?;
+            } else {
+                with_rule!(self.rule, rule, {
+                    tenet_matrixalgebra::svd_trunc_dyn(
+                        &mut *state.dense,
+                        rule,
+                        &self.space,
+                        data,
+                        truncation,
+                    )
+                })
+            }?;
             Ok(SvdTrunc {
                 u: self.from_dyn(out.u),
                 s: self.from_diagonal_real_spectrum(out.singular_values.clone(), complex)?,
@@ -3019,9 +3230,18 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
-            with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_vals_dyn(&mut *state.dense, rule, &self.space, data)
-            })
+            if self.rule == RuleKind::Su3 {
+                tenet_matrixalgebra::svd_vals_dyn_generic(
+                    &mut *state.dense,
+                    &Su3FusionRule::new(),
+                    &self.space,
+                    data,
+                )
+            } else {
+                with_rule!(self.rule, rule, {
+                    tenet_matrixalgebra::svd_vals_dyn(&mut *state.dense, rule, &self.space, data)
+                })
+            }
             .map_err(Into::into)
         })
     }
@@ -3036,9 +3256,18 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
-            let (q, r) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::qr_compact_dyn(&mut *state.dense, rule, &self.space, data)
-            })?;
+            let (q, r) = if self.rule == RuleKind::Su3 {
+                tenet_matrixalgebra::qr_compact_dyn_generic(
+                    &mut *state.dense,
+                    &Su3FusionRule::new(),
+                    &self.space,
+                    data,
+                )
+            } else {
+                with_rule!(self.rule, rule, {
+                    tenet_matrixalgebra::qr_compact_dyn(&mut *state.dense, rule, &self.space, data)
+                })
+            }?;
             Ok((self.from_dyn(q), self.from_dyn(r)))
         })
     }
@@ -3046,6 +3275,13 @@ impl Tensor {
     /// Full QR `t = q * r` (MatrixAlgebraKit `qr_full`): square `q` per
     /// sector.
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
+        // ponytail: see svd_full — the square-Q completion has no generic
+        // sibling yet (B3c-3); qr_compact covers left_orth and the workflows.
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::InvalidArgument(
+                "SU(3) qr_full is not yet wired (Stage B3c-3); use qr_compact".to_string(),
+            ));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3062,9 +3298,18 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
-            let (l, q) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::lq_compact_dyn(&mut *state.dense, rule, &self.space, data)
-            })?;
+            let (l, q) = if self.rule == RuleKind::Su3 {
+                tenet_matrixalgebra::lq_compact_dyn_generic(
+                    &mut *state.dense,
+                    &Su3FusionRule::new(),
+                    &self.space,
+                    data,
+                )
+            } else {
+                with_rule!(self.rule, rule, {
+                    tenet_matrixalgebra::lq_compact_dyn(&mut *state.dense, rule, &self.space, data)
+                })
+            }?;
             Ok((self.from_dyn(l), self.from_dyn(q)))
         })
     }
@@ -3072,6 +3317,12 @@ impl Tensor {
     /// Full LQ `t = l * q` (MatrixAlgebraKit `lq_full`): square `q` per
     /// sector.
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
+        // ponytail: see svd_full/qr_full (B3c-3); lq_compact covers right_orth.
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::InvalidArgument(
+                "SU(3) lq_full is not yet wired (Stage B3c-3); use lq_compact".to_string(),
+            ));
+        }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {

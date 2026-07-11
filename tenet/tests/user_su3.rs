@@ -23,9 +23,31 @@ fn su3_space_construction_and_dim() {
     // dual is an involution and preserves the total dim.
     assert_eq!(v.dual().dim(), v.dim());
     assert_eq!(v.dual().dual(), v);
-    // Out-of-table irrep is rejected (label API — sectors()/degeneracy() — is
-    // deferred to B3c to avoid a breaking public SectorLabel variant).
+    // Out-of-table irrep is rejected.
     assert!(Space::su3([((5, 5), 1)]).is_err()); // dim(5,5) > 27
+}
+
+#[test]
+fn su3_sector_readback_is_nonbreaking() {
+    // Stage B3c-2: SU(3) read-back rides dedicated `(p, q)` accessors, NOT an
+    // `SectorLabel::Su3` variant — the public enum (and every downstream
+    // exhaustive match on it, e.g. finite-torus) stays untouched.
+    let v = v();
+    // Sorted by internal sector id; `((p, q), deg)` round-trips the constructor.
+    let mut got = v.su3_sectors().unwrap();
+    got.sort();
+    assert_eq!(got, vec![((0, 1), 1), ((1, 0), 2)]);
+    // Per-label degeneracy lookups.
+    assert_eq!(v.su3_degeneracy(1, 0).unwrap(), Some(2));
+    assert_eq!(v.su3_degeneracy(0, 1).unwrap(), Some(1));
+    assert_eq!(v.su3_degeneracy(1, 1).unwrap(), None); // 8 absent from this leg
+    assert!(v.su3_degeneracy(5, 5).is_err()); // out of table
+                                              // dual() reports the dualized external sectors (3 <-> 3̄).
+    let mut dual = v.dual().su3_sectors().unwrap();
+    dual.sort();
+    assert_eq!(dual, vec![((0, 1), 2), ((1, 0), 1)]);
+    // Rule guard: SU(3) accessor on a non-SU(3) space errors, and vice versa.
+    assert!(Space::su2([(0, 1)]).su3_sectors().is_err());
 }
 
 #[test]
@@ -117,6 +139,61 @@ fn su3_adjoint_rank4_constructs_and_permutes() {
             (x - y).abs() < 1e-12,
             "rank-4 permute round-trip: {x} vs {y}"
         );
+    }
+}
+
+// Stage B3c-2 adjoint axioms on SU(3), which is NON-self-dual (3 <-> 3̄). The
+// adjoint materializes through the generic block-relabel sibling (never the
+// mult-free conjugate/Structure fold whose non-self-dual coupled-sector
+// mislabel was the historical bug), so `.scale(1.0)` is used to force the lazy
+// adjoint to materialize into owned coupled data before comparing.
+#[test]
+fn su3_adjoint_axioms_real() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    // Rank-2 endomorphism V <- V so the adjoint lands on the same coupled space.
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 21).unwrap();
+    assert!(!a.data().is_empty());
+
+    // norm(A†) == norm(A): materializes the adjoint (norm reads coupled data).
+    let ah = a.adjoint().unwrap();
+    assert!(
+        (ah.norm().unwrap() - a.norm().unwrap()).abs() < 1e-12,
+        "norm(A†) must equal norm(A)"
+    );
+
+    // A†† == A at the data level. Force materialization at each dagger with
+    // scale(1.0) so this exercises the block-relabel path, not the lazy
+    // involution short-circuit.
+    let ah_mat = a.adjoint().unwrap().scale(1.0).unwrap();
+    assert_ne!(ah_mat.data(), a.data(), "adjoint must move data");
+    let ahh = ah_mat.adjoint().unwrap().scale(1.0).unwrap();
+    assert_eq!(ahh.data().len(), a.data().len());
+    for (x, y) in ahh.data().iter().zip(a.data().iter()) {
+        assert!((x - y).abs() < 1e-12, "A†† round-trip: {x} vs {y}");
+    }
+}
+
+#[test]
+fn su3_adjoint_axioms_complex() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    // Complex tensor: adjoint conjugates, so A†† round-trips only if the
+    // generic materialization applies (and un-applies) the conjugate.
+    let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 22).unwrap();
+    assert!(!a.data_c64().is_empty());
+
+    let ah = a.adjoint().unwrap();
+    assert!(
+        (ah.norm().unwrap() - a.norm().unwrap()).abs() < 1e-12,
+        "norm(A†) must equal norm(A) for c64"
+    );
+
+    let ah_mat = a.adjoint().unwrap().scale(1.0).unwrap();
+    let ahh = ah_mat.adjoint().unwrap().scale(1.0).unwrap();
+    assert_eq!(ahh.data_c64().len(), a.data_c64().len());
+    for (x, y) in ahh.data_c64().iter().zip(a.data_c64().iter()) {
+        assert!((x - y).norm() < 1e-12, "c64 A†† round-trip: {x} vs {y}");
     }
 }
 

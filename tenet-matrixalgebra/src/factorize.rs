@@ -4,9 +4,9 @@ use std::sync::Arc;
 use num_complex::Complex64;
 use num_traits::Zero;
 use tenet_core::{
-    BlockKey, BlockStructure, CoreError, FusionProductSpace, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeRigidSymbols, SectorId, SectorLeg,
-    TensorMap, TensorMapSpace,
+    BlockKey, BlockStructure, CoreError, FusionProductSpace, FusionRule, FusionTensorMapSpace,
+    FusionTreeHomSpace, FusionTreeKey, GenericRigidSymbols, MultiplicityFreeRigidSymbols, SectorId,
+    SectorLeg, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
 
@@ -3659,4 +3659,965 @@ where
         );
     }
     Ok(matricizations)
+}
+
+// ============================================================================
+// Stage B3c-2: Generic-fusion (SU(N)) siblings.
+//
+// Parallel `*_generic` siblings of the mult-free factorization entry points.
+// The block-level engine — the dense SVD/QR per coupled sector, the gauges,
+// the workspace scatters, `diagonal_bond_data`, and every copy helper — is
+// symmetry-agnostic and SHARED. A sibling differs from its original in
+// exactly three substitutions:
+//   1. bound: `MultiplicityFreeRigidSymbols` -> `FusionRule` (or
+//      `GenericRigidSymbols` where the truncation weight needs rigid data);
+//   2. key enumeration: `fusion_tree_keys` -> `fusion_tree_keys_generic` and
+//      `from_degeneracy_shapes` -> `from_degeneracy_shapes_generic`, so the
+//      factor spaces carry multiplicity-aware (vertex-labelled) trees — the
+//      matricization already stacks ALL trees of a coupled sector into one
+//      dense block (TensorKit `block(t, c)`), so outer multiplicity rides the
+//      row/col tree lists with no math change;
+//   3. truncation dim weight: `dim_scalar(c)` -> `sqrt_dim(c)²` rounded to the
+//      nearest integer (SU(N) quantum dimensions are integers; the rounding
+//      keeps `Truncation::Rank` boundary comparisons exact), matching the
+//      mult-free weighted-truncation convention.
+// Duplicated rather than bound-relaxed so the mult-free path stays
+// byte-for-byte untouched (the B-series byte-invariance rule; the same
+// rationale as the B3c-1 `is_core_form_..._generic` sibling).
+// ============================================================================
+
+fn coupled_of_generic<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
+where
+    R: FusionRule,
+{
+    tree.coupled().unwrap_or_else(|| rule.vacuum())
+}
+
+/// Generic sibling of [`sector_matricizations`]: identical two-pass stacking
+/// (vertex-labelled trees are distinct keys, so OM trees get distinct rows /
+/// columns of the coupled block, exactly TensorKit's `block(t, c)` layout).
+fn sector_matricizations_generic<R, D>(
+    rule: &R,
+    structure: &BlockStructure,
+    data: &[D],
+    nout: usize,
+) -> Result<Vec<SectorMatricization<D>>, OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
+
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "tsvd",
+                index,
+            });
+        };
+        let sector = coupled_of_generic(rule, key.codomain_tree());
+        let row_dim: usize = block.shape()[..nout].iter().product();
+        let col_dim: usize = block.shape()[nout..].iter().product();
+        let matrix = match matricizations
+            .iter_mut()
+            .find(|matrix| matrix.sector == sector)
+        {
+            Some(matrix) => matrix,
+            None => {
+                matricizations.push(SectorMatricization::<D> {
+                    sector,
+                    rows: 0,
+                    cols: 0,
+                    row_trees: Vec::new(),
+                    col_trees: Vec::new(),
+                    data: Vec::new(),
+                });
+                matricizations.last_mut().expect("just pushed")
+            }
+        };
+        if !matrix
+            .row_trees
+            .iter()
+            .any(|(tree, _, _)| tree == key.codomain_tree())
+        {
+            matrix.row_trees.push((
+                key.codomain_tree().clone(),
+                matrix.rows,
+                block.shape()[..nout].to_vec(),
+            ));
+            matrix.rows += row_dim;
+        }
+        if !matrix
+            .col_trees
+            .iter()
+            .any(|(tree, _, _)| tree == key.domain_tree())
+        {
+            matrix.col_trees.push((
+                key.domain_tree().clone(),
+                matrix.cols,
+                block.shape()[nout..].to_vec(),
+            ));
+            matrix.cols += col_dim;
+        }
+    }
+    for matrix in &mut matricizations {
+        matrix.data = vec![D::zero(); matrix.rows * matrix.cols];
+    }
+
+    for index in 0..structure.block_count() {
+        let block = structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let sector = coupled_of_generic(rule, key.codomain_tree());
+        let matrix = matricizations
+            .iter_mut()
+            .find(|matrix| matrix.sector == sector)
+            .expect("matricization registered in first pass");
+        let row_offset = matrix
+            .row_trees
+            .iter()
+            .find(|(tree, _, _)| tree == key.codomain_tree())
+            .map(|(_, offset, _)| *offset)
+            .expect("row tree registered in first pass");
+        let col_offset = matrix
+            .col_trees
+            .iter()
+            .find(|(tree, _, _)| tree == key.domain_tree())
+            .map(|(_, offset, _)| *offset)
+            .expect("column tree registered in first pass");
+
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let rows = matrix.rows;
+        copy_tensor_block_to_matrix(
+            data,
+            shape,
+            strides,
+            offset,
+            nout,
+            &mut matrix.data,
+            rows,
+            row_offset,
+            col_offset,
+        );
+    }
+    Ok(matricizations)
+}
+
+/// Generic sibling of [`build_left_right_spaces`].
+fn build_left_right_spaces_generic<R, D>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    ranks: &[SectorRank],
+) -> Result<(DynamicFusionMapSpace, DynamicFusionMapSpace), OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let rank_by_sector: HashMap<SectorId, usize> =
+        ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
+    let matrix_by_sector = matricization_map(matricizations);
+    let sector_rank =
+        |sector: SectorId| -> usize { rank_by_sector.get(&sector).copied().unwrap_or(0) };
+
+    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+
+    let left_hom = FusionTreeHomSpace::new(
+        homspace.codomain().clone(),
+        FusionProductSpace::new([new_leg.clone()]),
+    );
+    let left_keys = left_hom
+        .fusion_tree_keys_generic(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let left_shapes = left_keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of_generic(rule, key.codomain_tree());
+            let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
+            shape.push(sector_rank(sector));
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+    let left_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes_generic(rule, left_hom, left_shapes)?;
+
+    let right_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg]),
+        homspace.domain().clone(),
+    );
+    let right_keys = right_hom
+        .fusion_tree_keys_generic(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let right_shapes = right_keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of_generic(rule, key.domain_tree());
+            let mut shape = vec![sector_rank(sector)];
+            shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+    let right_space =
+        DynamicFusionMapSpace::from_degeneracy_shapes_generic(rule, right_hom, right_shapes)?;
+
+    Ok((left_space, right_space))
+}
+
+/// Generic sibling of [`scatter_left_sector_blocks`].
+fn scatter_left_sector_blocks_generic<R, D>(
+    rule: &R,
+    left_space: &DynamicFusionMapSpace,
+    left_data: &mut [D],
+    matrix: &SectorMatricization<D>,
+    factor: &[D],
+    factor_rows: usize,
+) -> Result<(), OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let left_structure = Arc::clone(left_space.structure());
+    for index in 0..left_structure.block_count() {
+        let block = left_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        if coupled_of_generic(rule, key.codomain_tree()) != matrix.sector {
+            continue;
+        }
+        let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
+        scatter_matrix_block(
+            left_data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            block.shape().len() - 1,
+            factor,
+            factor_rows,
+            row_offset,
+        );
+    }
+    Ok(())
+}
+
+/// Generic sibling of [`scatter_right_sector_blocks`].
+fn scatter_right_sector_blocks_generic<R, D>(
+    rule: &R,
+    right_space: &DynamicFusionMapSpace,
+    right_data: &mut [D],
+    matrix: &SectorMatricization<D>,
+    factor: &[D],
+    factor_rows: usize,
+) -> Result<(), OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let right_structure = Arc::clone(right_space.structure());
+    for index in 0..right_structure.block_count() {
+        let block = right_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        if coupled_of_generic(rule, key.domain_tree()) != matrix.sector {
+            continue;
+        }
+        let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
+        scatter_matrix_block(
+            right_data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            0,
+            factor,
+            factor_rows,
+            col_offset,
+        );
+    }
+    Ok(())
+}
+
+/// Generic sibling of [`svd_compact_factors_dyn`] (SU(N)): identical dense
+/// per-sector SVD + gauge + scatter; only the space builders differ.
+pub fn svd_compact_factors_dyn_generic<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<SvdFactorsDyn<D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let matricizations =
+        sector_matricizations_generic(rule, space.structure(), data, space.nout())?;
+
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let (u_space, vt_space) =
+        build_left_right_spaces_generic(rule, space.homspace(), &matricizations, &ranks)?;
+    let u_len = u_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut u_data = vec![D::zero(); u_len];
+    let vt_len = vt_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut vt_data = vec![D::zero(); vt_len];
+
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut s_workspace = vec![D::Real::zero(); max_rank];
+    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
+    let mut singular_values = Vec::with_capacity(matricizations.len());
+
+    for matrix in &matricizations {
+        let rank = matrix.rows.min(matrix.cols);
+        let input_shape = [matrix.rows, matrix.cols];
+        let input_strides = [1usize, matrix.rows];
+        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let u_shape = [matrix.rows, rank];
+        let u_strides = [1usize, max_rows];
+        let s_shape = [rank];
+        let s_strides = [1usize];
+        let vt_shape = [rank, matrix.cols];
+        let vt_strides = [1usize, max_rank];
+        let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
+            .map_err(OperationError::Dense)?;
+        dense
+            .svd_into(
+                D::dense_read(input),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vt_view),
+            )
+            .map_err(OperationError::Dense)?;
+        svd_compact_gauge(
+            &mut u_workspace,
+            matrix.rows,
+            max_rows,
+            &mut vt_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+        );
+
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: s_workspace[..rank]
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect(),
+        });
+        scatter_left_sector_blocks_generic(
+            rule,
+            &u_space,
+            &mut u_data,
+            matrix,
+            &u_workspace,
+            max_rows,
+        )?;
+        scatter_right_sector_blocks_generic(
+            rule,
+            &vt_space,
+            &mut vt_data,
+            matrix,
+            &vt_workspace,
+            max_rank,
+        )?;
+    }
+
+    Ok(((u_space, u_data), (vt_space, vt_data), singular_values))
+}
+
+/// Generic sibling of [`diagonal_bond_space`].
+pub fn diagonal_bond_space_generic<R, V>(
+    rule: &R,
+    spectrum: &[SectorSpectrum<V>],
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: FusionRule,
+{
+    let new_leg = SectorLeg::new(
+        spectrum
+            .iter()
+            .map(|entry| (entry.sector, entry.values.len())),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg.clone()]),
+        FusionProductSpace::new([new_leg]),
+    );
+    let length_by_sector: HashMap<SectorId, usize> = spectrum
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
+    let keys = homspace
+        .fusion_tree_keys_generic(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let sector = coupled_of_generic(rule, key.codomain_tree());
+            let count = length_by_sector.get(&sector).copied().unwrap_or(0);
+            vec![count, count]
+        })
+        .collect::<Vec<_>>();
+    DynamicFusionMapSpace::from_degeneracy_shapes_generic(rule, homspace, shapes)
+}
+
+/// Generic sibling of [`diagonal_bond_tensor_dyn`] (`diagonal_bond_data` is
+/// rule-free and shared).
+pub(crate) fn diagonal_bond_tensor_dyn_generic<R, D, V>(
+    rule: &R,
+    singular_values: &[SectorSpectrum<V>],
+    to_scalar: &dyn Fn(V) -> D,
+) -> Result<DynFactor<D>, OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+    V: Copy,
+{
+    let space = diagonal_bond_space_generic(rule, singular_values)?;
+    let data = diagonal_bond_data(&space, singular_values, to_scalar)?;
+    Ok((space, data))
+}
+
+/// Generic sibling of [`svd_compact_dyn`].
+pub(crate) fn svd_compact_dyn_generic<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<SvdCompactDyn<D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let (u, vh, singular_values) = svd_compact_factors_dyn_generic(dense, rule, space, data)?;
+    let s = diagonal_bond_tensor_dyn_generic(rule, &singular_values, &D::from_real)?;
+    Ok(SvdCompactDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+    })
+}
+
+/// Generic sibling of [`svd_vals_dyn`].
+pub fn svd_vals_dyn_generic<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<Vec<SectorSpectrum>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let matricizations =
+        sector_matricizations_generic(rule, space.structure(), data, space.nout())?;
+    let mut singular_values = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let rank = matrix.rows.min(matrix.cols);
+        let input_shape = [matrix.rows, matrix.cols];
+        let input_strides = [1usize, matrix.rows];
+        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let s_tensor = dense
+            .svd_vals(D::dense_read(input))
+            .map_err(OperationError::Dense)?;
+        let mut s = D::real_spectrum(&s_tensor).map_err(OperationError::Dense)?;
+        s.truncate(rank);
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: s,
+        });
+    }
+    Ok(singular_values)
+}
+
+/// Generic sibling of [`decide_bond_truncation`]: the weight is
+/// `sqrt_dim(c)²` rounded to the nearest integer — SU(N) quantum dimensions
+/// are exact integers and `Truncation::Rank` compares cumulative weighted
+/// dimensions against an integer bound, so the fp square must not leak a
+/// `3.0000000000000004`.
+fn decide_bond_truncation_generic<R, V>(
+    rule: &R,
+    spectra: &[SectorSpectrum<V>],
+    truncation: &Truncation,
+    values_are_nonnegative: bool,
+) -> crate::truncation::TruncationDecision
+where
+    R: GenericRigidSymbols<Scalar = f64>,
+    V: SpectrumMagnitude,
+{
+    enum MagnitudeValues<'a> {
+        Borrowed(&'a [f64]),
+        Owned(Vec<f64>),
+    }
+
+    impl<'a> MagnitudeValues<'a> {
+        fn as_slice(&self) -> &[f64] {
+            match self {
+                MagnitudeValues::Borrowed(values) => values,
+                MagnitudeValues::Owned(values) => values,
+            }
+        }
+    }
+
+    let magnitudes: Vec<MagnitudeValues<'_>> = spectra
+        .iter()
+        .map(|entry| {
+            if values_are_nonnegative {
+                if let Some(values) = V::nonnegative_f64_slice(&entry.values) {
+                    return MagnitudeValues::Borrowed(values);
+                }
+            }
+            MagnitudeValues::Owned(entry.values.iter().map(|value| value.magnitude()).collect())
+        })
+        .collect();
+    let weighted: Vec<WeightedSpectrum<'_>> = spectra
+        .iter()
+        .zip(&magnitudes)
+        .map(|(entry, values)| {
+            let sqrt = rule.sqrt_dim_scalar(entry.sector);
+            WeightedSpectrum {
+                weight: (sqrt * sqrt).round(),
+                values: values.as_slice(),
+            }
+        })
+        .collect();
+    select_truncation(&weighted, truncation)
+}
+
+/// Generic sibling of [`sliced_bond_tensor`].
+fn sliced_bond_tensor_generic<R, D>(
+    rule: &R,
+    source_space: &DynamicFusionMapSpace,
+    source_data: &[D],
+    axis: usize,
+    kept_of: &dyn Fn(SectorId) -> usize,
+) -> Result<DynFactor<D>, OperationError>
+where
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let nout = source_space.nout();
+    let source_structure = Arc::clone(source_space.structure());
+
+    // The bond leg carries exactly the kept sectors.
+    let kept_sectors: Vec<SectorId> = {
+        let homspace = source_space.homspace();
+        let leg = if axis < nout {
+            &homspace.codomain().legs()[axis]
+        } else {
+            &homspace.domain().legs()[axis - nout]
+        };
+        leg.sectors()
+            .iter()
+            .copied()
+            .filter(|&sector| kept_of(sector) > 0)
+            .collect()
+    };
+    let bond_leg = SectorLeg::new(
+        kept_sectors.iter().map(|&sector| (sector, kept_of(sector))),
+        false,
+    );
+    let homspace = source_space.homspace();
+    let new_hom = if axis < nout {
+        let mut codomain_legs = homspace.codomain().legs().to_vec();
+        codomain_legs[axis] = bond_leg;
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain_legs),
+            homspace.domain().clone(),
+        )
+    } else {
+        let mut domain_legs = homspace.domain().legs().to_vec();
+        domain_legs[axis - nout] = bond_leg;
+        FusionTreeHomSpace::new(
+            homspace.codomain().clone(),
+            FusionProductSpace::new(domain_legs),
+        )
+    };
+
+    let keys = new_hom
+        .fusion_tree_keys_generic(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let shapes = keys
+        .iter()
+        .map(|key| {
+            let old_index = source_structure
+                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+                .ok_or(OperationError::UnsupportedTensorContractScope {
+                    message: "truncated factor tree must exist in the full factor",
+                })?;
+            let old_block = source_structure
+                .block(old_index)
+                .map_err(OperationError::from_core_preserving_context)?;
+            let mut shape = old_block.shape().to_vec();
+            let bond_tree = if axis < nout {
+                key.codomain_tree()
+            } else {
+                key.domain_tree()
+            };
+            shape[axis] = kept_of(coupled_of_generic(rule, bond_tree));
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+
+    let space = DynamicFusionMapSpace::from_degeneracy_shapes_generic(rule, new_hom, shapes)?;
+    let len = space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut data = vec![D::zero(); len];
+
+    let sliced_structure = Arc::clone(space.structure());
+    for index in 0..sliced_structure.block_count() {
+        let new_block = sliced_structure
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let key = new_block.key().clone();
+        let old_index = source_structure.find_block_index_by_key(&key).ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: "truncated factor tree must exist in the full factor",
+            },
+        )?;
+        let old_block = source_structure
+            .block(old_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let shape = new_block.shape().to_vec();
+        let new_strides = new_block.strides().to_vec();
+        let new_offset = new_block.offset();
+        let old_strides = old_block.strides().to_vec();
+        let old_offset = old_block.offset();
+        copy_matching_block_prefix(
+            source_data,
+            &old_strides,
+            old_offset,
+            &mut data,
+            &new_strides,
+            new_offset,
+            &shape,
+        );
+    }
+    Ok((space, data))
+}
+
+/// Generic sibling of [`truncate_svd_dyn`].
+pub(crate) fn truncate_svd_dyn_generic<R, D>(
+    rule: &R,
+    full: SvdCompactDyn<D>,
+    truncation: &Truncation,
+) -> Result<SvdTruncDyn<D>, OperationError>
+where
+    R: GenericRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let decision = decide_bond_truncation_generic(rule, &full.singular_values, truncation, true);
+    if full
+        .singular_values
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok(SvdTruncDyn {
+            u: full.u,
+            s: full.s,
+            vh: full.vh,
+            singular_values: full.singular_values,
+            error: 0.0,
+        });
+    }
+
+    let mut singular_values = full.singular_values;
+    for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    singular_values.retain(|entry| !entry.values.is_empty());
+    let kept_by_sector: HashMap<SectorId, usize> = singular_values
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
+
+    let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
+
+    let bond_axis = full.u.0.nout();
+    let u_factor = sliced_bond_tensor_generic(rule, &full.u.0, &full.u.1, bond_axis, &kept_of)?;
+    let vh_factor = sliced_bond_tensor_generic(rule, &full.vh.0, &full.vh.1, 0, &kept_of)?;
+    let s_factor = diagonal_bond_tensor_dyn_generic(rule, &singular_values, &D::from_real)?;
+    Ok(SvdTruncDyn {
+        u: u_factor,
+        s: s_factor,
+        vh: vh_factor,
+        singular_values,
+        error: decision.error,
+    })
+}
+
+/// Generic sibling of [`svd_trunc_dyn`].
+pub fn svd_trunc_dyn_generic<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+    truncation: &Truncation,
+) -> Result<SvdTruncDyn<D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: GenericRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let full = svd_compact_dyn_generic(dense, rule, space, data)?;
+    truncate_svd_dyn_generic(rule, full, truncation)
+}
+
+/// Generic sibling of [`qr_compact_dyn`].
+pub fn qr_compact_dyn_generic<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let matricizations =
+        sector_matricizations_generic(rule, space.structure(), data, space.nout())?;
+
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let (q_space, r_space) =
+        build_left_right_spaces_generic(rule, space.homspace(), &matricizations, &ranks)?;
+    let q_len = q_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut q_data = vec![D::zero(); q_len];
+    let r_len = r_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut r_data = vec![D::zero(); r_len];
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut q_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut r_workspace = vec![D::zero(); max_rank * max_cols];
+    for matrix in &matricizations {
+        let rank = matrix.rows.min(matrix.cols);
+        qr_into_workspace(
+            dense,
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            matrix.rows,
+            &mut q_workspace,
+            matrix.rows,
+            rank,
+            max_rows,
+            &mut r_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+        )?;
+        positive_diagonal_gauge_strided(
+            &mut q_workspace,
+            matrix.rows,
+            max_rows,
+            &mut r_workspace,
+            rank,
+            max_rank,
+            matrix.cols,
+        );
+        scatter_left_sector_blocks_generic(
+            rule,
+            &q_space,
+            &mut q_data,
+            matrix,
+            &q_workspace,
+            max_rows,
+        )?;
+        scatter_right_sector_blocks_generic(
+            rule,
+            &r_space,
+            &mut r_data,
+            matrix,
+            &r_workspace,
+            max_rank,
+        )?;
+    }
+
+    Ok(((q_space, q_data), (r_space, r_data)))
+}
+
+/// Generic sibling of [`lq_compact_dyn`].
+pub fn lq_compact_dyn_generic<E, R, D>(
+    dense: &mut E,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<(DynFactor<D>, DynFactor<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: FusionRule,
+    D: FactorScalar,
+{
+    let matricizations =
+        sector_matricizations_generic(rule, space.structure(), data, space.nout())?;
+
+    let ranks = matricizations
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let (l_space, q_space) =
+        build_left_right_spaces_generic(rule, space.homspace(), &matricizations, &ranks)?;
+    let l_len = l_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut l_data = vec![D::zero(); l_len];
+    let q_len = q_space
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut q_data = vec![D::zero(); q_len];
+    let max_rows = matricizations
+        .iter()
+        .map(|matrix| matrix.rows)
+        .max()
+        .unwrap_or(0);
+    let max_cols = matricizations
+        .iter()
+        .map(|matrix| matrix.cols)
+        .max()
+        .unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut transposed_workspace = vec![D::zero(); max_cols * max_rows];
+    let mut q_prime_workspace = vec![D::zero(); max_cols * max_rank];
+    let mut r_prime_workspace = vec![D::zero(); max_rank * max_rows];
+    let mut l_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut q_workspace = vec![D::zero(); max_rank * max_cols];
+    for matrix in &matricizations {
+        // QR of the adjoint: t^H = Q' R'  =>  t = R'^H Q'^H = L Q.
+        let rank = matrix.rows.min(matrix.cols);
+        adjoint_col_major_strided_into(
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            matrix.rows,
+            &mut transposed_workspace,
+            max_cols,
+        );
+        qr_into_workspace(
+            dense,
+            &transposed_workspace,
+            matrix.cols,
+            matrix.rows,
+            max_cols,
+            &mut q_prime_workspace,
+            matrix.cols,
+            rank,
+            max_cols,
+            &mut r_prime_workspace,
+            rank,
+            matrix.rows,
+            max_rank,
+        )?;
+        // Gauge the QR of t^H; L = R'^H then has a real non-negative diagonal.
+        positive_diagonal_gauge_strided(
+            &mut q_prime_workspace,
+            matrix.cols,
+            max_cols,
+            &mut r_prime_workspace,
+            rank,
+            max_rank,
+            matrix.rows,
+        );
+        // L = R'^H : rows x rank; Q = Q'^H : rank x cols.
+        adjoint_col_major_strided_into(
+            &r_prime_workspace,
+            rank,
+            matrix.rows,
+            max_rank,
+            &mut l_workspace,
+            max_rows,
+        );
+        adjoint_col_major_strided_into(
+            &q_prime_workspace,
+            matrix.cols,
+            rank,
+            max_cols,
+            &mut q_workspace,
+            max_rank,
+        );
+        scatter_left_sector_blocks_generic(
+            rule,
+            &l_space,
+            &mut l_data,
+            matrix,
+            &l_workspace,
+            max_rows,
+        )?;
+        scatter_right_sector_blocks_generic(
+            rule,
+            &q_space,
+            &mut q_data,
+            matrix,
+            &q_workspace,
+            max_rank,
+        )?;
+    }
+
+    Ok(((l_space, l_data), (q_space, q_data)))
 }

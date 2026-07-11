@@ -186,22 +186,26 @@ fn su3_om_contraction_scalar_matches_tensorkit() {
     );
 }
 
-/// The B3c-2 boundary is a CLEAR error, never a silent wrong answer: a
-/// conjugated / lazy-adjoint operand in an SU(N) contraction is declined.
+/// FLIPPED (Stage B3c-2): the B3c-1 boundary pinned a non-core (open
+/// contracted legs) SU(N) contraction as a clear error. B3c-2 wires the
+/// source-transform route — a generic permute to core form followed by the
+/// core GEMM — so contracting only ONE of A's two domain legs now succeeds
+/// and must equal the explicit permute-then-core reference exactly (the
+/// wiring adds no mathematics; see also `su3_b3c2_gates.rs`).
 #[test]
-fn su3_adjoint_contract_is_clear_b3c2_error() {
+fn su3_noncore_contract_matches_permute_then_core() {
     let rt = Runtime::builder().build().unwrap();
     let a = build_a(&rt);
     let b = build_b(&rt);
-    // `A ∘ B` is fine; `A ∘ B†`-style (adjoint operand) is Stage B3c-2. We reach
-    // the adjoint path via `.adjoint()` on B — itself unimplemented for SU(N) —
-    // so instead assert the contract wiring rejects a conjugated seam directly:
-    // a non-core-form contraction (open contracted legs) must also decline, not
-    // silently mis-contract. Contracting only ONE of A's two domain legs is not
-    // the compose route.
-    let err = a.contract(&b, &[1], &[0]);
-    assert!(
-        err.is_err(),
-        "a non-core (source-transform) SU(N) contraction must be a B3c-2 error, not silent"
-    );
+    let got = a.contract(&b, &[1], &[0]).unwrap();
+    let want = a
+        .permute(&[0, 2], &[1])
+        .unwrap()
+        .contract(&b.permute(&[0], &[1, 2]).unwrap(), &[2], &[0])
+        .unwrap();
+    assert_eq!(got.data().len(), want.data().len());
+    assert!(!got.data().is_empty());
+    for (x, y) in got.data().iter().zip(want.data().iter()) {
+        assert!((x - y).abs() < 1e-12, "non-core route: {x} vs {y}");
+    }
 }
