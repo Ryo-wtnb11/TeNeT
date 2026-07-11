@@ -3609,9 +3609,17 @@ fn generic_facade_structure_rejects_multiplicity_free_style() {
 // table's provenance hash.
 #[test]
 fn b3b_su3_cache_generic_sibling_matches_facade() {
+    use crate::TreeTransformRuleCacheKey;
     use tenet_core::Su3FusionRule;
 
     let rule = Su3FusionRule::new();
+    // The Su3 cache key embeds the table provenance: two handles to the same
+    // table produce equal keys (so plans are shared), and the key carries the
+    // provenance hash (so a swapped table cannot collide).
+    let key = rule.tree_transform_rule_cache_key();
+    assert_eq!(key, Su3FusionRule::new().tree_transform_rule_cache_key());
+    assert_ne!(rule.provenance(), 0);
+
     let eight = rule.sector_of(1, 1).unwrap();
     let vac = tenet_core::SectorId::new(0);
     // codomain [8,8]->vac (single vertex), domain []->vac: one 1-element block.
