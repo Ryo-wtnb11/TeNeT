@@ -4603,4 +4603,611 @@ mod tests {
             }
         }
     }
+
+    // ===================== Stage B2a: Generic bend / repartition =============
+    //
+    // Oracle & gate rule: the REAL A4Irrep(3) outer-multiplicity sub-block.
+    // A4Irrep(3) is self-dual (dual(3)=3), 3⊗3 = {0,1,2,3} with N(3,3,3)=2 (the
+    // only outer multiplicity) AND 3⊗3 ∋ vacuum — so it is genuinely rigid and
+    // can bend. (Contrast the braid-only `UnitaryToyOmRule`: its sector `a` has
+    // NO proper dual — a⊗a ∌ vacuum — so every B-symbol there is degenerate and
+    // bending is undefined. Extending it was therefore impossible without
+    // changing its fusion structure; a new rigid rule is used instead, per the
+    // "stop if existing code must change" constraint.)
+    //
+    // Constants computed out-of-band from TensorKit v0.16.2 + TensorKitSectors
+    // v0.3.6 (git-tree-sha1 334a0ed5a0a0088a2b6fe7a39f78dda928038d85), by
+    // TensorKit's OWN Bsymbol / Asymbol / bendright, independent of this port.
+    //
+    // DISCRIMINATING POWER (honest note): for A4Irrep(3), Bsymbol(3,3,3) AND
+    // Asymbol(3,3,3) are BOTH the 2×2 identity (asserted below) — the A4 3-irrep
+    // bend has no off-diagonal channel mixing. So this oracle does NOT catch a
+    // μ↔ν transpose in the B-matrix indexing. It DOES pin the tree surgery, the
+    // √dim(c)·(1/√dim(a)) coefficient (√3 vs 1 across the varied innerline in the
+    // rank-3 table — a sqrt/invsqrt swap changes these), μ = last-codomain-vertex
+    // selection, ν → domain vertex-label storage, and the F→B derivation. A
+    // μ↔ν-discriminating BEND oracle needs a non-diagonal Bsymbol (e.g. SU(3));
+    // none is available here as verified constants — flagged for B2b.
+    #[derive(Clone, Copy, Debug)]
+    struct A4BendRule;
+
+    impl FusionRule for A4BendRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            // Unused: bend/repartition are planar (no braiding). Bosonic keeps
+            // the rule well-formed.
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            // A4: 0 and 3 self-dual; the two nontrivial 1-dim irreps 1,2 are
+            // each other's dual (verified in Julia). Only dual(3)=3 is exercised
+            // by the bend, but the full map is correct.
+            match sector.id() {
+                1 => SectorId::new(2),
+                2 => SectorId::new(1),
+                _ => sector,
+            }
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (3, 3) => smallvec![
+                    SectorId::new(0),
+                    SectorId::new(1),
+                    SectorId::new(2),
+                    SectorId::new(3)
+                ],
+                (3, _) | (_, 3) => smallvec![SectorId::new(3)],
+                // {1,2}⊗{1,2}: never touched by the bend trees; defensive stub.
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    impl GenericFusionSymbols for A4BendRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            let inv = 1.0 / 3.0_f64.sqrt(); // 1/√dim(3)
+            let ids = (a.id(), b.id(), c.id(), d.id(), e.id(), f.id());
+            match ids {
+                // F(3,3,3,3,3,0): the block Bsymbol(3,3,3) reshapes, shape
+                // (N(3,3,3),N(3,3,3),1,1)=(2,2,1,1). (μ,ν)=(1/√3)·I, row-major.
+                (3, 3, 3, 3, 3, 0) => GenericFArray::new(vec![inv, 0.0, 0.0, inv], (2, 2, 1, 1)),
+                // F(x,3,3,x,3,0), x∈{0,1,2}: Bsymbol(x,3,3), shape (1,1,1,1)=[1].
+                (0, 3, 3, 0, 3, 0) | (1, 3, 3, 1, 3, 0) | (2, 3, 3, 2, 3, 0) => {
+                    GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+                }
+                // F(3,3,3,3,x,0), x∈{0,1,2}: Bsymbol(3,3,x) (the return bend when
+                // the intermediate coupled sector is x), (1,1,1,1)=[1/3].
+                (3, 3, 3, 3, 0, 0) | (3, 3, 3, 3, 1, 0) | (3, 3, 3, 3, 2, 0) => {
+                    GenericFArray::new(vec![1.0 / 3.0], (1, 1, 1, 1))
+                }
+                // F(3,3,3,3,0,3): the block Asymbol(3,3,3) reshapes, shape
+                // (1,1,N(3,3,3),N(3,3,3))=(1,1,2,2). (κ,λ)=(1/√3)·I, row-major.
+                (3, 3, 3, 3, 0, 3) => GenericFArray::new(vec![inv, 0.0, 0.0, inv], (1, 1, 2, 2)),
+                _ => panic!("A4BendRule: unmodelled F{ids:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            // Unused: planar duality moves never braid. Trivial 1×1 stub.
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+
+    impl GenericRigidSymbols for A4BendRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 {
+                3.0_f64.sqrt()
+            } else {
+                1.0
+            }
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 3 {
+                1.0 / 3.0_f64.sqrt()
+            } else {
+                1.0
+            }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            // All A4 sectors reached here have FS phase +1 (verified in Julia).
+            1.0
+        }
+    }
+
+    fn a4_three() -> SectorId {
+        SectorId::new(3)
+    }
+
+    // cod [3,3]->3 (vertex μ), dom [3]->3.
+    fn a4_pair_rank2(mu: usize) -> FusionTreeBlockKey {
+        let t = a4_three();
+        let cod = FusionTreeKey::new([t, t], Some(t), [false, false], [], [SectorId::new(mu)])
+            .with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        FusionTreeBlockKey::pair(cod, dom)
+    }
+
+    // cod [3,3,3]->3, inner=[x] (vertices v1,v2), dom [3]->3.
+    fn a4_pair_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeBlockKey {
+        let t = a4_three();
+        let cod = FusionTreeKey::new(
+            [t, t, t],
+            Some(t),
+            [false, false, false],
+            [SectorId::new(inner)],
+            [SectorId::new(v1), SectorId::new(v2)],
+        )
+        .with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        FusionTreeBlockKey::pair(cod, dom)
+    }
+
+    fn round_trip_bend(
+        rule: &A4BendRule,
+        pair: &FusionTreeBlockKey,
+    ) -> std::collections::HashMap<FusionTreeBlockKey, f64> {
+        let mut totals = std::collections::HashMap::new();
+        for (mid, c1) in generic_bendright_tree_pair(rule, pair).unwrap() {
+            for (out, c2) in generic_bendleft_tree_pair(rule, &mid).unwrap() {
+                *totals.entry(out).or_insert(0.0) += c1 * c2;
+            }
+        }
+        totals
+    }
+
+    fn assert_identity_map(
+        totals: &std::collections::HashMap<FusionTreeBlockKey, f64>,
+        expected_self: &FusionTreeBlockKey,
+        label: &str,
+    ) {
+        for (key, coeff) in totals {
+            let want = if key == expected_self { 1.0 } else { 0.0 };
+            assert!(
+                (coeff - want).abs() < 1e-12,
+                "{label}: coeff {coeff} for is_self={} (want {want})",
+                key == expected_self
+            );
+        }
+        assert!(
+            (totals.get(expected_self).copied().unwrap_or(0.0) - 1.0).abs() < 1e-12,
+            "{label}: self coefficient missing"
+        );
+    }
+
+    // Gate 1: bendright∘bendleft == identity (the B-matrix is a Hom-space
+    // isomorphism), enumerated over all vertex assignments, rank 2 and 3.
+    #[test]
+    fn b2a_generic_bend_round_trip_identity() {
+        let rule = A4BendRule;
+        let t = a4_three();
+        // Premise the round-trip depends on: N(a,b,c)==N(c,dual(b),a) so the
+        // bend is square/invertible on the bent triple (a=b=c=3).
+        assert_eq!(rule.nsymbol(t, t, t), rule.nsymbol(t, rule.dual(t), t));
+        assert_eq!(rule.nsymbol(t, t, t), 2);
+
+        for mu in 1..=2 {
+            let pair = a4_pair_rank2(mu);
+            assert_identity_map(&round_trip_bend(&rule, &pair), &pair, &format!("rank2 μ={mu}"));
+        }
+        // rank 3: inner∈{0,1,2} forces v1=v2=1 (N=1); inner=3 opens both OM
+        // vertices v1,v2∈{1,2}. All vertex assignments enumerated.
+        for inner in 0..=2 {
+            let pair = a4_pair_rank3(inner, 1, 1);
+            assert_identity_map(
+                &round_trip_bend(&rule, &pair),
+                &pair,
+                &format!("rank3 inner={inner}"),
+            );
+        }
+        for v1 in 1..=2 {
+            for v2 in 1..=2 {
+                let pair = a4_pair_rank3(3, v1, v2);
+                assert_identity_map(
+                    &round_trip_bend(&rule, &pair),
+                    &pair,
+                    &format!("rank3 inner=3 v=({v1},{v2})"),
+                );
+            }
+        }
+    }
+
+    // Gate 2: repartition(N) then repartition back to the original N == identity.
+    // via_n=1 exercises one bend each way; via_n=0 exercises two bends each way,
+    // covering the rank-1-codomain (left_coupled=vacuum) branch of bendright.
+    #[test]
+    fn b2a_generic_repartition_round_trip_identity() {
+        let rule = A4BendRule;
+        for via_n in [1usize, 0usize] {
+            for mu in 1..=2 {
+                let pair = a4_pair_rank2(mu); // codomain rank 2
+                let mut totals = std::collections::HashMap::new();
+                for (mid, c1) in generic_repartition_tree_pair(&rule, &pair, via_n).unwrap() {
+                    for (out, c2) in generic_repartition_tree_pair(&rule, &mid, 2).unwrap() {
+                        *totals.entry(out).or_insert(0.0) += c1 * c2;
+                    }
+                }
+                assert_identity_map(&totals, &pair, &format!("repartition via {via_n} μ={mu}"));
+            }
+        }
+    }
+
+    // Oracle: b_symbol_generic / a_symbol_generic match TK's Bsymbol / Asymbol.
+    #[test]
+    fn b2a_a4_b_and_a_symbol_match_tensorkit() {
+        let rule = A4BendRule;
+        let t = a4_three();
+        // TK: Bsymbol(3,3,3) == I₂, Asymbol(3,3,3) == I₂ (TKS v0.3.6).
+        let b = rule.b_symbol_generic(t, t, t);
+        assert_eq!(b.shape(), (2, 2));
+        let a = rule.a_symbol_generic(t, t, t);
+        assert_eq!(a.shape(), (2, 2));
+        for i in 0..2 {
+            for j in 0..2 {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((b.get(i, j) - want).abs() < 1e-10, "B[{i},{j}]={}", b.get(i, j));
+                assert!((a.get(i, j) - want).abs() < 1e-10, "A[{i},{j}]={}", a.get(i, j));
+            }
+        }
+    }
+
+    // Focused unit test for the domain-empty keep-last overwrite: mirrors TK's
+    // block assignment `U[row, col] = coeff` (duality_manipulations.jl:110),
+    // where every ν collapses onto the same output key (no vertex to store) and
+    // the LAST non-zero ν wins. A4's Bsymbol is diagonal so it never puts two
+    // non-zeros in one row — this needs a synthetic non-diagonal B. b_symbol is
+    // overridden directly (default-method override), so no F is consulted.
+    #[derive(Clone, Copy, Debug)]
+    struct OverwriteProbeRule;
+    impl FusionRule for OverwriteProbeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(2)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 2) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    impl GenericFusionSymbols for OverwriteProbeRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+            _d: SectorId,
+            _e: SectorId,
+            _f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            unreachable!("b_symbol_generic is overridden; F is never read")
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for OverwriteProbeRule {
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+        fn b_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            // Row 0 = [0.3, 0.7]: two non-zeros, distinct, so keep-last is
+            // distinguishable from keep-first (0.3) and from sum (1.0).
+            GenericRMatrix::new(vec![0.3, 0.7, 0.0, 0.0], 2, 2)
+        }
+    }
+
+    #[test]
+    fn b2a_generic_bendright_domain_empty_keeps_last_nu() {
+        let rule = OverwriteProbeRule;
+        let a = SectorId::new(1);
+        let c = SectorId::new(2);
+        // cod [1,1]->2 (vertex 1); dom []->2 (EMPTY domain ⇒ ν has nowhere to go).
+        let cod = FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(1)])
+            .with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([], Some(c), [], [], []).with_has_multiplicity(true);
+        let pair = FusionTreeBlockKey::pair(cod, dom);
+        let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
+        assert_eq!(out.len(), 1, "empty domain collapses ν to one key");
+        // coeff0 = √dim(2)·(1/√dim(1)) = 1; keep-last ⇒ B[0,1] = 0.7.
+        assert!((out[0].1 - 0.7).abs() < 1e-12, "keep-last ν: got {}", out[0].1);
+    }
+
+    // Oracle: tree-level bendright tables vs TensorKit's own bendright.
+    #[test]
+    fn b2a_a4_bendright_tree_table_matches_tensorkit() {
+        let rule = A4BendRule;
+        let sq3 = 3.0_f64.sqrt();
+
+        // --- rank 2: cod [3,3]->3 (μ), dom [3]->3.  TK (probe5.jl):
+        //   μ=1 -> dom vertex 1, coeff 1 ;  μ=2 -> dom vertex 2, coeff 1.
+        for mu in 1..=2 {
+            let out = generic_bendright_tree_pair(&rule, &a4_pair_rank2(mu)).unwrap();
+            let nonzero: Vec<_> = out.iter().filter(|(_, c)| c.abs() > 1e-10).collect();
+            assert_eq!(nonzero.len(), 1, "rank2 μ={mu} expects one nonzero");
+            let (key, coeff) = nonzero[0];
+            assert_eq!(key.codomain_tree().uncoupled(), [a4_three()], "rank2 cod");
+            assert!(key.codomain_tree().vertices().is_empty(), "rank2 cod rank-1 no vtx");
+            assert_eq!(key.domain_tree().vertices()[0].id(), mu, "rank2 ν == μ (B diagonal)");
+            assert!((coeff - 1.0).abs() < 1e-10, "rank2 μ={mu} coeff {coeff}");
+        }
+
+        // --- rank 3: cod [3,3,3]->3 inner=[x] (v1,v2), dom [3]->3.
+        // TK (probe6.jl): coeff = √dim(3)/√dim(inner) = √3 (inner∈{0,1,2}) or 1
+        // (inner=3); output cod vertex = v1, dom vertex = ν = v2 (B=I diagonal).
+        // Table rows: (inner, v1, v2) -> (cod_vtx, dom_vtx, coeff).
+        let table: [(usize, usize, usize, usize, usize, f64); 7] = [
+            (0, 1, 1, 1, 1, sq3),
+            (1, 1, 1, 1, 1, sq3),
+            (2, 1, 1, 1, 1, sq3),
+            (3, 1, 1, 1, 1, 1.0),
+            (3, 2, 1, 2, 1, 1.0),
+            (3, 1, 2, 1, 2, 1.0),
+            (3, 2, 2, 2, 2, 1.0),
+        ];
+        for (inner, v1, v2, cod_vtx, dom_vtx, coeff) in table {
+            let out = generic_bendright_tree_pair(&rule, &a4_pair_rank3(inner, v1, v2)).unwrap();
+            let nonzero: Vec<_> = out.iter().filter(|(_, c)| c.abs() > 1e-10).collect();
+            assert_eq!(nonzero.len(), 1, "rank3 ({inner},{v1},{v2}) one nonzero");
+            let (key, got) = nonzero[0];
+            let left_coupled = key.codomain_tree().coupled().unwrap().id();
+            assert_eq!(left_coupled, inner, "rank3 left_coupled == innerline");
+            assert_eq!(key.codomain_tree().vertices()[0].id(), cod_vtx, "rank3 cod vtx");
+            assert_eq!(key.domain_tree().vertices()[0].id(), dom_vtx, "rank3 dom vtx");
+            assert!((got - coeff).abs() < 1e-10, "rank3 ({inner},{v1},{v2}) coeff {got} want {coeff}");
+        }
+    }
+
+    // ============ REFUTE(b2a): μ↔ν / κ↔λ transpose discriminator ============
+    //
+    // The A4 oracle CANNOT catch a B-matrix (or A-matrix) index transpose: for
+    // A4Irrep(3) both Bsymbol and Asymbol are the 2×2 IDENTITY, which is its own
+    // transpose. This synthetic rule closes that gap with a *deliberately
+    // non-symmetric* B and A block (B[0,1]≠B[1,0], A[0,1]≠A[1,0]).
+    //
+    // The reshape-collapse is transpose-free in Julia (verified out-of-band:
+    // `reshape(F,(N1,N2))[μ,ν]==F[μ,ν,1,1]` for trailing singletons and
+    // `[κ,λ]==F[1,1,κ,λ]` for leading singletons), so the CORRECT reading is
+    //   B[μ,ν] = √dim(a)·√dim(b)·invsqrtdim(c) · F(a,b,dual(b),a,c,unit)[μ,ν,0,0]
+    //   A[κ,λ] = √dim(a)·√dim(b)·invsqrtdim(c) · conj(κ_a·F(dual(a),a,b,b,unit,c)[0,0,κ,λ]).
+    // A μ↔ν (or κ↔λ) swap in the impl would read F[ν,μ,0,0] / F[0,0,λ,κ] and
+    // produce the TRANSPOSE — which THIS test detects and the A4 oracle does not.
+    #[derive(Clone, Copy, Debug)]
+    struct TransposeProbeRule;
+    // Sector 1 is self-dual with dim 4 (so √dim=2, exercising the coeff factor);
+    // 1⊗1 = {0 (rigidity), 1 (with N=2)}. Only the (1,1,1) block is non-trivial.
+    impl FusionRule for TransposeProbeRule {
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector // 0 and 1 both self-dual
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => smallvec![SectorId::new(x)],
+                (1, 1) => smallvec![SectorId::new(0), SectorId::new(1)],
+                _ => smallvec![SectorId::new(0)],
+            }
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2 // the single outer multiplicity
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+    // The raw F data, in TK [μ,ν,κ,λ] semantic order, row-major — the SAME bytes
+    // the from-scratch oracle below reads directly.
+    const TP_FB: [f64; 4] = [0.3, 0.7, 0.9, 0.1]; // F(1,1,1,1,1,0)[μ,ν] block, non-symmetric
+    const TP_FA: [f64; 4] = [0.2, 0.5, 0.6, 0.4]; // F(1,1,1,1,0,1)[κ,λ] block, non-symmetric
+    impl GenericFusionSymbols for TransposeProbeRule {
+        type Scalar = f64;
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            match (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) {
+                // B block: shape (N(1,1,1),N(1,1,1),1,1) = (2,2,1,1).
+                (1, 1, 1, 1, 1, 0) => GenericFArray::new(TP_FB.to_vec(), (2, 2, 1, 1)),
+                // A block: shape (1,1,N(1,1,1),N(1,1,1)) = (1,1,2,2).
+                (1, 1, 1, 1, 0, 1) => GenericFArray::new(TP_FA.to_vec(), (1, 1, 2, 2)),
+                other => panic!("TransposeProbeRule: unmodelled F{other:?}"),
+            }
+        }
+        fn r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+    impl GenericRigidSymbols for TransposeProbeRule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 1 { 2.0 } else { 1.0 } // dim(1)=4
+        }
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            if sector.id() == 1 { 0.5 } else { 1.0 }
+        }
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    // Independent from-scratch TK evaluation of the reshape formula — explicit
+    // index loops, NO call into b_symbol_generic / a_symbol_generic.
+    fn tp_expected_b() -> [[f64; 2]; 2] {
+        let factor = 2.0 * 2.0 * 0.5; // √dim(1)·√dim(1)·invsqrtdim(1) = 2
+        let mut b = [[0.0; 2]; 2];
+        for mu in 0..2 {
+            for nu in 0..2 {
+                b[mu][nu] = factor * TP_FB[mu * 2 + nu]; // F[μ,ν,0,0]
+            }
+        }
+        b
+    }
+    fn tp_expected_a() -> [[f64; 2]; 2] {
+        let factor = 2.0 * 2.0 * 0.5;
+        let kappa_a = 1.0f64; // FS phase, real
+        let mut a = [[0.0; 2]; 2];
+        for k in 0..2 {
+            for l in 0..2 {
+                // conj(κ_a · F[0,0,κ,λ]) · factor; all real here.
+                a[k][l] = factor * (kappa_a * TP_FA[k * 2 + l]);
+            }
+        }
+        a
+    }
+
+    #[test]
+    fn refute_b2a_b_symbol_is_not_transposed() {
+        let rule = TransposeProbeRule;
+        let s = SectorId::new(1);
+        let b = rule.b_symbol_generic(s, s, s);
+        assert_eq!(b.shape(), (2, 2));
+        let want = tp_expected_b();
+        // Sanity: the oracle itself must be non-symmetric, else no discrimination.
+        assert!((want[0][1] - want[1][0]).abs() > 0.1, "oracle B must be non-symmetric");
+        for mu in 0..2 {
+            for nu in 0..2 {
+                assert!(
+                    (b.get(mu, nu) - want[mu][nu]).abs() < 1e-12,
+                    "B[{mu},{nu}]={} want {} (μ↔ν transpose?)",
+                    b.get(mu, nu),
+                    want[mu][nu]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refute_b2a_a_symbol_is_not_transposed() {
+        // a_symbol_generic is UNUSED by any other B2a test (fold is B2b), so this
+        // is the ONLY thing exercising its κ↔λ index order today.
+        let rule = TransposeProbeRule;
+        let s = SectorId::new(1);
+        let a = rule.a_symbol_generic(s, s, s);
+        assert_eq!(a.shape(), (2, 2));
+        let want = tp_expected_a();
+        assert!((want[0][1] - want[1][0]).abs() > 0.1, "oracle A must be non-symmetric");
+        for k in 0..2 {
+            for l in 0..2 {
+                assert!(
+                    (a.get(k, l) - want[k][l]).abs() < 1e-12,
+                    "A[{k},{l}]={} want {} (κ↔λ transpose?)",
+                    a.get(k, l),
+                    want[k][l]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refute_b2a_bendright_uses_b_row_not_column() {
+        // End-to-end: bend the codomain vertex μ; the ν output distribution must
+        // equal ROW μ of B (coeff = coeff0·Bmat[μ,ν], coeff0=1 here). A μ↔ν swap
+        // in the Bmat.get(μ,ν) call would emit COLUMN μ instead.
+        let rule = TransposeProbeRule;
+        let s = SectorId::new(1);
+        let b = tp_expected_b();
+        for mu in 1..=2usize {
+            // cod [1,1]->1 vertex μ ; dom [1]->1.
+            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
+                .with_has_multiplicity(true);
+            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let pair = FusionTreeBlockKey::pair(cod, dom);
+            let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
+            // Collect coeff keyed by output domain vertex label (=ν+1).
+            let mut got = [0.0f64; 2];
+            for (key, coeff) in &out {
+                let nu = key.domain_tree().vertices()[0].id(); // 1-based ν label
+                got[nu - 1] = *coeff;
+            }
+            let row = &b[mu - 1];
+            for nu in 0..2 {
+                assert!(
+                    (got[nu] - row[nu]).abs() < 1e-12,
+                    "μ={mu}: ν={nu} coeff {} want ROW-μ {} (transpose ⇒ column-μ)",
+                    got[nu],
+                    row[nu]
+                );
+            }
+            // Guard: distinguishable from the column (transposed) reading.
+            let col = [b[0][mu - 1], b[1][mu - 1]];
+            assert!(
+                (got[0] - col[0]).abs() > 1e-9 || (got[1] - col[1]).abs() > 1e-9,
+                "μ={mu}: row and column coincide — test cannot discriminate"
+            );
+        }
+    }
 }
