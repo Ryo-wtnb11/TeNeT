@@ -71,6 +71,13 @@ pub enum CoreError {
         key: BlockKey,
     },
     MissingFusionSpace,
+    /// A bounded fusion table (SU(3) dim<=27, Stage B3b) cannot represent the
+    /// requested space/sector exactly. Carries the full human-readable
+    /// diagnosis; block dimensions are either exact or this error — never
+    /// silently truncated.
+    FusionOutsideTable {
+        message: String,
+    },
     ElementCountOverflow,
     OffsetOverflow {
         value: usize,
@@ -162,6 +169,7 @@ impl fmt::Display for CoreError {
                 write!(f, "missing matching block for key {key:?}")
             }
             Self::MissingFusionSpace => write!(f, "tensor does not carry a fusion-tree space"),
+            Self::FusionOutsideTable { message } => write!(f, "{message}"),
             Self::ElementCountOverflow => write!(f, "block element count overflow"),
             Self::OffsetOverflow { value } => {
                 write!(f, "block offset {value} overflows addressable layout")

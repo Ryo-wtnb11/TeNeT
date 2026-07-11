@@ -1,8 +1,8 @@
 //! User-layer vector spaces: sector content plus degeneracies for one leg.
 
 use tenet_core::{
-    FusionRule, ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, TensorKitProductCodec, U1Irrep,
-    Z2Irrep,
+    FusionRule, ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, Su3FusionRule,
+    TensorKitProductCodec, U1Irrep, Z2Irrep,
 };
 
 use crate::error::Error;
@@ -30,6 +30,12 @@ pub enum SectorLabel {
         charge: i32,
         twice_spin: usize,
     },
+    // NOTE: no SU(3) variant. Adding one would break every downstream
+    // exhaustive `match` on this public enum (a real consumer does exactly
+    // that), so the SU(3) label read-back API (`sectors`/`degeneracy`) is
+    // deferred to Stage B3c — it is not needed by permute/braid/transpose. The
+    // internal `RuleKind::Su3` (pub(crate)) does not leak, so the shared
+    // dispatch enum can grow without a downstream break.
 }
 
 /// The fusion rule a [`Space`] (and every [`crate::prelude::Tensor`] built
@@ -43,6 +49,15 @@ pub(crate) enum RuleKind {
     SU2,
     U1FZ2,
     FZ2U1SU2,
+    /// Stage B3b: SU(3) table provider ([`tenet_core::Su3FusionRule`]). The
+    /// first `FusionStyleKind::Generic` (outer-multiplicity) rule reachable from
+    /// the user layer. Adding this variant is compile-time zero-cost for the
+    /// mult-free path (the χ32 anchor is re-measured to prove it): the
+    /// `with_rule!` / `with_rule_ctx!` dispatch macros bind a mult-free rule per
+    /// arm, and Su3 is `Generic`, so it takes dedicated non-macro paths
+    /// (`*_generic` siblings) for the supported ops (permute/braid/transpose)
+    /// and a clear panic for the rest (svd/trace/… are Stage B3c+).
+    Su3,
 }
 
 /// Dispatches on a [`RuleKind`], binding `$rule` to a reference to the
@@ -93,6 +108,20 @@ macro_rules! with_rule {
                     tenet_core::SU2FusionRule,
                 );
                 $body
+            }
+            // Su3 is `FusionStyleKind::Generic`, so it CANNOT bind through this
+            // macro (the shared `$body` calls mult-free-only methods on `$rule`).
+            // The supported SU(3) ops (permute/braid/transpose, construction)
+            // take dedicated `*_generic` paths that branch on `RuleKind::Su3`
+            // BEFORE reaching here; anything else is not yet implemented. This
+            // arm is `!`-typed, so it needs no `$body` and keeps every mult-free
+            // call site byte-for-byte unchanged (the χ32 zero-cost guarantee).
+            $crate::space::RuleKind::Su3 => {
+                unimplemented!(
+                    "this operation is not yet supported for SU(3) tensors \
+                     (Stage B3b implements permute/braid/transpose; svd/qr/trace/\
+                     norm/adjoint/contract are Stage B3c+)"
+                )
             }
         }
     };
@@ -242,6 +271,35 @@ impl Space {
         )
     }
 
+    /// SU(3)-graded space from `((p, q), degeneracy)` pairs, where `(p, q)` is
+    /// the Dynkin label of an irrep in the Stage B3b `dim ≤ 27` table (e.g.
+    /// `(1, 0)` = **3**, `(0, 1)` = **3̄**, `(1, 1)` = **8**, `(2, 2)` = **27**).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] for a `(p, q)` outside the table
+    /// (`dim > 27`) — the SU(3) provider is deliberately bounded (Stage B3c
+    /// lifts the cut). Panics on a duplicate label, as [`Self::u1`].
+    pub fn su3<I>(irreps: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = ((u8, u8), usize)>,
+    {
+        let rule = Su3FusionRule::new();
+        let sectors = irreps
+            .into_iter()
+            .map(|((p, q), deg)| {
+                rule.sector_of(p, q)
+                    .map(|sector| (sector, deg))
+                    .ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "SU(3) irrep ({p},{q}) is outside the dim<=27 table"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self::new(RuleKind::Su3, sectors))
+    }
+
     /// U(1) x fermion-parity product space from `((charge, parity),
     /// degeneracy)` pairs, using the TensorKit product-sector encoding
     /// ([`tenet_core::TensorKitProductCodec`]).
@@ -307,6 +365,22 @@ impl Space {
     /// The dual space: every sector is replaced by its dual and the dual
     /// flag is flipped, mirroring TensorKit's `V'`.
     pub fn dual(&self) -> Self {
+        // Su3 is Generic, so it cannot ride the mult-free `with_rule!` binding;
+        // `dual` needs only `FusionRule::dual`, handled directly.
+        if self.rule == RuleKind::Su3 {
+            let rule = Su3FusionRule::new();
+            let mut sectors: Vec<(SectorId, usize)> = self
+                .sectors
+                .iter()
+                .map(|&(sector, deg)| (rule.dual(sector), deg))
+                .collect();
+            sectors.sort_by_key(|(sector, _)| *sector);
+            return Self {
+                rule: self.rule,
+                sectors,
+                dual: !self.dual,
+            };
+        }
         let sectors = with_rule!(self.rule, rule, {
             fn dualize<R: FusionRule>(
                 rule: &R,
@@ -333,6 +407,19 @@ impl Space {
     /// SU(2)).
     pub fn dim(&self) -> usize {
         use tenet_core::MultiplicityFreeRigidSymbols;
+        if self.rule == RuleKind::Su3 {
+            use tenet_core::GenericRigidSymbols;
+            let rule = Su3FusionRule::new();
+            return self
+                .sectors
+                .iter()
+                .map(|&(sector, deg)| {
+                    // quantum dim = (sqrt_dim)^2, integer for SU(3).
+                    let sqrt = rule.sqrt_dim_scalar(sector);
+                    deg * (sqrt * sqrt).round() as usize
+                })
+                .sum();
+        }
         with_rule!(self.rule, rule, {
             self.sectors
                 .iter()
@@ -393,6 +480,11 @@ impl Space {
                     twice_spin: SU2Irrep::from_sector_id(su2).twice_spin(),
                 }
             }
+            RuleKind::Su3 => unimplemented!(
+                "SU(3) sector label read-back (`sectors`/`degeneracy`) is Stage B3c; \
+                 it would require a public `SectorLabel::Su3` variant, which breaks \
+                 downstream exhaustive matches. permute/braid/transpose do not need it."
+            ),
         }
     }
 

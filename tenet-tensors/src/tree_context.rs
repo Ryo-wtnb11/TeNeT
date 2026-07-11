@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockStructure, HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
+    BlockStructure, GenericBraidScalar, GenericRigidSymbols, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, Placement,
+    ScratchStorage, SimilarStorage, TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
@@ -316,6 +317,50 @@ where
             dst_structure,
             src_structure,
             storage_conjugate,
+        )?;
+        backend.tree_transform_structure_into_raw(
+            workspace,
+            &structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
+    }
+
+    /// Generic-fusion (SU(3)) dynamic-rank tree transform: the raw-slice
+    /// analogue of [`Self::tree_transform_dyn_into`], routed through the
+    /// non-memoized generic cache sibling. This is the path the top-level
+    /// `tenet::Tensor` SU(3) `permute`/`braid`/`transpose` take.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tree_transform_dyn_into_generic<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: GenericRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        C: GenericBraidScalar,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        cache.set_recoupling_threads(backend.recoupling_threads());
+        let structure = cache.get_or_compile_tree_pair_structures_generic(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
         )?;
         backend.tree_transform_structure_into_raw(
             workspace,

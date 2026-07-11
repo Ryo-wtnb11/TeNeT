@@ -546,6 +546,94 @@ impl FusionTreeHomSpace {
         keys
     }
 
+    /// Generic-fusion (outer-multiplicity) sibling of [`Self::fusion_tree_keys`]:
+    /// enumerates multiplicity-aware block keys (codomain × domain tree pairs)
+    /// for a `FusionRule` whose `nsymbol` can exceed 1 (SU(3), …). Not cached —
+    /// the Generic path is not on any hot loop yet (mirrors the non-memoized
+    /// Stage B3b cache siblings); add a cache when a Generic workload measures it.
+    ///
+    /// Bounded-table semantics (Option A, refute/b3b-verify): the result is
+    /// either the EXACT full-SU(3) block key set or an `Err` — never a silently
+    /// truncated one. Full-space enumeration errs as soon as either side's
+    /// coupled fold reports escaped candidates, tainted sectors, or a poisoned
+    /// (beyond one-hop) fold, even when the offending sectors could not survive
+    /// the codomain∩domain merge — conservative on purpose; use
+    /// [`Self::fusion_tree_keys_generic_for_coupled`] for a single provably
+    /// clean sector. Unbounded Generic rules never err.
+    // CoreError's large variants (BlockKey-carrying, 528B) trip
+    // `result_large_err` on every Result<_, CoreError> fn in this crate (161
+    // pre-existing instances); allowed here so the B3b fix adds no new
+    // warnings — shrinking CoreError is an orthogonal crate-wide cleanup.
+    #[allow(clippy::result_large_err)]
+    pub fn fusion_tree_keys_generic<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Vec<FusionTreeBlockKey>, CoreError>
+    where
+        R: FusionRule,
+    {
+        let (codomain, codomain_fold) =
+            fusion_trees_by_coupled_for_space_generic(rule, &self.codomain);
+        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, &self.domain);
+        for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
+            if !fold.is_fully_clean() {
+                return Err(CoreError::FusionOutsideTable {
+                    message: fusion_fold_error_message(side, fold),
+                });
+            }
+        }
+        Ok(merge_generic_tree_groups(&codomain, &domain))
+    }
+
+    /// Block keys of ONE coupled sector, for spaces whose full enumeration is
+    /// an `Err` but whose requested sector is provably clean (its complete
+    /// full-SU(3) tree set stays inside the table). `Err` when the sector is
+    /// tainted on either side (its trees would need out-of-table intermediates)
+    /// or the fold is poisoned; `Ok(vec![])` when the sector is simply not a
+    /// shared coupled candidate.
+    #[allow(clippy::result_large_err)] // see fusion_tree_keys_generic
+    pub fn fusion_tree_keys_generic_for_coupled<R>(
+        &self,
+        rule: &R,
+        coupled: SectorId,
+    ) -> Result<Vec<FusionTreeBlockKey>, CoreError>
+    where
+        R: FusionRule,
+    {
+        let (codomain, codomain_fold) =
+            fusion_trees_by_coupled_for_space_generic(rule, &self.codomain);
+        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, &self.domain);
+        for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
+            if fold.poisoned || fold.tainted.contains(&coupled) {
+                return Err(CoreError::FusionOutsideTable {
+                    message: format!(
+                        "SU(3) coupled sector {coupled:?} on the {side} side requires                          out-of-table intermediates (dim<=27 cut); extend the table                          (Stage B3c). {}",
+                        fusion_fold_error_message(side, fold)
+                    ),
+                });
+            }
+        }
+        let pick = |groups: &[CoupledFusionTrees]| -> Vec<FusionTreeKey> {
+            groups
+                .iter()
+                .find(|group| group.coupled == coupled)
+                .map(|group| group.trees.clone())
+                .unwrap_or_default()
+        };
+        let codomain_trees = pick(&codomain);
+        let domain_trees = pick(&domain);
+        let mut keys = Vec::with_capacity(codomain_trees.len() * domain_trees.len());
+        for domain_tree in &domain_trees {
+            for codomain_tree in &codomain_trees {
+                keys.push(FusionTreeBlockKey::pair(
+                    codomain_tree.clone(),
+                    domain_tree.clone(),
+                ));
+            }
+        }
+        Ok(keys)
+    }
+
     pub fn sector_structure<R>(&self, rule: &R) -> Result<SectorStructure, CoreError>
     where
         R: MultiplicityFreeFusionRule,

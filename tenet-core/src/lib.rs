@@ -22,6 +22,7 @@ include!("space.rs");
 include!("sector.rs");
 include!("fusion_space.rs");
 include!("fusion_rule.rs");
+include!("su3.rs");
 include!("fusion_tree.rs");
 include!("block_structure.rs");
 include!("tensor_map.rs");

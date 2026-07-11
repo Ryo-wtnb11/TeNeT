@@ -1,3 +1,32 @@
+/// Classification of a leg tuple's coupled-sector candidates for a possibly
+/// table-bounded rule (Stage B3b Option A). For unbounded rules every
+/// candidate is `clean`; for the bounded SU(3) table:
+/// * `clean`: every fusion tree ending in this sector stays inside the table —
+///   enumeration is exactly the full-SU(3) tree set;
+/// * `tainted`: some full-SU(3) tree for this sector passes through an
+///   out-of-table inner line — the table cannot enumerate (or recouple) the
+///   complete set, so constructing this sector must be an error, NEVER a
+///   silently truncated block;
+/// * `out_of_table`: display labels of coupled-sector candidates that escaped
+///   the table entirely (they cannot even be named by a dense `SectorId`);
+/// * `poisoned`: the fold left the one-hop frontier shell, so the split into
+///   clean/tainted is unknown — every sector must be treated as tainted
+///   (`clean` is emptied by the producer when this fires).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CoupledSectorFold {
+    pub clean: Vec<SectorId>,
+    pub tainted: Vec<SectorId>,
+    pub out_of_table: Vec<String>,
+    pub poisoned: bool,
+}
+
+impl CoupledSectorFold {
+    /// Whether the fold proved the candidate set complete and in-table.
+    pub fn is_fully_clean(&self) -> bool {
+        self.tainted.is_empty() && self.out_of_table.is_empty() && !self.poisoned
+    }
+}
+
 pub trait FusionRule {
     fn fusion_style(&self) -> FusionStyleKind;
 
@@ -21,6 +50,45 @@ pub trait FusionRule {
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         usize::from(self.fusion_channels(left, right).contains(&coupled))
+    }
+
+    /// The representable channels of `left ⊗ right` — identical to
+    /// [`Self::fusion_channels`] for unbounded rules (the default). A
+    /// table-bounded rule (SU(3), Stage B3b) overrides this to return the
+    /// in-table channels of an ESCAPING pair instead of panicking.
+    ///
+    /// Safety contract: callers may only rely on this being the complete
+    /// channel list where out-of-table branches provably contribute nothing —
+    /// i.e. on trees of sectors the [`Self::coupled_sector_fold`] classified
+    /// `clean` (a clean sector by definition has no tree through an
+    /// out-of-table line, so skipping frontier channels drops only
+    /// provably-dead branches).
+    fn fusion_channels_in_table(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.fusion_channels(left, right)
+    }
+
+    /// Folds `effective[0] ⊗ effective[1] ⊗ …` and classifies every coupled
+    /// candidate (see [`CoupledSectorFold`]). Default: the plain unbounded
+    /// fold — everything clean, nothing escapes. Bounded rules override.
+    fn coupled_sector_fold(&self, effective: &[SectorId]) -> CoupledSectorFold {
+        let mut acc: Vec<SectorId> = match effective.first() {
+            None => vec![self.vacuum()],
+            Some(&first) => vec![first],
+        };
+        for &last in effective.iter().skip(1) {
+            acc = acc
+                .iter()
+                .flat_map(|&front| self.fusion_channels(front, last))
+                .collect();
+            acc.sort_unstable();
+            acc.dedup();
+        }
+        acc.sort_unstable();
+        acc.dedup();
+        CoupledSectorFold {
+            clean: acc,
+            ..CoupledSectorFold::default()
+        }
     }
 }
 
