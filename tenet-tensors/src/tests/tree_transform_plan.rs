@@ -3349,3 +3349,161 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
     assert_eq!(adapter.add_calls, 0);
     assert_eq!(adapter.scale_calls, 0);
 }
+
+// ======================================================================
+// Stage B2c: Generic-fusion (outer-multiplicity) plan compile.
+// A minimal Generic rule with one self-dual outer-multiplicity sector (1):
+// N(1,1,1)=2 makes the rule genuinely Generic, while the tree pairs used
+// below couple [1,1] to the vacuum (N(1,1,0)=1), so the rank-2 codomain
+// braid is a pure 1×1 R-symbol — no bends, no F-moves. This exercises the
+// `build_generic_tree_pair_transform_group_plan` wiring (style guard, group
+// iteration, shared assembly, core-row dispatch) without a full SU(3) symbol
+// table; the recoupling math itself is proven in tenet-core's B2c tests.
+// ======================================================================
+use tenet_core::{
+    generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair, GenericFArray,
+    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
+};
+
+#[derive(Clone, Copy)]
+struct ToyGenericRule {
+    style: FusionStyleKind,
+}
+
+impl FusionRule for ToyGenericRule {
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.style
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector // 0 and 1 self-dual
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        match (left.id(), right.id()) {
+            (0, x) | (x, 0) => [SectorId::new(x)].into_iter().collect(),
+            (1, 1) => [SectorId::new(0), SectorId::new(1)].into_iter().collect(),
+            _ => [SectorId::new(0)].into_iter().collect(),
+        }
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+            2
+        } else {
+            usize::from(self.fusion_channels(left, right).contains(&coupled))
+        }
+    }
+}
+
+impl GenericFusionSymbols for ToyGenericRule {
+    type Scalar = f64;
+    fn f_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        _c: SectorId,
+        _d: SectorId,
+        _e: SectorId,
+        _f: SectorId,
+    ) -> GenericFArray<Self::Scalar> {
+        // Unreached for the rank-2 vacuum-coupled pair (pure R braid).
+        GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+    }
+    fn r_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        _c: SectorId,
+    ) -> GenericRMatrix<Self::Scalar> {
+        GenericRMatrix::new(vec![1.0], 1, 1)
+    }
+}
+
+impl GenericRigidSymbols for ToyGenericRule {
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+fn b2c_toy_src_pair() -> FusionTreeBlockKey {
+    // cod [1,1]->0 (vacuum-coupled, N(1,1,0)=1, single vertex label 1), dom []->0.
+    let cod = FusionTreeKey::new(
+        [SectorId::new(1), SectorId::new(1)],
+        Some(SectorId::new(0)),
+        [false, false],
+        [],
+        [SectorId::new(1)],
+    )
+    .with_has_multiplicity(true);
+    let dom =
+        FusionTreeKey::new([], Some(SectorId::new(0)), [], [], []).with_has_multiplicity(true);
+    FusionTreeBlockKey::pair(cod, dom)
+}
+
+// The generic plan compile reproduces the core `generic_permute_tree_pair`
+// rows exactly (the assembly adds no math), and its runtime style gate rejects
+// a rule that reports a multiplicity-free style — the symmetric sibling of the
+// mult-free builders' `UnsupportedFusionStyle` guards.
+#[test]
+fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
+    let rule = ToyGenericRule {
+        style: FusionStyleKind::Generic,
+    };
+    let src_pair = b2c_toy_src_pair();
+    let src_key = BlockKey::from(src_pair.clone());
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+
+    // The plan's single group spec must reproduce the per-source core rows for
+    // each operation kind (exercises every `transformed_generic_tree_pair_rows`
+    // arm). cod [1,1]->0 with an empty domain stays a pure 1×1 R braid, so the
+    // codomain permute/braid and the cyclic transpose all resolve numerically.
+    let assert_plan_matches =
+        |operation: TreeTransformOperation, core_rows: Vec<(FusionTreeBlockKey, f64)>| {
+            assert_eq!(core_rows.len(), 1);
+            let (core_dst, core_coeff) = &core_rows[0];
+            let plan =
+                build_generic_tree_pair_transform_group_plan(&rule, operation, &src_structure)
+                    .unwrap();
+            assert_eq!(plan.specs().len(), 1);
+            let spec = &plan.specs()[0];
+            assert_eq!(spec.src_keys(), &[src_key.clone()]);
+            assert_eq!(spec.dst_keys(), &[BlockKey::from(core_dst.clone())]);
+            assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
+            assert!((spec.recoupling_coefficients_dst_src()[0] - core_coeff).abs() < 1e-12);
+        };
+
+    assert_plan_matches(
+        TreeTransformOperation::permute([1, 0], []),
+        generic_permute_tree_pair(&rule, &src_pair, &[1, 0], &[]).unwrap(),
+    );
+    assert_plan_matches(
+        TreeTransformOperation::braid([1, 0], [], [0, 1], []),
+        generic_braid_tree_pair(&rule, &src_pair, &[1, 0], &[], &[0, 1], &[]).unwrap(),
+    );
+    assert_plan_matches(
+        TreeTransformOperation::transpose([1, 0], []),
+        generic_transpose_tree_pair(&rule, &src_pair, &[1, 0], &[]).unwrap(),
+    );
+
+    // Style guard: a multiplicity-free style is rejected before any compile.
+    let mf = ToyGenericRule {
+        style: FusionStyleKind::Simple,
+    };
+    let err = build_generic_tree_pair_transform_group_plan(
+        &mf,
+        TreeTransformOperation::permute([1, 0], []),
+        &src_structure,
+    )
+    .unwrap_err();
+    assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
+}
