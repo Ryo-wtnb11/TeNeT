@@ -1,7 +1,10 @@
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use tenet_core::{
-    product_fusion_rule, BraidingStyleKind, CoreError, FusionProductSpace, FusionRule,
-    FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, RuleIdentity,
-    SectorId, SectorLeg, SectorVec, TabulatedFusionRule, Z2FusionRule,
+    product_fusion_rule, BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace,
+    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
+    MultiplicityFreeFusionRule, RuleIdentity, SectorId, SectorLeg, SectorVec, TabulatedFusionRule,
+    TensorMapSpace, Z2FusionRule,
 };
 
 #[derive(Clone, Debug)]
@@ -76,14 +79,91 @@ fn cloned_stateful_rule_preserves_identity() {
 }
 
 #[test]
-fn independently_loaded_identical_tables_do_not_use_fnv_provenance_as_identity() {
+fn independently_loaded_identical_tables_share_full_content_identity() {
     const TABLE: &[u8] = include_bytes!("../src/su3_table.bin");
     let first = TabulatedFusionRule::try_from_bytes(TABLE, "first-su3-table.bin").unwrap();
     let second = TabulatedFusionRule::try_from_bytes(TABLE, "second-su3-table.bin").unwrap();
 
     assert_eq!(first.provenance(), second.provenance());
-    assert_ne!(first.rule_identity(), second.rule_identity());
+    assert_eq!(first.rule_identity(), second.rule_identity());
     assert_eq!(first.rule_identity(), first.clone().rule_identity());
+}
+
+#[derive(Default)]
+struct CountingHasher(usize);
+
+impl Hasher for CountingHasher {
+    fn finish(&self) -> u64 {
+        self.0 as u64
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 += bytes.len();
+    }
+}
+
+#[test]
+fn content_identity_hash_cost_does_not_scale_with_table_bytes() {
+    let short = RuleIdentity::from_canonical_bytes::<StatefulPointedRule>(7, Arc::from([1u8]));
+    let long = RuleIdentity::from_canonical_bytes::<StatefulPointedRule>(
+        7,
+        Arc::from(vec![2u8; 1_000_000]),
+    );
+    let mut short_hasher = CountingHasher::default();
+    let mut long_hasher = CountingHasher::default();
+
+    short.hash(&mut short_hasher);
+    long.hash(&mut long_hasher);
+
+    assert_eq!(short_hasher.0, long_hasher.0);
+    assert_ne!(short, long);
+}
+
+fn raw_scalar_space() -> FusionTensorMapSpace<0, 0> {
+    FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::from_dims([], []).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([], []),
+        BlockStructure::packed_column_major(0, [vec![]]).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn bound_space_rejects_rebinding_to_same_type_with_different_semantics() {
+    let first = StatefulPointedRule::new(0);
+    let second = StatefulPointedRule::new(1);
+    let space = raw_scalar_space().try_bind_rule(&first).unwrap();
+
+    assert!(matches!(
+        space.try_bind_rule(&second),
+        Err(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
+#[test]
+fn identity_inheritance_rejects_overwriting_a_bound_space() {
+    let first = StatefulPointedRule::new(0);
+    let second = StatefulPointedRule::new(1);
+    let destination = raw_scalar_space().try_bind_rule(&first).unwrap();
+    let source = raw_scalar_space().try_bind_rule(&second).unwrap();
+
+    assert!(matches!(
+        destination.try_inherit_rule_identity(&source),
+        Err(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
+#[test]
+fn generic_space_rejects_a_different_tabulated_rule() {
+    const SU3: &[u8] = include_bytes!("../src/su3_table.bin");
+    const SU4: &[u8] = include_bytes!("../src/testdata/su4_table.bin");
+    let su3 = TabulatedFusionRule::try_from_bytes(SU3, "su3-table.bin").unwrap();
+    let su4 = TabulatedFusionRule::try_from_bytes(SU4, "su4-table.bin").unwrap();
+    let space = raw_scalar_space().try_bind_rule(&su3).unwrap();
+
+    assert!(matches!(
+        space.validate_rule(&su4),
+        Err(CoreError::FusionRuleMismatch { .. })
+    ));
 }
 
 #[test]

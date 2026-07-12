@@ -209,11 +209,13 @@ fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() 
         .unwrap()],
     )
     .unwrap();
-    let space = FusionTensorMapSpace::new(
+    let space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
         hom,
         structure,
     )
+    .unwrap()
+    .try_bind_rule(&Z2FusionRule)
     .unwrap();
 
     let adjoint = crate::lowering::adjoint_fusion_space_view(&space).unwrap();
@@ -245,11 +247,13 @@ fn categorical_adjoint_view_does_not_dualize_nonselfdual_u1_stored_legs() {
         FusionProductSpace::new([SectorLeg::new([(q1, 1)], false)]),
         FusionProductSpace::new([SectorLeg::new([(q2, 1)], false)]),
     );
-    let space = FusionTensorMapSpace::new(
+    let space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         hom,
         BlockStructure::empty(2),
     )
+    .unwrap()
+    .try_bind_rule(&U1FusionRule)
     .unwrap();
 
     let adjoint = crate::lowering::adjoint_fusion_space_view(&space).unwrap();

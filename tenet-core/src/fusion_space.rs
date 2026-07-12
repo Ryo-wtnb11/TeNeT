@@ -1205,10 +1205,10 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// let hom = FusionTreeHomSpace::from_sector_ids([(0, 2)], std::iter::empty::<(usize, usize)>());
     /// let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
     ///
-    /// let space = FusionTensorMapSpace::new(dense, hom, structure).unwrap();
+    /// let space = FusionTensorMapSpace::new_unbound(dense, hom, structure).unwrap();
     /// assert_eq!(space.required_len().unwrap(), 2);
     /// ```
-    pub fn new(
+    pub fn new_unbound(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
         subblock_structure: BlockStructure,
@@ -1385,16 +1385,39 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         }
     }
 
-    pub fn bind_rule<R: FusionRule>(self, rule: &R) -> Self {
-        self.with_rule_identity(rule.rule_identity())
+    pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
+        let actual = rule.rule_identity();
+        match self.rule_identity.as_ref() {
+            Some(expected) if expected != &actual => Err(CoreError::FusionRuleMismatch {
+                expected: expected.clone(),
+                actual,
+            }),
+            Some(_) => Ok(self),
+            None => {
+                self.rule_identity = Some(actual);
+                Ok(self)
+            }
+        }
     }
 
-    pub fn inherit_rule_identity<const OTHER_NOUT: usize, const OTHER_NIN: usize>(
+    pub fn try_inherit_rule_identity<const OTHER_NOUT: usize, const OTHER_NIN: usize>(
         mut self,
         source: &FusionTensorMapSpace<OTHER_NOUT, OTHER_NIN>,
-    ) -> Self {
-        self.rule_identity = source.rule_identity();
-        self
+    ) -> Result<Self, CoreError> {
+        match (self.rule_identity.as_ref(), source.rule_identity.as_ref()) {
+            (Some(expected), Some(actual)) if expected != actual => {
+                Err(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual: actual.clone(),
+                })
+            }
+            (None, Some(identity)) => {
+                self.rule_identity = Some(identity.clone());
+                Ok(self)
+            }
+            (Some(_), Some(_)) => Ok(self),
+            (_, None) => Err(CoreError::MissingFusionRuleIdentity),
+        }
     }
 
     fn with_rule_identity(mut self, identity: RuleIdentity) -> Self {

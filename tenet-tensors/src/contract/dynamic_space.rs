@@ -635,7 +635,7 @@ impl DynamicFusionMapSpace {
         self.nout + self.nin
     }
 
-    fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), OperationError> {
+    pub(crate) fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), OperationError> {
         match self.rule_identity.as_ref() {
             Some(expected) if expected != &rule.rule_identity() => Err(
                 OperationError::from_core_preserving_context(CoreError::FusionRuleMismatch {

@@ -838,7 +838,12 @@ impl TabulatedFusionRule {
         Self {
             table: Arc::clone(table()),
             identity: IDENTITY
-                .get_or_init(RuleIdentity::new_unique::<Self>)
+                .get_or_init(|| {
+                    RuleIdentity::from_canonical_bytes::<Self>(
+                        table().provenance,
+                        Arc::<[u8]>::from(SU3_TABLE_BYTES),
+                    )
+                })
                 .clone(),
         }
     }
@@ -848,9 +853,13 @@ impl TabulatedFusionRule {
     /// Category provenance and gauge identity still require comparison with the
     /// generator's independent SUNRepresentations oracle.
     pub fn try_from_bytes(bytes: &[u8], _name: &'static str) -> Result<Self, TableError> {
+        let table = Arc::new(TabulatedSymbolTable::load_from(bytes)?);
         Ok(Self {
-            table: Arc::new(TabulatedSymbolTable::load_from(bytes)?),
-            identity: RuleIdentity::new_unique::<Self>(),
+            identity: RuleIdentity::from_canonical_bytes::<Self>(
+                table.provenance,
+                Arc::<[u8]>::from(bytes),
+            ),
+            table,
         })
     }
 

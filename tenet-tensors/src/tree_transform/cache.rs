@@ -724,9 +724,15 @@ fn decode_fusion_tree_key(input: &mut CacheBytes<'_>) -> Result<FusionTreeKey, (
     let is_dual = decode_bool_vec(input)?;
     let innerlines = decode_sector_vec(input)?;
     let vertices = decode_sector_vec(input)?;
-    Ok(FusionTreeKey::new(
-        uncoupled, coupled, is_dual, innerlines, vertices,
-    ))
+    FusionTreeKey::try_new_for_rule(
+        &tenet_core::Z2FusionRule,
+        uncoupled,
+        coupled,
+        is_dual,
+        innerlines,
+        vertices,
+    )
+    .map_err(|_| ())
 }
 
 fn encode_sector_slice(out: &mut Vec<u8>, sectors: &[SectorId]) {
