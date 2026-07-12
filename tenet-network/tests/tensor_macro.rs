@@ -3,7 +3,8 @@
 
 use tenet::prelude::*;
 use tenet_network::{
-    tensor, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, TemporaryLabel, TensorId,
+    tensor, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace,
+    TemporaryLabel, TensorId,
 };
 
 fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
@@ -200,6 +201,48 @@ fn greedy_order_beats_naive_left_to_right_on_a_chain() {
     assert_close(from_macro.data(), from_greedy.data(), 1e-12);
 }
 
+/// Reusing one workspace across warm executions preserves the compiled
+/// schedule's numerical result, including intermediate orientation.
+#[test]
+fn planned_network_reuses_execution_workspace() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 157).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 158).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 159).unwrap();
+    let labels = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| TemporaryLabel::from(*name))
+            .collect()
+    };
+    let network = Network::new(
+        vec![
+            labels(&["i", "j"]),
+            labels(&["j", "k"]),
+            labels(&["k", "l"]),
+        ],
+        vec![false; 3],
+        vec![None; 3],
+        labels(&["l", "i"]),
+        Some(1),
+    )
+    .unwrap();
+    let tensors = [&a, &b, &c];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+
+    let first = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let second = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    assert_close(first.data(), expected.data(), 1e-12);
+    assert_close(second.data(), expected.data(), 1e-12);
+}
+
 /// A written `;` split that contradicts the tensor's codomain rank is a
 /// runtime error (labels are checked at compile time, spaces at run time).
 #[test]
@@ -211,6 +254,33 @@ fn wrong_input_codomain_split_is_rejected() {
     // t is [v] <- [v] (codomain rank 1) but written as [i, j; ].
     let result = tensor!([i; k] = t[i, j;] * u[j; k]);
     assert!(matches!(result, Err(Error::InvalidArgument(_))));
+}
+
+/// A compiled schedule rejects a tensor whose rank still matches but whose
+/// codomain/domain orientation no longer matches the topology it lowered.
+#[test]
+fn planned_network_rejects_codomain_orientation_drift() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let planned_input = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 165).unwrap();
+    let network = Network::new(
+        vec![vec![TemporaryLabel::from("i"), TemporaryLabel::from("j")]],
+        vec![false],
+        vec![None],
+        vec![TemporaryLabel::from("i"), TemporaryLabel::from("j")],
+        Some(1),
+    )
+    .unwrap();
+    let planned = network
+        .plan(&[&planned_input], &GreedyDenseOptimizer)
+        .unwrap();
+
+    let drifted = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [], 166).unwrap();
+    let error = planned.execute(&[&drifted]).unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidArgument(message) if message.contains("topology drifted")),
+        "unexpected error: {error}"
+    );
 }
 
 /// Contracted legs are validated structurally at plan time: same sectors AND
