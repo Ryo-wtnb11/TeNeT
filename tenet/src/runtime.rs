@@ -14,6 +14,11 @@ use tenet_tensors::{
     TreeTransformSu3RuleCacheKey,
 };
 
+/// Re-exported for the prelude: the transpose-kernel selection consumed by
+/// [`RuntimeBuilder::transpose_backend`] (defined next to the kernel adapter
+/// it configures; see its docs for the opt-in rationale).
+pub use tenet_tensors::TransposeBackend;
+
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
 
@@ -194,6 +199,41 @@ impl RuntimeState {
         apply(&mut self.su2, threads);
         apply(&mut self.u1_fz2, threads);
         apply(&mut self.fz2_u1_su2, threads);
+    }
+
+    /// Applies the transpose-kernel selection to every per-rule execution
+    /// context. Unlike the replay worker count (a tree-transform-only
+    /// property), the transpose kernel drives pure permuted copies in BOTH
+    /// backends each context holds — the tree-transform backend (replay
+    /// pack/scatter) and the contraction backend (fusion-block pack/scatter)
+    /// — so both are set, for every rule including SU(3).
+    fn set_transpose_backend(&mut self, backend: TransposeBackend) {
+        fn apply<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+            ctxs: &mut Ctxs<Key>,
+            backend: TransposeBackend,
+        ) {
+            ctxs.f64
+                .tree_context_mut()
+                .backend_mut()
+                .set_transpose_backend(backend);
+            ctxs.f64
+                .contract_backend_mut()
+                .set_transpose_backend(backend);
+            ctxs.c64
+                .tree_context_mut()
+                .backend_mut()
+                .set_transpose_backend(backend);
+            ctxs.c64
+                .contract_backend_mut()
+                .set_transpose_backend(backend);
+        }
+        apply(&mut self.u1, backend);
+        apply(&mut self.z2, backend);
+        apply(&mut self.fz2, backend);
+        apply(&mut self.su2, backend);
+        apply(&mut self.u1_fz2, backend);
+        apply(&mut self.fz2_u1_su2, backend);
+        apply(&mut self.su3, backend);
     }
 }
 
@@ -410,6 +450,9 @@ pub struct RuntimeBuilder {
     /// Selected built-in CPU provider for the contraction/recoupling GEMM;
     /// `None` uses faer. Independent of [`Self::linalg_backend`].
     gemm_backend: Option<LinalgBackend>,
+    /// Selected transpose kernel for pure permuted copies; `None` keeps the
+    /// fused-loop default (dispatch-identical to not having the knob).
+    transpose_backend: Option<TransposeBackend>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -423,6 +466,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("dense_executor", &self.dense_executor.is_some())
             .field("linalg_backend", &self.linalg_backend)
             .field("gemm_backend", &self.gemm_backend)
+            .field("transpose_backend", &self.transpose_backend)
             .finish()
     }
 }
@@ -549,6 +593,34 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Selects the CPU **transpose kernel** for pure permuted copies (the
+    /// pack / assign-scatter of tree-transform replay and fusion-block
+    /// contraction). Unset keeps [`TransposeBackend::FusedLoops`], which is
+    /// byte- and dispatch-identical to not having the knob at all.
+    ///
+    /// [`TransposeBackend::StridedPerm`] is **opt-in on measured numbers**
+    /// (issue #114): it loses badly on small-degeneracy SU(2) replay (d=4
+    /// transposes ~2x slower — its per-call plan build cannot amortize over
+    /// many tiny blocks) and only wins on large-block abelian
+    /// transpose-heavy workloads. Backend choice never changes results; see
+    /// `docs/backend_policy.md` for the regime table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder()
+    ///     .transpose_backend(TransposeBackend::StridedPerm)
+    ///     .build()?;
+    /// # let _ = rt;
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn transpose_backend(mut self, backend: TransposeBackend) -> Self {
+        self.transpose_backend = Some(backend);
+        self
+    }
+
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
@@ -603,6 +675,9 @@ impl RuntimeBuilder {
         state.plan_cache_config = self.plan_cache;
         if let Some(threads) = self.recoupling_threads {
             state.set_recoupling_threads(threads);
+        }
+        if let Some(transpose) = self.transpose_backend {
+            state.set_transpose_backend(transpose);
         }
         #[cfg(feature = "cuda")]
         if let Some(device) = self.cuda_device {
@@ -707,5 +782,57 @@ mod tests {
         assert!(make_transform_ops(Some(1), None).is_ok());
         assert!(make_transform_ops(None, Some(faer)).is_ok());
         assert!(make_transform_ops(Some(1), Some(faer)).is_ok());
+    }
+
+    /// `RuntimeBuilder::transpose_backend(StridedPerm)` must reach BOTH
+    /// backends (tree-transform and contraction) of every per-rule context —
+    /// the backends whose getters feed every kernel-adapter construction in
+    /// the replay/contraction drivers. Unset must stay FusedLoops. This is
+    /// the builder→backend leg of the route-selection chain; the
+    /// backend→dispatch leg is pinned by tenet-operations'
+    /// `transpose_backend_field_switches_the_route`.
+    #[test]
+    fn builder_transpose_backend_reaches_every_context_backend() {
+        fn assert_all<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+            ctxs: &mut Ctxs<Key>,
+            expected: TransposeBackend,
+        ) {
+            assert_eq!(
+                ctxs.f64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .transpose_backend(),
+                expected
+            );
+            assert_eq!(ctxs.f64.contract_backend().transpose_backend(), expected);
+            assert_eq!(
+                ctxs.c64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .transpose_backend(),
+                expected
+            );
+            assert_eq!(ctxs.c64.contract_backend().transpose_backend(), expected);
+        }
+        fn assert_state(runtime: &Runtime, expected: TransposeBackend) {
+            let mut state = runtime.inner.state.lock().unwrap();
+            let state = &mut *state;
+            assert_all(&mut state.u1, expected);
+            assert_all(&mut state.z2, expected);
+            assert_all(&mut state.fz2, expected);
+            assert_all(&mut state.su2, expected);
+            assert_all(&mut state.u1_fz2, expected);
+            assert_all(&mut state.fz2_u1_su2, expected);
+            assert_all(&mut state.su3, expected);
+        }
+
+        let selected = Runtime::builder()
+            .transpose_backend(TransposeBackend::StridedPerm)
+            .build()
+            .unwrap();
+        assert_state(&selected, TransposeBackend::StridedPerm);
+
+        let default = Runtime::builder().build().unwrap();
+        assert_state(&default, TransposeBackend::FusedLoops);
     }
 }
