@@ -7,6 +7,18 @@
 //! compile layer (`tenet-tensors`) hands plans down as offsets, strides,
 //! `SectorId`s, and scalar coefficients.
 
+#[cfg(not(any(
+    feature = "cpu-faer",
+    feature = "cpu-blas",
+    feature = "blas-accelerate",
+    feature = "blas-openblas",
+    feature = "blas-mkl",
+    feature = "provider-inject"
+)))]
+compile_error!(
+    "tenet-operations requires a host execution backend; enable cpu-faer, cpu-blas, a blas-* provider, or provider-inject (cuda still requires host replay)"
+);
+
 pub mod axis;
 #[cfg(feature = "cuda")]
 pub mod cuda;

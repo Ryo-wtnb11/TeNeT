@@ -76,6 +76,82 @@ jobs:
       - run: cargo fmt --check
         working-directory: tenet
 
+  backend-contract:
+    name: backend contract (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: cpu-faer, os: ubuntu-latest, features: cpu-faer }
+          - { name: cpu-blas-core, os: ubuntu-latest, features: cpu-blas }
+          - { name: openblas, os: ubuntu-latest, features: blas-openblas }
+          - { name: mkl, os: ubuntu-latest, features: blas-mkl }
+          - { name: provider-inject, os: ubuntu-latest, features: provider-inject }
+          - { name: accelerate, os: macos-latest, features: blas-accelerate }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: backend-${{ matrix.name }}
+      - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
+        working-directory: tenet
+
+  no-backend-contract:
+    name: no backend is rejected explicitly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the backend-selection diagnostic
+        run: |
+          set -euo pipefail
+          if cargo check --workspace --no-default-features 2>no-backend.log; then
+            echo "no-default-features unexpectedly compiled" >&2
+            exit 1
+          fi
+          grep -F "tenet-operations requires a host execution backend" no-backend.log
+        working-directory: tenet
+
+  cuda-check:
+    name: CUDA compile contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: Jimver/cuda-toolkit@v0.2.28
+        with:
+          method: network
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: backend-cuda
+      - run: cargo check --workspace --all-targets --no-default-features --features cuda,cpu-faer
+        working-directory: tenet
+
   test-linux:
     name: cargo test (ubuntu-latest)
     needs: changes

@@ -123,13 +123,14 @@ The Python side calls `cotengra.array_contract_tree(...)` and returns
 
 | feature | effect |
 | --- | --- |
+| no default features | Unsupported for execution crates; the build fails with a backend-selection diagnostic. Leaf crates such as `tenet-core` remain backend-free. |
 | `cpu-faer` | Default CPU dense backend. |
 | `cpu-blas` | Enable the BLAS/LAPACK provider path selected through downstream backend features. |
 | `blas-accelerate` | Accelerate-backed BLAS/LAPACK feature wiring. |
 | `blas-openblas` | OpenBLAS-backed BLAS/LAPACK feature wiring. |
 | `blas-mkl` | MKL-backed BLAS/LAPACK feature wiring. |
 | `provider-inject` | Allow injecting a dense provider explicitly. |
-| `cuda` | CUDA execution paths where implemented. |
+| `cuda` | Compile CUDA execution paths where implemented; a CPU feature is also required for host-only replay. |
 | `opt-path` | Enable `opt-einsum-path` optimizers in `tenet-network`. |
 | `cotengra-python` | Enable the Python cotengra planner bridge in `tenet-network`. |
 
@@ -144,6 +145,11 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
+- Execution crates reject a no-default-features build because their convenience
+  APIs require a concrete executor. Use `tenet-core` for backend-free types, or
+  enable a CPU/CUDA feature or `provider-inject` for the full workspace.
+- CUDA is compile-checked in CI, but requires a CUDA runner for runtime smoke
+  tests; host-only tree-transform replay is not silently used as device replay.
 - `cotengra-python` is a planner backend, not an executor backend.
 - Cotengra slicing decisions can be represented as `SlicedPlan`, but ordinary
   sliced execution over `Tensor` is not wired yet.

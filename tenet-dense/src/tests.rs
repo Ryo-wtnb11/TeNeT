@@ -1037,6 +1037,20 @@ fn default_executor_rejects_integer_linalg_view() {
     ));
 }
 
+#[cfg(all(feature = "cpu-faer", not(feature = "cpu-blas")))]
+#[test]
+fn faer_only_build_rejects_uncompiled_blas_provider() {
+    let error = DefaultDenseExecutor::with_kind(CpuBackendKind::Blas).unwrap_err();
+    assert!(error.to_string().contains("cpu-blas"));
+}
+
+#[cfg(all(feature = "cpu-blas", not(feature = "cpu-faer")))]
+#[test]
+fn blas_only_build_rejects_uncompiled_faer_provider() {
+    let error = DefaultDenseExecutor::with_kind(CpuBackendKind::Faer).unwrap_err();
+    assert!(error.to_string().contains("cpu-faer"));
+}
+
 // Exercises the values-only trait *defaults* (full decomposition minus the
 // vectors). `DefaultDenseExecutor` overrides them, so this wraps it in an
 // executor that implements svd/eigh/eig but leaves svd_vals/eigh_vals/eig_vals
