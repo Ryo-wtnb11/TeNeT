@@ -1096,7 +1096,7 @@ impl ProductComplexFixture {
         let (rule, src_space, dst_space) = fz2_u1_su2_tree_pair_fixture();
         let rhs_hom = FusionTreeHomSpace::from_sector_ids([], []);
         let scalar_key = BlockKey::from(rhs_hom.fusion_tree_keys(&rule)[0].clone());
-        let rhs_space = FusionTensorMapSpace::new(
+        let rhs_space = FusionTensorMapSpace::new_unbound(
             TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
             rhs_hom,
             packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),

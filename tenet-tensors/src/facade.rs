@@ -291,9 +291,18 @@ where
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
+    let dst_fusion = dst
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
     let src_fusion = src
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    dst_fusion
+        .validate_rule(rule)
+        .map_err(OperationError::Core)?;
+    src_fusion
+        .validate_rule(rule)
+        .map_err(OperationError::Core)?;
     if source_conjugate
         && matches!(&operation, TreeTransformOperation::Braid { .. })
         && !rule.supports_unitary_braid_dagger()
@@ -384,9 +393,18 @@ where
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
+    let dst_fusion = dst
+        .fusion_space()
+        .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
     let src_fusion = src
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
+    dst_fusion
+        .validate_rule(rule)
+        .map_err(OperationError::Core)?;
+    src_fusion
+        .validate_rule(rule)
+        .map_err(OperationError::Core)?;
     if source_conjugate
         && matches!(&operation, TreeTransformOperation::Braid { .. })
         && !rule.supports_unitary_braid_dagger()

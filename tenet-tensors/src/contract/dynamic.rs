@@ -2118,7 +2118,8 @@ mod tests {
                 [vec![1, 1], vec![1, 1]],
             )
             .unwrap()
-            .bind_rule(&rule)
+            .try_bind_rule(&rule)
+            .unwrap()
         };
         let allocations = Rc::new(RefCell::new(Vec::new()));
         let lhs =
@@ -2242,7 +2243,7 @@ mod tests {
             .expect("SU2 fixture should contain the recoupled output tree")
             .clone();
         let lhs_space = || {
-            FusionTensorMapSpace::new(
+            FusionTensorMapSpace::new_unbound(
                 TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
                 lhs_hom.clone(),
                 crate::tests::packed_fixture_structure(
@@ -2252,7 +2253,8 @@ mod tests {
                 .unwrap(),
             )
             .unwrap()
-            .bind_rule(&rule)
+            .try_bind_rule(&rule)
+            .unwrap()
         };
         let rhs_space = || {
             FusionTensorMapSpace::from_degeneracy_shapes(
@@ -2264,7 +2266,7 @@ mod tests {
             .unwrap()
         };
         let dst_space = || {
-            FusionTensorMapSpace::new(
+            FusionTensorMapSpace::new_unbound(
                 TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
                 lhs_hom.clone(),
                 crate::tests::packed_fixture_structure(
@@ -2276,6 +2278,8 @@ mod tests {
                 )
                 .unwrap(),
             )
+            .unwrap()
+            .try_bind_rule(&rule)
             .unwrap()
         };
         let allocations = Rc::new(RefCell::new(Vec::new()));

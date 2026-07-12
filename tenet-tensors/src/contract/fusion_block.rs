@@ -740,6 +740,9 @@ pub(crate) fn compile_fusion_block_contract_plan_generic<R>(
 where
     R: FusionRule,
 {
+    dst_space.validate_rule(rule)?;
+    lhs_space.validate_rule(rule)?;
+    rhs_space.validate_rule(rule)?;
     // Hardening guard (adversarial review, Stage B3c-1 refute pass): the
     // per-subblock `coefficient` computed below in `finish_generic` is
     // hardcoded to `1.0`, which assumes a bosonic rule (no supertrace twist).
@@ -1229,4 +1232,43 @@ where
     R: FusionRule,
 {
     tree.coupled().unwrap_or_else(|| rule.vacuum())
+}
+
+#[cfg(test)]
+mod rule_identity_tests {
+    use super::*;
+    use tenet_core::{CoreError, FusionTreeHomSpace, TabulatedFusionRule};
+    use tenet_operations::OutputAxisOrder;
+
+    #[test]
+    fn generic_block_plan_rejects_spaces_from_different_tabulated_rules() {
+        const SU3: &[u8] = include_bytes!("../../../tenet-core/src/su3_table.bin");
+        const SU4: &[u8] = include_bytes!("../../../tenet-core/src/testdata/su4_table.bin");
+        let su3 = TabulatedFusionRule::try_from_bytes(SU3, "su3-table.bin").unwrap();
+        let su4 = TabulatedFusionRule::try_from_bytes(SU4, "su4-table.bin").unwrap();
+        let make = |rule: &TabulatedFusionRule| {
+            DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+                rule,
+                FusionTreeHomSpace::from_sector_ids([], []),
+                [vec![]],
+            )
+            .unwrap()
+        };
+        let dst = make(&su3);
+        let lhs = make(&su3);
+        let rhs = make(&su4);
+
+        let error = compile_fusion_block_contract_plan_generic(
+            &su3,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new(&[], &[], OutputAxisOrder::identity()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+    }
 }

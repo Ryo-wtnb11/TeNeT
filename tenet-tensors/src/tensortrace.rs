@@ -141,6 +141,8 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        dst.validate_rule(rule).map_err(OperationError::Core)?;
+        src.validate_rule(rule).map_err(OperationError::Core)?;
         Self::compile_fusion_spaces_with_storage_structure(
             rule,
             dst,
@@ -167,6 +169,8 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        dst.validate_rule(rule)?;
+        src.validate_rule(rule)?;
         Self::compile_fusion_parts(
             rule,
             dst.homspace(),
@@ -191,6 +195,8 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        dst.validate_rule(rule)?;
+        src.validate_rule(rule)?;
         Self::compile_fusion_parts(
             rule,
             dst.homspace(),

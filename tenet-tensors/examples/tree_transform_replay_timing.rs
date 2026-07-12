@@ -525,20 +525,24 @@ fn su2_recoupling_fixture() -> (BlockStructure, TensorMapSpace<4, 0>, TensorMapS
 
 fn all_codomain_fusion_tree_key(innerlines: [usize; 2]) -> BlockKey {
     BlockKey::from(FusionTreeBlockKey::pair(
-        FusionTreeKey::from_sector_ids(
+        FusionTreeKey::try_from_sector_ids_for_rule(
+            &SU2FusionRule,
             [1, 1, 1, 1],
             Some(0),
             [false, false, false, false],
             innerlines,
             [1, 1, 1],
-        ),
-        FusionTreeKey::new(
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
             Vec::<SectorId>::new(),
             None,
             Vec::<bool>::new(),
             Vec::<SectorId>::new(),
             Vec::<SectorId>::new(),
-        ),
+        )
+        .unwrap(),
     ))
 }
 
