@@ -147,7 +147,8 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-core` for backend-free types, or
-  enable a CPU/CUDA feature or `provider-inject` for the full workspace.
+  enable a CPU feature or `provider-inject` for the full workspace. CUDA is an
+  additional backend feature and still requires one of those host backends.
 - CUDA is compile-checked in CI, but requires a CUDA runner for runtime smoke
   tests; host-only tree-transform replay is not silently used as device replay.
 - `cotengra-python` is a planner backend, not an executor backend.
