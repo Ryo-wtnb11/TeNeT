@@ -3691,7 +3691,7 @@ mod b3c1_su4_smoke {
     static SU4_BYTES: &[u8] = include_bytes!("../../../tenet-core/src/testdata/su4_table.bin");
 
     fn su4() -> TabulatedFusionRule {
-        TabulatedFusionRule::from_bytes(SU4_BYTES, "su4_table.bin")
+        TabulatedFusionRule::from_bytes(SU4_BYTES, "su4_table.bin").unwrap()
     }
 
     // Construction + permute: a `[4,4̄] <- vac` singlet tensor; swapping the two

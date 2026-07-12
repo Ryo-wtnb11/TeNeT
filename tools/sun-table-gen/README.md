@@ -47,9 +47,17 @@ lifts the cut), never silently enumerated as a truncated tree set.
 Julia arrays are column-major; a column-major transcription bug bit Stage B2b.
 `gen.jl` flattens every F/R block **row-major** on the generator side (matching
 the Rust `GenericFArray::get` / `GenericRMatrix::get` indexing). The reader
-copies bytes verbatim and must never re-transpose. A trailing FNV-1a-64 of the
+copies bytes verbatim and must never re-transpose. Integer and floating-point
+fields are emitted explicitly in little-endian order, independent of the Julia
+host. A trailing FNV-1a-64 of the
 payload is stored in the header and re-checked by the loader, so a transpose or
 truncation mistake fails loudly at first use.
+
+Before writing, the generator checks every F/R record shape against independent
+`Nsymbol` calls, checks R unitarity, and runs TensorKitSectors pentagon and
+hexagon equations on the four lowest-dimensional irreps. The Rust loader then
+reconstructs admissible keys from serialized fusion multiplicities and rejects
+missing, extra, malformed, non-finite, or non-unitary symbol records.
 
 ## Binary format v3 (magic `TFR3`)
 

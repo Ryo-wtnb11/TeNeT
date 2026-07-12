@@ -56,7 +56,7 @@
 #  fold classify sectors as clean / tainted / escaped instead of panicking —
 #  see su3.rs `coupled_sector_fold`.)
 
-using SUNRepresentations, TensorKitSectors
+using LinearAlgebra, SUNRepresentations, TensorKitSectors
 
 const N       = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 3
 const DIM_CUT = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 27
@@ -75,10 +75,10 @@ end
 # little-endian appenders
 pu8!(v, x)  = push!(v, UInt8(x))
 pi8!(v, x)  = push!(v, reinterpret(UInt8, Int8(x)))
-pu16!(v, x) = append!(v, reinterpret(UInt8, [UInt16(x)]))
-pu32!(v, x) = append!(v, reinterpret(UInt8, [UInt32(x)]))
-pu64!(v, x) = append!(v, reinterpret(UInt8, [UInt64(x)]))
-pf64!(v, x) = append!(v, reinterpret(UInt8, [Float64(x)]))
+pu16!(v, x) = for shift in (0, 8); pu8!(v, (UInt16(x) >> shift) & 0xff); end
+pu32!(v, x) = for shift in (0, 8, 16, 24); pu8!(v, (UInt32(x) >> shift) & 0xff); end
+pu64!(v, x) = for shift in (0, 8, 16, 24, 32, 40, 48, 56); pu8!(v, (UInt64(x) >> shift) & 0xff); end
+pf64!(v, x) = pu64!(v, reinterpret(UInt64, Float64(x)))
 
 # label as a RANK-tuple of ints (group-agnostic Dynkin coordinates)
 label_of(s) = collect(Int, dynkin_label(s))
@@ -142,6 +142,9 @@ function main()
     pu32!(payload, length(rrecs))
     for (a, b, c, R) in rrecs
         rows, cols = size(R)
+        @assert (rows, cols) == (Nsymbol(irreps[a + 1], irreps[b + 1], irreps[c + 1]),
+                                 Nsymbol(irreps[b + 1], irreps[a + 1], irreps[c + 1]))
+        @assert isapprox(R' * R, I; atol = 1.0e-12, rtol = 1.0e-12)
         pu8!(payload, a); pu8!(payload, b); pu8!(payload, c)
         pu8!(payload, rows); pu8!(payload, cols)
         for i in 1:rows, j in 1:cols          # ROW-major flatten
@@ -170,6 +173,11 @@ function main()
     pu32!(payload, nf)
     for (hdr, F) in frecs
         a, b, c, d, e, f, s0, s1, s2, s3 = hdr
+        @assert (s0, s1, s2, s3) == (
+            Nsymbol(irreps[a + 1], irreps[b + 1], irreps[e + 1]),
+            Nsymbol(irreps[e + 1], irreps[c + 1], irreps[d + 1]),
+            Nsymbol(irreps[b + 1], irreps[c + 1], irreps[f + 1]),
+            Nsymbol(irreps[a + 1], irreps[f + 1], irreps[d + 1]))
         pu8!(payload, a); pu8!(payload, b); pu8!(payload, c)
         pu8!(payload, d); pu8!(payload, e); pu8!(payload, f)
         pu8!(payload, s0); pu8!(payload, s1); pu8!(payload, s2); pu8!(payload, s3)
@@ -237,6 +245,14 @@ function main()
         for (c, nmul) in rets
             pu8!(payload, c); pu8!(payload, nmul)
         end
+    end
+
+    witnesses = irreps[1:min(4, length(irreps))]
+    for a in witnesses, b in witnesses, c in witnesses
+        @assert hexagon_equation(a, b, c; atol = 1.0e-12, rtol = 1.0e-12)
+    end
+    for a in witnesses, b in witnesses, c in witnesses, d in witnesses
+        @assert pentagon_equation(a, b, c, d; atol = 1.0e-12, rtol = 1.0e-12)
     end
 
     # ---- assemble file: header + payload ----

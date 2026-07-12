@@ -6442,9 +6442,168 @@ mod tests {
     // SUNRepresentations' own SU(4) fusion (id layout in the test).
     static SU4_TABLE_BYTES: &[u8] = include_bytes!("testdata/su4_table.bin");
 
+    fn rehash_table(bytes: &mut [u8]) {
+        let hash = fnv1a64(&bytes[20..]).to_le_bytes();
+        bytes[12..20].copy_from_slice(&hash);
+    }
+
+    fn symbol_record_ranges(bytes: &[u8]) -> (usize, std::ops::Range<usize>, usize, std::ops::Range<usize>) {
+        let mut cursor = Cursor { bytes, pos: 4 };
+        assert_eq!(cursor.u32().unwrap(), 3);
+        let rank = cursor.u32().unwrap() as usize - 1;
+        cursor.u64().unwrap();
+        let n_irreps = cursor.u32().unwrap() as usize;
+        cursor.take(n_irreps * (rank + 6)).unwrap();
+        let n_pairs = cursor.u32().unwrap() as usize;
+        for _ in 0..n_pairs {
+            cursor.take(2).unwrap();
+            let n_channels = cursor.u8().unwrap() as usize;
+            cursor.take(n_channels * 2).unwrap();
+        }
+        let r_count_offset = cursor.pos;
+        let n_r = cursor.u32().unwrap();
+        assert!(n_r > 0);
+        let r_start = cursor.pos;
+        cursor.take(3).unwrap();
+        let rows = cursor.u8().unwrap() as usize;
+        let cols = cursor.u8().unwrap() as usize;
+        cursor.take(rows * cols * 8).unwrap();
+        let r_range = r_start..cursor.pos;
+        for _ in 1..n_r {
+            cursor.take(3).unwrap();
+            let rows = cursor.u8().unwrap() as usize;
+            let cols = cursor.u8().unwrap() as usize;
+            cursor.take(rows * cols * 8).unwrap();
+        }
+        let f_count_offset = cursor.pos;
+        let n_f = cursor.u32().unwrap();
+        assert!(n_f > 0);
+        let f_start = cursor.pos;
+        cursor.take(6).unwrap();
+        let shape = [cursor.u8().unwrap(), cursor.u8().unwrap(), cursor.u8().unwrap(), cursor.u8().unwrap()];
+        let len = shape.into_iter().map(usize::from).product::<usize>();
+        cursor.take(len * 8).unwrap();
+        (r_count_offset, r_range, f_count_offset, f_start..cursor.pos)
+    }
+
+    fn remove_record(bytes: &[u8], count_offset: usize, range: std::ops::Range<usize>) -> Vec<u8> {
+        let mut mutated = bytes.to_vec();
+        let count = u32::from_le_bytes(mutated[count_offset..count_offset + 4].try_into().unwrap());
+        mutated[count_offset..count_offset + 4].copy_from_slice(&(count - 1).to_le_bytes());
+        mutated.drain(range);
+        rehash_table(&mut mutated);
+        mutated
+    }
+
+    fn first_nonsymmetric_f_shape(bytes: &[u8]) -> usize {
+        let (_, _, f_count_offset, _) = symbol_record_ranges(bytes);
+        let mut cursor = Cursor { bytes, pos: f_count_offset };
+        let n_f = cursor.u32().unwrap();
+        for _ in 0..n_f {
+            cursor.take(6).unwrap();
+            let shape_offset = cursor.pos;
+            let shape = [
+                cursor.u8().unwrap(),
+                cursor.u8().unwrap(),
+                cursor.u8().unwrap(),
+                cursor.u8().unwrap(),
+            ];
+            let len = shape.into_iter().map(usize::from).product::<usize>();
+            cursor.take(len * 8).unwrap();
+            if shape[0] != shape[1] {
+                return shape_offset;
+            }
+        }
+        panic!("fixture must contain a non-symmetric F shape")
+    }
+
+    #[test]
+    fn tabulated_loader_rejects_truncated_and_overflowing_inputs() {
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&SU4_TABLE_BYTES[..8], "truncated"),
+            Err(TableError::Truncated { .. })
+        ));
+        let mut overflowing = SU4_TABLE_BYTES.to_vec();
+        overflowing[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        rehash_table(&mut overflowing);
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&overflowing, "overflowing"),
+            Err(TableError::Invalid { section: "irreps", .. })
+        ));
+    }
+
+    #[test]
+    fn tabulated_loader_rejects_missing_admissible_symbols() {
+        let (r_count, r_range, f_count, f_range) = symbol_record_ranges(SU4_TABLE_BYTES);
+        let missing_r = remove_record(SU4_TABLE_BYTES, r_count, r_range.clone());
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&missing_r, "missing-r"),
+            Err(TableError::MissingR(_))
+        ));
+
+        let removed = f_range.end - f_range.start;
+        let missing_f = remove_record(SU4_TABLE_BYTES, f_count, f_range);
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&missing_f, "missing-f"),
+            Err(TableError::MissingF(_))
+        ));
+        assert!(removed > 10);
+    }
+
+    #[test]
+    fn tabulated_loader_rejects_bad_ids_and_symbol_shapes() {
+        let (_, r_range, _, _) = symbol_record_ranges(SU4_TABLE_BYTES);
+        let mut bad_id = SU4_TABLE_BYTES.to_vec();
+        bad_id[r_range.start] = u8::MAX;
+        rehash_table(&mut bad_id);
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&bad_id, "bad-id"),
+            Err(TableError::Invalid { section: "R", .. })
+        ));
+
+        let shape_offset = first_nonsymmetric_f_shape(SU3_TABLE_BYTES);
+        let mut bad_shape = SU3_TABLE_BYTES.to_vec();
+        bad_shape.swap(shape_offset, shape_offset + 1);
+        rehash_table(&mut bad_shape);
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&bad_shape, "bad-shape"),
+            Err(TableError::Invalid { section: "F", .. })
+        ));
+    }
+
+    #[test]
+    fn tabulated_symbols_keep_proven_forbidden_tuples_zero() {
+        let rule = su3();
+        let three = su3_id(1, 0);
+        let vacuum = rule.vacuum();
+        let r = rule.r_symbol_generic(three, three, vacuum);
+        assert_eq!(r.shape(), (0, 0));
+        assert!(r.data().is_empty());
+
+        let f = rule.f_symbol_generic(three, three, three, vacuum, vacuum, vacuum);
+        assert!(f.shape().0 == 0 || f.shape().1 == 0 || f.shape().2 == 0 || f.shape().3 == 0);
+        assert!(f.data().is_empty());
+    }
+
+    #[test]
+    fn generic_symbol_shapes_are_checked_in_release_builds() {
+        assert_eq!(
+            GenericFArray::try_new(vec![0.0; 3], (1, 1, 2, 2)).unwrap_err().expected_len,
+            Some(4)
+        );
+        assert_eq!(
+            GenericRMatrix::try_new(vec![0.0; 3], 2, 2).unwrap_err().expected_len,
+            Some(4)
+        );
+        assert_eq!(
+            GenericRMatrix::<f64>::try_new(Vec::new(), usize::MAX, 2).unwrap_err().expected_len,
+            None
+        );
+    }
+
     #[test]
     fn b3c1_su4_table_is_data_only() {
-        let rule = TabulatedFusionRule::from_bytes(SU4_TABLE_BYTES, "su4_table.bin");
+        let rule = TabulatedFusionRule::from_bytes(SU4_TABLE_BYTES, "su4_table.bin").unwrap();
         assert_eq!(rule.group_n(), 4);
         // FNV self-check already passed in `from_bytes`; identity is set.
         assert_ne!(rule.provenance(), 0);

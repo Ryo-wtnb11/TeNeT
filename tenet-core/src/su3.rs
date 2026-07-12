@@ -110,46 +110,87 @@ struct TabulatedOneHop {
     has_frontier: bool,
 }
 
-/// Minimal little-endian cursor over the embedded blob. Panics on truncation —
-/// the blob is a compile-time constant, so any failure is a build/asset bug,
-/// not a runtime input error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TableError {
+    Truncated { offset: usize, needed: usize, remaining: usize },
+    BadMagic,
+    UnsupportedVersion(u32),
+    HashMismatch { expected: u64, actual: u64 },
+    Overflow(&'static str),
+    Invalid { section: &'static str, message: String },
+    Duplicate { section: &'static str, key: String },
+    MissingR([u8; 3]),
+    MissingF([u8; 6]),
+    TrailingBytes(usize),
+}
+
+impl fmt::Display for TableError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Truncated { offset, needed, remaining } => write!(
+                f,
+                "table is truncated at byte {offset}: need {needed} bytes, have {remaining}"
+            ),
+            Self::BadMagic => write!(f, "bad tabulated-fusion magic"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported table version {v}"),
+            Self::HashMismatch { expected, actual } => write!(
+                f,
+                "payload FNV-1a mismatch: header {expected:#x}, computed {actual:#x}"
+            ),
+            Self::Overflow(context) => write!(f, "integer overflow while reading {context}"),
+            Self::Invalid { section, message } => write!(f, "invalid {section}: {message}"),
+            Self::Duplicate { section, key } => write!(f, "duplicate {section} record {key}"),
+            Self::MissingR(key) => write!(f, "missing admissible R record {key:?}"),
+            Self::MissingF(key) => write!(f, "missing admissible F record {key:?}"),
+            Self::TrailingBytes(n) => write!(f, "table has {n} trailing bytes"),
+        }
+    }
+}
+
+impl std::error::Error for TableError {}
+
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Cursor<'a> {
-    fn u8(&mut self) -> u8 {
-        let v = self.bytes[self.pos];
-        self.pos += 1;
-        v
+    fn take(&mut self, len: usize) -> Result<&'a [u8], TableError> {
+        let end = self.pos.checked_add(len).ok_or(TableError::Overflow("cursor offset"))?;
+        let slice = self.bytes.get(self.pos..end).ok_or(TableError::Truncated {
+            offset: self.pos,
+            needed: len,
+            remaining: self.bytes.len().saturating_sub(self.pos),
+        })?;
+        self.pos = end;
+        Ok(slice)
     }
-    fn i8(&mut self) -> i8 {
-        self.u8() as i8
+    fn u8(&mut self) -> Result<u8, TableError> {
+        let v = self.take(1)?[0];
+        Ok(v)
     }
-    fn u16(&mut self) -> u16 {
+    fn i8(&mut self) -> Result<i8, TableError> {
+        Ok(self.u8()? as i8)
+    }
+    fn u16(&mut self) -> Result<u16, TableError> {
         let mut b = [0u8; 2];
-        b.copy_from_slice(&self.bytes[self.pos..self.pos + 2]);
-        self.pos += 2;
-        u16::from_le_bytes(b)
+        b.copy_from_slice(self.take(2)?);
+        Ok(u16::from_le_bytes(b))
     }
-    fn u32(&mut self) -> u32 {
+    fn u32(&mut self) -> Result<u32, TableError> {
         let mut b = [0u8; 4];
-        b.copy_from_slice(&self.bytes[self.pos..self.pos + 4]);
-        self.pos += 4;
-        u32::from_le_bytes(b)
+        b.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(b))
     }
-    fn u64(&mut self) -> u64 {
+    fn u64(&mut self) -> Result<u64, TableError> {
         let mut b = [0u8; 8];
-        b.copy_from_slice(&self.bytes[self.pos..self.pos + 8]);
-        self.pos += 8;
-        u64::from_le_bytes(b)
+        b.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(b))
     }
-    fn f64(&mut self) -> f64 {
+    fn f64(&mut self) -> Result<f64, TableError> {
         let mut b = [0u8; 8];
-        b.copy_from_slice(&self.bytes[self.pos..self.pos + 8]);
-        self.pos += 8;
-        f64::from_le_bytes(b)
+        b.copy_from_slice(self.take(8)?);
+        Ok(f64::from_le_bytes(b))
     }
 }
 
@@ -172,36 +213,149 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
+fn validate_sector_ids(
+    section: &'static str,
+    ids: &[u8],
+    n_irreps: usize,
+) -> Result<(), TableError> {
+    if let Some(id) = ids.iter().copied().find(|&id| id as usize >= n_irreps) {
+        return Err(TableError::Invalid {
+            section,
+            message: format!("sector id {id} is outside 0..{n_irreps}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_record_count(
+    section: &'static str,
+    count: usize,
+    minimum_record_bytes: usize,
+    remaining_bytes: usize,
+) -> Result<(), TableError> {
+    if count > remaining_bytes / minimum_record_bytes {
+        return Err(TableError::Invalid {
+            section,
+            message: format!("record count {count} exceeds the remaining payload"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_symbol_completeness(
+    nsym: &FxHashMap<(u8, u8, u8), usize>,
+    rsymbols: &FxHashMap<[u8; 3], GenericRMatrix<f64>>,
+    fsymbols: &FxHashMap<[u8; 6], GenericFArray<f64>>,
+) -> Result<(), TableError> {
+    for (&(a, b, coupled), &rows) in nsym {
+        let key = [a, b, coupled];
+        let block = rsymbols.get(&key).ok_or(TableError::MissingR(key))?;
+        let cols = nsym.get(&(b, a, coupled)).copied().ok_or_else(|| TableError::Invalid {
+            section: "N symbols",
+            message: format!("missing reverse multiplicity for {key:?}"),
+        })?;
+        if block.shape() != (rows, cols) {
+            return Err(TableError::Invalid {
+                section: "R",
+                message: format!("{key:?} has shape {:?}, expected ({rows}, {cols})", block.shape()),
+            });
+        }
+        for i in 0..cols {
+            for j in 0..cols {
+                let dot = (0..rows).map(|k| block.get(k, i) * block.get(k, j)).sum::<f64>();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                if (dot - expected).abs() > 1e-10 {
+                    return Err(TableError::Invalid {
+                        section: "R",
+                        message: format!("{key:?} is not orthogonal"),
+                    });
+                }
+            }
+        }
+    }
+    if rsymbols.len() != nsym.len() {
+        return Err(TableError::Invalid { section: "R", message: "record set contains a forbidden key".into() });
+    }
+
+    let mut channels: FxHashMap<(u8, u8), Vec<u8>> = FxHashMap::default();
+    for &(a, b, coupled) in nsym.keys() {
+        channels.entry((a, b)).or_default().push(coupled);
+    }
+    let triples: Vec<(u8, u8, u8)> = nsym.keys().copied().collect();
+    let mut expected_f = 0usize;
+    for &(a, b, e) in &triples {
+        for (&(left, c), ds) in &channels {
+            if left != e { continue; }
+            let Some(fs) = channels.get(&(b, c)) else { continue };
+            for &d in ds {
+                for &f in fs {
+                    let Some(&n4) = nsym.get(&(a, f, d)) else { continue };
+                    let key = [a, b, c, d, e, f];
+                    let block = fsymbols.get(&key).ok_or(TableError::MissingF(key))?;
+                    let shape = (nsym[&(a, b, e)], nsym[&(e, c, d)], nsym[&(b, c, f)], n4);
+                    if block.shape() != shape {
+                        return Err(TableError::Invalid {
+                            section: "F",
+                            message: format!("{key:?} has shape {:?}, expected {shape:?}", block.shape()),
+                        });
+                    }
+                    expected_f += 1;
+                }
+            }
+        }
+    }
+    if fsymbols.len() != expected_f {
+        return Err(TableError::Invalid { section: "F", message: "record set contains a forbidden or duplicate key".into() });
+    }
+    Ok(())
+}
+
 impl TabulatedSymbolTable {
-    /// Parse a group-agnostic tabulated-fusion blob (format v3, magic `TFR3`).
-    /// Panics on any malformation: the SU(3) blob is a compile-time constant and
-    /// any test/smoke blob is a checked-in asset, so a failure is a build/asset
-    /// bug, never runtime input. `label` is `panic_name` for the error prefix.
-    fn load_from(bytes: &[u8], panic_name: &str) -> Self {
-        assert_eq!(&bytes[0..4], b"TFR3", "{panic_name}: bad magic");
+    fn load_from(bytes: &[u8]) -> Result<Self, TableError> {
+        if bytes.get(..4) != Some(b"TFR3") {
+            return Err(TableError::BadMagic);
+        }
         let mut c = Cursor { bytes, pos: 4 };
-        let version = c.u32();
-        assert_eq!(version, 3, "{panic_name}: unsupported version {version}");
-        let group_n = c.u32();
-        assert!(group_n >= 2, "{panic_name}: SU(N) needs N>=2, got {group_n}");
-        let rank = (group_n - 1) as usize;
-        let provenance = c.u64();
+        let version = c.u32()?;
+        if version != 3 {
+            return Err(TableError::UnsupportedVersion(version));
+        }
+        let group_n = c.u32()?;
+        if !(2..=256).contains(&group_n) {
+            return Err(TableError::Invalid {
+                section: "header",
+                message: format!("SU(N) requires 2 <= N <= 256, got {group_n}"),
+            });
+        }
+        let rank = usize::try_from(group_n - 1).map_err(|_| TableError::Overflow("rank"))?;
+        let provenance = c.u64()?;
         // Self-check: recompute the payload hash. Catches truncation and — the
         // Stage B2b hazard — a row/column transpose mistake in the generator or
         // reader, which would change the byte stream and so the FNV digest.
         let payload_hash = fnv1a64(&bytes[c.pos..]);
-        assert_eq!(
-            payload_hash, provenance,
-            "{panic_name}: payload FNV-1a mismatch (corrupt or transposed table)"
-        );
+        if payload_hash != provenance {
+            return Err(TableError::HashMismatch { expected: provenance, actual: payload_hash });
+        }
 
-        let n_irreps = c.u32() as usize;
+        let n_irreps = c.u32()? as usize;
+        if n_irreps == 0 || n_irreps > 256 {
+            return Err(TableError::Invalid {
+                section: "irreps",
+                message: format!("count must be in 1..=256, got {n_irreps}"),
+            });
+        }
         let mut irreps = Vec::with_capacity(n_irreps);
         for _ in 0..n_irreps {
-            let label: Vec<u8> = (0..rank).map(|_| c.u8()).collect();
-            let dim = c.u32() as f64;
-            let dual = SectorId::new(c.u8() as usize);
-            let fs = c.i8() as f64;
+            let label: Vec<u8> = (0..rank).map(|_| c.u8()).collect::<Result<_, _>>()?;
+            let dim = c.u32()? as f64;
+            let dual = SectorId::new(c.u8()? as usize);
+            let fs = c.i8()? as f64;
+            if dim == 0.0 || !matches!(fs as i8, -1 | 1) {
+                return Err(TableError::Invalid {
+                    section: "irreps",
+                    message: format!("dimension must be positive and FS must be +/-1 for {label:?}"),
+                });
+            }
             irreps.push(TabulatedIrrep {
                 label,
                 dim,
@@ -210,115 +364,205 @@ impl TabulatedSymbolTable {
             });
         }
 
-        let n_pairs = c.u32() as usize;
+        if irreps[0].label.iter().any(|&x| x != 0) {
+            return Err(TableError::Invalid { section: "irreps", message: "sector 0 is not vacuum".into() });
+        }
+        for (id, irrep) in irreps.iter().enumerate() {
+            let dual = irrep.dual.id();
+            if dual >= n_irreps || irreps[dual].dual.id() != id || irreps[dual].dim != irrep.dim {
+                return Err(TableError::Invalid { section: "irreps", message: format!("invalid dual for sector {id}") });
+            }
+            if irreps[dual].label.iter().rev().copied().ne(irrep.label.iter().copied()) {
+                return Err(TableError::Invalid { section: "irreps", message: format!("dual label mismatch for sector {id}") });
+            }
+            if irreps[..id].iter().any(|other| other.label == irrep.label) {
+                return Err(TableError::Duplicate {
+                    section: "irrep label",
+                    key: format!("{:?}", irrep.label),
+                });
+            }
+        }
+
+        let n_pairs = c.u32()? as usize;
+        validate_record_count("fusion", n_pairs, 3, bytes.len() - c.pos)?;
+        if n_pairs > n_irreps * n_irreps {
+            return Err(TableError::Invalid { section: "fusion", message: format!("too many pairs: {n_pairs}") });
+        }
         let mut fusion = FxHashMap::default();
+        let mut nsym = FxHashMap::default();
         for _ in 0..n_pairs {
-            let a = c.u8();
-            let b = c.u8();
-            let n_ch = c.u8() as usize;
+            let a = c.u8()?;
+            let b = c.u8()?;
+            let n_ch = c.u8()? as usize;
             let mut channels: SectorVec = SectorVec::new();
             for _ in 0..n_ch {
-                let cc = c.u8();
-                let _nmul = c.u8(); // multiplicity comes from the R rows below
+                let cc = c.u8()?;
+                let nmul = c.u8()? as usize;
+                validate_sector_ids("fusion", &[a, b, cc], n_irreps)?;
+                if nmul == 0 || nsym.insert((a, b, cc), nmul).is_some() {
+                    return Err(TableError::Invalid { section: "fusion", message: format!("invalid multiplicity for ({a},{b},{cc})") });
+                }
                 channels.push(SectorId::new(cc as usize));
             }
-            fusion.insert((a, b), channels);
-        }
-
-        let n_r = c.u32() as usize;
-        let mut rsymbols = FxHashMap::default();
-        let mut nsym = FxHashMap::default();
-        for _ in 0..n_r {
-            let a = c.u8();
-            let b = c.u8();
-            let cc = c.u8();
-            let rows = c.u8() as usize;
-            let cols = c.u8() as usize;
-            let mut data = Vec::with_capacity(rows * cols);
-            for _ in 0..rows * cols {
-                data.push(c.f64());
+            if fusion.insert((a, b), channels).is_some() {
+                return Err(TableError::Duplicate { section: "fusion", key: format!("({a},{b})") });
             }
-            // rows(R(a,b,c)) == N(a,b,c): the multiplicity of every in-table
-            // triple, escaping pairs included.
-            nsym.insert((a, b, cc), rows);
-            rsymbols.insert([a, b, cc], GenericRMatrix::new(data, rows, cols));
         }
 
-        let n_f = c.u32() as usize;
-        let mut fsymbols = FxHashMap::default();
-        for _ in 0..n_f {
-            let key = [c.u8(), c.u8(), c.u8(), c.u8(), c.u8(), c.u8()];
-            let s0 = c.u8() as usize;
-            let s1 = c.u8() as usize;
-            let s2 = c.u8() as usize;
-            let s3 = c.u8() as usize;
-            let len = s0 * s1 * s2 * s3;
+        let n_r = c.u32()? as usize;
+        validate_record_count("R", n_r, 5, bytes.len() - c.pos)?;
+        let mut rsymbols = FxHashMap::default();
+        for _ in 0..n_r {
+            let a = c.u8()?;
+            let b = c.u8()?;
+            let cc = c.u8()?;
+            validate_sector_ids("R", &[a, b, cc], n_irreps)?;
+            let rows = c.u8()? as usize;
+            let cols = c.u8()? as usize;
+            let len = rows.checked_mul(cols).ok_or(TableError::Overflow("R shape"))?;
             let mut data = Vec::with_capacity(len);
             for _ in 0..len {
-                data.push(c.f64());
+                let value = c.f64()?;
+                if !value.is_finite() { return Err(TableError::Invalid { section: "R", message: "non-finite coefficient".into() }); }
+                data.push(value);
             }
-            fsymbols.insert(key, GenericFArray::new(data, (s0, s1, s2, s3)));
+            let key = [a, b, cc];
+            if rsymbols.insert(key, GenericRMatrix::try_new(data, rows, cols).map_err(|e| TableError::Invalid { section: "R", message: e.to_string() })?).is_some() {
+                return Err(TableError::Duplicate { section: "R", key: format!("{key:?}") });
+            }
+        }
+
+        let n_f = c.u32()? as usize;
+        validate_record_count("F", n_f, 10, bytes.len() - c.pos)?;
+        let mut fsymbols = FxHashMap::default();
+        for _ in 0..n_f {
+            let key = [c.u8()?, c.u8()?, c.u8()?, c.u8()?, c.u8()?, c.u8()?];
+            validate_sector_ids("F", &key, n_irreps)?;
+            let s0 = c.u8()? as usize;
+            let s1 = c.u8()? as usize;
+            let s2 = c.u8()? as usize;
+            let s3 = c.u8()? as usize;
+            let len = s0.checked_mul(s1).and_then(|n| n.checked_mul(s2)).and_then(|n| n.checked_mul(s3)).ok_or(TableError::Overflow("F shape"))?;
+            let mut data = Vec::with_capacity(len);
+            for _ in 0..len {
+                let value = c.f64()?;
+                if !value.is_finite() { return Err(TableError::Invalid { section: "F", message: "non-finite coefficient".into() }); }
+                data.push(value);
+            }
+            if fsymbols.insert(key, GenericFArray::try_new(data, (s0, s1, s2, s3)).map_err(|e| TableError::Invalid { section: "F", message: e.to_string() })?).is_some() {
+                return Err(TableError::Duplicate { section: "F", key: format!("{key:?}") });
+            }
         }
 
         // ---- v2 frontier shell ----
-        let n_frontier = c.u32() as usize;
+        let n_frontier = c.u32()? as usize;
+        validate_record_count("frontier", n_frontier, rank + 6, bytes.len() - c.pos)?;
         let mut frontier = Vec::with_capacity(n_frontier);
+        let mut frontier_duals = Vec::with_capacity(n_frontier);
         for _ in 0..n_frontier {
-            let label: Vec<u8> = (0..rank).map(|_| c.u8()).collect();
-            let dim = c.u32();
-            let _dual_fid = c.u16(); // recorded for completeness; labels suffice here
+            let label: Vec<u8> = (0..rank).map(|_| c.u8()).collect::<Result<_, _>>()?;
+            let dim = c.u32()?;
+            let dual_fid = c.u16()?;
+            if dim == 0 || dual_fid as usize >= n_frontier {
+                return Err(TableError::Invalid { section: "frontier", message: format!("invalid dimension or dual id {dual_fid}") });
+            }
             frontier.push((label, dim));
+            frontier_duals.push(dual_fid);
+        }
+        for (fid, (&dual, (label, dim))) in frontier_duals.iter().zip(&frontier).enumerate() {
+            let dual = dual as usize;
+            if frontier_duals[dual] as usize != fid || frontier[dual].1 != *dim || frontier[dual].0.iter().rev().copied().ne(label.iter().copied()) {
+                return Err(TableError::Invalid { section: "frontier", message: format!("invalid dual for frontier {fid}") });
+            }
         }
 
-        let n_escaping = c.u32() as usize;
+        let n_escaping = c.u32()? as usize;
+        validate_record_count("escaping", n_escaping, 4, bytes.len() - c.pos)?;
+        if n_escaping > n_irreps * n_irreps {
+            return Err(TableError::Invalid { section: "escaping", message: format!("too many pairs: {n_escaping}") });
+        }
         let mut escaping = FxHashMap::default();
         for _ in 0..n_escaping {
-            let a = c.u8();
-            let b = c.u8();
-            let n_in = c.u8() as usize;
+            let a = c.u8()?;
+            let b = c.u8()?;
+            validate_sector_ids("escaping", &[a, b], n_irreps)?;
+            let n_in = c.u8()? as usize;
             let mut in_channels: SectorVec = SectorVec::new();
             for _ in 0..n_in {
-                let cc = c.u8();
-                let _nmul = c.u8(); // multiplicity lives in `nsym` (R rows)
+                let cc = c.u8()?;
+                let nmul = c.u8()? as usize;
+                validate_sector_ids("escaping", &[cc], n_irreps)?;
+                if nmul == 0 || nsym.insert((a, b, cc), nmul).is_some() {
+                    return Err(TableError::Invalid { section: "escaping", message: format!("invalid multiplicity for ({a},{b},{cc})") });
+                }
                 in_channels.push(SectorId::new(cc as usize));
             }
-            let n_fr = c.u8() as usize;
+            let n_fr = c.u8()? as usize;
+            if n_fr == 0 {
+                return Err(TableError::Invalid { section: "escaping", message: format!("({a},{b}) has no frontier channel") });
+            }
             let mut fr = Vec::with_capacity(n_fr);
             for _ in 0..n_fr {
-                fr.push(c.u16());
+                let fid = c.u16()?;
+                if fid as usize >= n_frontier { return Err(TableError::Invalid { section: "escaping", message: format!("frontier id {fid} out of bounds") }); }
+                fr.push(fid);
             }
-            escaping.insert(
+            if escaping.insert(
                 (a, b),
                 TabulatedEscapingPair {
                     in_channels,
                     frontier: fr,
                 },
-            );
+            ).is_some() {
+                return Err(TableError::Duplicate { section: "escaping", key: format!("({a},{b})") });
+            }
+        }
+        for a in (0..n_irreps).map(|id| id as u8) {
+            for b in (0..n_irreps).map(|id| id as u8) {
+                if fusion.contains_key(&(a, b)) == escaping.contains_key(&(a, b)) {
+                    return Err(TableError::Invalid { section: "pair partition", message: format!("({a},{b}) must occur in exactly one pair set") });
+                }
+            }
         }
 
-        let n_hops = c.u32() as usize;
+        let n_hops = c.u32()? as usize;
+        validate_record_count("one-hop", n_hops, 5, bytes.len() - c.pos)?;
         let mut one_hop = FxHashMap::default();
         for _ in 0..n_hops {
-            let fid = c.u16();
-            let x = c.u8();
-            let flags = c.u8();
-            let n_ret = c.u8() as usize;
+            let fid = c.u16()?;
+            let x = c.u8()?;
+            if fid as usize >= n_frontier { return Err(TableError::Invalid { section: "one-hop", message: format!("frontier id {fid} out of bounds") }); }
+            validate_sector_ids("one-hop", &[x], n_irreps)?;
+            let flags = c.u8()?;
+            let n_ret = c.u8()? as usize;
             let mut returns = Vec::with_capacity(n_ret);
             for _ in 0..n_ret {
-                returns.push((c.u8(), c.u8()));
+                let sector = c.u8()?;
+                let multiplicity = c.u8()?;
+                validate_sector_ids("one-hop", &[sector], n_irreps)?;
+                if multiplicity == 0 { return Err(TableError::Invalid { section: "one-hop", message: "zero return multiplicity".into() }); }
+                returns.push((sector, multiplicity));
             }
-            one_hop.insert(
+            if one_hop.insert(
                 (fid, x),
                 TabulatedOneHop {
                     returns,
                     beyond_shell: flags & 1 != 0,
                     has_frontier: flags & 2 != 0,
                 },
-            );
+            ).is_some() {
+                return Err(TableError::Duplicate { section: "one-hop", key: format!("({fid},{x})") });
+            }
         }
-        assert_eq!(c.pos, bytes.len(), "{panic_name}: trailing bytes");
+        let expected_hops = n_frontier.checked_mul(n_irreps).ok_or(TableError::Overflow("one-hop count"))?;
+        if one_hop.len() != expected_hops {
+            return Err(TableError::Invalid { section: "one-hop", message: format!("have {}, expected {expected_hops}", one_hop.len()) });
+        }
+        if c.pos != bytes.len() { return Err(TableError::TrailingBytes(bytes.len() - c.pos)); }
 
-        TabulatedSymbolTable {
+        validate_symbol_completeness(&nsym, &rsymbols, &fsymbols)?;
+
+        Ok(TabulatedSymbolTable {
             group_n,
             irreps,
             fusion,
@@ -329,7 +573,7 @@ impl TabulatedSymbolTable {
             escaping,
             one_hop,
             provenance,
-        }
+        })
     }
 
     #[inline]
@@ -356,10 +600,10 @@ impl TabulatedSymbolTable {
 fn table() -> &'static Arc<TabulatedSymbolTable> {
     static TABLE: OnceLock<Arc<TabulatedSymbolTable>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        Arc::new(TabulatedSymbolTable::load_from(
-            SU3_TABLE_BYTES,
-            "su3_table.bin",
-        ))
+        Arc::new(
+            TabulatedSymbolTable::load_from(SU3_TABLE_BYTES)
+                .unwrap_or_else(|error| panic!("su3_table.bin: {error}")),
+        )
     })
 }
 
@@ -403,12 +647,12 @@ impl TabulatedFusionRule {
     /// A handle over an arbitrary tabulated-fusion blob (e.g. the small SU(4)
     /// smoke table). The blob is parsed and self-checked (FNV) once here; the
     /// returned handle owns its own `Arc<TabulatedSymbolTable>`, independent of
-    /// the SU(3) global. Panics on a malformed blob (a checked-in asset bug).
-    pub fn from_bytes(bytes: &[u8], name: &'static str) -> Self {
-        Self {
-            table: Arc::new(TabulatedSymbolTable::load_from(bytes, name)),
+    /// the SU(3) global.
+    pub fn from_bytes(bytes: &[u8], _name: &'static str) -> Result<Self, TableError> {
+        Ok(Self {
+            table: Arc::new(TabulatedSymbolTable::load_from(bytes)?),
             identity: RuleIdentity::new_unique::<Self>(),
-        }
+        })
     }
 
     /// `N` of the `SU(N)` group this rule tabulates.
