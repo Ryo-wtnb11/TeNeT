@@ -11,27 +11,30 @@ use crate::{
 
 const FUSED_RANK_LIMIT: usize = 8;
 
-/// Whether to route pure permuted copies (pack / assign-scatter) through the
-/// HPTT-style blocked micro-kernel transpose (`strided_kernel::copy_into_col_major`,
-/// which delegates to `strided_perm::copy_into_col_major`) instead of the naive
-/// fused loop.
+/// Transpose kernel selection for pure permuted copies (pack / assign-scatter)
+/// in [`StridedHostKernelAdapter`], chosen per-runtime via
+/// `Runtime::builder().transpose_backend(...)` (see `docs/backend_policy.md`).
+/// Backend choice is a performance knob only — routed copies are byte-identical
+/// across backends (checksum-verified in the #114 A/B).
 ///
-/// Env-gated so the win can be A/B measured: HPTT's blocking pays off for large
-/// blocks but its per-call plan build can lose against the zero-alloc fused loop
-/// on the many tiny blocks of small-D SU(2) replay. Default off ⇒ no behavior
-/// change.
-///
-/// Ported from prototype commit b3ca6e5 (`feat(kernel-adapter): add env-gated
-/// HPTT blocked transpose fast path`). The gate is renamed from that
-/// prototype's `TENET_HPTT` to `TENET_STRIDED_PERM`: the actual backend is
-/// `strided_perm`'s HPTT-*inspired* col-major copy reached through
-/// `strided-kernel` (already a dependency), not a literal HPTT (Springer et al.)
-/// binding, so the env var names the real crate boundary being toggled.
-#[inline]
-fn strided_perm_enabled() -> bool {
-    use std::sync::OnceLock;
-    static E: OnceLock<bool> = OnceLock::new();
-    *E.get_or_init(|| std::env::var("TENET_STRIDED_PERM").as_deref() == Ok("1"))
+/// `StridedPerm` is **opt-in, not the default**, on measured numbers (issue
+/// #114, ported from prototype commit b3ca6e5): its per-call plan build loses
+/// badly on the many tiny blocks of small-degeneracy SU(2) replay (d=4 swap
+/// +92%, swap+out +95%; profile: pack x6.8, scatter x6.1) and only wins above
+/// noise on large-block abelian transposes (fZ2 swap+out d=16 -6.5%). The name
+/// says `strided_perm` rather than HPTT because the kernel is `strided_perm`'s
+/// HPTT-*inspired* col-major copy reached through `strided-kernel` (already a
+/// dependency), not a literal HPTT (Springer et al.) binding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TransposeBackend {
+    /// The zero-alloc fused loop nest (the default; byte- and
+    /// dispatch-identical to the pre-#114 behavior).
+    #[default]
+    FusedLoops,
+    /// `strided_perm`'s HPTT-style blocked micro-kernel transpose, applied to
+    /// eligible pure permuted copies; ineligible layouts fall back to the
+    /// fused loop.
+    StridedPerm,
 }
 
 /// strided-perm-backed permuted copy `dst = src` over strided views (no scale,
@@ -488,7 +491,20 @@ pub trait HostKernelAdapter<T> {
 /// for a BLAS/GEMM call happens by replacing this adapter, not by editing the
 /// replay drivers.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct StridedHostKernelAdapter;
+pub struct StridedHostKernelAdapter {
+    /// Selected transpose kernel for pure permuted copies (pack /
+    /// assign-scatter); [`TransposeBackend::FusedLoops`] by default. See
+    /// [`TransposeBackend`] for why `StridedPerm` is opt-in.
+    pub transpose_backend: TransposeBackend,
+}
+
+impl StridedHostKernelAdapter {
+    /// Adapter with an explicit transpose kernel; `Default` is `FusedLoops`.
+    #[inline]
+    pub fn with_transpose_backend(transpose_backend: TransposeBackend) -> Self {
+        Self { transpose_backend }
+    }
+}
 
 impl<T> HostKernelAdapter<T> for StridedHostKernelAdapter
 where
@@ -565,9 +581,11 @@ where
         beta: T,
     ) -> Result<(), OperationError> {
         // Assign-scatter (beta=0, alpha=1, positive strides) is a pure permuted
-        // copy: route through the strided-perm blocked transpose when enabled and
-        // the layout is eligible; otherwise fall through to the fused loop.
-        if strided_perm_enabled()
+        // copy: route through the strided-perm blocked transpose when that
+        // backend was selected and the layout is eligible; otherwise fall
+        // through to the fused loop. Opt-in, never default — see
+        // `TransposeBackend` for the #114 A/B numbers behind that.
+        if self.transpose_backend == TransposeBackend::StridedPerm
             && beta.is_zero()
             && alpha.is_one()
             && src_strides.iter().all(|&s| s >= 0)
@@ -632,8 +650,10 @@ where
     ) -> Result<(), OperationError> {
         // Pack is a pure permuted copy (alpha=1, no conjugate, positive
         // strides): route it through the strided-perm blocked transpose when
-        // enabled and eligible; otherwise fall through to the fused loop.
-        if strided_perm_enabled()
+        // that backend was selected and the layout is eligible; otherwise fall
+        // through to the fused loop. Opt-in, never default — see
+        // `TransposeBackend` for the #114 A/B numbers behind that.
+        if self.transpose_backend == TransposeBackend::StridedPerm
             && alpha.is_one()
             && !source_conjugate
             && src_strides.iter().all(|&s| s >= 0)
@@ -768,7 +788,7 @@ mod tests {
 
     #[test]
     fn strided_host_adapter_add_strided_matches_axpby_semantics() {
-        let mut adapter = StridedHostKernelAdapter;
+        let mut adapter = StridedHostKernelAdapter::default();
         let mut zero_strides = Vec::new();
         let mut dst = [10.0_f64, 20.0];
         let src = [2.0_f64, 3.0];
@@ -794,7 +814,7 @@ mod tests {
 
     #[test]
     fn strided_host_adapter_recoupling_applies_u_transpose() {
-        let mut adapter = StridedHostKernelAdapter;
+        let mut adapter = StridedHostKernelAdapter::default();
         // Two source columns of two elements, two destination columns:
         // destination[:, d] = sum_s U[d, s] * source[:, s].
         let source = [1.0_f64, 2.0, 10.0, 20.0];
@@ -1075,7 +1095,7 @@ mod tests {
 
     #[test]
     fn strided_host_adapter_fused_beta_branches_match_axpby_semantics() {
-        let mut adapter = StridedHostKernelAdapter;
+        let mut adapter = StridedHostKernelAdapter::default();
         let mut zero_strides = Vec::new();
         let src = [2.0_f64, 3.0];
 
@@ -1140,14 +1160,14 @@ mod tests {
     }
 }
 
-/// Parity tests for the env-gated strided-perm transpose route (ported from
-/// prototype commit b3ca6e5). These call `strided_perm_copy` and `fused_pair`
-/// directly and assert byte-equality, so they do NOT depend on
-/// `TENET_STRIDED_PERM` — the routing contract (routing never changes results)
-/// is verified whether or not the gate is on in the running process.
+/// Parity tests for the strided-perm transpose route (ported from prototype
+/// commit b3ca6e5). These call `strided_perm_copy` and `fused_pair` directly
+/// and assert byte-equality, independent of any runtime backend selection —
+/// the routing contract (routing never changes results) holds for every
+/// [`TransposeBackend`] value.
 #[cfg(test)]
 mod strided_perm_probe {
-    use super::{fused_pair, strided_perm_copy, StridedHostKernelAdapter};
+    use super::{fused_pair, strided_perm_copy, StridedHostKernelAdapter, TransposeBackend};
     use crate::kernel_adapter::HostKernelAdapter;
 
     /// Inclusive max linear index a positive-stride layout reaches.
@@ -1285,42 +1305,92 @@ mod strided_perm_probe {
         );
     }
 
-    /// #104-style differential test through the PUBLIC adapter fused path: the
-    /// adapter's default `copy_scale_strided` (fused loop) and `axpby_strided`
-    /// (assign-scatter) must byte-match the strided-perm route for an eligible
-    /// transpose layout — pins that swapping in the route at the dispatch point
+    /// #104-style differential test through the PUBLIC adapter: the default
+    /// (`FusedLoops`) adapter and a `StridedPerm` adapter must byte-match on an
+    /// eligible transpose layout, for both `copy_scale_strided` (pack) and
+    /// `axpby_strided` (assign-scatter) — pins that selecting the backend
     /// changes nothing but which kernel runs.
     #[test]
-    fn adapter_fused_path_matches_strided_perm_route() {
+    fn adapter_backends_byte_match_on_eligible_transpose() {
         let shape = [6usize, 5];
         let ss = [5isize, 1]; // src row-major
         let ds = [1isize, 6]; // dst col-major => transpose, both sides stride-1
         let src: Vec<f64> = (0..30).map(|i| i as f64 * 0.25 - 2.0).collect();
 
-        // Route output.
+        // Reference: the raw route (also asserts the layout is eligible).
         let mut route = vec![0.0f64; 30];
         assert!(
             strided_perm_copy(&mut route, &src, &shape, &ds, &ss, 0, 0).unwrap(),
             "layout must be route-eligible"
         );
 
-        // Public adapter, default (gate-off) fused path: copy_scale_strided.
-        let mut adapter = StridedHostKernelAdapter;
-        let mut pack = vec![0.0f64; 30];
-        adapter
-            .copy_scale_strided(&mut pack, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
-            .unwrap();
-        assert_eq!(
-            pack, route,
-            "copy_scale_strided fused != strided-perm route"
+        let mut fused_adapter = StridedHostKernelAdapter::default();
+        let mut perm_adapter =
+            StridedHostKernelAdapter::with_transpose_backend(TransposeBackend::StridedPerm);
+        for adapter in [&mut fused_adapter, &mut perm_adapter] {
+            let backend = adapter.transpose_backend;
+            let mut pack = vec![0.0f64; 30];
+            adapter
+                .copy_scale_strided(&mut pack, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
+                .unwrap();
+            assert_eq!(pack, route, "copy_scale_strided mismatch for {backend:?}");
+
+            let mut scatter = vec![0.0f64; 30];
+            adapter
+                .axpby_strided(&mut scatter, &src, &shape, &ds, &ss, 0, 0, 1.0, 0.0)
+                .unwrap();
+            assert_eq!(scatter, route, "axpby_strided mismatch for {backend:?}");
+        }
+    }
+
+    /// Observes which route the adapter's `transpose_backend` field actually
+    /// selects. Routed copies are byte-identical by design, so the routes are
+    /// distinguished at the error boundary instead: on an eligible layout whose
+    /// destination is one element too short, the strided-perm route returns a
+    /// clean `Err` (StridedView bounding-box validation) while the fused loop
+    /// panics on its safe indexing. Each behavior is unique to its route, so
+    /// this pins that the adapter field — not an env var, not a global —
+    /// switches the dispatch.
+    #[test]
+    fn transpose_backend_field_switches_the_route() {
+        let shape = [4usize, 4];
+        let ss = [4isize, 1];
+        let ds = [1isize, 4]; // eligible transpose layout
+        let src: Vec<f64> = (0..16).map(|i| i as f64).collect();
+
+        // StridedPerm: view validation rejects the short destination cleanly.
+        let mut perm_adapter =
+            StridedHostKernelAdapter::with_transpose_backend(TransposeBackend::StridedPerm);
+        let mut short_dst = vec![0.0f64; 15];
+        assert!(
+            perm_adapter
+                .copy_scale_strided(&mut short_dst, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
+                .is_err(),
+            "StridedPerm route must reject the out-of-bounds layout as an error"
         );
 
-        // Public adapter, default fused path: axpby_strided assign-scatter.
-        let mut scatter = vec![0.0f64; 30];
-        adapter
-            .axpby_strided(&mut scatter, &src, &shape, &ds, &ss, 0, 0, 1.0, 0.0)
-            .unwrap();
-        assert_eq!(scatter, route, "axpby_strided fused != strided-perm route");
+        // FusedLoops (default): the same call reaches the fused loop, whose
+        // safe indexing panics on the out-of-bounds destination instead.
+        let panicked = std::panic::catch_unwind(move || {
+            let mut fused_adapter = StridedHostKernelAdapter::default();
+            let mut short_dst = vec![0.0f64; 15];
+            let _ = fused_adapter.copy_scale_strided(
+                &mut short_dst,
+                &src,
+                &shape,
+                &ds,
+                &ss,
+                0,
+                0,
+                false,
+                1.0,
+            );
+        })
+        .is_err();
+        assert!(
+            panicked,
+            "FusedLoops route must take the fused (panicking) path"
+        );
     }
 
     // Crossover micro-bench (ignored; run explicitly):

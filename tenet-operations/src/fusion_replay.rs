@@ -1102,7 +1102,7 @@ mod tests {
             groups,
         )
         .unwrap();
-        let mut kernels = crate::StridedHostKernelAdapter;
+        let mut kernels = crate::StridedHostKernelAdapter::default();
         let mut gemm = CountingBatchGemm::default();
         let mut workspace = FusionBlockContractWorkspace::<f64>::default();
         let mut profile = TensorContractFusionProfile::default();
