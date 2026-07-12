@@ -29,7 +29,7 @@ pub mod prelude {
     pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
     pub use crate::runtime::{
         clear_default_runtime, default_runtime, set_default_runtime, LinalgBackend, Runtime,
-        RuntimeBuilder,
+        RuntimeBuilder, TransposeBackend,
     };
     pub use crate::space::{SectorLabel, Space};
     pub use crate::tensor::{

@@ -34,6 +34,15 @@ where
 {
     type Workspace;
 
+    /// Transpose kernel this backend is configured to run pure permuted
+    /// copies (fusion-block pack / assign-scatter) with; contraction drivers
+    /// build their `StridedHostKernelAdapter` from this value. Defaulted
+    /// (like `TreeTransformBackend::recoupling_threads`) so backends without
+    /// the knob keep the fused-loop default.
+    fn transpose_backend(&self) -> tenet_operations::TransposeBackend {
+        tenet_operations::TransposeBackend::FusedLoops
+    }
+
     fn tensorcontract_structure_into<
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -241,6 +250,11 @@ where
     C: Copy + One,
 {
     type Workspace = TensorContractWorkspace<D>;
+
+    #[inline]
+    fn transpose_backend(&self) -> tenet_operations::TransposeBackend {
+        DenseTreeTransformOperations::transpose_backend(self)
+    }
 
     fn tensorcontract_structure_into<
         const DST_NOUT: usize,

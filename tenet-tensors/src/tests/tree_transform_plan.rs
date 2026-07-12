@@ -2711,7 +2711,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     >::default();
 
     tenet_operations::tree_transform_structure_with_storage_workspace_strided_kernel(
-        &mut crate::StridedHostKernelAdapter,
+        &mut crate::StridedHostKernelAdapter::default(),
         &mut workspace,
         &structure,
         &mut dst,
@@ -2766,7 +2766,7 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     .unwrap();
 
     tenet_operations::tree_transform_structure_with_storage_workspace_strided_kernel(
-        &mut crate::StridedHostKernelAdapter,
+        &mut crate::StridedHostKernelAdapter::default(),
         &mut workspace,
         &structure2,
         &mut dst2,
@@ -3168,7 +3168,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         beta: f64,
     ) -> Result<(), OperationError> {
         self.add_calls += 1;
-        crate::StridedHostKernelAdapter.add_strided(
+        crate::StridedHostKernelAdapter::default().add_strided(
             zero_strides,
             dst_data,
             src_data,
@@ -3196,7 +3196,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         beta: f64,
     ) -> Result<(), OperationError> {
         self.axpby_calls += 1;
-        crate::StridedHostKernelAdapter.axpby_strided(
+        crate::StridedHostKernelAdapter::default().axpby_strided(
             dst_data,
             src_data,
             shape,
@@ -3222,7 +3222,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         alpha: f64,
     ) -> Result<(), OperationError> {
         self.copy_scale_calls += 1;
-        crate::StridedHostKernelAdapter.copy_scale_strided(
+        crate::StridedHostKernelAdapter::default().copy_scale_strided(
             dst_data,
             src_data,
             shape,
@@ -3244,7 +3244,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         beta: f64,
     ) -> Result<(), OperationError> {
         self.scale_calls += 1;
-        crate::StridedHostKernelAdapter.scale_strided(
+        crate::StridedHostKernelAdapter::default().scale_strided(
             dst_data,
             shape,
             dst_strides,
@@ -3268,7 +3268,7 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
         f64: RecouplingCoefficientAction<C>,
     {
         self.recoupling_calls += 1;
-        crate::StridedHostKernelAdapter.recoupling_src_times_u_transpose(
+        crate::StridedHostKernelAdapter::default().recoupling_src_times_u_transpose(
             destination,
             source,
             recoupling_coefficients_dst_src,

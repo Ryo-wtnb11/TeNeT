@@ -54,13 +54,56 @@ State today, and the gap this policy targets:
     OpenBLAS / MKL / Accelerate can't be linked simultaneously, so *which* BLAS
     is a compile-time `blas-*` feature; at runtime you choose faer vs the one
     linked BLAS. (MKL, being both BLAS and LAPACK, backs both knobs at once.)
-- Still hardcoded: the *transpose* kernel and the transpose-free contraction
-  path inside `DenseTreeTransformOperations` — swapping the GEMM provider is
-  done (above), but HPTT/TBLIS-style kernels are not yet a builder choice.
+- The **transpose kernel** for pure permuted copies is selectable (#114):
+  - `Runtime::builder().transpose_backend(TransposeBackend::FusedLoops | TransposeBackend::StridedPerm)`
+    picks the kernel for the pack / assign-scatter copies of tree-transform
+    replay and fusion-block contraction. Default `FusedLoops` (the zero-alloc
+    fused loop nest) — byte- and dispatch-identical to before the knob existed.
+    See [Transpose backend](#transpose-backend-fusedloops-vs-stridedperm) below
+    for the measured regimes; `StridedPerm` is opt-in on those numbers.
+- Still hardcoded: the transpose-free contraction path inside
+  `DenseTreeTransformOperations` — TBLIS-style kernels are not yet a builder
+  choice.
 - Device selection is exposed the same way (`Runtime::builder().cuda`).
 
-Remaining work: HPTT (fast transpose) and TBLIS (transpose-free contraction)
-for the transform/contract kernels — see #7, #41.
+Remaining work: a true HPTT binding as a further `TransposeBackend` variant and
+TBLIS (transpose-free contraction) for the contract kernels — see #7, #41.
+
+## Transpose backend: FusedLoops vs StridedPerm
+
+`TransposeBackend::StridedPerm` routes non-scaling, non-conjugating permuted
+copies with a genuine stride-1 axis on both sides (after dropping extent-1
+axes) through `strided_perm`'s HPTT-style blocked transpose
+(`strided_kernel::copy_into_col_major`); everything else falls back to the
+fused loop. Routed copies are **byte-identical** to the fused loop (checksum-
+verified across the whole A/B grid), so this is purely a performance knob.
+
+Measured regimes (#114 A/B: `microbench_fusion`, blas-accelerate,
+`RAYON_NUM_THREADS=1`, median of 3; Δ% = StridedPerm vs FusedLoops, noise
+floor ±3% from the transpose-free `compose` control):
+
+| Regime | Δ% | Verdict |
+|---|---|---|
+| SU(2) d=4 swap / swap+out | **+92 / +95** | catastrophic loss |
+| SU(2) d=8 swap / swap+out | +7 / +14 | loss |
+| abelian (U1 / fZ2 / U1×fZ2), d≤8 | −2…+2 | neutral (noise) |
+| d=16, all symmetries | −3…+1 | neutral, except ↓ |
+| fZ2 swap+out d=16 | **−6.5** | the one clear win |
+
+Profile of the loss (SU(2) d=4 swap): tree-replay pack ×6.8 and scatter ×6.1 —
+`strided_perm`'s **per-call plan build** cannot amortize over the many tiny
+blocks of small-degeneracy SU(2) replay, while the fused loop is zero-alloc
+per call.
+
+**Guidance:** keep the default. Consider `StridedPerm` only for large-block
+abelian transpose-heavy workloads (large degeneracy, few sectors, permutation-
+dominated), and adopt it on a measurement of *your* workload, not this table.
+
+**Re-evaluation trigger:** an upstream strided-perm compiled-plan /
+plan-once-execute-many API (the strided-rs compiled-plan gap) would remove the
+per-call plan-build cost behind the pack ×6.8 / scatter ×6.1 blow-up, which is
+the entire small-block loss; re-run the #114 A/B grid when it lands before
+reconsidering the default.
 
 ## Rules
 
@@ -73,9 +116,10 @@ for the transform/contract kernels — see #7, #41.
    selection already works this way (`Runtime::builder().cuda(device)`). CPU
    compute backends must be selectable the same way — the dense factorization
    provider (`.linalg_backend(...)`) and the contraction GEMM provider
-   (`.gemm_backend(...)`), both done in #64, and, still to come, the
-   transpose/transpose-free-contraction kernels (`.transpose_backend(...)`,
-   HPTT/TBLIS) — not chosen at call sites and not hardcoded at compile time.
+   (`.gemm_backend(...)`), both done in #64, the transpose kernel
+   (`.transpose_backend(...)`, done in #114), and, still to come, the
+   transpose-free-contraction kernels (TBLIS) — not chosen at call sites and
+   not hardcoded at compile time.
    There is one documented default (faer / CPU dense); everything else is
    opt-in. (Where several implementations of one provider can't co-link —
    OpenBLAS vs MKL — which one is a compile-time feature; the *family* stays a

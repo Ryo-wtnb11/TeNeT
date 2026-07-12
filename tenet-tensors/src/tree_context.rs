@@ -255,7 +255,9 @@ where
             .cache
             .get_or_compile_tree_pair(rule, operation, dst, src)?;
         tree_transform_structure_with_storage_workspace_strided_kernel(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                self.backend.transpose_backend(),
+            ),
             storage_workspace,
             &structure,
             dst,
