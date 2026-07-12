@@ -1705,6 +1705,7 @@ impl Tensor {
     pub fn to_cuda(&self) -> Result<Self, Error> {
         let data = match self.coupled_data() {
             Data::CudaF64(storage) => Data::CudaF64(Arc::clone(storage)),
+            Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
             Data::C64(_) => {
                 return Err(device_unsupported("uploading a c64 tensor"));
             }
@@ -1736,6 +1737,7 @@ impl Tensor {
     pub fn to_host(&self) -> Result<Self, Error> {
         let data = match self.coupled_data() {
             Data::F64(_) | Data::C64(_) => self.coupled_data().clone(),
+            Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
             Data::CudaF64(storage) => {
                 let mut state = self.rt.lock();
                 let cuda = state.cuda.as_mut().ok_or_else(|| {
