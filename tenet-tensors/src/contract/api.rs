@@ -895,7 +895,9 @@ where
         .is_fully_direct()
     {
         return tensorcontract_core_fusion_blocks_into_raw(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                backend.transpose_backend(),
+            ),
             backend,
             workspace,
             rule,
@@ -990,7 +992,9 @@ where
         .is_fully_direct()
     {
         return tensorcontract_core_fusion_blocks_into_raw(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                contract_backend.transpose_backend(),
+            ),
             contract_backend,
             contract_workspace,
             rule,

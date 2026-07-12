@@ -177,7 +177,9 @@ where
     {
         let rhs_scratch_space = rhs_core.space().clone();
         apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_backend.transpose_backend(),
+            ),
             rule,
             &rhs_scratch_space,
             rhs_core.data_mut(),
@@ -404,7 +406,9 @@ where
             D::zero(),
         )?;
         apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             rule,
             &rhs_core_space,
             rhs_scratch.data_mut(),
@@ -422,7 +426,9 @@ where
         )?;
         let (lhs_core, rhs_core) = scratch.lhs_rhs();
         return block_plan.execute_raw(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -460,7 +466,9 @@ where
     {
         let (lhs_core, rhs_core, core_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_raw(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -603,7 +611,9 @@ where
             D::zero(),
         )?;
         apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             rule,
             &rhs_space,
             rhs_scratch.buffer_mut().as_mut_slice(),
@@ -625,7 +635,9 @@ where
         )?;
         let (lhs_core, rhs_core) = scratch.lhs_rhs();
         return block_plan.execute_storage_raw_sources(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -668,7 +680,9 @@ where
     {
         let (lhs_core, rhs_core, core_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_storage_raw(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -812,7 +826,9 @@ where
             &mut profile.tree_replay,
         )?;
         apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             rule,
             &rhs_space,
             rhs_scratch.data_mut(),
@@ -840,7 +856,9 @@ where
         let dst_structure = std::sync::Arc::clone(dst.structure());
         let (lhs_core, rhs_core) = scratch.lhs_rhs();
         return block_plan.execute_raw_profiled(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -892,7 +910,9 @@ where
     {
         let (lhs_core, rhs_core, core_dst) = scratch.lhs_rhs_dst_mut();
         block_plan.execute_raw_profiled(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            ),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -1892,7 +1912,7 @@ where
 {
     let _ = dst_structure;
     tensorcontract_core_fusion_blocks_into_raw(
-        &mut crate::StridedHostKernelAdapter,
+        &mut crate::StridedHostKernelAdapter::with_transpose_backend(backend.transpose_backend()),
         backend,
         workspace,
         rule,

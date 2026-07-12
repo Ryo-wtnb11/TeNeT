@@ -497,7 +497,7 @@ mod tests {
         let structure = std::sync::Arc::clone(space.subblock_structure());
         let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
         plan.execute_raw(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::default(),
             &mut BackendRank2Gemm {
                 backend: &mut backend,
                 workspace: &mut workspace,
@@ -648,7 +648,7 @@ mod tests {
         >::default();
 
         plan.execute_storage_workspace(
-            &mut crate::StridedHostKernelAdapter,
+            &mut crate::StridedHostKernelAdapter::default(),
             &mut BackendRank2Gemm {
                 backend: &mut backend,
                 workspace: &mut workspace,
