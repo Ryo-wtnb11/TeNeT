@@ -1376,7 +1376,7 @@ where
             rule: rule_key.clone(),
             nout,
             homspace: homspace.clone(),
-            replay_structure_ptr: Arc::as_ptr(&replay_structure) as usize,
+            replay_structure_id: replay_structure.content_id(),
             operation: operation.clone(),
             source_conjugate,
         };
@@ -1651,7 +1651,7 @@ struct DynamicFusionTransformedSourceFastKey<RuleKey> {
     rule: RuleKey,
     nout: usize,
     homspace: FusionTreeHomSpace,
-    replay_structure_ptr: usize,
+    replay_structure_id: usize,
     operation: TreeTransformOperation,
     source_conjugate: bool,
 }
@@ -1694,7 +1694,7 @@ struct DynamicFusionCoreDstSpaceKey<RuleKey> {
 struct DynamicFusionFastSpaceKey {
     nout: usize,
     homspace: FusionTreeHomSpace,
-    structure_ptr: usize,
+    structure_id: usize,
 }
 
 impl DynamicFusionFastSpaceKey {
@@ -1702,7 +1702,7 @@ impl DynamicFusionFastSpaceKey {
         Self {
             nout: space.nout(),
             homspace: space.homspace().clone(),
-            structure_ptr: Arc::as_ptr(space.structure()) as usize,
+            structure_id: space.structure().content_id(),
         }
     }
 }
@@ -1934,8 +1934,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use tenet_core::{
-        BlockKey, FusionProductSpace, FusionTensorMapSpace, Placement, SU2FusionRule, SectorId,
-        SectorLeg, TensorMapSpace, Trivial, Z2FusionRule,
+        BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, Placement, SU2FusionRule,
+        SectorId, SectorLeg, TensorMapSpace, Trivial, Z2FusionRule,
     };
 
     use crate::storage_scratch::StorageFusionBlockContractWorkspace;
@@ -1945,6 +1945,60 @@ mod tests {
 
     use super::super::fusion_block::FusionBlockContractWorkspace;
     use super::super::scratch::StorageDynamicFusionScratchWorkspace;
+
+    fn one_block_structure() -> Arc<BlockStructure> {
+        Arc::new(
+            BlockStructure::from_blocks_with_rank(
+                1,
+                vec![
+                    BlockSpec::column_major_with_key(BlockKey::sector_ids([0]), vec![2], 0)
+                        .unwrap(),
+                ],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn dynamic_fusion_fast_space_key_uses_structure_content_identity() {
+        let first_structure = one_block_structure();
+        let second_structure = one_block_structure();
+        assert!(!Arc::ptr_eq(&first_structure, &second_structure));
+        assert_eq!(first_structure.content_id(), second_structure.content_id());
+
+        let homspace = Arc::new(FusionTreeHomSpace::from_sector_ids([(0, 2)], []));
+        let first = DynamicFusionFastSpaceKey {
+            nout: 1,
+            homspace: homspace.as_ref().clone(),
+            structure_id: first_structure.content_id(),
+        };
+        let second = DynamicFusionFastSpaceKey {
+            nout: 1,
+            homspace: homspace.as_ref().clone(),
+            structure_id: second_structure.content_id(),
+        };
+
+        assert_eq!(first, second);
+
+        let operation = TreeTransformOperation::permute([0], []);
+        let first_transform = DynamicFusionTransformedSourceFastKey::<&'static str> {
+            rule: "test",
+            nout: 1,
+            homspace: homspace.as_ref().clone(),
+            replay_structure_id: first_structure.content_id(),
+            operation: operation.clone(),
+            source_conjugate: false,
+        };
+        let second_transform = DynamicFusionTransformedSourceFastKey::<&'static str> {
+            rule: "test",
+            nout: 1,
+            homspace: homspace.as_ref().clone(),
+            replay_structure_id: second_structure.content_id(),
+            operation,
+            source_conjugate: false,
+        };
+        assert_eq!(first_transform, second_transform);
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct ScratchAllocation {
