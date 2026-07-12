@@ -29,18 +29,22 @@ sh benchmarks/issue_118_audit.sh | tee issue-118-audit.txt
 ```
 
 The finite-torus manifest must resolve TeNeT from the checkout running the
-script; the runner rejects stale binaries or another path dependency. It prints
-the TeNeT and tenferro SHAs, `Cargo.lock` and feature-tree hashes, Rust toolchain,
-system and thread environment, every raw finite-torus result, and process RSS
-for 0, 8192, and 9000 constructed hom spaces. RSS minus the zero-count run is a
-process-level upper estimate for resident metadata, not an allocator-exact
-cache size.
+script; the runner rejects stale binaries or another path dependency. Cargo
+metadata also establishes the resolved tenferro checkout and rejects a
+different or invalid `TENFERRO_DIR`. It prints TeNeT, tenferro, and finite-torus
+SHAs; the governing TeNeT and finite-torus lock hashes; the feature-tree hash;
+and the toolchain, system, thread environment, and every raw result. Hashing is
+portable across hosts with either `sha256sum` or `shasum`.
 
-On latest main `0bbc56a`, the release example measured 1,232 KiB at count 0,
-8,000 KiB at 8,192, and 8,112 KiB at 9,000. The cache-sized upper estimate is
-therefore 6,768 KiB; adding another 808 distinct spaces changed process RSS by
-112 KiB rather than growing in proportion to the full input set. Allocator page
-retention and executable/runtime memory are included in these RSS values.
+RSS is sampled `RUNS` times for an empty filtered test process and the existing
+9,000-space eviction test. Their difference is a process-level upper estimate,
+not an allocator-exact cache size. Loader, allocator page-retention, and test
+harness noise remain in each observation.
+
+An earlier single-observation probe on main `0bbc56a` measured 1,232 KiB at
+count 0, 8,000 KiB at 8,192, and 8,112 KiB at 9,000. These values are retained
+only as historical context, not a distribution or acceptance gate. The runner
+above supersedes that probe with repeated baseline/churn observations.
 
 ## Measured result
 
