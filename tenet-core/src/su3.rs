@@ -45,7 +45,8 @@
 static SU3_TABLE_BYTES: &[u8] = include_bytes!("su3_table.bin");
 const MAX_TABLE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SYMBOL_VALUES: usize = MAX_TABLE_BYTES / size_of::<f64>();
-const MAX_COMPLETENESS_KEYS: usize = 1_000_000;
+const MAX_METADATA_ENTRIES: usize = 1_000_000;
+const MAX_COMPLETENESS_WORK: usize = 1_000_000;
 const MAX_ASSOCIATOR_DIM: usize = 1_024;
 const MAX_GRAM_WORK: usize = 100_000_000;
 
@@ -242,6 +243,21 @@ fn validate_record_count(
     Ok(())
 }
 
+fn consume_metadata_budget(
+    section: &'static str,
+    used: &mut usize,
+    additional: usize,
+) -> Result<(), TableError> {
+    *used = used.checked_add(additional).ok_or(TableError::Overflow("metadata entry count"))?;
+    if *used > MAX_METADATA_ENTRIES {
+        return Err(TableError::Invalid {
+            section,
+            message: "metadata entry budget exceeded".into(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_symbol_completeness(
     nsym: &FxHashMap<(u8, u8, u8), usize>,
     rsymbols: &FxHashMap<[u8; 3], GenericRMatrix<f64>>,
@@ -278,6 +294,15 @@ fn validate_symbol_completeness(
         return Err(TableError::Invalid { section: "R", message: "record set contains a forbidden key".into() });
     }
 
+    validate_f_completeness(nsym, fsymbols)?;
+    validate_f_unitarity(nsym, fsymbols, covered_pairs)?;
+    Ok(())
+}
+
+fn validate_f_completeness(
+    nsym: &FxHashMap<(u8, u8, u8), usize>,
+    fsymbols: &FxHashMap<[u8; 6], GenericFArray<f64>>,
+) -> Result<(), TableError> {
     let mut channels: FxHashMap<(u8, u8), Vec<u8>> = FxHashMap::default();
     for &(a, b, coupled) in nsym.keys() {
         channels.entry((a, b)).or_default().push(coupled);
@@ -288,12 +313,22 @@ fn validate_symbol_completeness(
     }
     let triples: Vec<(u8, u8, u8)> = nsym.keys().copied().collect();
     let mut expected_f = 0usize;
+    let mut completeness_work = 0usize;
     for &(a, b, e) in &triples {
         let Some(outgoing) = channels_by_left.get(&e) else { continue };
         for &(c, ref ds) in outgoing {
             let Some(fs) = channels.get(&(b, c)) else { continue };
             for &d in ds {
                 for &f in fs {
+                    completeness_work = completeness_work
+                        .checked_add(1)
+                        .ok_or(TableError::Overflow("F completeness work"))?;
+                    if completeness_work > MAX_COMPLETENESS_WORK {
+                        return Err(TableError::Invalid {
+                            section: "F",
+                            message: "admissible-key validation work budget exceeded".into(),
+                        });
+                    }
                     let Some(&n4) = nsym.get(&(a, f, d)) else { continue };
                     let key = [a, b, c, d, e, f];
                     let block = fsymbols.get(&key).ok_or(TableError::MissingF(key))?;
@@ -305,12 +340,6 @@ fn validate_symbol_completeness(
                         });
                     }
                     expected_f += 1;
-                    if expected_f > MAX_COMPLETENESS_KEYS {
-                        return Err(TableError::Invalid {
-                            section: "F",
-                            message: "admissible-key validation budget exceeded".into(),
-                        });
-                    }
                 }
             }
         }
@@ -318,7 +347,6 @@ fn validate_symbol_completeness(
     if fsymbols.len() != expected_f {
         return Err(TableError::Invalid { section: "F", message: "record set contains a forbidden or duplicate key".into() });
     }
-    validate_f_unitarity(nsym, fsymbols, covered_pairs)?;
     Ok(())
 }
 
@@ -513,10 +541,12 @@ impl TabulatedSymbolTable {
         }
         let mut fusion = FxHashMap::default();
         let mut nsym = FxHashMap::default();
+        let mut nsym_metadata = 0usize;
         for _ in 0..n_pairs {
             let a = c.u8()?;
             let b = c.u8()?;
             let n_ch = c.u8()? as usize;
+            consume_metadata_budget("fusion", &mut nsym_metadata, n_ch)?;
             let mut channels: SectorVec = SectorVec::new();
             for _ in 0..n_ch {
                 let cc = c.u8()?;
@@ -533,6 +563,9 @@ impl TabulatedSymbolTable {
         }
 
         let n_r = c.u32()? as usize;
+        if n_r > MAX_METADATA_ENTRIES {
+            return Err(TableError::Invalid { section: "R", message: "record budget exceeded".into() });
+        }
         validate_record_count("R", n_r, 5, bytes.len() - c.pos)?;
         let mut rsymbols = FxHashMap::default();
         let mut symbol_values = 0usize;
@@ -563,6 +596,9 @@ impl TabulatedSymbolTable {
         }
 
         let n_f = c.u32()? as usize;
+        if n_f > MAX_METADATA_ENTRIES {
+            return Err(TableError::Invalid { section: "F", message: "record budget exceeded".into() });
+        }
         validate_record_count("F", n_f, 10, bytes.len() - c.pos)?;
         let mut fsymbols = FxHashMap::default();
         for _ in 0..n_f {
@@ -592,6 +628,9 @@ impl TabulatedSymbolTable {
 
         // ---- v2 frontier shell ----
         let n_frontier = c.u32()? as usize;
+        if n_frontier > MAX_METADATA_ENTRIES {
+            return Err(TableError::Invalid { section: "frontier", message: "record budget exceeded".into() });
+        }
         validate_record_count("frontier", n_frontier, rank + 6, bytes.len() - c.pos)?;
         let mut frontier = Vec::with_capacity(n_frontier);
         let mut frontier_duals = Vec::with_capacity(n_frontier);
@@ -618,11 +657,13 @@ impl TabulatedSymbolTable {
             return Err(TableError::Invalid { section: "escaping", message: format!("too many pairs: {n_escaping}") });
         }
         let mut escaping = FxHashMap::default();
+        let mut escaping_metadata = 0usize;
         for _ in 0..n_escaping {
             let a = c.u8()?;
             let b = c.u8()?;
             validate_sector_ids("escaping", &[a, b], n_irreps)?;
             let n_in = c.u8()? as usize;
+            consume_metadata_budget("escaping", &mut nsym_metadata, n_in)?;
             let mut in_channels: SectorVec = SectorVec::new();
             for _ in 0..n_in {
                 let cc = c.u8()?;
@@ -634,6 +675,7 @@ impl TabulatedSymbolTable {
                 in_channels.push(SectorId::new(cc as usize));
             }
             let n_fr = c.u8()? as usize;
+            consume_metadata_budget("escaping", &mut escaping_metadata, n_fr)?;
             if n_fr == 0 {
                 return Err(TableError::Invalid { section: "escaping", message: format!("({a},{b}) has no frontier channel") });
             }
@@ -662,8 +704,12 @@ impl TabulatedSymbolTable {
         }
 
         let n_hops = c.u32()? as usize;
+        if n_hops > MAX_METADATA_ENTRIES {
+            return Err(TableError::Invalid { section: "one-hop", message: "record budget exceeded".into() });
+        }
         validate_record_count("one-hop", n_hops, 5, bytes.len() - c.pos)?;
         let mut one_hop = FxHashMap::default();
+        let mut one_hop_metadata = 0usize;
         for _ in 0..n_hops {
             let fid = c.u16()?;
             let x = c.u8()?;
@@ -671,6 +717,7 @@ impl TabulatedSymbolTable {
             validate_sector_ids("one-hop", &[x], n_irreps)?;
             let flags = c.u8()?;
             let n_ret = c.u8()? as usize;
+            consume_metadata_budget("one-hop", &mut one_hop_metadata, n_ret)?;
             let mut returns = Vec::with_capacity(n_ret);
             for _ in 0..n_ret {
                 let sector = c.u8()?;
@@ -789,11 +836,6 @@ impl TabulatedFusionRule {
             table: Arc::new(TabulatedSymbolTable::load_from(bytes)?),
             identity: RuleIdentity::new_unique::<Self>(),
         })
-    }
-
-    #[deprecated(since = "0.1.0", note = "use try_from_bytes and handle TableError")]
-    pub fn from_bytes(bytes: &[u8], _name: &'static str) -> Result<Self, TableError> {
-        Self::try_from_bytes(bytes, _name)
     }
 
     /// `N` of the `SU(N)` group this rule tabulates.

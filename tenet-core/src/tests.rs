@@ -6533,6 +6533,22 @@ mod tests {
     }
 
     #[test]
+    fn tabulated_loader_rejects_record_counts_above_metadata_budget() {
+        let (r_count, _, _, _) = symbol_record_ranges(SU4_TABLE_BYTES);
+        let mut excessive = SU4_TABLE_BYTES.to_vec();
+        excessive[r_count..r_count + 4]
+            .copy_from_slice(&((MAX_METADATA_ENTRIES as u32) + 1).to_le_bytes());
+        rehash_table(&mut excessive);
+        assert!(matches!(
+            TabulatedFusionRule::try_from_bytes(&excessive, "metadata-budget"),
+            Err(TableError::Invalid { section: "R", .. })
+        ));
+
+        let mut used = MAX_METADATA_ENTRIES - 200;
+        consume_metadata_budget("fusion", &mut used, u8::MAX as usize).unwrap_err();
+    }
+
+    #[test]
     fn tabulated_loader_rejects_missing_admissible_symbols() {
         let (r_count, r_range, f_count, f_range) = symbol_record_ranges(SU4_TABLE_BYTES);
         let missing_r = remove_record(SU4_TABLE_BYTES, r_count, r_range.clone());
@@ -6612,6 +6628,24 @@ mod tests {
         covered.insert((0, 0), smallvec![SectorId::new(0)]);
         assert!(matches!(
             validate_f_unitarity(&nsym, &fsymbols, &covered),
+            Err(TableError::Invalid { section: "F", .. })
+        ));
+    }
+
+    #[test]
+    fn tabulated_f_completeness_charges_candidates_with_missing_fourth_nsymbol() {
+        let mut nsym = FxHashMap::default();
+        for a in 0..101u8 {
+            nsym.insert((a, 250, 249), 1);
+        }
+        for c in 0..101u8 {
+            nsym.insert((249, c, 248), 1);
+            for f in 100..200u8 {
+                nsym.insert((250, c, f), 1);
+            }
+        }
+        assert!(matches!(
+            validate_f_completeness(&nsym, &FxHashMap::default()),
             Err(TableError::Invalid { section: "F", .. })
         ));
     }
