@@ -31,10 +31,17 @@ sh benchmarks/issue_118_audit.sh | tee issue-118-audit.txt
 The finite-torus manifest must resolve TeNeT from the checkout running the
 script; the runner rejects stale binaries or another path dependency. Cargo
 metadata also establishes the resolved tenferro checkout and rejects a
-different or invalid `TENFERRO_DIR`. It prints TeNeT, tenferro, and finite-torus
-SHAs; the governing TeNeT and finite-torus lock hashes; the feature-tree hash;
-and the toolchain, system, thread environment, and every raw result. Hashing is
-portable across hosts with either `sha256sum` or `shasum`.
+different or invalid `TENFERRO_DIR`. Every resolved `tenferro-*` package and
+manifest is reported, and all must map to one physical git root. It prints
+TeNeT, tenferro, and finite-torus SHAs; the governing TeNeT and finite-torus
+lock hashes; the feature-tree hash; and the toolchain, system, thread
+environment, and every raw result. All Cargo resolution/build commands use
+`--locked`, and the runner rejects lock changes. Hashing is portable across
+hosts with either `sha256sum` or `shasum`.
+
+The finite-torus executable path comes from Cargo's JSON artifact, so workspace
+`target_directory` and `CARGO_TARGET_DIR` overrides do not redirect the runner
+to a stale hard-coded binary.
 
 RSS is sampled `RUNS` times for an empty filtered test process and the existing
 9,000-space eviction test. Their difference is a process-level upper estimate,
