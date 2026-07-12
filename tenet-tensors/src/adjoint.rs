@@ -5,15 +5,101 @@
 //! transposes of `t`'s blocks (`block(t^H, c) = block(t, c)^H`). Codomain and
 //! domain swap as spaces; leg duality flags are unchanged.
 
-use std::sync::Arc;
+use std::any::{Any, TypeId};
+use std::collections::VecDeque;
+use std::hash::Hash;
+use std::sync::{Arc, RwLock};
 
+use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
+use crate::cache::{enforce_lru_limit, operation_global_registry, touch_lru_key};
 use crate::contract::DynamicFusionMapSpace;
+use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
+
+/// Identity of an adjoint (dagger) output space. The dagger is a pure function
+/// of the source: its hom space (legs carry the authoritative
+/// sector→degeneracy/duality map every adjoint block shape derives from) and its
+/// coupled subblock layout, under a given fusion rule. Mirrors
+/// `TransformedSpaceKey`/`ContractedSpaceKey` in `contract::dynamic_space`; the
+/// operation is fixed (dagger) so there is no operation field.
+///
+/// Why-not (`rule_type: &str` provenance): a type name distinguishes rule types
+/// but not two tables of the same type (a regenerated `TabulatedFusionRule` /
+/// SU(3) provider fuses the same sector ids differently), so the key carries the
+/// rule's `TreeTransformRuleCacheKey` — the provenance-bearing replay cache key.
+///
+/// Why-not (source `content_id` alone): the subblock structure is the
+/// coupled-sector *matrix* layout, coarser than the hom space, so distinct
+/// sources can share a `content_id` yet need different daggers — an id-only key
+/// aliases them (measured: the finite-torus singlet then fails with a dimension
+/// mismatch). The hom space plus `content_id`/`nout`/`nin` is sound; a cheap
+/// interned `HomSpaceId` replaces the by-value hom space clone in PR-2.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct AdjointSpaceKey<RuleKey> {
+    rule_key: RuleKey,
+    source_homspace: Arc<FusionTreeHomSpace>,
+    source_content_id: usize,
+    nout: usize,
+    nin: usize,
+}
+
+/// Bounded LRU store of built adjoint spaces (strong `Arc`, since
+/// `adjoint_space_dyn` returns by value and would leave a `Weak` with no owner).
+struct AdjointSpaceCache<RuleKey> {
+    entries: FxHashMap<AdjointSpaceKey<RuleKey>, Arc<DynamicFusionMapSpace>>,
+    order: VecDeque<AdjointSpaceKey<RuleKey>>,
+}
+
+impl<RuleKey> Default for AdjointSpaceCache<RuleKey> {
+    fn default() -> Self {
+        Self {
+            entries: FxHashMap::default(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+/// Residency bound for the process-global adjoint-space cache. A finite-torus
+/// energy eval interns ~O(100) distinct daggers, so this never evicts in that
+/// workload; it exists only to keep an adversarial (many-distinct-space) run
+/// from growing the strong cache without limit, mirroring the operation cache
+/// policy's LRU cap rather than the sibling spaces' unbounded global maps.
+const ADJOINT_SPACE_CACHE_CAP: usize = 8192;
+
+/// Process-global adjoint-space cache, one bounded store per fusion `RuleKey`
+/// type — the per-type registry the tree-transform/contraction replay caches
+/// use, so `reset_global_operation_caches` clears it too. (Own accessor rather
+/// than `typed_global_map` because the map and its LRU order must share one lock
+/// to stay consistent.)
+fn adjoint_space_cache<RuleKey>() -> Arc<RwLock<AdjointSpaceCache<RuleKey>>>
+where
+    RuleKey: 'static + Send + Sync,
+{
+    let registry = operation_global_registry();
+    let type_id = TypeId::of::<AdjointSpaceCache<RuleKey>>();
+    if let Some(cache) = registry
+        .read()
+        .expect("global cache registry poisoned")
+        .get(&type_id)
+    {
+        return Arc::downcast::<RwLock<AdjointSpaceCache<RuleKey>>>(Arc::clone(cache))
+            .expect("adjoint space cache type id collision");
+    }
+    let mut caches = registry.write().expect("global cache registry poisoned");
+    if let Some(cache) = caches.get(&type_id) {
+        return Arc::downcast::<RwLock<AdjointSpaceCache<RuleKey>>>(Arc::clone(cache))
+            .expect("adjoint space cache type id collision");
+    }
+    let cache: Arc<RwLock<AdjointSpaceCache<RuleKey>>> =
+        Arc::new(RwLock::new(AdjointSpaceCache::default()));
+    caches.insert(type_id, Arc::clone(&cache) as Arc<dyn Any + Send + Sync>);
+    cache
+}
 
 /// Dynamic-rank adjoint space (dagger of the homspace): codomain and domain
 /// swapped, per-block shapes transposed. Pure metadata — touches no data — so a
@@ -21,7 +107,46 @@ use crate::{ConjugateValue, OperationError};
 /// without copying any elements. `adjoint_dyn` is exactly this plus the
 /// conjugate-transpose of the block data, and its output data lives in this
 /// space's layout.
+///
+/// Process-cached: the warm energy loop rebuilds the same daggers every eval,
+/// and even this metadata build pays per-key shape lookups plus
+/// `from_degeneracy_shapes`/`scratch_subblock_structure`/content interning, so
+/// an equal source resolves the already-built space instead (#118).
 pub fn adjoint_space_dyn<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
+    let key = AdjointSpaceKey {
+        rule_key: rule.tree_transform_rule_cache_key(),
+        source_homspace: Arc::clone(space.homspace_arc()),
+        source_content_id: space.structure().content_id(),
+        nout: space.nout(),
+        nin: space.nin(),
+    };
+    let cache = adjoint_space_cache::<R::Key>();
+    if let Ok(mut guard) = cache.write() {
+        if let Some(hit) = guard.entries.get(&key).cloned() {
+            touch_lru_key(&mut guard.order, &key);
+            // Clone the inner hom-space/subblock Arcs for the by-value return.
+            return Ok((*hit).clone());
+        }
+    }
+    let built = Arc::new(build_adjoint_space_dyn(rule, space)?);
+    if let Ok(mut guard) = cache.write() {
+        guard.entries.insert(key.clone(), Arc::clone(&built));
+        touch_lru_key(&mut guard.order, &key);
+        let AdjointSpaceCache { entries, order } = &mut *guard;
+        enforce_lru_limit(entries, order, ADJOINT_SPACE_CACHE_CAP);
+    }
+    Ok((*built).clone())
+}
+
+/// Uncached build of the adjoint (dagger) space; [`adjoint_space_dyn`] memoizes
+/// it.
+fn build_adjoint_space_dyn<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
 ) -> Result<DynamicFusionMapSpace, OperationError>
@@ -79,7 +204,10 @@ where
     let nout = space.nout();
     let nin = space.nin();
     let structure = Arc::clone(space.structure());
-    let adjoint_space = adjoint_space_dyn(rule, space)?;
+    // Uncached build: the eager adjoint (SVD/eigh consumers) is a separate,
+    // out-of-scope path from the cached lazy `adjoint_space_dyn` (#118 PR-1),
+    // and routing it here keeps the replay-cache-key bound off matrix algebra.
+    let adjoint_space = build_adjoint_space_dyn(rule, space)?;
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
@@ -405,4 +533,58 @@ where
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::tree_transform::TreeTransformBuiltinRuleCacheKey;
+    use tenet_core::{FusionProductSpace, SectorLeg, U1FusionRule, U1Irrep};
+
+    // Single-charge U(1) source: one coupled sector, block shape [deg, deg].
+    fn u1_source(charge: i32, deg: usize) -> DynamicFusionMapSpace {
+        let rule = U1FusionRule;
+        let sid = U1Irrep::new(charge).sector_id();
+        let leg = || FusionProductSpace::new([SectorLeg::new([(sid, deg)], false)]);
+        let hom = FusionTreeHomSpace::new(leg(), leg());
+        let count = hom.fusion_tree_keys(&rule).len();
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count])
+            .unwrap()
+    }
+
+    #[test]
+    fn equal_source_returns_the_cached_layout() {
+        let rule = U1FusionRule;
+        let src = u1_source(1, 2);
+        let first = adjoint_space_dyn(&rule, &src).unwrap();
+        let second = adjoint_space_dyn(&rule, &src).unwrap();
+        // A hit clones the cached space's inner Arcs, so both share one layout.
+        assert!(Arc::ptr_eq(first.structure(), second.structure()));
+    }
+
+    #[test]
+    fn different_source_is_not_aliased() {
+        let rule = U1FusionRule;
+        let a = adjoint_space_dyn(&rule, &u1_source(1, 2)).unwrap();
+        let b = adjoint_space_dyn(&rule, &u1_source(3, 2)).unwrap();
+        assert!(!Arc::ptr_eq(a.structure(), b.structure()));
+    }
+
+    // Provenance is first-class in the key: two rules that would otherwise index
+    // the same source get distinct cache entries.
+    #[test]
+    fn distinct_rule_provenance_gives_distinct_keys() {
+        let src = u1_source(1, 2);
+        let make = |rule_key| AdjointSpaceKey {
+            rule_key,
+            source_homspace: Arc::clone(src.homspace_arc()),
+            source_content_id: src.structure().content_id(),
+            nout: src.nout(),
+            nin: src.nin(),
+        };
+        assert_ne!(
+            make(TreeTransformBuiltinRuleCacheKey::U1),
+            make(TreeTransformBuiltinRuleCacheKey::SU2)
+        );
+    }
 }
