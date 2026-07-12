@@ -45,10 +45,9 @@ fn second_identical_call_hits() {
 }
 
 /// The standard macro path materializes topology and grows a slot table once,
-/// then serves warm executions from the cached workspace without repeating
-/// either structural allocation.
+/// then keeps both counters unchanged across warm executions.
 #[test]
-fn warm_macro_path_reuses_topology_and_workspace_allocations() {
+fn warm_macro_path_avoids_repeated_structural_materialization() {
     let rt = Runtime::builder().build().unwrap();
     let (a, b) = chain(&rt, 2, 305);
 
@@ -58,6 +57,7 @@ fn warm_macro_path_reuses_topology_and_workspace_allocations() {
     assert_eq!(cold.workspaces_created, 1);
     assert_eq!(cold.workspace_slot_grows, 1);
     assert_eq!(cold.workspace_reuses, 0);
+    assert_eq!(cold.dynamic_aliases, 0);
 
     for _ in 0..8 {
         let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
@@ -67,6 +67,7 @@ fn warm_macro_path_reuses_topology_and_workspace_allocations() {
     assert_eq!(warm.workspaces_created, 1);
     assert_eq!(warm.workspace_slot_grows, 1);
     assert_eq!(warm.workspace_reuses, 8);
+    assert_eq!(warm.dynamic_aliases, 0);
 }
 
 /// Reusing one `Network` instance also bypasses owned topology and dimension
@@ -101,20 +102,29 @@ fn warm_network_contract_with_uses_identity_alias() {
     assert_eq!(stats.workspaces_created, 1);
     assert_eq!(stats.workspace_slot_grows, 1);
     assert_eq!(stats.workspace_reuses, 1);
+    assert_eq!(stats.dynamic_aliases, 1);
 }
 
 /// A failed cached execution returns its leased workspace before the next
-/// call, so error paths do not force another slot-table allocation.
+/// call, so error paths do not force another slot-table growth.
 #[test]
 fn failed_execution_returns_workspace_to_cache() {
     let rt = Runtime::builder().build().unwrap();
     let other_rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 307);
-    let (_, foreign) = chain(&other_rt, 2, 309);
+    let small = Space::u1([(0, 1)]);
+    let large = Space::u1([(0, 16)]);
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&small], [&small], 307).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&small], [&small], 308).unwrap();
+    let foreign = Tensor::rand_with_seed(&other_rt, Dtype::F64, [&small], [&small], 309).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&small], [&large], 310).unwrap();
+    let d = Tensor::rand_with_seed(&rt, Dtype::F64, [&large], [&large], 311).unwrap();
 
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let _error = tensor!([i, j; m, n] = a[i, j; k, l] * foreign[k, l; m, n]).unwrap_err();
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let _ = tensor!([i; m] = a[i; j] * b[j; k] * c[k; l] * d[l; m]).unwrap();
+    let retained_before = c.storage_strong_count();
+    let _error = tensor!([i; m] = a[i; j] * foreign[j; k] * c[k; l] * d[l; m]).unwrap_err();
+    assert_eq!(c.storage_strong_count(), retained_before);
+    assert_eq!(d.storage_strong_count(), 1);
+    let _ = tensor!([i; m] = a[i; j] * b[j; k] * c[k; l] * d[l; m]).unwrap();
 
     let stats = plan_cache_stats(&rt);
     assert_eq!(stats.workspaces_created, 1);

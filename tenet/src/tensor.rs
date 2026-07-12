@@ -1778,6 +1778,12 @@ impl Tensor {
         self.space.rank()
     }
 
+    /// Number of tensors currently sharing this tensor's storage allocation.
+    #[doc(hidden)]
+    pub fn storage_strong_count(&self) -> usize {
+        Arc::strong_count(&self.data)
+    }
+
     /// Flat `f64` storage in the TensorKit-equivalent coupled-sector matrix
     /// layout (column-major inside each coupled block).
     ///

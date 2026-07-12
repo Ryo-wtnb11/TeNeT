@@ -402,6 +402,25 @@ impl NetworkExecutionWorkspace {
     pub(crate) fn slot_capacity(&self) -> usize {
         self.slots.capacity()
     }
+
+    pub(crate) fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reserve_slots(&mut self, count: usize) {
+        self.slots.reserve(count);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn slot_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retain_tensor(&mut self, tensor: Tensor) {
+        self.slots.push(Some(tensor));
+    }
 }
 
 impl PlannedNetwork {
@@ -802,7 +821,7 @@ pub fn contract_network(
     network.contract(&tensors)
 }
 
-/// Allocation-free topology lookup used by [`tensor!`] for networks without
+/// Borrowed topology lookup used by [`tensor!`] for networks without
 /// intra-operand traces.
 #[doc(hidden)]
 pub fn contract_static_network(
