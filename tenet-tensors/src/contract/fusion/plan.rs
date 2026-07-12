@@ -123,6 +123,9 @@ pub fn prepare_tensorcontract_fusion_plan<
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
     prepare_tensorcontract_fusion_plan_dyn(
         rule,
         &DynamicFusionMapSpace::from_typed(dst),
@@ -144,6 +147,9 @@ pub fn prepare_tensorcontract_fusion_plan_dyn<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
     let lowered_axes =
         lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
     let lhs_adjoint;

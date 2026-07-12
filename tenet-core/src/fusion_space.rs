@@ -76,18 +76,18 @@ struct FusionTreeLegSetSignature {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FusionTreeHomSpaceCacheKey {
-    rule_type: &'static str,
+    rule: RuleIdentity,
     codomain: Vec<FusionTreeLegSetSignature>,
     domain: Vec<FusionTreeLegSetSignature>,
 }
 
 impl FusionTreeHomSpaceCacheKey {
-    fn new<R>(homspace: &FusionTreeHomSpace) -> Self
+    fn new<R>(rule: &R, homspace: &FusionTreeHomSpace) -> Self
     where
         R: MultiplicityFreeFusionRule,
     {
         Self {
-            rule_type: std::any::type_name::<R>(),
+            rule: rule.rule_identity(),
             codomain: fusion_product_space_signature(homspace.codomain()),
             domain: fusion_product_space_signature(homspace.domain()),
         }
@@ -439,7 +439,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let key = FusionTreeHomSpaceCacheKey::new::<R>(self);
+        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
         let cache = fusion_tree_layout_cache();
         if let Ok(read) = cache.read() {
             if let Some(layout) = read.get(&key) {
@@ -1185,6 +1185,7 @@ pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
     dense_space: TensorMapSpace<NOUT, NIN>,
     homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
+    rule_identity: Option<RuleIdentity>,
 }
 
 impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
@@ -1204,10 +1205,10 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// let hom = FusionTreeHomSpace::from_sector_ids([(0, 2)], std::iter::empty::<(usize, usize)>());
     /// let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
     ///
-    /// let space = FusionTensorMapSpace::new(dense, hom, structure).unwrap();
+    /// let space = FusionTensorMapSpace::new_unbound(dense, hom, structure).unwrap();
     /// assert_eq!(space.required_len().unwrap(), 2);
     /// ```
-    pub fn new(
+    pub fn new_unbound(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
         subblock_structure: BlockStructure,
@@ -1237,6 +1238,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             dense_space,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: None,
         })
     }
 
@@ -1326,6 +1328,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         Self::validate_homspace_rank(&homspace)?;
         let subblock_structure = homspace.coupled_subblock_structure(rule, NOUT, shapes)?;
         Self::from_shared_subblock_structure(dense_space, homspace, subblock_structure)
+            .map(|space| space.with_rule_identity(rule.rule_identity()))
     }
 
     fn validate_homspace_rank(homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
@@ -1364,6 +1367,62 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     #[inline]
     pub fn subblock_structure(&self) -> &Arc<BlockStructure> {
         &self.subblock_structure
+    }
+
+    #[inline]
+    pub fn rule_identity(&self) -> Option<RuleIdentity> {
+        self.rule_identity.clone()
+    }
+
+    pub fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), CoreError> {
+        match self.rule_identity.as_ref() {
+            Some(expected) if expected != &rule.rule_identity() => Err(CoreError::FusionRuleMismatch {
+                expected: expected.clone(),
+                actual: rule.rule_identity(),
+            }),
+            Some(_) => Ok(()),
+            None => Err(CoreError::MissingFusionRuleIdentity),
+        }
+    }
+
+    pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
+        let actual = rule.rule_identity();
+        match self.rule_identity.as_ref() {
+            Some(expected) if expected != &actual => Err(CoreError::FusionRuleMismatch {
+                expected: expected.clone(),
+                actual,
+            }),
+            Some(_) => Ok(self),
+            None => {
+                self.rule_identity = Some(actual);
+                Ok(self)
+            }
+        }
+    }
+
+    pub fn try_inherit_rule_identity<const OTHER_NOUT: usize, const OTHER_NIN: usize>(
+        mut self,
+        source: &FusionTensorMapSpace<OTHER_NOUT, OTHER_NIN>,
+    ) -> Result<Self, CoreError> {
+        match (self.rule_identity.as_ref(), source.rule_identity.as_ref()) {
+            (Some(expected), Some(actual)) if expected != actual => {
+                Err(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual: actual.clone(),
+                })
+            }
+            (None, Some(identity)) => {
+                self.rule_identity = Some(identity.clone());
+                Ok(self)
+            }
+            (Some(_), Some(_)) => Ok(self),
+            (_, None) => Err(CoreError::MissingFusionRuleIdentity),
+        }
+    }
+
+    fn with_rule_identity(mut self, identity: RuleIdentity) -> Self {
+        self.rule_identity = Some(identity);
+        self
     }
 
     pub fn find_subblock_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {

@@ -47,7 +47,8 @@ mod tests {
             )
                 .unwrap();
         let packed_space =
-            FusionTensorMapSpace::<2, 2>::new(dense(), hom.clone(), packed_structure).unwrap();
+            FusionTensorMapSpace::<2, 2>::new_unbound(dense(), hom.clone(), packed_structure)
+                .unwrap();
         let coupled_space = FusionTensorMapSpace::<2, 2>::from_degeneracy_shapes_coupled(
             dense(),
             hom.clone(),
@@ -207,6 +208,7 @@ mod tests {
     struct BranchingMultiplicityFreeRule;
 
     impl FusionRule for BranchingMultiplicityFreeRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Simple
         }
@@ -243,6 +245,7 @@ mod tests {
     struct UnsortedFusionIteratorOrderRule;
 
     impl FusionRule for UnsortedFusionIteratorOrderRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Simple
         }
@@ -276,6 +279,7 @@ mod tests {
     struct Z4PointedRule;
 
     impl FusionRule for Z4PointedRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Unique
         }
@@ -313,6 +317,7 @@ mod tests {
     }
 
     impl FusionRule for Z2xZ3PointedRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Unique
         }
@@ -346,6 +351,7 @@ mod tests {
     struct PlanarZ2Rule;
 
     impl FusionRule for PlanarZ2Rule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Unique
         }
@@ -402,6 +408,7 @@ mod tests {
     struct AsymmetricAnyonicRule;
 
     impl FusionRule for AsymmetricAnyonicRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Unique
         }
@@ -827,6 +834,7 @@ mod tests {
     struct ComplexScalarProbeRule;
 
     impl FusionRule for ComplexScalarProbeRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Simple
         }
@@ -1729,6 +1737,19 @@ mod tests {
             -1.0
         );
         assert_eq!(rule.sqrt_dim_scalar(odd_two), 1.0);
+    }
+
+    #[test]
+    fn product_rule_reuses_its_memoized_identity_node() {
+        let rule = product_fusion_rule(Z2FusionRule, U1FusionRule);
+        assert!(rule.identity.get().is_none());
+
+        let first = rule.rule_identity();
+        let cached = rule.identity.get().unwrap() as *const RuleIdentity;
+        let second = rule.rule_identity();
+
+        assert_eq!(first, second);
+        assert_eq!(cached, rule.identity.get().unwrap() as *const RuleIdentity);
     }
 
     #[test]
@@ -3633,6 +3654,7 @@ mod tests {
     }
 
     impl FusionRule for ToyOmRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -3873,6 +3895,7 @@ mod tests {
     }
 
     impl FusionRule for UnitaryToyOmRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -4223,6 +4246,7 @@ mod tests {
     }
 
     impl FusionRule for RefuteOmRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -4514,6 +4538,7 @@ mod tests {
         const R333: [f64; 4] = [-1.0, 0.0, 0.0, 1.0];
     }
     impl FusionRule for A4SubBlockRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -4663,6 +4688,7 @@ mod tests {
     struct A4BendRule;
 
     impl FusionRule for A4BendRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -4916,6 +4942,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct OverwriteProbeRule;
     impl FusionRule for OverwriteProbeRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -5064,6 +5091,7 @@ mod tests {
     // Sector 1 is self-dual with dim 4 (so √dim=2, exercising the coeff factor);
     // 1⊗1 = {0 (rigidity), 1 (with N=2)}. Only the (1,1,1) block is non-trivial.
     impl FusionRule for TransposeProbeRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -5263,6 +5291,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct A4FoldRule;
     impl FusionRule for A4FoldRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -5743,6 +5772,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct ComplexUnitaryRule;
     impl FusionRule for ComplexUnitaryRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -5954,6 +5984,7 @@ mod tests {
         Complex64::new(0.6, 0.8) // |w| = 1, genuinely complex
     }
     impl FusionRule for Coeff2ConjRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }
@@ -6121,6 +6152,7 @@ mod tests {
     struct Su3BendRule;
     // ids: 1 = (4,2,0) self-dual, 2 = (3,1,0), 3 = (3,2,0) = dual((3,1,0)).
     impl FusionRule for Su3BendRule {
+        fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
         }

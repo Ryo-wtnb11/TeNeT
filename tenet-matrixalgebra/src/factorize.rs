@@ -255,6 +255,8 @@ where
         space.homspace().clone(),
         Arc::clone(space.structure()),
     )
+    .map_err(OperationError::from_core_preserving_context)?
+    .try_bind_rule(rule)
     .map_err(OperationError::from_core_preserving_context)?;
     TensorMap::from_vec_with_fusion_space(data, typed_space)
         .map_err(OperationError::from_core_preserving_context)

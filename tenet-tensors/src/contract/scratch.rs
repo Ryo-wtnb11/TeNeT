@@ -436,7 +436,8 @@ mod tests {
             std::iter::empty::<(SectorId, usize)>(),
         );
         let structure = BlockStructure::packed_column_major(1, [vec![len]]).unwrap();
-        let fusion_space = FusionTensorMapSpace::new(dense_space, homspace, structure).unwrap();
+        let fusion_space =
+            FusionTensorMapSpace::new_unbound(dense_space, homspace, structure).unwrap();
         Arc::new(DynamicFusionMapSpace::from_typed(&fusion_space))
     }
 

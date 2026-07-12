@@ -98,6 +98,9 @@ pub fn tensorcontract_fusion_structure_dyn<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
     // The categorical-adjoint (conjugate) block matching in this Structure route
     // is only correct when the conjugated operand's sectors are all self-dual
     // (a sector equal to its dual). For non-self-dual sectors — e.g. a U(1)

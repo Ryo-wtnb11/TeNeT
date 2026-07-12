@@ -2258,11 +2258,27 @@ fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
 #[test]
 fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
     let src_key = BlockKey::from(FusionTreeBlockKey::pair(
-        FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]),
+        FusionTreeKey::try_from_sector_ids_for_rule(
+            &UniqueZ2Rule,
+            [1, 1],
+            Some(0),
+            [false, false],
+            [],
+            [1],
+        )
+        .unwrap(),
         empty_fusion_tree_with_coupled(Some(0)),
     ));
     let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair(
-        FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]),
+        FusionTreeKey::try_from_sector_ids_for_rule(
+            &UniqueZ2Rule,
+            [1, 1],
+            Some(0),
+            [false, false],
+            [],
+            [1],
+        )
+        .unwrap(),
         empty_fusion_tree_with_coupled(Some(0)),
     ));
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
@@ -2283,7 +2299,15 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
 #[test]
 fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
     let src_key = BlockKey::from(FusionTreeBlockKey::pair(
-        FusionTreeKey::from_sector_ids([1, 0], Some(1), [false, false], [], [1]),
+        FusionTreeKey::try_from_sector_ids_for_rule(
+            &UniqueZ2Rule,
+            [1, 0],
+            Some(1),
+            [false, false],
+            [],
+            [1],
+        )
+        .unwrap(),
         empty_fusion_tree_with_coupled(Some(1)),
     ));
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
@@ -3371,6 +3395,9 @@ struct ToyGenericRule {
 }
 
 impl FusionRule for ToyGenericRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         self.style
     }
@@ -3437,16 +3464,28 @@ impl GenericRigidSymbols for ToyGenericRule {
 
 fn b2c_toy_src_pair() -> FusionTreeBlockKey {
     // cod [1,1]->0 (vacuum-coupled, N(1,1,0)=1, single vertex label 1), dom []->0.
-    let cod = FusionTreeKey::new(
+    let cod = FusionTreeKey::try_new_for_rule(
+        &ToyGenericRule {
+            style: FusionStyleKind::Generic,
+        },
         [SectorId::new(1), SectorId::new(1)],
         Some(SectorId::new(0)),
         [false, false],
         [],
         [SectorId::new(1)],
     )
-    .with_has_multiplicity(true);
-    let dom =
-        FusionTreeKey::new([], Some(SectorId::new(0)), [], [], []).with_has_multiplicity(true);
+    .unwrap();
+    let dom = FusionTreeKey::try_new_for_rule(
+        &ToyGenericRule {
+            style: FusionStyleKind::Generic,
+        },
+        [],
+        Some(SectorId::new(0)),
+        [],
+        [],
+        [],
+    )
+    .unwrap();
     FusionTreeBlockKey::pair(cod, dom)
 }
 
@@ -3624,15 +3663,16 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
     let vac = tenet_core::SectorId::new(0);
     // codomain [8,8]->vac (single vertex), domain []->vac: one 1-element block.
     let make = |value: f64| {
-        let cod = FusionTreeKey::new(
+        let cod = FusionTreeKey::try_new_for_rule(
+            &rule,
             [eight, eight],
             Some(vac),
             [false, false],
             [],
             [tenet_core::SectorId::new(1)],
         )
-        .with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([], Some(vac), [], [], []).with_has_multiplicity(true);
+        .unwrap();
+        let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
         let key = BlockKey::from(FusionTreeBlockKey::pair(cod, dom));
         let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
         let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -3706,9 +3746,16 @@ mod b3c1_su4_smoke {
         // `[a, b] <- vac` singlet map. The two codomain sectors differ, so a
         // leg swap really reorders the fusion tree (recouples via SU(4) F/R).
         let make = |a: SectorId, b: SectorId, value: f64| {
-            let cod = FusionTreeKey::new([a, b], Some(vac), [false, false], [], [SectorId::new(1)])
-                .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([], Some(vac), [], [], []).with_has_multiplicity(true);
+            let cod = FusionTreeKey::try_new_for_rule(
+                &rule,
+                [a, b],
+                Some(vac),
+                [false, false],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap();
+            let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
             let key = BlockKey::from(FusionTreeBlockKey::pair(cod, dom));
             let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
             let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();

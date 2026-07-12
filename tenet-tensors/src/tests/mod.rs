@@ -180,13 +180,15 @@ fn empty_fusion_tree() -> FusionTreeKey {
 }
 
 fn empty_fusion_tree_with_coupled(coupled: Option<usize>) -> FusionTreeKey {
-    FusionTreeKey::new(
+    FusionTreeKey::try_new_for_rule(
+        &Z2FusionRule,
         Vec::<SectorId>::new(),
         coupled.map(SectorId::new),
         Vec::<bool>::new(),
         Vec::<SectorId>::new(),
         Vec::<SectorId>::new(),
     )
+    .unwrap()
 }
 
 fn all_codomain_fusion_tree_test_key<
@@ -202,13 +204,15 @@ fn all_codomain_fusion_tree_test_key<
     codomain_vertices: [usize; COD_VERTICES],
 ) -> BlockKey {
     BlockKey::from(FusionTreeBlockKey::pair(
-        FusionTreeKey::from_sector_ids(
+        FusionTreeKey::try_from_sector_ids_for_rule(
+            &Z2FusionRule,
             codomain,
             coupled,
             codomain_is_dual,
             codomain_innerlines,
             codomain_vertices,
-        ),
+        )
+        .unwrap(),
         empty_fusion_tree(),
     ))
 }
@@ -326,6 +330,9 @@ fn column_major_structure_like(structure: &BlockStructure, shape: Vec<usize>) ->
 struct UniqueZ2Rule;
 
 impl FusionRule for UniqueZ2Rule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Unique
     }
@@ -402,6 +409,9 @@ impl MultiplicityFreePivotalSymbols for UniqueZ2Rule {
 struct UniqueAnyonicRule;
 
 impl FusionRule for UniqueAnyonicRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Unique
     }
@@ -503,6 +513,9 @@ impl MultiplicityFreeRigidSymbols for UniqueAnyonicRule {
 struct UnitaryPhaseAnyonicRule;
 
 impl FusionRule for UnitaryPhaseAnyonicRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Unique
     }
@@ -608,6 +621,9 @@ impl MultiplicityFreeRigidSymbols for UnitaryPhaseAnyonicRule {
 struct UniquePlanarRule;
 
 impl FusionRule for UniquePlanarRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Unique
     }
@@ -631,6 +647,9 @@ impl MultiplicityFreeFusionRule for UniquePlanarRule {}
 struct SimpleSu2Rule;
 
 impl FusionRule for SimpleSu2Rule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Simple
     }
@@ -656,6 +675,9 @@ impl MultiplicityFreeFusionRule for SimpleSu2Rule {}
 struct GenericMultiplicityRule;
 
 impl FusionRule for GenericMultiplicityRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Generic
     }

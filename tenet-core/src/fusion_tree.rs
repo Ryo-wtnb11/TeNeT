@@ -518,6 +518,51 @@ impl PartialOrd for FusionTreeKey {
 }
 
 impl FusionTreeKey {
+    pub fn try_new_for_rule<R, Uncoupled, Dual, Innerlines, Vertices>(
+        rule: &R,
+        uncoupled: Uncoupled,
+        coupled: Option<SectorId>,
+        is_dual: Dual,
+        innerlines: Innerlines,
+        vertices: Vertices,
+    ) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+        Uncoupled: IntoIterator<Item = SectorId>,
+        Dual: IntoIterator<Item = bool>,
+        Innerlines: IntoIterator<Item = SectorId>,
+        Vertices: IntoIterator<Item = SectorId>,
+    {
+        Self::try_new_for_style(
+            rule.fusion_style(), uncoupled, coupled, is_dual, innerlines, vertices,
+        )
+    }
+
+    pub(crate) fn try_new_for_style<Uncoupled, Dual, Innerlines, Vertices>(
+        style: FusionStyleKind,
+        uncoupled: Uncoupled,
+        coupled: Option<SectorId>,
+        is_dual: Dual,
+        innerlines: Innerlines,
+        vertices: Vertices,
+    ) -> Result<Self, CoreError>
+    where
+        Uncoupled: IntoIterator<Item = SectorId>,
+        Dual: IntoIterator<Item = bool>,
+        Innerlines: IntoIterator<Item = SectorId>,
+        Vertices: IntoIterator<Item = SectorId>,
+    {
+        let has_multiplicity = style.has_multiplicity();
+        let tree = Self::new(uncoupled, coupled, is_dual, innerlines, vertices)
+            .with_has_multiplicity(has_multiplicity);
+        if !has_multiplicity && tree.vertices.iter().any(|vertex| vertex.id() != 1) {
+            return Err(CoreError::MalformedFusionTree {
+                message: "multiplicity-free fusion tree has a nontrivial vertex",
+            });
+        }
+        Ok(tree)
+    }
+
     // `has_multiplicity` is NOT a parameter of `new`/`from_sector_ids`/
     // `from_uncoupled` on purpose. These three constructors have ~57 call
     // sites across tenet-core and tenet-tensors (production tree-transform
@@ -531,7 +576,7 @@ impl FusionTreeKey {
     // toy OM rule's tests. When Stage B's recouple wrapper starts producing
     // real Generic-fusion trees, it can call `.with_has_multiplicity(true)`
     // at its own construction sites rather than everyone else's.
-    pub fn new<Uncoupled, Dual, Innerlines, Vertices>(
+    pub(crate) fn new<Uncoupled, Dual, Innerlines, Vertices>(
         uncoupled: Uncoupled,
         coupled: Option<SectorId>,
         is_dual: Dual,
@@ -558,7 +603,7 @@ impl FusionTreeKey {
     /// setter rather than a constructor parameter — see the rationale on
     /// `new` above for why the existing constructors were left alone.
     #[must_use]
-    pub fn with_has_multiplicity(mut self, has_multiplicity: bool) -> Self {
+    pub(crate) fn with_has_multiplicity(mut self, has_multiplicity: bool) -> Self {
         self.has_multiplicity = has_multiplicity;
         self
     }
@@ -568,7 +613,7 @@ impl FusionTreeKey {
         self.has_multiplicity
     }
 
-    pub fn from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
+    pub(crate) fn from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
         uncoupled: Uncoupled,
         coupled: Option<usize>,
         is_dual: Dual,
@@ -582,6 +627,31 @@ impl FusionTreeKey {
         Vertices: IntoIterator<Item = usize>,
     {
         Self::new(
+            uncoupled.into_iter().map(SectorId::new),
+            coupled.map(SectorId::new),
+            is_dual,
+            innerlines.into_iter().map(SectorId::new),
+            vertices.into_iter().map(SectorId::new),
+        )
+    }
+
+    pub fn try_from_sector_ids_for_rule<R, Uncoupled, Dual, Innerlines, Vertices>(
+        rule: &R,
+        uncoupled: Uncoupled,
+        coupled: Option<usize>,
+        is_dual: Dual,
+        innerlines: Innerlines,
+        vertices: Vertices,
+    ) -> Result<Self, CoreError>
+    where
+        R: FusionRule,
+        Uncoupled: IntoIterator<Item = usize>,
+        Dual: IntoIterator<Item = bool>,
+        Innerlines: IntoIterator<Item = usize>,
+        Vertices: IntoIterator<Item = usize>,
+    {
+        Self::try_new_for_rule(
+            rule,
             uncoupled.into_iter().map(SectorId::new),
             coupled.map(SectorId::new),
             is_dual,

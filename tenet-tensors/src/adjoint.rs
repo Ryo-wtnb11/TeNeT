@@ -119,6 +119,7 @@ pub fn adjoint_space_dyn<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
+    space.validate_rule(rule)?;
     let key = AdjointSpaceKey {
         rule_key: rule.tree_transform_rule_cache_key(),
         source_homspace: Arc::clone(space.homspace_arc()),
@@ -201,6 +202,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
+    space.validate_rule(rule)?;
     let nout = space.nout();
     let nin = space.nin();
     let structure = Arc::clone(space.structure());
@@ -286,6 +288,7 @@ pub fn adjoint_space_dyn_generic<R>(
 where
     R: FusionRule,
 {
+    space.validate_rule(rule)?;
     let nout = space.nout();
     let homspace = space.homspace();
     let adjoint_hom =
@@ -339,6 +342,7 @@ where
     R: FusionRule,
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
+    space.validate_rule(rule)?;
     let nout = space.nout();
     let nin = space.nin();
     let structure = Arc::clone(space.structure());

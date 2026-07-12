@@ -412,23 +412,27 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     let even_key = key_for_sector(even);
     let odd_key = key_for_sector(odd);
 
-    let lhs_space = FusionTensorMapSpace::new(
+    let lhs_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace.clone(),
+        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let rhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::new(
-        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
-        homspace.clone(),
-        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
-    )
-    .unwrap();
-    let dst_space = FusionTensorMapSpace::new(
+    let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
         packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
 
     let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
@@ -504,19 +508,19 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
     let even_key = key_for_sector(even);
     let odd_key = key_for_sector(odd);
 
-    let lhs_space = FusionTensorMapSpace::new(
+    let lhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::new(
+    let rhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::new(
+    let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
         packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
@@ -1541,7 +1545,7 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
     );
     let keys = dst_hom.fusion_tree_keys(&rule);
     let dst_structure = packed_fixture_structure(2, [(keys[0].clone(), vec![1, 1])]).unwrap();
-    let dst_space = FusionTensorMapSpace::new(
+    let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         dst_hom,
         dst_structure,
@@ -1686,19 +1690,23 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
         empty_fusion_tree(),
         empty_fusion_tree(),
     ));
-    let lhs_space = FusionTensorMapSpace::new(
+    let lhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1), (1, 1)], []),
         packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::new(
+    let rhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
         packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
-    let dst_space = FusionTensorMapSpace::new(
+    let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1), (1, 1)], []),
         packed_fixture_structure(
@@ -1707,6 +1715,8 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
         )
         .unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let lhs = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(vec![10.0], lhs_space).unwrap();
     let rhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
@@ -1761,11 +1771,13 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     let src_key = BlockKey::from(src_tree.clone());
     let dst_key0 = BlockKey::from(src_tree);
     let dst_key1 = BlockKey::from(recoupled_tree);
-    let lhs_space = FusionTensorMapSpace::new(
+    let lhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         lhs_hom.clone(),
         packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
@@ -1774,7 +1786,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         [vec![]],
     )
     .unwrap();
-    let dst_space = FusionTensorMapSpace::new(
+    let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
         lhs_hom,
         packed_fixture_structure(
@@ -1783,6 +1795,8 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         )
         .unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let lhs_core_space = lhs_space.clone();
     let core_dst_space = lhs_space.clone();
@@ -2064,26 +2078,32 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
         )
         .unwrap()
     };
-    let lhs_space = FusionTensorMapSpace::new(
+    let lhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
         lhs_hom.clone(),
         packed(&lhs_hom),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
-    let rhs_space = FusionTensorMapSpace::new(
+    let rhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<3, 1>::from_dims([2, 2, 2], [2]).unwrap(),
         rhs_hom.clone(),
         packed(&rhs_hom),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let dst_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2)]);
     let dst_keys = dst_hom.fusion_tree_keys(&rule);
     assert_eq!(dst_keys.len(), 1);
-    let dst_space = FusionTensorMapSpace::new(
+    let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
         dst_hom,
         packed_fixture_structure(2, [(dst_keys[0].clone(), vec![2, 2])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let lhs_data = (0..32).map(|index| 0.25 + index as f64).collect::<Vec<_>>();
     let rhs_data = (0..32)
@@ -2162,46 +2182,54 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
     let rule = U1FusionRule;
     let plus_two = U1Irrep::new(2).sector_id();
     let minus_two = U1Irrep::new(-2).sector_id();
-    let lhs_domain = FusionTreeKey::new(
+    let lhs_domain = FusionTreeKey::try_new_for_rule(
+        &rule,
         [plus_two],
         Some(plus_two),
         [false],
         Vec::<SectorId>::new(),
         Vec::<SectorId>::new(),
-    );
-    let rhs_codomain = FusionTreeKey::new(
+    )
+    .unwrap();
+    let rhs_codomain = FusionTreeKey::try_new_for_rule(
+        &rule,
         [minus_two],
         Some(minus_two),
         [false],
         Vec::<SectorId>::new(),
         Vec::<SectorId>::new(),
-    );
+    )
+    .unwrap();
     assert!(contracted_fusion_tree_basis_matches(
         &rule,
         &lhs_domain,
         &rhs_codomain
     ));
 
-    let raw_rhs_codomain = FusionTreeKey::new(
+    let raw_rhs_codomain = FusionTreeKey::try_new_for_rule(
+        &rule,
         [plus_two],
         Some(plus_two),
         [false],
         Vec::<SectorId>::new(),
         Vec::<SectorId>::new(),
-    );
+    )
+    .unwrap();
     assert!(!contracted_fusion_tree_basis_matches(
         &rule,
         &lhs_domain,
         &raw_rhs_codomain
     ));
 
-    let dual_flag_rhs_codomain = FusionTreeKey::new(
+    let dual_flag_rhs_codomain = FusionTreeKey::try_new_for_rule(
+        &rule,
         [minus_two],
         Some(minus_two),
         [true],
         Vec::<SectorId>::new(),
         Vec::<SectorId>::new(),
-    );
+    )
+    .unwrap();
     assert!(!contracted_fusion_tree_basis_matches(
         &rule,
         &lhs_domain,
@@ -2802,7 +2830,10 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             .unwrap(),
             _ => unreachable!("test only has three lhs block-structure cases"),
         };
-        FusionTensorMapSpace::new(dense_space, lhs_hom.clone(), structure).unwrap()
+        FusionTensorMapSpace::new_unbound(dense_space, lhs_hom.clone(), structure)
+            .unwrap()
+            .try_bind_rule(&rule)
+            .unwrap()
     };
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
@@ -3408,11 +3439,13 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([], []);
     let scalar_key = BlockKey::from(rhs_hom.fusion_tree_keys(&rule)[0].clone());
-    let rhs_space = FusionTensorMapSpace::new(
+    let rhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         rhs_hom,
         packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let lhs_core_hom = src_space
         .homspace()
