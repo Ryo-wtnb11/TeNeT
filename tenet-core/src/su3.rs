@@ -375,6 +375,7 @@ fn table() -> &'static Arc<TabulatedSymbolTable> {
 #[derive(Clone, Debug)]
 pub struct TabulatedFusionRule {
     table: Arc<TabulatedSymbolTable>,
+    identity: RuleIdentity,
 }
 
 /// Thin public alias kept for the SU(3) call sites (Stage B3b): the SU(3)
@@ -390,8 +391,12 @@ impl Default for TabulatedFusionRule {
 impl TabulatedFusionRule {
     /// A handle to the process-global SU(3) table (the checked-in default).
     pub fn new() -> Self {
+        static IDENTITY: OnceLock<RuleIdentity> = OnceLock::new();
         Self {
             table: Arc::clone(table()),
+            identity: IDENTITY
+                .get_or_init(RuleIdentity::new_unique::<Self>)
+                .clone(),
         }
     }
 
@@ -402,6 +407,7 @@ impl TabulatedFusionRule {
     pub fn from_bytes(bytes: &[u8], name: &'static str) -> Self {
         Self {
             table: Arc::new(TabulatedSymbolTable::load_from(bytes, name)),
+            identity: RuleIdentity::new_unique::<Self>(),
         }
     }
 
@@ -469,6 +475,10 @@ impl TabulatedFusionRule {
 }
 
 impl FusionRule for TabulatedFusionRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.identity.clone()
+    }
+
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Generic
     }

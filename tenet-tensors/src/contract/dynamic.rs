@@ -2118,6 +2118,7 @@ mod tests {
                 [vec![1, 1], vec![1, 1]],
             )
             .unwrap()
+            .bind_rule(&rule)
         };
         let allocations = Rc::new(RefCell::new(Vec::new()));
         let lhs =
@@ -2251,6 +2252,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap()
+            .bind_rule(&rule)
         };
         let rhs_space = || {
             FusionTensorMapSpace::from_degeneracy_shapes(

@@ -40,6 +40,11 @@ pub enum CoreError {
         expected: SectorId,
         actual: SectorId,
     },
+    FusionRuleMismatch {
+        expected: RuleIdentity,
+        actual: RuleIdentity,
+    },
+    MissingFusionRuleIdentity,
     /// A per-sector leg degeneracy disagrees with another authoritative
     /// source (the paired leg of a composition, or a fusion-tree degeneracy
     /// shape validated against its leg).
@@ -137,6 +142,10 @@ impl fmt::Display for CoreError {
             Self::SectorMismatch { expected, actual } => {
                 write!(f, "sector mismatch: expected {expected:?}, got {actual:?}")
             }
+            Self::FusionRuleMismatch { expected, actual } => {
+                write!(f, "fusion rule mismatch: expected {expected:?}, got {actual:?}")
+            }
+            Self::MissingFusionRuleIdentity => write!(f, "fusion space has no bound rule identity"),
             Self::LegDegeneracyMismatch {
                 sector,
                 expected,

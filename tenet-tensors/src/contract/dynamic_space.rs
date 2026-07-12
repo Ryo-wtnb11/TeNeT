@@ -22,7 +22,7 @@ struct ContractedSpaceKey {
     /// Fusion rule discriminant: the same sector ids fuse differently under
     /// different rules, so the process-global cache must key on the rule.
     /// Mirrors `FusionTreeHomSpaceCacheKey` in tenet-core.
-    rule_type: &'static str,
+    rule: tenet_core::RuleIdentity,
     lhs_homspace: Arc<FusionTreeHomSpace>,
     rhs_homspace: Arc<FusionTreeHomSpace>,
     lhs_axes: Vec<usize>,
@@ -42,7 +42,7 @@ fn contracted_space_cache() -> &'static RwLock<FxHashMap<ContractedSpaceKey, Dyn
 /// operation, under a given fusion rule. Mirrors [`ContractedSpaceKey`].
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct TransformedSpaceKey {
-    rule_type: &'static str,
+    rule: tenet_core::RuleIdentity,
     source_homspace: Arc<FusionTreeHomSpace>,
     operation: TreeTransformOperation,
 }
@@ -101,6 +101,7 @@ pub struct DynamicFusionMapSpace {
     nin: usize,
     homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
+    rule_identity: Option<tenet_core::RuleIdentity>,
 }
 
 impl DynamicFusionMapSpace {
@@ -114,6 +115,7 @@ impl DynamicFusionMapSpace {
             nin: NIN,
             homspace: Arc::clone(space.homspace_arc()),
             subblock_structure: Arc::clone(space.subblock_structure()),
+            rule_identity: space.rule_identity(),
         }
     }
 
@@ -160,6 +162,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: Some(rule.rule_identity()),
         })
     }
 
@@ -186,9 +189,10 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
+        self.validate_rule(rule)?;
         let source = self;
         let cache_key = TransformedSpaceKey {
-            rule_type: std::any::type_name::<R>(),
+            rule: rule.rule_identity(),
             source_homspace: Arc::clone(&source.homspace),
             operation: operation.clone(),
         };
@@ -240,6 +244,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: Some(rule.rule_identity()),
         };
         if let Ok(mut map) = transformed_space_cache().write() {
             map.insert(cache_key, space.clone());
@@ -291,6 +296,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: Some(rule.rule_identity()),
         })
     }
 
@@ -306,6 +312,7 @@ impl DynamicFusionMapSpace {
     where
         R: FusionRule,
     {
+        self.validate_rule(rule)?;
         let source = self;
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let nout = codomain_axes.len();
@@ -347,6 +354,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: Some(rule.rule_identity()),
         })
     }
 
@@ -364,6 +372,8 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
+        lhs.validate_rule(rule)?;
+        rhs.validate_rule(rule)?;
         if lhs_axes.len() != rhs_axes.len() {
             return Err(OperationError::ContractAxisCountMismatch {
                 lhs: lhs_axes.len(),
@@ -385,7 +395,7 @@ impl DynamicFusionMapSpace {
                 actual: rhs.rank(),
             })?;
         let key = ContractedSpaceKey {
-            rule_type: std::any::type_name::<R>(),
+            rule: rule.rule_identity(),
             lhs_homspace: Arc::clone(&lhs.homspace),
             rhs_homspace: Arc::clone(&rhs.homspace),
             lhs_axes: lhs_axes.to_vec(),
@@ -486,6 +496,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: Some(rule.rule_identity()),
         })
     }
 
@@ -506,6 +517,8 @@ impl DynamicFusionMapSpace {
     where
         R: FusionRule,
     {
+        lhs.validate_rule(rule)?;
+        rhs.validate_rule(rule)?;
         if lhs_axes.len() != rhs_axes.len() {
             return Err(OperationError::ContractAxisCountMismatch {
                 lhs: lhs_axes.len(),
@@ -577,6 +590,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
+            rule_identity: Some(rule.rule_identity()),
         })
     }
 
@@ -599,6 +613,7 @@ impl DynamicFusionMapSpace {
             nin: self.nout,
             homspace: Arc::new(homspace),
             subblock_structure: Arc::new(structure),
+            rule_identity: self.rule_identity.clone(),
         })
     }
 
@@ -618,6 +633,21 @@ impl DynamicFusionMapSpace {
     #[inline]
     pub fn rank(&self) -> usize {
         self.nout + self.nin
+    }
+
+    fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), OperationError> {
+        match self.rule_identity.as_ref() {
+            Some(expected) if expected != &rule.rule_identity() => Err(
+                OperationError::from_core_preserving_context(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual: rule.rule_identity(),
+                }),
+            ),
+            Some(_) => Ok(()),
+            None => Err(OperationError::from_core_preserving_context(
+                CoreError::MissingFusionRuleIdentity,
+            )),
+        }
     }
 
     #[inline]
