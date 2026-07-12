@@ -84,6 +84,67 @@ pf64!(v, x) = pu64!(v, reinterpret(UInt64, Float64(x)))
 label_of(s) = collect(Int, dynkin_label(s))
 plabel!(v, s) = for c in label_of(s); pu8!(v, c); end
 
+function verify_blob(bytes, irreps, rrecs, frecs)
+    pos = Ref(1)
+    take8!() = begin
+        pos[] <= length(bytes) || error("decoder truncated at $(pos[])")
+        value = bytes[pos[]]
+        pos[] += 1
+        value
+    end
+    take16!() = sum(UInt16(take8!()) << shift for shift in (0, 8))
+    take32!() = sum(UInt32(take8!()) << shift for shift in (0, 8, 16, 24))
+    take64!() = sum(UInt64(take8!()) << shift for shift in (0, 8, 16, 24, 32, 40, 48, 56))
+    takef64!() = reinterpret(Float64, take64!())
+
+    @assert [take8!() for _ in 1:4] == collect(codeunits("TFR3"))
+    @assert take32!() == 3
+    @assert take32!() == N
+    provenance = take64!()
+    @assert provenance == fnv1a(bytes[pos[]:end])
+    @assert take32!() == length(irreps)
+    for s in irreps
+        @assert [take8!() for _ in 1:RANK] == label_of(s)
+        @assert take32!() == dim(s)
+        @assert take8!() == findfirst(==(dual(s)), irreps) - 1
+        @assert reinterpret(Int8, take8!()) == round(Int8, frobeniusschur(s))
+    end
+
+    npairs = take32!()
+    for _ in 1:npairs
+        take8!(); take8!()
+        for _ in 1:take8!()
+            take8!(); take8!()
+        end
+    end
+
+    @assert take32!() == length(rrecs)
+    for (a, b, c, source) in rrecs
+        @assert (take8!(), take8!(), take8!()) == (a, b, c)
+        rows, cols = size(source)
+        @assert (take8!(), take8!()) == (rows, cols)
+        for i in 1:rows, j in 1:cols
+            @assert takef64!() == source[i, j]
+        end
+    end
+
+    @assert take32!() == length(frecs)
+    has_outer_multiplicity = any(maximum(hdr[7:10]) > 1 for (hdr, _) in frecs)
+    has_asymmetric_axes = false
+    for (hdr, source) in frecs
+        a, b, c, d, e, f, s0, s1, s2, s3 = hdr
+        @assert ntuple(_ -> take8!(), 6) == (a, b, c, d, e, f)
+        decoded_shape = ntuple(_ -> Int(take8!()), 4)
+        @assert decoded_shape == (s0, s1, s2, s3) == size(source)
+        has_asymmetric_axes |= length(unique(decoded_shape)) > 1
+        for i0 in 1:s0, i1 in 1:s1, i2 in 1:s2, i3 in 1:s3
+            @assert takef64!() == source[i0, i1, i2, i3]
+        end
+    end
+    @assert !has_outer_multiplicity || has_asymmetric_axes
+    return nothing
+end
+
 function main()
     Irr = SUNIrrep{N}
 
@@ -263,6 +324,8 @@ function main()
     pu32!(out, N)          # group tag: N of SU(N)
     pu64!(out, prov)       # provenance / cache-identity hash
     append!(out, payload)
+
+    verify_blob(out, irreps, rrecs, frecs)
 
     write(DEST, out)
     println("wrote ", DEST, "  (SU(", N, "), dim<=", DIM_CUT, ")")

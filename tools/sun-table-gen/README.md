@@ -55,7 +55,12 @@ truncation mistake fails loudly at first use.
 
 Before writing, the generator checks every F/R record shape against independent
 `Nsymbol` calls, checks R unitarity, and runs TensorKitSectors pentagon and
-hexagon equations on the four lowest-dimensional irreps. The Rust loader then
+hexagon equations on the four lowest-dimensional irreps. It then decodes the
+emitted bytes independently and compares every R/F key, shape, and row-major
+coefficient with the in-memory SUNRepresentations source records. CI also
+generates a small SU(3) table whose F records contain asymmetric outer-
+multiplicity axes, so the decoder cannot pass by treating every block as a
+scalar. The Rust loader then
 reconstructs admissible keys from serialized fusion multiplicities and rejects
 missing, extra, malformed, non-finite, or non-unitary symbol records.
 

@@ -45,6 +45,9 @@
 static SU3_TABLE_BYTES: &[u8] = include_bytes!("su3_table.bin");
 const MAX_TABLE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SYMBOL_VALUES: usize = MAX_TABLE_BYTES / size_of::<f64>();
+const MAX_COMPLETENESS_KEYS: usize = 1_000_000;
+const MAX_ASSOCIATOR_DIM: usize = 1_024;
+const MAX_GRAM_WORK: usize = 100_000_000;
 
 /// Per-irrep scalar data, indexed by dense `SectorId`.
 #[derive(Clone, Debug)]
@@ -302,6 +305,12 @@ fn validate_symbol_completeness(
                         });
                     }
                     expected_f += 1;
+                    if expected_f > MAX_COMPLETENESS_KEYS {
+                        return Err(TableError::Invalid {
+                            section: "F",
+                            message: "admissible-key validation budget exceeded".into(),
+                        });
+                    }
                 }
             }
         }
@@ -322,7 +331,10 @@ fn validate_f_unitarity(
     for &key in fsymbols.keys() {
         groups.entry([key[0], key[1], key[2], key[3]]).or_default().push(key);
     }
+    let mut gram_work = 0usize;
     for ([a, b, c, d], keys) in groups {
+        // A partial finite-cut matrix is not an associator, so testing its Gram
+        // matrix would reject valid tables rather than establish coherence.
         if !covered_pairs.contains_key(&(a, b)) || !covered_pairs.contains_key(&(b, c)) {
             continue;
         }
@@ -355,6 +367,24 @@ fn validate_f_unitarity(
             return Err(TableError::Invalid {
                 section: "F",
                 message: format!("associator ({a},{b},{c},{d}) is {row_count}x{col_count}"),
+            });
+        }
+        if row_count > MAX_ASSOCIATOR_DIM {
+            return Err(TableError::Invalid {
+                section: "F",
+                message: format!("associator dimension {row_count} exceeds validation budget"),
+            });
+        }
+        let work = row_count
+            .checked_mul(row_count)
+            .and_then(|n| n.checked_mul(row_count))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or(TableError::Overflow("F Gram work"))?;
+        gram_work = gram_work.checked_add(work).ok_or(TableError::Overflow("F Gram work"))?;
+        if gram_work > MAX_GRAM_WORK {
+            return Err(TableError::Invalid {
+                section: "F",
+                message: "associator validation work budget exceeded".into(),
             });
         }
         let matrix_len = row_count.checked_mul(col_count).ok_or(TableError::Overflow("F associator matrix"))?;
@@ -750,15 +780,20 @@ impl TabulatedFusionRule {
         }
     }
 
-    /// A handle over an arbitrary tabulated-fusion blob (e.g. the small SU(4)
-    /// smoke table). The blob is parsed and self-checked (FNV) once here; the
-    /// returned handle owns its own `Arc<TabulatedSymbolTable>`, independent of
-    /// the SU(3) global.
-    pub fn from_bytes(bytes: &[u8], _name: &'static str) -> Result<Self, TableError> {
+    /// Parses a bounded tabulated-fusion blob and validates its structure,
+    /// admissible symbol completeness, shapes, and closed-witness unitarity.
+    /// Category provenance and gauge identity still require comparison with the
+    /// generator's independent SUNRepresentations oracle.
+    pub fn try_from_bytes(bytes: &[u8], _name: &'static str) -> Result<Self, TableError> {
         Ok(Self {
             table: Arc::new(TabulatedSymbolTable::load_from(bytes)?),
             identity: RuleIdentity::new_unique::<Self>(),
         })
+    }
+
+    #[deprecated(since = "0.1.0", note = "use try_from_bytes and handle TableError")]
+    pub fn from_bytes(bytes: &[u8], _name: &'static str) -> Result<Self, TableError> {
+        Self::try_from_bytes(bytes, _name)
     }
 
     /// `N` of the `SU(N)` group this rule tabulates.

@@ -175,7 +175,9 @@ jobs:
         run: julia --project=tools/sun-table-gen -e 'using Pkg; Pkg.instantiate()'
         working-directory: tenet
       - name: Regenerate the SU(4) smoke table
-        run: julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 4 15 /tmp/su4_table.bin
+        run: |
+          julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 4 15 /tmp/su4_table.bin
+          julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 3 10 /tmp/su3_om_table.bin
         working-directory: tenet
       - uses: dtolnay/rust-toolchain@stable
       - name: Load the generated artifact through TeNeT

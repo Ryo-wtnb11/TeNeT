@@ -6520,14 +6520,14 @@ mod tests {
     #[test]
     fn tabulated_loader_rejects_truncated_and_overflowing_inputs() {
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&SU4_TABLE_BYTES[..8], "truncated"),
+            TabulatedFusionRule::try_from_bytes(&SU4_TABLE_BYTES[..8], "truncated"),
             Err(TableError::Truncated { .. })
         ));
         let mut overflowing = SU4_TABLE_BYTES.to_vec();
         overflowing[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
         rehash_table(&mut overflowing);
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&overflowing, "overflowing"),
+            TabulatedFusionRule::try_from_bytes(&overflowing, "overflowing"),
             Err(TableError::Invalid { section: "irreps", .. })
         ));
     }
@@ -6537,14 +6537,14 @@ mod tests {
         let (r_count, r_range, f_count, f_range) = symbol_record_ranges(SU4_TABLE_BYTES);
         let missing_r = remove_record(SU4_TABLE_BYTES, r_count, r_range.clone());
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&missing_r, "missing-r"),
+            TabulatedFusionRule::try_from_bytes(&missing_r, "missing-r"),
             Err(TableError::MissingR(_))
         ));
 
         let removed = f_range.end - f_range.start;
         let missing_f = remove_record(SU4_TABLE_BYTES, f_count, f_range);
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&missing_f, "missing-f"),
+            TabulatedFusionRule::try_from_bytes(&missing_f, "missing-f"),
             Err(TableError::MissingF(_))
         ));
         assert!(removed > 10);
@@ -6557,7 +6557,7 @@ mod tests {
         bad_id[r_range.start] = u8::MAX;
         rehash_table(&mut bad_id);
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&bad_id, "bad-id"),
+            TabulatedFusionRule::try_from_bytes(&bad_id, "bad-id"),
             Err(TableError::Invalid { section: "R", .. })
         ));
 
@@ -6566,7 +6566,7 @@ mod tests {
         bad_shape.swap(shape_offset, shape_offset + 1);
         rehash_table(&mut bad_shape);
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&bad_shape, "bad-shape"),
+            TabulatedFusionRule::try_from_bytes(&bad_shape, "bad-shape"),
             Err(TableError::Invalid { section: "F", .. })
         ));
     }
@@ -6579,7 +6579,7 @@ mod tests {
         oversized[shape_offset..shape_offset + 4].fill(u8::MAX);
         rehash_table(&mut oversized);
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&oversized, "oversized-shape"),
+            TabulatedFusionRule::try_from_bytes(&oversized, "oversized-shape"),
             Err(TableError::Invalid { section: "F", .. }) | Err(TableError::Truncated { .. })
         ));
     }
@@ -6591,7 +6591,27 @@ mod tests {
         corrupted[first_f.start + 10..first_f.start + 18].copy_from_slice(&0.0f64.to_le_bytes());
         rehash_table(&mut corrupted);
         assert!(matches!(
-            TabulatedFusionRule::from_bytes(&corrupted, "nonunitary-f"),
+            TabulatedFusionRule::try_from_bytes(&corrupted, "nonunitary-f"),
+            Err(TableError::Invalid { section: "F", .. })
+        ));
+    }
+
+    #[test]
+    fn tabulated_f_coherence_rejects_excessive_gram_work_before_allocation() {
+        let mut nsym = FxHashMap::default();
+        nsym.insert((0, 0, 0), 33);
+        let mut fsymbols = FxHashMap::default();
+        fsymbols.insert(
+            [0; 6],
+            GenericFArray {
+                data: Vec::<f64>::new(),
+                shape: (33, 33, 33, 33),
+            },
+        );
+        let mut covered = FxHashMap::default();
+        covered.insert((0, 0), smallvec![SectorId::new(0)]);
+        assert!(matches!(
+            validate_f_unitarity(&nsym, &fsymbols, &covered),
             Err(TableError::Invalid { section: "F", .. })
         ));
     }
@@ -6643,7 +6663,7 @@ mod tests {
 
     #[test]
     fn b3c1_su4_table_is_data_only() {
-        let rule = TabulatedFusionRule::from_bytes(SU4_TABLE_BYTES, "su4_table.bin").unwrap();
+        let rule = TabulatedFusionRule::try_from_bytes(SU4_TABLE_BYTES, "su4_table.bin").unwrap();
         assert_eq!(rule.group_n(), 4);
         // FNV self-check already passed in `from_bytes`; identity is set.
         assert_ne!(rule.provenance(), 0);
@@ -6683,7 +6703,7 @@ mod tests {
     fn generated_su4_artifact_passes_the_production_loader() {
         let path = std::env::var("TENET_GENERATED_SU4").expect("TENET_GENERATED_SU4 must be set");
         let bytes = std::fs::read(path).unwrap();
-        let rule = TabulatedFusionRule::from_bytes(&bytes, "generated-su4").unwrap();
+        let rule = TabulatedFusionRule::try_from_bytes(&bytes, "generated-su4").unwrap();
         assert_eq!(rule.group_n(), 4);
         assert_eq!(rule.provenance(), 0x2afd_b9a5_dcf6_18e6);
     }
