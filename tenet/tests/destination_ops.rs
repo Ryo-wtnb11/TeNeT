@@ -151,3 +151,58 @@ fn su3_contract_overwrite_clears_structural_zero_output() {
         "alpha=0 must clear every SU(3) output block, including blocks without a contributing GEMM"
     );
 }
+
+#[test]
+fn destination_dispatch_matches_owned_for_every_rule() {
+    let runtime = Runtime::builder().build().unwrap();
+    let spaces = vec![
+        Space::u1([(-1, 1), (0, 2), (1, 1)]),
+        Space::z2([(0, 2), (1, 1)]),
+        Space::fz2([(0, 2), (1, 1)]),
+        Space::su2([(0, 2), (1, 1)]),
+        Space::product([((0, 0), 2), ((1, 1), 1)]).unwrap(),
+        Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 1, 1), 1)]).unwrap(),
+        Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap(),
+    ];
+
+    for (index, space) in spaces.iter().enumerate() {
+        let lhs = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::F64,
+            [space],
+            [space],
+            30_200 + index as u64 * 2,
+        )
+        .unwrap();
+        let rhs = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::F64,
+            [space],
+            [space],
+            30_201 + index as u64 * 2,
+        )
+        .unwrap();
+        let contracted = lhs.contract(&rhs, &[1], &[0]).unwrap();
+        let mut contract_destination = contracted.scale(f64::NAN).unwrap();
+        let permuted = lhs.permute(&[1], &[0]).unwrap();
+        let mut permute_destination = permuted.scale(f64::NAN).unwrap();
+        let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+
+        context
+            .contract_overwrite_into(
+                &mut contract_destination,
+                &lhs,
+                &rhs,
+                &[1],
+                &[0],
+                Scalar::F64(1.0),
+            )
+            .unwrap();
+        context
+            .permute_overwrite_into(&mut permute_destination, &lhs, &[1], &[0], Scalar::F64(1.0))
+            .unwrap();
+
+        assert_close(contract_destination.data(), contracted.data(), 1e-12);
+        assert_close(permute_destination.data(), permuted.data(), 1e-12);
+    }
+}
