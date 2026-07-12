@@ -240,15 +240,48 @@ pub struct GenericFArray<Scalar> {
     shape: (usize, usize, usize, usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolShapeError {
+    pub actual_len: usize,
+    pub expected_len: Option<usize>,
+}
+
+impl fmt::Display for SymbolShapeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.expected_len {
+            Some(expected) => write!(
+                f,
+                "symbol data length {} does not match shape product {expected}",
+                self.actual_len
+            ),
+            None => write!(f, "symbol shape product overflows usize"),
+        }
+    }
+}
+
+impl std::error::Error for SymbolShapeError {}
+
 impl<Scalar> GenericFArray<Scalar> {
     pub fn new(data: Vec<Scalar>, shape: (usize, usize, usize, usize)) -> Self {
+        Self::try_new(data, shape).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_new(
+        data: Vec<Scalar>,
+        shape: (usize, usize, usize, usize),
+    ) -> Result<Self, SymbolShapeError> {
         let (n_mu, n_nu, n_kappa, n_lambda) = shape;
-        debug_assert_eq!(
-            data.len(),
-            n_mu * n_nu * n_kappa * n_lambda,
-            "GenericFArray data length must match shape product"
-        );
-        Self { data, shape }
+        let expected_len = n_mu
+            .checked_mul(n_nu)
+            .and_then(|n| n.checked_mul(n_kappa))
+            .and_then(|n| n.checked_mul(n_lambda));
+        if expected_len != Some(data.len()) {
+            return Err(SymbolShapeError {
+                actual_len: data.len(),
+                expected_len,
+            });
+        }
+        Ok(Self { data, shape })
     }
 
     #[inline]
@@ -280,12 +313,22 @@ pub struct GenericRMatrix<Scalar> {
 
 impl<Scalar> GenericRMatrix<Scalar> {
     pub fn new(data: Vec<Scalar>, rows: usize, cols: usize) -> Self {
-        debug_assert_eq!(
-            data.len(),
-            rows * cols,
-            "GenericRMatrix data length must match rows * cols"
-        );
-        Self { data, rows, cols }
+        Self::try_new(data, rows, cols).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_new(
+        data: Vec<Scalar>,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Self, SymbolShapeError> {
+        let expected_len = rows.checked_mul(cols);
+        if expected_len != Some(data.len()) {
+            return Err(SymbolShapeError {
+                actual_len: data.len(),
+                expected_len,
+            });
+        }
+        Ok(Self { data, rows, cols })
     }
 
     #[inline]

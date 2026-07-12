@@ -3676,7 +3676,7 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
 //
 // The identical Generic pipeline — the `R: FusionRule` / `GenericRigidSymbols`
 // tree-transform and contract siblings — driven from a *different* group's
-// checked-in blob (a small SU(4), dim ≤ 15) via `TabulatedFusionRule::from_bytes`,
+// checked-in blob (a small SU(4), dim ≤ 15) via `TabulatedFusionRule::try_from_bytes`,
 // with ZERO Rust changes. Proves permute (real SU(4) F-symbol recoupling) and
 // contract (core/compose GEMM) are group-agnostic: a new group is data only.
 #[cfg(test)]
@@ -3691,7 +3691,7 @@ mod b3c1_su4_smoke {
     static SU4_BYTES: &[u8] = include_bytes!("../../../tenet-core/src/testdata/su4_table.bin");
 
     fn su4() -> TabulatedFusionRule {
-        TabulatedFusionRule::from_bytes(SU4_BYTES, "su4_table.bin")
+        TabulatedFusionRule::try_from_bytes(SU4_BYTES, "su4_table.bin").unwrap()
     }
 
     // Construction + permute: a `[4,4̄] <- vac` singlet tensor; swapping the two

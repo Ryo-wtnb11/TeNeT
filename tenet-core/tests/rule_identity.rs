@@ -78,8 +78,8 @@ fn cloned_stateful_rule_preserves_identity() {
 #[test]
 fn independently_loaded_identical_tables_do_not_use_fnv_provenance_as_identity() {
     const TABLE: &[u8] = include_bytes!("../src/su3_table.bin");
-    let first = TabulatedFusionRule::from_bytes(TABLE, "first-su3-table.bin");
-    let second = TabulatedFusionRule::from_bytes(TABLE, "second-su3-table.bin");
+    let first = TabulatedFusionRule::try_from_bytes(TABLE, "first-su3-table.bin").unwrap();
+    let second = TabulatedFusionRule::try_from_bytes(TABLE, "second-su3-table.bin").unwrap();
 
     assert_eq!(first.provenance(), second.provenance());
     assert_ne!(first.rule_identity(), second.rule_identity());
