@@ -815,7 +815,10 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
 #[cfg(test)]
 mod scratch_cache_tests {
     use super::*;
+    use std::sync::Mutex;
     use tenet_core::{FusionProductSpace, SectorLeg, U1FusionRule, U1Irrep};
+
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     // Single-charge U(1) source in a chosen bond dimension (the last leg of each
     // block shape); one coupled sector, block shape [deg, deg].
@@ -831,6 +834,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn equal_layout_and_shapes_share_one_structure() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         let a = u1_space(1, 3);
         let b = u1_space(1, 3);
         assert!(Arc::ptr_eq(a.structure(), b.structure()));
@@ -838,6 +842,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn different_bond_dimension_is_not_shared() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         // The shapes carry chi, so a differently-truncated build keys separately.
         let a = u1_space(1, 3);
         let b = u1_space(1, 4);
@@ -846,6 +851,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn different_homspace_is_not_shared() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         let a = u1_space(1, 3);
         let b = u1_space(2, 3);
         assert!(!Arc::ptr_eq(a.structure(), b.structure()));
@@ -857,6 +863,7 @@ mod scratch_cache_tests {
     // distinct discriminant from any mult-free rule all the same.
     #[test]
     fn distinct_rule_provenance_gives_distinct_layout_ids() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         use tenet_core::{SU2FusionRule, Su3FusionRule};
         let homspace = u1_space(1, 3).homspace().id();
         let make = |rule| LayoutId {
@@ -873,6 +880,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn same_rule_type_with_distinct_provenance_gives_distinct_layout_ids() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         let homspace = u1_space(1, 3).homspace().id();
         let first = LayoutId {
             rule: RuleIdentity::new_unique::<U1FusionRule>(),
@@ -887,6 +895,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn scratch_structure_reuses_after_homspace_intern_eviction() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         crate::reset_global_operation_caches();
         let before = u1_space(73, 3);
         for charge in 10_000..19_000 {
@@ -901,6 +910,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn large_shapes_reuse_without_allocating_tensor_storage() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         let rule = U1FusionRule;
         let sid = U1Irrep::new(91).sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(sid, 4096)], false)]);
@@ -916,6 +926,7 @@ mod scratch_cache_tests {
 
     #[test]
     fn reset_and_concurrent_rebuild_keep_structure_semantics() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
         crate::reset_global_operation_caches();
         let spaces = std::thread::scope(|scope| {
             let resetter = scope.spawn(|| {

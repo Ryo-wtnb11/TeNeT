@@ -1778,6 +1778,12 @@ impl Tensor {
         self.space.rank()
     }
 
+    /// Number of tensors currently sharing this tensor's storage allocation.
+    #[doc(hidden)]
+    pub fn storage_strong_count(&self) -> usize {
+        Arc::strong_count(&self.data)
+    }
+
     /// Flat `f64` storage in the TensorKit-equivalent coupled-sector matrix
     /// layout (column-major inside each coupled block).
     ///
@@ -1873,6 +1879,27 @@ impl Tensor {
                         .sum()
                 })
                 .collect())
+        })
+    }
+
+    /// Quantum-dimension-weighted size of one flat leg.
+    pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
+        let hom = self.space.homspace();
+        let leg = if axis < hom.codomain().len() {
+            &hom.codomain().legs()[axis]
+        } else if axis < hom.rank() {
+            &hom.domain().legs()[axis - hom.codomain().len()]
+        } else {
+            return Err(Error::InvalidArgument(format!(
+                "axis {axis} out of range for rank {}",
+                hom.rank()
+            )));
+        };
+        with_rule!(self.rule, rule, {
+            Ok(leg
+                .iter()
+                .map(|(sector, deg)| (deg as f64 * rule.dim_scalar(sector)).round() as usize)
+                .sum())
         })
     }
 

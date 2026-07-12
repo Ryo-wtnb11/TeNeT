@@ -310,4 +310,16 @@ pub struct PlanCacheStats {
     pub replans: u64,
     /// Current number of cached plans.
     pub entries: usize,
+    /// Execution workspaces allocated because no cached lease was available.
+    pub workspaces_created: u64,
+    /// Execution workspace leases served from the per-plan pool.
+    pub workspace_reuses: u64,
+    /// Slot-table capacity growth events across cached workspaces.
+    pub workspace_slot_grows: u64,
+    /// Owned topology materializations performed by the static macro path.
+    pub topology_materializations: u64,
+    /// Idle execution workspaces retained by current cached plans.
+    pub idle_workspaces: usize,
+    /// Process-local aliases retained for reusable `Network` instances.
+    pub dynamic_aliases: usize,
 }
