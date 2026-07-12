@@ -1017,7 +1017,7 @@ mod tests {
         let tensor =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 12421).unwrap();
         let retained_before = tensor.storage_strong_count();
-        let result = std::panic::catch_unwind({
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
             let pool = Arc::clone(&pool);
             let tensor = tensor.clone();
             move || {
@@ -1025,7 +1025,7 @@ mod tests {
                 lease.workspace().retain_tensor(tensor);
                 panic!("mid-execution panic fixture");
             }
-        });
+        }));
         assert!(result.is_err());
         assert_eq!(tensor.storage_strong_count(), retained_before);
         let available = pool.available.lock().unwrap();
