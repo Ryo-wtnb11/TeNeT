@@ -6,17 +6,15 @@
 //! domain swap as spaces; leg duality flags are unchanged.
 
 use std::any::{Any, TypeId};
-use std::collections::VecDeque;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
-use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
+    HomSpaceId, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
-use crate::cache::{enforce_lru_limit, operation_global_registry, touch_lru_key};
+use crate::cache::operation_global_registry;
 use crate::contract::DynamicFusionMapSpace;
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
@@ -37,12 +35,13 @@ use crate::{ConjugateValue, OperationError};
 /// coupled-sector *matrix* layout, coarser than the hom space, so distinct
 /// sources can share a `content_id` yet need different daggers — an id-only key
 /// aliases them (measured: the finite-torus singlet then fails with a dimension
-/// mismatch). The hom space plus `content_id`/`nout`/`nin` is sound; a cheap
-/// interned `HomSpaceId` replaces the by-value hom space clone in PR-2.
+/// mismatch). The hom space plus `content_id`/`nout`/`nin` is sound; the source
+/// hom space enters as its interned [`HomSpaceId`] (PR-2), so the key hashes a
+/// small id instead of walking the space's legs by value every warm eval.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct AdjointSpaceKey<RuleKey> {
     rule_key: RuleKey,
-    source_homspace: Arc<FusionTreeHomSpace>,
+    source_homspace_id: HomSpaceId,
     source_content_id: usize,
     nout: usize,
     nin: usize,
@@ -51,15 +50,15 @@ struct AdjointSpaceKey<RuleKey> {
 /// Bounded LRU store of built adjoint spaces (strong `Arc`, since
 /// `adjoint_space_dyn` returns by value and would leave a `Weak` with no owner).
 struct AdjointSpaceCache<RuleKey> {
-    entries: FxHashMap<AdjointSpaceKey<RuleKey>, Arc<DynamicFusionMapSpace>>,
-    order: VecDeque<AdjointSpaceKey<RuleKey>>,
+    entries: lru::LruCache<AdjointSpaceKey<RuleKey>, Arc<DynamicFusionMapSpace>>,
 }
 
-impl<RuleKey> Default for AdjointSpaceCache<RuleKey> {
+impl<RuleKey: Eq + Hash> Default for AdjointSpaceCache<RuleKey> {
     fn default() -> Self {
         Self {
-            entries: FxHashMap::default(),
-            order: VecDeque::new(),
+            entries: lru::LruCache::new(
+                std::num::NonZeroUsize::new(ADJOINT_SPACE_CACHE_CAP).unwrap(),
+            ),
         }
     }
 }
@@ -78,7 +77,7 @@ const ADJOINT_SPACE_CACHE_CAP: usize = 8192;
 /// to stay consistent.)
 fn adjoint_space_cache<RuleKey>() -> Arc<RwLock<AdjointSpaceCache<RuleKey>>>
 where
-    RuleKey: 'static + Send + Sync,
+    RuleKey: 'static + Eq + Hash + Send + Sync,
 {
     let registry = operation_global_registry();
     let type_id = TypeId::of::<AdjointSpaceCache<RuleKey>>();
@@ -122,7 +121,7 @@ where
     space.validate_rule(rule)?;
     let key = AdjointSpaceKey {
         rule_key: rule.tree_transform_rule_cache_key(),
-        source_homspace: Arc::clone(space.homspace_arc()),
+        source_homspace_id: space.homspace().id(),
         source_content_id: space.structure().content_id(),
         nout: space.nout(),
         nin: space.nin(),
@@ -130,17 +129,13 @@ where
     let cache = adjoint_space_cache::<R::Key>();
     if let Ok(mut guard) = cache.write() {
         if let Some(hit) = guard.entries.get(&key).cloned() {
-            touch_lru_key(&mut guard.order, &key);
             // Clone the inner hom-space/subblock Arcs for the by-value return.
             return Ok((*hit).clone());
         }
     }
     let built = Arc::new(build_adjoint_space_dyn(rule, space)?);
     if let Ok(mut guard) = cache.write() {
-        guard.entries.insert(key.clone(), Arc::clone(&built));
-        touch_lru_key(&mut guard.order, &key);
-        let AdjointSpaceCache { entries, order } = &mut *guard;
-        enforce_lru_limit(entries, order, ADJOINT_SPACE_CACHE_CAP);
+        guard.entries.put(key, Arc::clone(&built));
     }
     Ok((*built).clone())
 }
@@ -584,7 +579,7 @@ mod cache_tests {
         let src = u1_source(1, 2);
         let make = |rule_key| AdjointSpaceKey {
             rule_key,
-            source_homspace: Arc::clone(src.homspace_arc()),
+            source_homspace_id: src.homspace().id(),
             source_content_id: src.structure().content_id(),
             nout: src.nout(),
             nin: src.nin(),
