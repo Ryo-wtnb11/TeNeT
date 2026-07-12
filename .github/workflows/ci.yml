@@ -99,6 +99,9 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Accelerate build toolchain
+        if: matrix.name == 'accelerate'
+        run: brew install gcc
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
