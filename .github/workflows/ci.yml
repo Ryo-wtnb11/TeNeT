@@ -157,14 +157,14 @@ jobs:
 
   sun-table-generator:
     name: SU(N) table generator
-    runs-on: ubuntu-latest
+    runs-on: macos-14-arm64
     steps:
       - uses: actions/checkout@v4
         with:
           path: tenet
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.11'
+          version: '1.11.6'
       - uses: julia-actions/cache@v2
       - name: Instantiate generator environment
         run: julia --project=tools/sun-table-gen -e 'using Pkg; Pkg.instantiate()'
