@@ -6586,6 +6586,21 @@ mod tests {
     }
 
     #[test]
+    fn tabulated_symbol_lookup_rejects_sector_ids_that_do_not_fit_the_table() {
+        let rule = su3();
+        let valid = rule.vacuum();
+        for invalid in [SectorId::new(256), SectorId::new(usize::MAX)] {
+            assert!(std::panic::catch_unwind(|| rule.r_symbol_generic(invalid, valid, valid)).is_err());
+            assert!(
+                std::panic::catch_unwind(|| {
+                    rule.f_symbol_generic(invalid, valid, valid, valid, valid, valid)
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn generic_symbol_shapes_are_checked_in_release_builds() {
         assert_eq!(
             GenericFArray::try_new(vec![0.0; 3], (1, 1, 2, 2)).unwrap_err().expected_len,

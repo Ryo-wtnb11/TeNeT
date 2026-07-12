@@ -935,6 +935,11 @@ impl TabulatedFusionRule {
             None => "<out-of-table>".to_string(),
         }
     }
+
+    fn table_key(&self, sector: SectorId) -> u8 {
+        self.table.irrep(sector);
+        u8::try_from(sector.id()).expect("validated table sector must fit in u8")
+    }
 }
 
 impl GenericFusionSymbols for TabulatedFusionRule {
@@ -950,20 +955,16 @@ impl GenericFusionSymbols for TabulatedFusionRule {
         f: SectorId,
     ) -> GenericFArray<Self::Scalar> {
         let key = [
-            a.id() as u8,
-            b.id() as u8,
-            c.id() as u8,
-            d.id() as u8,
-            e.id() as u8,
-            f.id() as u8,
+            self.table_key(a),
+            self.table_key(b),
+            self.table_key(c),
+            self.table_key(d),
+            self.table_key(e),
+            self.table_key(f),
         ];
         match self.table.fsymbols.get(&key) {
             Some(block) => block.clone(),
             None => {
-                // Not in the table: either an N-forbidden 6-tuple (all-zero block
-                // per TensorKit) or an out-of-table label. Both are represented by
-                // the shape-from-`nsymbol` zero block, EXCEPT an out-of-table label
-                // makes `nsymbol` itself panic — which is the intended hard error.
                 let n1 = self.nsymbol(a, b, e);
                 let n2 = self.nsymbol(e, c, d);
                 let n3 = self.nsymbol(b, c, f);
@@ -979,7 +980,7 @@ impl GenericFusionSymbols for TabulatedFusionRule {
         b: SectorId,
         c: SectorId,
     ) -> GenericRMatrix<Self::Scalar> {
-        let key = [a.id() as u8, b.id() as u8, c.id() as u8];
+        let key = [self.table_key(a), self.table_key(b), self.table_key(c)];
         match self.table.rsymbols.get(&key) {
             Some(block) => block.clone(),
             None => {
