@@ -399,8 +399,12 @@ impl UserScalar for Complex64 {
 }
 
 /// Caller-owned host execution state for dynamic destination operations.
+/// [`Self::default`] is independent of a [`Runtime`]; use
+/// [`Self::for_runtime`] when execution must inherit and remain bound to a
+/// runtime's backend configuration.
 #[derive(Default)]
 pub struct TensorExecutionContext {
+    runtime: Option<Runtime>,
     u1: Ctxs<BuiltinKey>,
     z2: Ctxs<BuiltinKey>,
     fz2: Ctxs<BuiltinKey>,
@@ -416,6 +420,7 @@ impl TensorExecutionContext {
     pub fn for_runtime(runtime: &Runtime) -> Result<Self, Error> {
         let config = runtime.execution_config();
         let mut context = Self {
+            runtime: Some(runtime.clone()),
             u1: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
             z2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
             fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
@@ -431,6 +436,22 @@ impl TensorExecutionContext {
             context.set_transpose_backend(backend);
         }
         Ok(context)
+    }
+
+    fn accepts_runtime(&self, tensor: &Tensor) -> bool {
+        self.runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.shares_state_with(tensor.runtime()))
+    }
+
+    fn validate_runtime(&self, tensor: &Tensor) -> Result<(), Error> {
+        if self.accepts_runtime(tensor) {
+            Ok(())
+        } else {
+            Err(Error::InvalidArgument(
+                "execution context is bound to a different runtime".to_string(),
+            ))
+        }
     }
 
     fn set_recoupling_threads(&mut self, threads: usize) {
@@ -3878,7 +3899,10 @@ impl TensorExecutionContext {
         lhs_axes: &[usize],
         rhs_axes: &[usize],
     ) -> Result<bool, Error> {
-        if lhs.check_same_world(rhs).is_err()
+        if !self.accepts_runtime(lhs)
+            || !self.accepts_runtime(rhs)
+            || !self.accepts_runtime(dst)
+            || lhs.check_same_world(rhs).is_err()
             || dst.check_same_world(lhs).is_err()
             || dst.check_same_world(rhs).is_err()
             || dst.placement() != Placement::Host
@@ -3920,7 +3944,9 @@ impl TensorExecutionContext {
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<bool, Error> {
-        if dst.check_same_world(src).is_err()
+        if !self.accepts_runtime(src)
+            || !self.accepts_runtime(dst)
+            || dst.check_same_world(src).is_err()
             || dst.placement() != Placement::Host
             || src.adjoint_source.is_some()
             || dst.adjoint_source.is_some()
@@ -3957,6 +3983,9 @@ impl TensorExecutionContext {
         rhs_axes: &[usize],
         alpha: Scalar,
     ) -> Result<(), Error> {
+        self.validate_runtime(lhs)?;
+        self.validate_runtime(rhs)?;
+        self.validate_runtime(dst)?;
         lhs.check_same_world(rhs)?;
         dst.validate_host_destination(lhs)?;
         dst.validate_host_destination(rhs)?;
@@ -4005,29 +4034,42 @@ impl TensorExecutionContext {
                 Data::F64(lhs_data),
                 Data::F64(rhs_data),
                 Scalar::F64(alpha),
-            ) => dispatch_contract_into(
-                self, dst.rule, &expected, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes,
-                rhs_axes, alpha, 0.0,
-            ),
+            ) => {
+                // SU(3)'s generic plan omits destination blocks with no GEMM;
+                // zeroing only that route prevents stale arena data without
+                // taxing the fully overwriting built-in-rule fast paths.
+                if dst.rule == RuleKind::Su3 {
+                    dst_data.fill(0.0);
+                }
+                dispatch_contract_into(
+                    self, dst.rule, &expected, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes,
+                    rhs_axes, alpha, 0.0,
+                )
+            }
             (
                 Some(Data::C64(dst_data)),
                 Data::C64(lhs_data),
                 Data::C64(rhs_data),
                 Scalar::C64(alpha),
-            ) => dispatch_contract_into(
-                self,
-                dst.rule,
-                &expected,
-                dst_data,
-                lhs,
-                lhs_data,
-                rhs,
-                rhs_data,
-                lhs_axes,
-                rhs_axes,
-                alpha,
-                Complex64::new(0.0, 0.0),
-            ),
+            ) => {
+                if dst.rule == RuleKind::Su3 {
+                    dst_data.fill(Complex64::new(0.0, 0.0));
+                }
+                dispatch_contract_into(
+                    self,
+                    dst.rule,
+                    &expected,
+                    dst_data,
+                    lhs,
+                    lhs_data,
+                    rhs,
+                    rhs_data,
+                    lhs_axes,
+                    rhs_axes,
+                    alpha,
+                    Complex64::new(0.0, 0.0),
+                )
+            }
             (None, _, _, _) => Err(Error::InvalidArgument(
                 "destination storage must be uniquely owned".to_string(),
             )),
@@ -4047,6 +4089,8 @@ impl TensorExecutionContext {
         domain_axes: &[usize],
         alpha: Scalar,
     ) -> Result<(), Error> {
+        self.validate_runtime(src)?;
+        self.validate_runtime(dst)?;
         dst.validate_host_destination(src)?;
         if src.adjoint_source.is_some() || matches!(src.data.as_ref(), Data::Diagonal(_)) {
             return Err(Error::InvalidArgument(
@@ -4067,11 +4111,15 @@ impl TensorExecutionContext {
 
         match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
             (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
+                // Tree-transform plans may omit structural-zero destinations,
+                // so beta=0 alone cannot clear data retained by the arena.
+                dst_data.fill(0.0);
                 dispatch_permute_into(
                     self, dst.rule, operation, &expected, dst_data, src, src_data, alpha, 0.0,
                 )
             }
             (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
+                dst_data.fill(Complex64::new(0.0, 0.0));
                 dispatch_permute_into(
                     self,
                     dst.rule,

@@ -119,6 +119,10 @@ impl WorkspaceLease {
 
 impl Drop for WorkspaceLease {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.workspace.take();
+            return;
+        }
         if let Some(mut workspace) = self.workspace.take() {
             workspace.clear();
             let mut available = self
@@ -1007,10 +1011,10 @@ mod tests {
         drop((first, second, third));
     }
 
-    /// Unwinding through a lease returns an empty workspace instead of
-    /// retaining partially populated slots.
+    /// Unwinding quarantines the whole workspace because backend context and
+    /// arena contents may have been partially mutated before the panic.
     #[test]
-    fn panic_returns_cleared_workspace() {
+    fn injected_backend_panic_quarantines_workspace() {
         let pool = Arc::new(WorkspacePool::default());
         let runtime = Runtime::builder().build().unwrap();
         let space = Space::u1([(0, 2)]);
@@ -1023,14 +1027,19 @@ mod tests {
             move || {
                 let mut lease = pool.lease();
                 lease.workspace().retain_tensor(tensor);
-                panic!("mid-execution panic fixture");
+                let injected_backend = || panic!("injected backend panic fixture");
+                injected_backend();
             }
         }));
         assert!(result.is_err());
         assert_eq!(tensor.storage_strong_count(), retained_before);
-        let available = pool.available.lock().unwrap();
-        assert_eq!(available.len(), 1);
-        assert_eq!(available[0].slot_len(), 0);
+        assert!(pool.available.lock().unwrap().is_empty());
+        let mut replacement = pool.lease();
+        assert_eq!(pool.created.load(Ordering::Relaxed), 2);
+        assert_eq!(replacement.workspace().slot_len(), 0);
+        replacement.workspace().retain_tensor(tensor.clone());
+        drop(replacement);
+        assert_eq!(pool.available.lock().unwrap().len(), 1);
     }
 
     /// An in-flight strong reference cannot make a weak alias valid after its
