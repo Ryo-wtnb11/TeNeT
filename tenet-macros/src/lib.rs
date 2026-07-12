@@ -214,29 +214,34 @@ pub fn tensor(input: TokenStream) -> TokenStream {
             .into();
     }
 
-    let operands = parsed.operands.iter().map(|op| {
+    let tensors = parsed.operands.iter().map(|op| {
         let tensor = &op.tensor;
-        let conj = op.conj;
-        let labels = &op.group.labels;
-        let split = option_tokens(op.group.split);
-        quote! {
-            ::tenet_network::NetOperand {
-                tensor: &#tensor,
-                conj: #conj,
-                labels: &[#(#labels),*],
-                codomain_split: #split,
-            }
-        }
+        quote! { &#tensor }
     });
+    let labels = parsed.operands.iter().map(|op| &op.group.labels);
+    let conj = parsed.operands.iter().map(|op| op.conj);
+    let splits = parsed
+        .operands
+        .iter()
+        .map(|op| option_tokens(op.group.split));
     let output = &parsed.output.labels;
     let out_split = option_tokens(parsed.output.split);
 
     quote! {
-        ::tenet_network::contract_network(
-            &[#(#operands),*],
-            &[#(#output),*],
-            #out_split,
-        )
+        {
+            const __TENET_TOPOLOGY: ::tenet_network::StaticTopologySpec =
+                ::tenet_network::StaticTopologySpec {
+                    inputs: &[#(&[#(#labels),*]),*],
+                    conj: &[#(#conj),*],
+                    codomain_splits: &[#(#splits),*],
+                    output: &[#(#output),*],
+                    output_codomain_rank: #out_split,
+                };
+            ::tenet_network::contract_static_network(
+                &[#(#tensors),*],
+                &__TENET_TOPOLOGY,
+            )
+        }
     }
     .into()
 }

@@ -44,6 +44,84 @@ fn second_identical_call_hits() {
     assert_eq!((stats.hits, stats.misses, stats.entries), (0, 0, 0));
 }
 
+/// The standard macro path materializes topology and grows a slot table once,
+/// then serves warm executions from the cached workspace without repeating
+/// either structural allocation.
+#[test]
+fn warm_macro_path_reuses_topology_and_workspace_allocations() {
+    let rt = Runtime::builder().build().unwrap();
+    let (a, b) = chain(&rt, 2, 305);
+
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let cold = plan_cache_stats(&rt);
+    assert_eq!(cold.topology_materializations, 1);
+    assert_eq!(cold.workspaces_created, 1);
+    assert_eq!(cold.workspace_slot_grows, 1);
+    assert_eq!(cold.workspace_reuses, 0);
+
+    for _ in 0..8 {
+        let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    }
+    let warm = plan_cache_stats(&rt);
+    assert_eq!(warm.topology_materializations, 1);
+    assert_eq!(warm.workspaces_created, 1);
+    assert_eq!(warm.workspace_slot_grows, 1);
+    assert_eq!(warm.workspace_reuses, 8);
+}
+
+/// Reusing one `Network` instance also bypasses owned topology and dimension
+/// snapshots before the full cache lookup.
+#[test]
+fn warm_network_contract_with_uses_identity_alias() {
+    use tenet_network::{NetOperand, Network};
+
+    let rt = Runtime::builder().build().unwrap();
+    let (a, b) = chain(&rt, 2, 306);
+    let operands = [
+        NetOperand {
+            tensor: &a,
+            conj: false,
+            labels: &["i", "j", "k", "l"],
+            codomain_split: Some(2),
+        },
+        NetOperand {
+            tensor: &b,
+            conj: false,
+            labels: &["k", "l", "m", "n"],
+            codomain_split: Some(2),
+        },
+    ];
+    let network = Network::from_names(&operands, &["i", "j", "m", "n"], Some(2)).unwrap();
+    let tensors = [&a, &b];
+
+    let _ = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
+    let _ = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
+    let stats = plan_cache_stats(&rt);
+    assert_eq!(stats.topology_materializations, 1);
+    assert_eq!(stats.workspaces_created, 1);
+    assert_eq!(stats.workspace_slot_grows, 1);
+    assert_eq!(stats.workspace_reuses, 1);
+}
+
+/// A failed cached execution returns its leased workspace before the next
+/// call, so error paths do not force another slot-table allocation.
+#[test]
+fn failed_execution_returns_workspace_to_cache() {
+    let rt = Runtime::builder().build().unwrap();
+    let other_rt = Runtime::builder().build().unwrap();
+    let (a, b) = chain(&rt, 2, 307);
+    let (_, foreign) = chain(&other_rt, 2, 309);
+
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    let _error = tensor!([i, j; m, n] = a[i, j; k, l] * foreign[k, l; m, n]).unwrap_err();
+    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+
+    let stats = plan_cache_stats(&rt);
+    assert_eq!(stats.workspaces_created, 1);
+    assert_eq!(stats.workspace_slot_grows, 1);
+    assert_eq!(stats.workspace_reuses, 2);
+}
+
 /// Same topology, mildly drifted dims (well under the drift factor): the
 /// cached order is reused — this is the truncation-sweep case the
 /// topology key exists for — and the result is still correct.

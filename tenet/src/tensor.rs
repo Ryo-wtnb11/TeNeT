@@ -1876,6 +1876,27 @@ impl Tensor {
         })
     }
 
+    /// Quantum-dimension-weighted size of one flat leg.
+    pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
+        let hom = self.space.homspace();
+        let leg = if axis < hom.codomain().len() {
+            &hom.codomain().legs()[axis]
+        } else if axis < hom.rank() {
+            &hom.domain().legs()[axis - hom.codomain().len()]
+        } else {
+            return Err(Error::InvalidArgument(format!(
+                "axis {axis} out of range for rank {}",
+                hom.rank()
+            )));
+        };
+        with_rule!(self.rule, rule, {
+            Ok(leg
+                .iter()
+                .map(|(sector, deg)| (deg as f64 * rule.dim_scalar(sector)).round() as usize)
+                .sum())
+        })
+    }
+
     /// The user-facing [`Space`] of flat leg `axis`, following TensorKit's
     /// `space(t, i)` convention: `codomain[i]` for `i < codomain_rank()`,
     /// `dual(domain[i - codomain_rank()])` otherwise.

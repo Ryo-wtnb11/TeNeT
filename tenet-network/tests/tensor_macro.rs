@@ -243,6 +243,49 @@ fn planned_network_reuses_execution_workspace() {
     assert_close(second.data(), expected.data(), 1e-12);
 }
 
+/// One immutable plan supports concurrent replay when each worker owns its
+/// execution workspace.
+#[test]
+fn planned_network_replays_concurrently_with_distinct_workspaces() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 167).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 168).unwrap();
+    let network = Network::new(
+        vec![
+            vec![TemporaryLabel::from("i"), TemporaryLabel::from("j")],
+            vec![TemporaryLabel::from("j"), TemporaryLabel::from("k")],
+        ],
+        vec![false; 2],
+        vec![None; 2],
+        vec![TemporaryLabel::from("i"), TemporaryLabel::from("k")],
+        Some(1),
+    )
+    .unwrap();
+    let tensors = [&a, &b];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let barrier = std::sync::Barrier::new(4);
+
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut workspace = NetworkExecutionWorkspace::default();
+                    barrier.wait();
+                    planned
+                        .execute_with_workspace(&tensors, &mut workspace)
+                        .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            let result = worker.join().unwrap();
+            assert_close(result.data(), expected.data(), 1e-12);
+        }
+    });
+}
+
 /// A written `;` split that contradicts the tensor's codomain rank is a
 /// runtime error (labels are checked at compile time, spaces at run time).
 #[test]

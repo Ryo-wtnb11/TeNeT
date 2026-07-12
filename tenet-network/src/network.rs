@@ -8,6 +8,7 @@
 //! mirroring the legacy `tenet-contract` executor over the old core.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tenet::prelude::{Error, Tensor};
 
@@ -30,6 +31,40 @@ pub struct NetOperand<'a> {
     pub codomain_split: Option<usize>,
 }
 
+/// Compile-time topology emitted by [`tensor!`].
+#[doc(hidden)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct StaticTopologySpec {
+    pub inputs: &'static [&'static [&'static str]],
+    pub conj: &'static [bool],
+    pub codomain_splits: &'static [Option<usize>],
+    pub output: &'static [&'static str],
+    pub output_codomain_rank: Option<usize>,
+}
+
+impl StaticTopologySpec {
+    pub(crate) fn network(&self) -> Result<Network, Error> {
+        Network::new(
+            self.inputs
+                .iter()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .map(|label| TemporaryLabel::from(*label))
+                        .collect()
+                })
+                .collect(),
+            self.conj.to_vec(),
+            self.codomain_splits.to_vec(),
+            self.output
+                .iter()
+                .map(|label| TemporaryLabel::from(*label))
+                .collect(),
+            self.output_codomain_rank,
+        )
+    }
+}
+
 /// A labeled tensor network: per-operand label lists (+ conj markers) and
 /// the requested output labels with their codomain/domain split.
 ///
@@ -40,6 +75,7 @@ pub struct NetOperand<'a> {
 ///
 /// [`tensor!`]: https://docs.rs/tenet-macros
 pub struct Network {
+    cache_id: u64,
     pub(crate) inputs: Vec<Vec<TemporaryLabel>>,
     pub(crate) conj: Vec<bool>,
     pub(crate) codomain_splits: Vec<Option<usize>>,
@@ -48,6 +84,8 @@ pub struct Network {
     /// `None` = all-codomain output.
     pub(crate) output_codomain_rank: Option<usize>,
 }
+
+static NEXT_NETWORK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())
@@ -85,12 +123,17 @@ impl Network {
         // cyclic per-operand relabeling that does not change the structure.
         NetworkIR::from_labels(inputs.clone(), output.clone()).map_err(invalid)?;
         Ok(Self {
+            cache_id: NEXT_NETWORK_CACHE_ID.fetch_add(1, Ordering::Relaxed),
             inputs,
             conj,
             codomain_splits,
             output,
             output_codomain_rank,
         })
+    }
+
+    pub(crate) fn cache_id(&self) -> u64 {
+        self.cache_id
     }
 
     /// Convenience constructor from `&str` labels (what the `tensor!`
@@ -353,6 +396,12 @@ struct CompiledStep {
 #[derive(Default)]
 pub struct NetworkExecutionWorkspace {
     slots: Vec<Option<Tensor>>,
+}
+
+impl NetworkExecutionWorkspace {
+    pub(crate) fn slot_capacity(&self) -> usize {
+        self.slots.capacity()
+    }
 }
 
 impl PlannedNetwork {
@@ -751,6 +800,56 @@ pub fn contract_network(
         .map(|(op, traced)| traced.as_ref().unwrap_or(op.tensor))
         .collect();
     network.contract(&tensors)
+}
+
+/// Allocation-free topology lookup used by [`tensor!`] for networks without
+/// intra-operand traces.
+#[doc(hidden)]
+pub fn contract_static_network(
+    tensors: &[&Tensor],
+    spec: &'static StaticTopologySpec,
+) -> Result<Tensor, Error> {
+    if tensors.len() != spec.inputs.len() {
+        return Err(invalid(format!(
+            "network has {} operands but {} tensors were given",
+            spec.inputs.len(),
+            tensors.len()
+        )));
+    }
+    if spec.conj.len() != spec.inputs.len() || spec.codomain_splits.len() != spec.inputs.len() {
+        return Err(invalid(
+            "static topology marker lists must match operand count",
+        ));
+    }
+    if spec
+        .inputs
+        .iter()
+        .any(|labels| has_intra_operand_pair_names(labels))
+    {
+        let operands: Vec<NetOperand<'_>> = tensors
+            .iter()
+            .enumerate()
+            .map(|(index, &tensor)| NetOperand {
+                tensor,
+                conj: spec.conj[index],
+                labels: spec.inputs[index],
+                codomain_split: spec.codomain_splits[index],
+            })
+            .collect();
+        return contract_network(&operands, spec.output, spec.output_codomain_rank);
+    }
+    let optimizer = tensors
+        .first()
+        .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
+        .unwrap_or_default();
+    crate::plancache::execute_static(spec, tensors, &optimizer)
+}
+
+fn has_intra_operand_pair_names(labels: &[&str]) -> bool {
+    labels
+        .iter()
+        .enumerate()
+        .any(|(i, label)| labels[..i].contains(label))
 }
 
 fn has_intra_operand_pair(labels: &[TemporaryLabel]) -> bool {

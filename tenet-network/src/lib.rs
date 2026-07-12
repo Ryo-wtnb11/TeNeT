@@ -61,7 +61,8 @@ pub use error::{ContractError, Result};
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
-    contract_network, NetOperand, Network, NetworkExecutionWorkspace, PlannedNetwork,
+    contract_network, contract_static_network, NetOperand, Network, NetworkExecutionWorkspace,
+    PlannedNetwork, StaticTopologySpec,
 };
 pub use optimizer::{
     block_sparse_order_from_labels, greedy_order, greedy_order_block_sparse,
