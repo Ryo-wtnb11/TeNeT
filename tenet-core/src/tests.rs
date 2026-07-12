@@ -6651,6 +6651,21 @@ mod tests {
     }
 
     #[test]
+    fn tabulated_f_completeness_charges_missing_second_pair_lookups() {
+        let mut nsym = FxHashMap::default();
+        for a in 0..3u8 {
+            nsym.insert((a, 250, 249), 1);
+        }
+        for c in 0..3u8 {
+            nsym.insert((249, c, 248), 1);
+        }
+        assert!(matches!(
+            validate_f_completeness_with_limit(&nsym, &FxHashMap::default(), 4),
+            Err(TableError::Invalid { section: "F", .. })
+        ));
+    }
+
+    #[test]
     fn tabulated_symbols_keep_proven_forbidden_tuples_zero() {
         let rule = su3();
         let three = su3_id(1, 0);

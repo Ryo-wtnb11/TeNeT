@@ -303,6 +303,29 @@ fn validate_f_completeness(
     nsym: &FxHashMap<(u8, u8, u8), usize>,
     fsymbols: &FxHashMap<[u8; 6], GenericFArray<f64>>,
 ) -> Result<(), TableError> {
+    validate_f_completeness_with_limit(nsym, fsymbols, MAX_COMPLETENESS_WORK)
+}
+
+fn consume_completeness_work(
+    used: &mut usize,
+    additional: usize,
+    limit: usize,
+) -> Result<(), TableError> {
+    *used = used.checked_add(additional).ok_or(TableError::Overflow("F completeness work"))?;
+    if *used > limit {
+        return Err(TableError::Invalid {
+            section: "F",
+            message: "admissible-key validation work budget exceeded".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_f_completeness_with_limit(
+    nsym: &FxHashMap<(u8, u8, u8), usize>,
+    fsymbols: &FxHashMap<[u8; 6], GenericFArray<f64>>,
+    work_limit: usize,
+) -> Result<(), TableError> {
     let mut channels: FxHashMap<(u8, u8), Vec<u8>> = FxHashMap::default();
     for &(a, b, coupled) in nsym.keys() {
         channels.entry((a, b)).or_default().push(coupled);
@@ -317,18 +340,11 @@ fn validate_f_completeness(
     for &(a, b, e) in &triples {
         let Some(outgoing) = channels_by_left.get(&e) else { continue };
         for &(c, ref ds) in outgoing {
+            consume_completeness_work(&mut completeness_work, 1, work_limit)?;
             let Some(fs) = channels.get(&(b, c)) else { continue };
             for &d in ds {
                 for &f in fs {
-                    completeness_work = completeness_work
-                        .checked_add(1)
-                        .ok_or(TableError::Overflow("F completeness work"))?;
-                    if completeness_work > MAX_COMPLETENESS_WORK {
-                        return Err(TableError::Invalid {
-                            section: "F",
-                            message: "admissible-key validation work budget exceeded".into(),
-                        });
-                    }
+                    consume_completeness_work(&mut completeness_work, 1, work_limit)?;
                     let Some(&n4) = nsym.get(&(a, f, d)) else { continue };
                     let key = [a, b, c, d, e, f];
                     let block = fsymbols.get(&key).ok_or(TableError::MissingF(key))?;
