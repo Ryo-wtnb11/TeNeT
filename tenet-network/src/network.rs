@@ -129,11 +129,32 @@ impl Network {
             let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
             ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost).map_err(invalid)?
         };
+        let input_codomain_ranks: Vec<usize> = tensors
+            .iter()
+            .map(|tensor| tensor.codomain_rank())
+            .collect();
+        let lowered_codomain_ranks: Vec<usize> = tensors
+            .iter()
+            .enumerate()
+            .map(|(i, tensor)| {
+                if self.conj[i] {
+                    tensor.rank() - tensor.codomain_rank()
+                } else {
+                    tensor.codomain_rank()
+                }
+            })
+            .collect();
+        let schedule = compile_schedule(
+            &ir,
+            &plan,
+            self.output_codomain_rank,
+            &lowered_codomain_ranks,
+        )?;
         Ok(PlannedNetwork {
-            ir,
             plan,
             conj: self.conj.clone(),
-            output_codomain_rank: self.output_codomain_rank,
+            input_codomain_ranks,
+            schedule,
         })
     }
 
@@ -148,11 +169,32 @@ impl Network {
         plan: ContractionPlan,
     ) -> Result<PlannedNetwork, Error> {
         let (ir, _infos) = self.lower(tensors)?;
+        let input_codomain_ranks: Vec<usize> = tensors
+            .iter()
+            .map(|tensor| tensor.codomain_rank())
+            .collect();
+        let lowered_codomain_ranks: Vec<usize> = tensors
+            .iter()
+            .enumerate()
+            .map(|(i, tensor)| {
+                if self.conj[i] {
+                    tensor.rank() - tensor.codomain_rank()
+                } else {
+                    tensor.codomain_rank()
+                }
+            })
+            .collect();
+        let schedule = compile_schedule(
+            &ir,
+            &plan,
+            self.output_codomain_rank,
+            &lowered_codomain_ranks,
+        )?;
         Ok(PlannedNetwork {
-            ir,
             plan,
             conj: self.conj.clone(),
-            output_codomain_rank: self.output_codomain_rank,
+            input_codomain_ranks,
+            schedule,
         })
     }
 
@@ -284,10 +326,33 @@ fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
 /// shapes. Inspect the order via [`Self::plan`], run it via
 /// [`Self::execute`].
 pub struct PlannedNetwork {
-    ir: NetworkIR,
     plan: ContractionPlan,
     conj: Vec<bool>,
-    output_codomain_rank: Option<usize>,
+    input_codomain_ranks: Vec<usize>,
+    schedule: CompiledSchedule,
+}
+
+struct CompiledSchedule {
+    slot_count: usize,
+    input_ranks: Vec<usize>,
+    steps: Vec<CompiledStep>,
+    final_slot: usize,
+    final_permutation: Option<(Vec<usize>, Vec<usize>)>,
+}
+
+struct CompiledStep {
+    lhs_slot: usize,
+    rhs_slot: usize,
+    result_slot: usize,
+    lhs_contract_axes: Vec<usize>,
+    rhs_contract_axes: Vec<usize>,
+    result_permutation: Option<(Vec<usize>, Vec<usize>)>,
+}
+
+/// Caller-owned tensor slots for repeated execution of a [`PlannedNetwork`].
+#[derive(Default)]
+pub struct NetworkExecutionWorkspace {
+    slots: Vec<Option<Tensor>>,
 }
 
 impl PlannedNetwork {
@@ -302,6 +367,15 @@ impl PlannedNetwork {
     /// are oriented for their next use, and the final tensor is permuted
     /// to the requested output label order and codomain/domain split.
     pub fn execute(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
+        self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
+    }
+
+    /// Run the compiled schedule while reusing its tensor-slot table.
+    pub fn execute_with_workspace(
+        &self,
+        tensors: &[&Tensor],
+        workspace: &mut NetworkExecutionWorkspace,
+    ) -> Result<Tensor, Error> {
         if tensors.len() != self.conj.len() {
             return Err(invalid(format!(
                 "plan has {} operands but {} tensors were given",
@@ -310,101 +384,188 @@ impl PlannedNetwork {
             )));
         }
 
-        // Active tensors keyed by planner TensorId, each with its current
-        // leg labels in the tensor's flat leg order.
-        let mut active: HashMap<TensorId, (Tensor, Vec<TemporaryLabel>)> = HashMap::new();
-        for (i, (node, &tensor)) in self.ir.tensors().iter().zip(tensors).enumerate() {
+        workspace
+            .slots
+            .resize_with(self.schedule.slot_count, || None);
+        for slot in &mut workspace.slots {
+            *slot = None;
+        }
+        let slots = &mut workspace.slots;
+        for (i, &tensor) in tensors.iter().enumerate() {
+            if tensor.rank() != self.schedule.input_ranks[i]
+                || tensor.codomain_rank() != self.input_codomain_ranks[i]
+            {
+                return Err(invalid(format!(
+                    "operand {i} topology drifted: planned rank/split {}/{}, got {}/{}",
+                    self.schedule.input_ranks[i],
+                    self.input_codomain_ranks[i],
+                    tensor.rank(),
+                    tensor.codomain_rank()
+                )));
+            }
             let lowered = if self.conj[i] {
                 tensor.adjoint()?
             } else {
                 tensor.clone()
             };
-            if node.labels().len() != lowered.rank() {
-                return Err(invalid(format!(
-                    "operand {i} has {} labels but tensor rank {}",
-                    node.labels().len(),
-                    lowered.rank()
-                )));
-            }
-            active.insert(TensorId::new(i), (lowered, node.labels().to_vec()));
+            slots[i] = Some(lowered);
         }
 
-        let labels_by_id = planned_label_orders(&self.ir, &self.plan)?;
-        let steps = self.plan.steps();
-        let consumers = build_consumers(steps);
-        for step in steps.iter() {
-            let (lt, ll) = active
-                .remove(&step.lhs())
+        for step in &self.schedule.steps {
+            let lhs = slots[step.lhs_slot]
+                .take()
                 .ok_or_else(|| invalid("lhs operand already consumed"))?;
-            let (rt, rl) = active
-                .remove(&step.rhs())
+            let rhs = slots[step.rhs_slot]
+                .take()
                 .ok_or_else(|| invalid("rhs operand already consumed"))?;
-
-            // Contracted = labels shared by both operands and absent from
-            // the step result (batch labels were rejected at build time).
-            let mut a_contracted = Vec::new();
-            let mut b_contracted = Vec::new();
-            for (ai, la) in ll.iter().enumerate() {
-                if let Some(bi) = rl.iter().position(|x| x == la) {
-                    if step.result_labels().contains(la) {
-                        return Err(invalid(format!(
-                            "batch label `{la}` (shared + in result) unsupported"
-                        )));
-                    }
-                    a_contracted.push(ai);
-                    b_contracted.push(bi);
-                }
+            let mut result =
+                lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes)?;
+            if let Some((codomain, domain)) = &step.result_permutation {
+                result = result.permute(codomain, domain)?;
             }
+            slots[step.result_slot] = Some(result);
+        }
 
-            let c = lt.contract(&rt, &a_contracted, &b_contracted)?;
-            // `contract` returns (open lhs legs ascending <- open rhs legs
-            // ascending); track labels in that flat order.
-            let mut c_labels: Vec<TemporaryLabel> = ll
+        let mut result = slots[self.schedule.final_slot]
+            .take()
+            .ok_or_else(|| invalid("no final tensor produced"))?;
+        if let Some((codomain, domain)) = &self.schedule.final_permutation {
+            result = result.permute(codomain, domain)?;
+        }
+        Ok(result)
+    }
+}
+
+fn compile_schedule(
+    ir: &NetworkIR,
+    plan: &ContractionPlan,
+    output_codomain_rank: Option<usize>,
+    input_codomain_ranks: &[usize],
+) -> Result<CompiledSchedule, Error> {
+    let labels_by_id = planned_label_orders(ir, plan)?;
+    let consumers = build_consumers(plan.steps());
+    let slot_count = ir.tensors().len() + plan.steps().len();
+    let mut current_labels: Vec<Option<Vec<TemporaryLabel>>> = vec![None; slot_count];
+    let mut current_codomain_ranks: Vec<Option<usize>> = vec![None; slot_count];
+    let mut slots_by_id = HashMap::with_capacity(slot_count);
+    for (slot, node) in ir.tensors().iter().enumerate() {
+        slots_by_id.insert(node.id(), slot);
+        current_labels[slot] = Some(node.labels().to_vec());
+        current_codomain_ranks[slot] = Some(input_codomain_ranks[slot]);
+    }
+
+    let mut compiled_steps = Vec::with_capacity(plan.steps().len());
+    for (step_index, step) in plan.steps().iter().enumerate() {
+        let lhs_slot = *slots_by_id
+            .get(&step.lhs())
+            .ok_or_else(|| invalid("lhs slot missing while compiling schedule"))?;
+        let rhs_slot = *slots_by_id
+            .get(&step.rhs())
+            .ok_or_else(|| invalid("rhs slot missing while compiling schedule"))?;
+        let result_slot = ir.tensors().len() + step_index;
+        let lhs_labels = current_labels[lhs_slot]
+            .take()
+            .ok_or_else(|| invalid("lhs labels already consumed while compiling schedule"))?;
+        let rhs_labels = current_labels[rhs_slot]
+            .take()
+            .ok_or_else(|| invalid("rhs labels already consumed while compiling schedule"))?;
+        let _lhs_codomain_rank = current_codomain_ranks[lhs_slot]
+            .take()
+            .ok_or_else(|| invalid("lhs orientation already consumed while compiling schedule"))?;
+        current_codomain_ranks[rhs_slot]
+            .take()
+            .ok_or_else(|| invalid("rhs orientation already consumed while compiling schedule"))?;
+
+        let mut lhs_contract_axes = Vec::new();
+        let mut rhs_contract_axes = Vec::new();
+        for (lhs_axis, label) in lhs_labels.iter().enumerate() {
+            if let Some(rhs_axis) = rhs_labels.iter().position(|other| other == label) {
+                lhs_contract_axes.push(lhs_axis);
+                rhs_contract_axes.push(rhs_axis);
+            }
+        }
+        let mut result_labels: Vec<TemporaryLabel> = lhs_labels
+            .iter()
+            .enumerate()
+            .filter(|(axis, _)| !lhs_contract_axes.contains(axis))
+            .map(|(_, label)| label.clone())
+            .collect();
+        result_labels.extend(
+            rhs_labels
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| !a_contracted.contains(i))
-                .map(|(_, l)| l.clone())
-                .collect();
-            c_labels.extend(
-                rl.iter()
-                    .enumerate()
-                    .filter(|(i, _)| !b_contracted.contains(i))
-                    .map(|(_, l)| l.clone()),
-            );
-            let (c, c_labels) = orient_intermediate_for_next_use(
-                c,
-                c_labels,
-                step.result(),
-                steps,
-                &consumers,
-                &labels_by_id,
-            )?;
-            active.insert(step.result(), (c, c_labels));
-        }
+                .filter(|(axis, _)| !rhs_contract_axes.contains(axis))
+                .map(|(_, label)| label.clone()),
+        );
 
-        let final_id = steps
-            .last()
-            .map(|s| s.result())
-            .unwrap_or_else(|| TensorId::new(0));
-        let (result, labels) = active
-            .remove(&final_id)
-            .ok_or_else(|| invalid("no final tensor produced"))?;
-
-        let output = self.ir.output_labels();
-        let split = self.output_codomain_rank.unwrap_or(output.len());
-        let cod_axes = label_positions(&output[..split], &labels)?;
-        let dom_axes = label_positions(&output[split..], &labels)?;
-        let identity = result.codomain_rank() == cod_axes.len()
-            && cod_axes
+        let result_permutation = compiled_intermediate_permutation(
+            &result_labels,
+            lhs_labels.len() - lhs_contract_axes.len(),
+            step.result(),
+            plan.steps(),
+            &consumers,
+            &labels_by_id,
+        )?;
+        if let Some((codomain, domain)) = &result_permutation {
+            result_labels = codomain
                 .iter()
-                .chain(dom_axes.iter())
-                .copied()
-                .eq(0..labels.len());
-        if identity {
-            return Ok(result);
+                .chain(domain)
+                .map(|&axis| result_labels[axis].clone())
+                .collect();
         }
-        result.permute(&cod_axes, &dom_axes)
+        let result_codomain_rank = result_permutation.as_ref().map_or(
+            lhs_labels.len() - lhs_contract_axes.len(),
+            |(codomain, _)| codomain.len(),
+        );
+        current_labels[result_slot] = Some(result_labels);
+        current_codomain_ranks[result_slot] = Some(result_codomain_rank);
+        slots_by_id.insert(step.result(), result_slot);
+        compiled_steps.push(CompiledStep {
+            lhs_slot,
+            rhs_slot,
+            result_slot,
+            lhs_contract_axes,
+            rhs_contract_axes,
+            result_permutation,
+        });
     }
+
+    let final_id = plan
+        .steps()
+        .last()
+        .map(|step| step.result())
+        .unwrap_or_else(|| TensorId::new(0));
+    let final_slot = *slots_by_id
+        .get(&final_id)
+        .ok_or_else(|| invalid("final slot missing while compiling schedule"))?;
+    let final_labels = current_labels[final_slot]
+        .as_ref()
+        .ok_or_else(|| invalid("final labels missing while compiling schedule"))?;
+    let final_codomain_rank = current_codomain_ranks[final_slot]
+        .ok_or_else(|| invalid("final orientation missing while compiling schedule"))?;
+    let output = ir.output_labels();
+    let split = output_codomain_rank.unwrap_or(output.len());
+    let codomain = label_positions(&output[..split], final_labels)?;
+    let domain = label_positions(&output[split..], final_labels)?;
+    let final_permutation = (!(final_codomain_rank == split
+        && codomain
+            .iter()
+            .chain(&domain)
+            .copied()
+            .eq(0..final_labels.len())))
+    .then_some((codomain, domain));
+
+    Ok(CompiledSchedule {
+        slot_count,
+        input_ranks: ir
+            .tensors()
+            .iter()
+            .map(|node| node.labels().len())
+            .collect(),
+        steps: compiled_steps,
+        final_slot,
+        final_permutation,
+    })
 }
 
 /// Positions of each `wanted` label within `have` (the current leg labels).
@@ -420,6 +581,54 @@ fn label_positions(
                 .ok_or_else(|| invalid(format!("label `{l}` not among available legs")))
         })
         .collect()
+}
+
+fn compiled_intermediate_permutation(
+    labels: &[TemporaryLabel],
+    current_codomain_rank: usize,
+    result_id: TensorId,
+    steps: &[ContractionStep],
+    consumers: &HashMap<TensorId, (usize, bool)>,
+    labels_by_id: &HashMap<TensorId, Vec<TemporaryLabel>>,
+) -> Result<Option<(Vec<usize>, Vec<usize>)>, Error> {
+    let Some(&(future_index, result_is_lhs)) = consumers.get(&result_id) else {
+        return Ok(None);
+    };
+    let future_step = &steps[future_index];
+    let sibling_id = if result_is_lhs {
+        future_step.rhs()
+    } else {
+        future_step.lhs()
+    };
+    let sibling_labels = labels_by_id
+        .get(&sibling_id)
+        .ok_or_else(|| invalid("future sibling labels missing"))?;
+    let mut open_axes = Vec::new();
+    let mut contracted_axes = Vec::new();
+    for (axis, label) in labels.iter().enumerate() {
+        if sibling_labels.contains(label) {
+            contracted_axes.push(axis);
+        } else {
+            open_axes.push(axis);
+        }
+    }
+    let permutation = if result_is_lhs {
+        (open_axes, contracted_axes)
+    } else {
+        (contracted_axes, open_axes)
+    };
+    if permutation.0.len() == current_codomain_rank
+        && permutation
+            .0
+            .iter()
+            .chain(&permutation.1)
+            .copied()
+            .eq(0..labels.len())
+    {
+        Ok(None)
+    } else {
+        Ok(Some(permutation))
+    }
 }
 
 /// Leg-label order of every input and planned intermediate, mirroring the
@@ -449,58 +658,6 @@ fn planned_label_orders(
         active.insert(step.result(), labels);
     }
     Ok(labels_by_id)
-}
-
-/// Materialize an intermediate as (codomain <- domain) matching its next
-/// pairwise use: a left child as (open_to_parent <- contracted_with_sibling),
-/// a right child mirrored. Keeps later `contract` calls from re-bending
-/// surviving legs path-dependently (same convention as the legacy executor
-/// and TensorOperations.jl contextual temporaries).
-fn orient_intermediate_for_next_use(
-    tensor: Tensor,
-    labels: Vec<TemporaryLabel>,
-    result_id: TensorId,
-    steps: &[ContractionStep],
-    consumers: &HashMap<TensorId, (usize, bool)>,
-    labels_by_id: &HashMap<TensorId, Vec<TemporaryLabel>>,
-) -> Result<(Tensor, Vec<TemporaryLabel>), Error> {
-    let Some(&(future_index, result_is_lhs)) = consumers.get(&result_id) else {
-        return Ok((tensor, labels));
-    };
-    let future_step = &steps[future_index];
-    let sibling_id = if result_is_lhs {
-        future_step.rhs()
-    } else {
-        future_step.lhs()
-    };
-    let sibling_labels = labels_by_id
-        .get(&sibling_id)
-        .ok_or_else(|| invalid("future sibling labels missing"))?;
-
-    let mut open_axes = Vec::new();
-    let mut contracted_axes = Vec::new();
-    for (axis, label) in labels.iter().enumerate() {
-        if sibling_labels.contains(label) {
-            contracted_axes.push(axis);
-        } else {
-            open_axes.push(axis);
-        }
-    }
-    let (cod_axes, dom_axes) = if result_is_lhs {
-        (open_axes, contracted_axes)
-    } else {
-        (contracted_axes, open_axes)
-    };
-    let cod_rank = tensor.codomain_rank();
-    let rank = tensor.rank();
-    if cod_axes.iter().copied().eq(0..cod_rank) && dom_axes.iter().copied().eq(cod_rank..rank) {
-        return Ok((tensor, labels));
-    }
-    let mut oriented_labels = Vec::with_capacity(labels.len());
-    oriented_labels.extend(cod_axes.iter().map(|&axis| labels[axis].clone()));
-    oriented_labels.extend(dom_axes.iter().map(|&axis| labels[axis].clone()));
-    let oriented = tensor.permute(&cod_axes, &dom_axes)?;
-    Ok((oriented, oriented_labels))
 }
 
 /// One forward pass mapping each tensor id to the single later step that
