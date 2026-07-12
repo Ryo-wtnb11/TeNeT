@@ -43,6 +43,8 @@
 /// The raw table bytes (see `tools/su3-table-gen/README.md` for provenance and
 /// `gen.jl` for the little-endian format).
 static SU3_TABLE_BYTES: &[u8] = include_bytes!("su3_table.bin");
+const MAX_TABLE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SYMBOL_VALUES: usize = MAX_TABLE_BYTES / size_of::<f64>();
 
 /// Per-irrep scalar data, indexed by dense `SectorId`.
 #[derive(Clone, Debug)]
@@ -187,11 +189,6 @@ impl<'a> Cursor<'a> {
         b.copy_from_slice(self.take(8)?);
         Ok(u64::from_le_bytes(b))
     }
-    fn f64(&mut self) -> Result<f64, TableError> {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(self.take(8)?);
-        Ok(f64::from_le_bytes(b))
-    }
 }
 
 /// Group-agnostic Dynkin label as `(p,q,…)` for diagnostics — the SU(3)
@@ -246,6 +243,7 @@ fn validate_symbol_completeness(
     nsym: &FxHashMap<(u8, u8, u8), usize>,
     rsymbols: &FxHashMap<[u8; 3], GenericRMatrix<f64>>,
     fsymbols: &FxHashMap<[u8; 6], GenericFArray<f64>>,
+    covered_pairs: &FxHashMap<(u8, u8), SectorVec>,
 ) -> Result<(), TableError> {
     for (&(a, b, coupled), &rows) in nsym {
         let key = [a, b, coupled];
@@ -281,11 +279,15 @@ fn validate_symbol_completeness(
     for &(a, b, coupled) in nsym.keys() {
         channels.entry((a, b)).or_default().push(coupled);
     }
+    let mut channels_by_left: FxHashMap<u8, Vec<(u8, Vec<u8>)>> = FxHashMap::default();
+    for (&(left, right), coupled) in &channels {
+        channels_by_left.entry(left).or_default().push((right, coupled.clone()));
+    }
     let triples: Vec<(u8, u8, u8)> = nsym.keys().copied().collect();
     let mut expected_f = 0usize;
     for &(a, b, e) in &triples {
-        for (&(left, c), ds) in &channels {
-            if left != e { continue; }
+        let Some(outgoing) = channels_by_left.get(&e) else { continue };
+        for &(c, ref ds) in outgoing {
             let Some(fs) = channels.get(&(b, c)) else { continue };
             for &d in ds {
                 for &f in fs {
@@ -307,11 +309,105 @@ fn validate_symbol_completeness(
     if fsymbols.len() != expected_f {
         return Err(TableError::Invalid { section: "F", message: "record set contains a forbidden or duplicate key".into() });
     }
+    validate_f_unitarity(nsym, fsymbols, covered_pairs)?;
+    Ok(())
+}
+
+fn validate_f_unitarity(
+    nsym: &FxHashMap<(u8, u8, u8), usize>,
+    fsymbols: &FxHashMap<[u8; 6], GenericFArray<f64>>,
+    covered_pairs: &FxHashMap<(u8, u8), SectorVec>,
+) -> Result<(), TableError> {
+    let mut groups: FxHashMap<[u8; 4], Vec<[u8; 6]>> = FxHashMap::default();
+    for &key in fsymbols.keys() {
+        groups.entry([key[0], key[1], key[2], key[3]]).or_default().push(key);
+    }
+    for ([a, b, c, d], keys) in groups {
+        if !covered_pairs.contains_key(&(a, b)) || !covered_pairs.contains_key(&(b, c)) {
+            continue;
+        }
+        let mut es: Vec<u8> = keys.iter().map(|key| key[4]).collect();
+        let mut fs: Vec<u8> = keys.iter().map(|key| key[5]).collect();
+        es.sort_unstable();
+        es.dedup();
+        fs.sort_unstable();
+        fs.dedup();
+
+        let mut rows = Vec::with_capacity(es.len());
+        let mut row_count = 0usize;
+        for e in es {
+            let size = nsym[&(a, b, e)]
+                .checked_mul(nsym[&(e, c, d)])
+                .ok_or(TableError::Overflow("F associator row count"))?;
+            rows.push((e, row_count, size));
+            row_count = row_count.checked_add(size).ok_or(TableError::Overflow("F associator row count"))?;
+        }
+        let mut cols = Vec::with_capacity(fs.len());
+        let mut col_count = 0usize;
+        for f in fs {
+            let size = nsym[&(b, c, f)]
+                .checked_mul(nsym[&(a, f, d)])
+                .ok_or(TableError::Overflow("F associator column count"))?;
+            cols.push((f, col_count, size));
+            col_count = col_count.checked_add(size).ok_or(TableError::Overflow("F associator column count"))?;
+        }
+        if row_count != col_count {
+            return Err(TableError::Invalid {
+                section: "F",
+                message: format!("associator ({a},{b},{c},{d}) is {row_count}x{col_count}"),
+            });
+        }
+        let matrix_len = row_count.checked_mul(col_count).ok_or(TableError::Overflow("F associator matrix"))?;
+        if matrix_len > MAX_SYMBOL_VALUES {
+            return Err(TableError::Invalid { section: "F", message: "associator validation budget exceeded".into() });
+        }
+        let mut matrix = vec![0.0; matrix_len];
+        for key in keys {
+            let block = &fsymbols[&key];
+            let (_, row_offset, _) = rows.iter().find(|(e, _, _)| *e == key[4]).unwrap();
+            let (_, col_offset, _) = cols.iter().find(|(f, _, _)| *f == key[5]).unwrap();
+            let (s0, s1, s2, s3) = block.shape();
+            for mu in 0..s0 {
+                for nu in 0..s1 {
+                    let row = row_offset + mu * s1 + nu;
+                    for kappa in 0..s2 {
+                        for lambda in 0..s3 {
+                            let col = col_offset + kappa * s3 + lambda;
+                            matrix[row * col_count + col] = *block.get(mu, nu, kappa, lambda);
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..row_count {
+            for j in 0..row_count {
+                let column_dot = (0..row_count)
+                    .map(|k| matrix[k * row_count + i] * matrix[k * row_count + j])
+                    .sum::<f64>();
+                let row_dot = (0..row_count)
+                    .map(|k| matrix[i * row_count + k] * matrix[j * row_count + k])
+                    .sum::<f64>();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                if (column_dot - expected).abs() > 1e-10 || (row_dot - expected).abs() > 1e-10 {
+                    return Err(TableError::Invalid {
+                        section: "F",
+                        message: format!("associator ({a},{b},{c},{d}) is not unitary"),
+                    });
+                }
+            }
+        }
+    }
     Ok(())
 }
 
 impl TabulatedSymbolTable {
     fn load_from(bytes: &[u8]) -> Result<Self, TableError> {
+        if bytes.len() > MAX_TABLE_BYTES {
+            return Err(TableError::Invalid {
+                section: "header",
+                message: format!("table exceeds the {MAX_TABLE_BYTES}-byte input budget"),
+            });
+        }
         if bytes.get(..4) != Some(b"TFR3") {
             return Err(TableError::BadMagic);
         }
@@ -329,9 +425,6 @@ impl TabulatedSymbolTable {
         }
         let rank = usize::try_from(group_n - 1).map_err(|_| TableError::Overflow("rank"))?;
         let provenance = c.u64()?;
-        // Self-check: recompute the payload hash. Catches truncation and — the
-        // Stage B2b hazard — a row/column transpose mistake in the generator or
-        // reader, which would change the byte stream and so the FNV digest.
         let payload_hash = fnv1a64(&bytes[c.pos..]);
         if payload_hash != provenance {
             return Err(TableError::HashMismatch { expected: provenance, actual: payload_hash });
@@ -412,6 +505,7 @@ impl TabulatedSymbolTable {
         let n_r = c.u32()? as usize;
         validate_record_count("R", n_r, 5, bytes.len() - c.pos)?;
         let mut rsymbols = FxHashMap::default();
+        let mut symbol_values = 0usize;
         for _ in 0..n_r {
             let a = c.u8()?;
             let b = c.u8()?;
@@ -420,9 +514,15 @@ impl TabulatedSymbolTable {
             let rows = c.u8()? as usize;
             let cols = c.u8()? as usize;
             let len = rows.checked_mul(cols).ok_or(TableError::Overflow("R shape"))?;
+            symbol_values = symbol_values.checked_add(len).ok_or(TableError::Overflow("symbol value count"))?;
+            if symbol_values > MAX_SYMBOL_VALUES {
+                return Err(TableError::Invalid { section: "R", message: "symbol value budget exceeded".into() });
+            }
+            let byte_len = len.checked_mul(size_of::<f64>()).ok_or(TableError::Overflow("R byte length"))?;
+            let raw = c.take(byte_len)?;
             let mut data = Vec::with_capacity(len);
-            for _ in 0..len {
-                let value = c.f64()?;
+            for chunk in raw.chunks_exact(size_of::<f64>()) {
+                let value = f64::from_le_bytes(chunk.try_into().expect("f64 chunk has fixed width"));
                 if !value.is_finite() { return Err(TableError::Invalid { section: "R", message: "non-finite coefficient".into() }); }
                 data.push(value);
             }
@@ -443,9 +543,15 @@ impl TabulatedSymbolTable {
             let s2 = c.u8()? as usize;
             let s3 = c.u8()? as usize;
             let len = s0.checked_mul(s1).and_then(|n| n.checked_mul(s2)).and_then(|n| n.checked_mul(s3)).ok_or(TableError::Overflow("F shape"))?;
+            symbol_values = symbol_values.checked_add(len).ok_or(TableError::Overflow("symbol value count"))?;
+            if symbol_values > MAX_SYMBOL_VALUES {
+                return Err(TableError::Invalid { section: "F", message: "symbol value budget exceeded".into() });
+            }
+            let byte_len = len.checked_mul(size_of::<f64>()).ok_or(TableError::Overflow("F byte length"))?;
+            let raw = c.take(byte_len)?;
             let mut data = Vec::with_capacity(len);
-            for _ in 0..len {
-                let value = c.f64()?;
+            for chunk in raw.chunks_exact(size_of::<f64>()) {
+                let value = f64::from_le_bytes(chunk.try_into().expect("f64 chunk has fixed width"));
                 if !value.is_finite() { return Err(TableError::Invalid { section: "F", message: "non-finite coefficient".into() }); }
                 data.push(value);
             }
@@ -560,7 +666,7 @@ impl TabulatedSymbolTable {
         }
         if c.pos != bytes.len() { return Err(TableError::TrailingBytes(bytes.len() - c.pos)); }
 
-        validate_symbol_completeness(&nsym, &rsymbols, &fsymbols)?;
+        validate_symbol_completeness(&nsym, &rsymbols, &fsymbols, &fusion)?;
 
         Ok(TabulatedSymbolTable {
             group_n,

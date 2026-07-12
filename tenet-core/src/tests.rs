@@ -6572,6 +6572,31 @@ mod tests {
     }
 
     #[test]
+    fn tabulated_loader_bounds_symbol_allocation_before_reserving() {
+        let (_, _, _, first_f) = symbol_record_ranges(SU4_TABLE_BYTES);
+        let shape_offset = first_f.start + 6;
+        let mut oversized = SU4_TABLE_BYTES.to_vec();
+        oversized[shape_offset..shape_offset + 4].fill(u8::MAX);
+        rehash_table(&mut oversized);
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&oversized, "oversized-shape"),
+            Err(TableError::Invalid { section: "F", .. }) | Err(TableError::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn tabulated_loader_rejects_nonunitary_f_associator() {
+        let (_, _, _, first_f) = symbol_record_ranges(SU4_TABLE_BYTES);
+        let mut corrupted = SU4_TABLE_BYTES.to_vec();
+        corrupted[first_f.start + 10..first_f.start + 18].copy_from_slice(&0.0f64.to_le_bytes());
+        rehash_table(&mut corrupted);
+        assert!(matches!(
+            TabulatedFusionRule::from_bytes(&corrupted, "nonunitary-f"),
+            Err(TableError::Invalid { section: "F", .. })
+        ));
+    }
+
+    #[test]
     fn tabulated_symbols_keep_proven_forbidden_tuples_zero() {
         let rule = su3();
         let three = su3_id(1, 0);
@@ -6651,6 +6676,16 @@ mod tests {
         // quantum dims from the blob (√dim² round-trips the integer dim).
         let d = |s| (rule.sqrt_dim_scalar(s) * rule.sqrt_dim_scalar(s)).round() as i64;
         assert_eq!([d(four), d(six), d(ten), d(fifteen)], [4, 6, 10, 15]);
+    }
+
+    #[test]
+    #[ignore = "requires a freshly generated artifact path"]
+    fn generated_su4_artifact_passes_the_production_loader() {
+        let path = std::env::var("TENET_GENERATED_SU4").expect("TENET_GENERATED_SU4 must be set");
+        let bytes = std::fs::read(path).unwrap();
+        let rule = TabulatedFusionRule::from_bytes(&bytes, "generated-su4").unwrap();
+        assert_eq!(rule.group_n(), 4);
+        assert_eq!(rule.provenance(), 0x2afd_b9a5_dcf6_18e6);
     }
 
     // --- table integrity + hard-error boundary ---------------------------
