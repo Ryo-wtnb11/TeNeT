@@ -17,6 +17,7 @@ blas-accelerate = ["tenet/blas-accelerate"]
 blas-openblas = ["tenet/blas-openblas"]
 blas-mkl = ["tenet/blas-mkl"]
 provider-inject = ["tenet/provider-inject"]
+cuda = ["tenet/cuda"]
 # Wraps the `opt-einsum-path` crate (Apache-2.0) as a
 # `DenseContractionOptimizer` backend (optimal / dp / branch / random-greedy).
 opt-path = ["dep:opt-einsum-path", "tenet/opt-path"]

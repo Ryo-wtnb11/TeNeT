@@ -49,6 +49,21 @@ fn c64_to_cuda_is_explicit_error() {
 }
 
 #[test]
+fn diagonal_transfer_entry_points_observe_dense_host_data() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 97).unwrap();
+    let (_, diagonal, _) = source.svd_compact().unwrap();
+
+    let host = diagonal.to_host().unwrap();
+    assert_eq!(host.placement(), Placement::Host);
+    assert_eq!(host.data(), diagonal.data());
+
+    let error = diagonal.to_cuda().unwrap_err();
+    assert!(matches!(error, Error::InvalidArgument(_)), "got {error:?}");
+}
+
+#[test]
 #[ignore]
 fn u1_contract_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
