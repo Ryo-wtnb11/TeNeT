@@ -27,6 +27,7 @@ strided-kernel = { version = "0.3", features = ["parallel"] }
 # Fast non-cryptographic hasher for internal plan/structure/recoupling caches
 # keyed on fusion-tree structure (no untrusted input); std SipHash is slow here.
 rustc-hash = "2"
+lru = "0.12"
 # Parallel tree-transform plan compile runs on rayon's global pool — the
 # same pool strided-kernel's "parallel" feature already installs, so this
 # adds no dependency weight and keeps ONE CPU pool (see tenet-operations).

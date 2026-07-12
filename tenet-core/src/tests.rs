@@ -7417,4 +7417,118 @@ mod tests {
         assert_eq!(r.shape(), (1, 1));
         assert!((r.data()[0] - -1.0).abs() < 1e-10);
     }
+
+    // Equal hom spaces (by value, even rebuilt independently) intern to one id;
+    // a single differing bit — a leg's dual flag, its sector set, its
+    // degeneracy, or the codomain/domain rank — must intern to a distinct id.
+    fn u1_leg(charge: i32, deg: usize, dual: bool) -> SectorLeg {
+        SectorLeg::new([(u1(charge), deg)], dual)
+    }
+
+    #[test]
+    fn hom_space_id_is_idempotent() {
+        let build = || {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([u1_leg(1, 2, false)]),
+                FusionProductSpace::new([u1_leg(1, 2, false)]),
+            )
+        };
+        assert_eq!(build().id(), build().id());
+    }
+
+    #[test]
+    fn hom_space_id_separates_dual_flip() {
+        // Rank-1 duality analog of the #119 regression: flipping one leg's dual
+        // bit must not alias, on either the codomain or the domain side.
+        let base = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+        );
+        let cod_dual = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 2, true)]),
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+        );
+        let dom_dual = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+            FusionProductSpace::new([u1_leg(1, 2, true)]),
+        );
+        assert_ne!(base.id(), cod_dual.id());
+        assert_ne!(base.id(), dom_dual.id());
+    }
+
+    #[test]
+    fn hom_space_id_separates_sectors_degeneracy_and_rank() {
+        let base = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+        )
+        .id();
+        let other_charge = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(3, 2, false)]),
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+        )
+        .id();
+        let other_deg = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 5, false)]),
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+        )
+        .id();
+        let higher_rank = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 2, false), u1_leg(0, 2, false)]),
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+        )
+        .id();
+        assert_ne!(base, other_charge);
+        assert_ne!(base, other_deg);
+        assert_ne!(base, higher_rank);
+    }
+
+    #[test]
+    fn hom_space_id_remains_semantic_after_intern_eviction() {
+        let build = || {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([u1_leg(17, 2, false)]),
+                FusionProductSpace::new([u1_leg(17, 3, true)]),
+            )
+        };
+        let before = build().id();
+        for charge in 10_000..10_000 + HOM_SPACE_INTERN_CAP as i32 + 1 {
+            let _ = FusionTreeHomSpace::new(
+                FusionProductSpace::new([u1_leg(charge, 1, false)]),
+                FusionProductSpace::new([u1_leg(charge, 1, false)]),
+            );
+        }
+        let after = build().id();
+        assert!(!Arc::ptr_eq(&before.key, &after.key));
+        assert_eq!(before, after);
+        let hash = |id: &HomSpaceId| {
+            let mut state = rustc_hash::FxHasher::default();
+            id.hash(&mut state);
+            std::hash::Hasher::finish(&state)
+        };
+        assert_eq!(hash(&before), hash(&after));
+        assert_eq!(hom_space_intern_table().read().unwrap().entries.len(), HOM_SPACE_INTERN_CAP);
+    }
+
+    #[test]
+    fn concurrent_equal_hom_spaces_share_semantic_identity() {
+        let ids = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        FusionTreeHomSpace::new(
+                            FusionProductSpace::new([u1_leg(41, 7, false)]),
+                            FusionProductSpace::new([u1_leg(41, 9, true)]),
+                        )
+                        .id()
+                    })
+                })
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(ids
+            .windows(2)
+            .all(|pair| Arc::ptr_eq(&pair[0].key, &pair[1].key)));
+    }
 }

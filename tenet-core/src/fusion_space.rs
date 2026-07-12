@@ -62,10 +62,26 @@ impl FusionProductSpace {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug)]
 pub struct FusionTreeHomSpace {
     codomain: FusionProductSpace,
     domain: FusionProductSpace,
+    id: HomSpaceId,
+}
+
+impl PartialEq for FusionTreeHomSpace {
+    fn eq(&self, other: &Self) -> bool {
+        self.codomain == other.codomain && self.domain == other.domain
+    }
+}
+
+impl Eq for FusionTreeHomSpace {}
+
+impl std::hash::Hash for FusionTreeHomSpace {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.codomain.hash(state);
+        self.domain.hash(state);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -148,6 +164,91 @@ fn coupled_block_structure_cache(
     CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
+/// Process-global intern id for a fusion hom space. [`FusionTreeHomSpace::id`]
+/// deep-hashes the space at construction (the full generic key: every codomain
+/// and domain leg's sectors and dual flag — never a multiplicity-free subset)
+/// and stores a collision-safe semantic identity. Downstream hashing reads its
+/// cached prehash in O(1); equality falls back to the full immutable key only
+/// for matching prehashes. Mirrors the block-structure content intern.
+///
+/// Why-not (persist to disk): the cached prehash is an implementation detail,
+/// so a loaded operation cache reconstructs identity from the semantic space
+/// value instead of carrying this process-local acceleration object.
+///
+/// Why-not (unbounded intern): applications can construct arbitrarily many
+/// temporary spaces. The bounded table follows TensorKit's metadata-cache
+/// policy. The semantic key remains in each live id, so equal spaces remain
+/// equal across eviction; the interner only supplies a pointer-equality fast
+/// path while an entry is resident.
+#[derive(Clone, Debug)]
+pub struct HomSpaceId {
+    prehash: u64,
+    key: Arc<HomSpaceInternKey>,
+}
+
+impl PartialEq for HomSpaceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.prehash == other.prehash
+            && (Arc::ptr_eq(&self.key, &other.key) || self.key == other.key)
+    }
+}
+
+impl Eq for HomSpaceId {}
+
+impl std::hash::Hash for HomSpaceId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.prehash.hash(state);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct HomSpaceInternKey {
+    codomain: FusionProductSpace,
+    domain: FusionProductSpace,
+}
+
+struct HomSpaceInternTable {
+    entries: lru::LruCache<HomSpaceInternKey, Arc<HomSpaceInternKey>>,
+}
+
+const HOM_SPACE_INTERN_CAP: usize = 8192;
+
+fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
+    static TABLE: OnceLock<RwLock<HomSpaceInternTable>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        RwLock::new(HomSpaceInternTable {
+            entries: lru::LruCache::new(
+                std::num::NonZeroUsize::new(HOM_SPACE_INTERN_CAP).unwrap(),
+            ),
+        })
+    })
+}
+
+fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) -> HomSpaceId {
+    let key = HomSpaceInternKey {
+        codomain: codomain.clone(),
+        domain: domain.clone(),
+    };
+    let mut hasher = rustc_hash::FxHasher::default();
+    key.hash(&mut hasher);
+    let prehash = std::hash::Hasher::finish(&hasher);
+    let mut table = hom_space_intern_table()
+        .write()
+        .expect("hom space intern table poisoned");
+    if let Some(canonical) = table.entries.get(&key) {
+        return HomSpaceId {
+            prehash,
+            key: Arc::clone(canonical),
+        };
+    }
+    let canonical = Arc::new(key.clone());
+    table.entries.put(key, Arc::clone(&canonical));
+    HomSpaceId {
+        prehash,
+        key: canonical,
+    }
+}
+
 fn fusion_tree_layout_from_keys<R>(
     rule: &R,
     keys: Vec<FusionTreeBlockKey>,
@@ -213,7 +314,12 @@ impl FusionTreeHomSpace {
     /// assert_eq!(hom.domain().len(), 1);
     /// ```
     pub fn new(codomain: FusionProductSpace, domain: FusionProductSpace) -> Self {
-        Self { codomain, domain }
+        let id = intern_hom_space(&codomain, &domain);
+        Self {
+            codomain,
+            domain,
+            id,
+        }
     }
 
     /// Builds a hom space when each external leg has exactly one sector,
@@ -291,6 +397,13 @@ impl FusionTreeHomSpace {
     #[inline]
     pub fn rank(&self) -> usize {
         self.codomain.len() + self.domain.len()
+    }
+
+    /// Collision-safe process-local semantic identity assigned at construction.
+    /// Hashing is O(1), and equal spaces compare equal across intern eviction.
+    #[inline]
+    pub fn id(&self) -> HomSpaceId {
+        self.id.clone()
     }
 
     pub fn select<R>(
