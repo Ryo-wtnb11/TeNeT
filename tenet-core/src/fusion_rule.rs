@@ -27,7 +27,58 @@ impl CoupledSectorFold {
     }
 }
 
-pub trait FusionRule {
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RuleIdentity(RuleIdentityNode);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum RuleIdentityNode {
+    Type(std::any::TypeId),
+    Unique(std::any::TypeId, u64),
+    Product(Arc<ProductRuleIdentity>),
+}
+
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct ProductRuleIdentity {
+        codec: std::any::TypeId,
+        left: RuleIdentity,
+        right: RuleIdentity,
+}
+
+impl RuleIdentity {
+    pub fn of_type<R: 'static + ?Sized>() -> Self {
+        Self(RuleIdentityNode::Type(std::any::TypeId::of::<R>()))
+    }
+
+    pub fn new_unique<R: 'static>() -> Self {
+        static NEXT_INSTANCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let instance = NEXT_INSTANCE
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |current| current.checked_add(1),
+            )
+            .expect("fusion-rule identity space exhausted");
+        Self(RuleIdentityNode::Unique(
+            std::any::TypeId::of::<R>(),
+            instance,
+        ))
+    }
+
+    fn product<Codec: 'static>(left: Self, right: Self) -> Self {
+        Self(RuleIdentityNode::Product(Arc::new(ProductRuleIdentity {
+            codec: std::any::TypeId::of::<Codec>(),
+            left,
+            right,
+        })))
+    }
+}
+
+pub trait FusionRule: 'static {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+
     fn fusion_style(&self) -> FusionStyleKind;
 
     fn braiding_style(&self) -> BraidingStyleKind;
@@ -642,8 +693,12 @@ impl<LeftRule, RightRule, Codec> FusionRule for ProductFusionRule<LeftRule, Righ
 where
     LeftRule: FusionRule,
     RightRule: FusionRule,
-    Codec: ProductSectorCodec,
+    Codec: ProductSectorCodec + 'static,
 {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::product::<Codec>(self.left.rule_identity(), self.right.rule_identity())
+    }
+
     fn fusion_style(&self) -> FusionStyleKind {
         self.left
             .fusion_style()
@@ -703,7 +758,7 @@ impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionRule
 where
     LeftRule: MultiplicityFreeFusionRule,
     RightRule: MultiplicityFreeFusionRule,
-    Codec: ProductSectorCodec,
+    Codec: ProductSectorCodec + 'static,
 {
 }
 
@@ -712,7 +767,7 @@ impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionSymbols
 where
     LeftRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
     RightRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
-    Codec: ProductSectorCodec,
+    Codec: ProductSectorCodec + 'static,
 {
     type Scalar = f64;
 
@@ -771,7 +826,7 @@ where
     LeftRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
     RightRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
     // Sync via the trait's supertrait; the codec is a PhantomData marker.
-    Codec: ProductSectorCodec + Sync,
+    Codec: ProductSectorCodec + Sync + 'static,
 {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
@@ -1682,4 +1737,3 @@ impl MultiplicityFreeRigidSymbols for FibonacciFusionRule {
         Complex64::new(1.0, 0.0)
     }
 }
-

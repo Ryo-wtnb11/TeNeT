@@ -417,7 +417,8 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .bind_rule(&rule);
     let rhs_space = FusionTensorMapSpace::new(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
@@ -429,7 +430,8 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
         homspace,
         packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .bind_rule(&rule);
 
     let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
     let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![5.0], rhs_space).unwrap();
@@ -1766,7 +1768,8 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         lhs_hom.clone(),
         packed_fixture_structure(4, [(src_key, vec![1, 1, 1, 1])]).unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .bind_rule(&rule);
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
@@ -1783,7 +1786,8 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         )
         .unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .bind_rule(&rule);
     let lhs_core_space = lhs_space.clone();
     let core_dst_space = lhs_space.clone();
     let rhs_core_space = rhs_space.clone();
@@ -2802,7 +2806,9 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             .unwrap(),
             _ => unreachable!("test only has three lhs block-structure cases"),
         };
-        FusionTensorMapSpace::new(dense_space, lhs_hom.clone(), structure).unwrap()
+        FusionTensorMapSpace::new(dense_space, lhs_hom.clone(), structure)
+            .unwrap()
+            .bind_rule(&rule)
     };
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 3>::from_dims([2], [2, 2, 2]).unwrap(),
@@ -3413,7 +3419,8 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
         rhs_hom,
         packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .bind_rule(&rule);
     let lhs_core_hom = src_space
         .homspace()
         .permute(&rule, &[0, 1, 2], &[])
