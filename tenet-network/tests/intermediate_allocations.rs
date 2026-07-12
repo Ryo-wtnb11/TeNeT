@@ -132,7 +132,10 @@ fn warm_intermediate_arena_reduces_allocations_across_chi() {
             reused.1 < owned.1,
             "chi={chi}: allocated bytes did not decrease: owned={owned:?}, reused={reused:?}"
         );
-        assert!(owned_stats.owned_intermediates > owned_stats_before.owned_intermediates);
+        assert_eq!(
+            owned_stats.owned_intermediates - owned_stats_before.owned_intermediates,
+            9
+        );
         assert_eq!(
             owned_stats.reused_intermediates,
             owned_stats_before.reused_intermediates
@@ -142,6 +145,9 @@ fn warm_intermediate_arena_reduces_allocations_across_chi() {
             3,
             "the final escaping tensor remains owned once per replay"
         );
-        assert!(reused_stats.reused_intermediates > reused_stats_before.reused_intermediates);
+        assert_eq!(
+            reused_stats.reused_intermediates - reused_stats_before.reused_intermediates,
+            6
+        );
     }
 }

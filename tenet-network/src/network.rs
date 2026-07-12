@@ -466,7 +466,11 @@ impl PlannedNetwork {
         self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
     }
 
-    /// Run the compiled schedule while reusing its tensor-slot table.
+    /// Run the compiled schedule while reusing its tensor-slot table and
+    /// eligible host intermediate buffers. A returned [`Error`] preserves
+    /// checked-out reusable buffers. Backend panics are treated as fatal and
+    /// may discard workspace contents; the runtime already applies the same
+    /// policy by poisoning its execution-state mutex after an unwind.
     pub fn execute_with_workspace(
         &self,
         tensors: &[&Tensor],
@@ -577,7 +581,13 @@ impl PlannedNetwork {
                     }
                     Ok(false) => {
                         workspace.stats.owned_intermediates += 1;
-                        lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes)
+                        match lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes) {
+                            Ok(result) => Ok(result),
+                            Err(error) => {
+                                workspace.intermediates[step_index].contracted = Some(destination);
+                                Err(error)
+                            }
+                        }
                     }
                     Err(error) => {
                         workspace.intermediates[step_index].contracted = Some(destination);
@@ -634,7 +644,14 @@ impl PlannedNetwork {
                         }
                         Ok(false) => {
                             workspace.stats.owned_intermediates += 1;
-                            result.permute(codomain, domain)
+                            match result.permute(codomain, domain) {
+                                Ok(oriented) => Ok(oriented),
+                                Err(error) => {
+                                    workspace.intermediates[step_index].oriented =
+                                        Some(destination);
+                                    Err(error)
+                                }
+                            }
                         }
                         Err(error) => {
                             workspace.intermediates[step_index].oriented = Some(destination);
