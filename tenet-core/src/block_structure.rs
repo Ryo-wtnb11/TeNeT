@@ -217,7 +217,7 @@ impl FusionTreeBlockKey {
             && self.domain_tree.innerlines().is_empty()
             && self.domain_tree.vertices().is_empty()
         {
-            self.codomain_tree.compact_id()
+            self.codomain_tree.compact_id()?.checked_add(1)
         } else {
             None
         }
