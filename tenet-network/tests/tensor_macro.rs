@@ -241,6 +241,22 @@ fn planned_network_reuses_execution_workspace() {
         .unwrap();
     assert_close(first.data(), expected.data(), 1e-12);
     assert_close(second.data(), expected.data(), 1e-12);
+
+    let z = Space::z2([(0, 2), (1, 2)]);
+    let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();
+    assert!(planned
+        .execute_with_workspace(&[&wrong_a, &b, &c], &mut workspace)
+        .is_err());
+
+    let before_recovery = workspace.stats();
+    let recovered = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    assert_close(recovered.data(), expected.data(), 1e-12);
+    assert_eq!(
+        workspace.stats().reused_intermediates - before_recovery.reused_intermediates,
+        2
+    );
 }
 
 /// One immutable plan supports concurrent replay when each worker owns its

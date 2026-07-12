@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tenet::prelude::{Error, Tensor};
+use tenet::prelude::{Dtype, Error, Runtime, Scalar, Tensor, TensorExecutionContext};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::ir::NetworkIR;
@@ -396,6 +396,23 @@ struct CompiledStep {
 #[derive(Default)]
 pub struct NetworkExecutionWorkspace {
     slots: Vec<Option<Tensor>>,
+    slot_producers: Vec<Option<(usize, bool)>>,
+    intermediates: Vec<IntermediateBuffers>,
+    tensor_context: Option<TensorExecutionContext>,
+    tensor_runtime: Option<Runtime>,
+    stats: NetworkExecutionStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NetworkExecutionStats {
+    pub owned_intermediates: u64,
+    pub reused_intermediates: u64,
+}
+
+#[derive(Default)]
+struct IntermediateBuffers {
+    contracted: Option<Tensor>,
+    oriented: Option<Tensor>,
 }
 
 impl NetworkExecutionWorkspace {
@@ -405,6 +422,17 @@ impl NetworkExecutionWorkspace {
 
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
+        self.slot_producers.clear();
+    }
+
+    #[doc(hidden)]
+    pub fn clear_intermediate_buffers(&mut self) {
+        self.intermediates.clear();
+    }
+
+    #[doc(hidden)]
+    pub fn stats(&self) -> NetworkExecutionStats {
+        self.stats
     }
 
     #[cfg(test)]
@@ -438,7 +466,11 @@ impl PlannedNetwork {
         self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
     }
 
-    /// Run the compiled schedule while reusing its tensor-slot table.
+    /// Run the compiled schedule while reusing its tensor-slot table and
+    /// eligible host intermediate buffers. A returned [`Error`] preserves
+    /// checked-out reusable buffers. Backend panics are treated as fatal and
+    /// may discard workspace contents; the runtime already applies the same
+    /// policy by poisoning its execution-state mutex after an unwind.
     pub fn execute_with_workspace(
         &self,
         tensors: &[&Tensor],
@@ -455,10 +487,29 @@ impl PlannedNetwork {
         workspace
             .slots
             .resize_with(self.schedule.slot_count, || None);
+        workspace
+            .slot_producers
+            .resize(self.schedule.slot_count, None);
+        workspace
+            .intermediates
+            .resize_with(self.schedule.steps.len(), IntermediateBuffers::default);
+        let runtime = tensors[0].runtime();
+        if workspace
+            .tensor_runtime
+            .as_ref()
+            .is_none_or(|cached| !cached.shares_state_with(runtime))
+        {
+            workspace.tensor_context = Some(TensorExecutionContext::for_runtime(runtime)?);
+            workspace.tensor_runtime = Some(runtime.clone());
+            workspace.intermediates.clear();
+            workspace
+                .intermediates
+                .resize_with(self.schedule.steps.len(), IntermediateBuffers::default);
+        }
         for slot in &mut workspace.slots {
             *slot = None;
         }
-        let slots = &mut workspace.slots;
+        workspace.slot_producers.fill(None);
         for (i, &tensor) in tensors.iter().enumerate() {
             if tensor.rank() != self.schedule.input_ranks[i]
                 || tensor.codomain_rank() != self.input_codomain_ranks[i]
@@ -476,31 +527,198 @@ impl PlannedNetwork {
             } else {
                 tensor.clone()
             };
-            slots[i] = Some(lowered);
+            workspace.slots[i] = Some(lowered);
         }
 
-        for step in &self.schedule.steps {
-            let lhs = slots[step.lhs_slot]
+        for (step_index, step) in self.schedule.steps.iter().enumerate() {
+            let lhs = workspace.slots[step.lhs_slot]
                 .take()
                 .ok_or_else(|| invalid("lhs operand already consumed"))?;
-            let rhs = slots[step.rhs_slot]
+            let lhs_producer = workspace.slot_producers[step.lhs_slot].take();
+            let rhs = workspace.slots[step.rhs_slot]
                 .take()
                 .ok_or_else(|| invalid("rhs operand already consumed"))?;
-            let mut result =
-                lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes)?;
+            let rhs_producer = workspace.slot_producers[step.rhs_slot].take();
+
+            let contraction = if let Some(mut destination) =
+                workspace.intermediates[step_index].contracted.take()
+            {
+                match workspace
+                    .tensor_context
+                    .as_ref()
+                    .expect("execution context initialized")
+                    .can_contract_overwrite_into(
+                        &destination,
+                        &lhs,
+                        &rhs,
+                        &step.lhs_contract_axes,
+                        &step.rhs_contract_axes,
+                    ) {
+                    Ok(true) => {
+                        let alpha = identity_scalar(lhs.dtype());
+                        let write = workspace
+                            .tensor_context
+                            .as_mut()
+                            .expect("execution context initialized")
+                            .contract_overwrite_into(
+                                &mut destination,
+                                &lhs,
+                                &rhs,
+                                &step.lhs_contract_axes,
+                                &step.rhs_contract_axes,
+                                alpha,
+                            );
+                        match write {
+                            Ok(()) => {
+                                workspace.stats.reused_intermediates += 1;
+                                Ok(destination)
+                            }
+                            Err(error) => {
+                                workspace.intermediates[step_index].contracted = Some(destination);
+                                Err(error)
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        workspace.stats.owned_intermediates += 1;
+                        match lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes) {
+                            Ok(result) => Ok(result),
+                            Err(error) => {
+                                workspace.intermediates[step_index].contracted = Some(destination);
+                                Err(error)
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        workspace.intermediates[step_index].contracted = Some(destination);
+                        Err(error)
+                    }
+                }
+            } else {
+                workspace.stats.owned_intermediates += 1;
+                lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes)
+            };
+            let mut result = match contraction {
+                Ok(result) => result,
+                Err(error) => {
+                    return_intermediate(workspace, lhs, lhs_producer);
+                    return_intermediate(workspace, rhs, rhs_producer);
+                    return Err(error);
+                }
+            };
+            let mut result_producer = (step_index, false);
             if let Some((codomain, domain)) = &step.result_permutation {
-                result = result.permute(codomain, domain)?;
+                let permutation = if let Some(mut destination) =
+                    workspace.intermediates[step_index].oriented.take()
+                {
+                    match workspace
+                        .tensor_context
+                        .as_ref()
+                        .expect("execution context initialized")
+                        .can_permute_overwrite_into(&destination, &result, codomain, domain)
+                    {
+                        Ok(true) => {
+                            let alpha = identity_scalar(result.dtype());
+                            let write = workspace
+                                .tensor_context
+                                .as_mut()
+                                .expect("execution context initialized")
+                                .permute_overwrite_into(
+                                    &mut destination,
+                                    &result,
+                                    codomain,
+                                    domain,
+                                    alpha,
+                                );
+                            match write {
+                                Ok(()) => {
+                                    workspace.stats.reused_intermediates += 1;
+                                    Ok(destination)
+                                }
+                                Err(error) => {
+                                    workspace.intermediates[step_index].oriented =
+                                        Some(destination);
+                                    Err(error)
+                                }
+                            }
+                        }
+                        Ok(false) => {
+                            workspace.stats.owned_intermediates += 1;
+                            match result.permute(codomain, domain) {
+                                Ok(oriented) => Ok(oriented),
+                                Err(error) => {
+                                    workspace.intermediates[step_index].oriented =
+                                        Some(destination);
+                                    Err(error)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            workspace.intermediates[step_index].oriented = Some(destination);
+                            Err(error)
+                        }
+                    }
+                } else {
+                    workspace.stats.owned_intermediates += 1;
+                    result.permute(codomain, domain)
+                };
+                let oriented = match permutation {
+                    Ok(oriented) => oriented,
+                    Err(error) => {
+                        workspace.intermediates[step_index].contracted = Some(result);
+                        return_intermediate(workspace, lhs, lhs_producer);
+                        return_intermediate(workspace, rhs, rhs_producer);
+                        return Err(error);
+                    }
+                };
+                workspace.intermediates[step_index].contracted = Some(result);
+                result = oriented;
+                result_producer = (step_index, true);
             }
-            slots[step.result_slot] = Some(result);
+            return_intermediate(workspace, lhs, lhs_producer);
+            return_intermediate(workspace, rhs, rhs_producer);
+            workspace.slots[step.result_slot] = Some(result);
+            workspace.slot_producers[step.result_slot] = Some(result_producer);
         }
 
-        let mut result = slots[self.schedule.final_slot]
+        let mut result = workspace.slots[self.schedule.final_slot]
             .take()
             .ok_or_else(|| invalid("no final tensor produced"))?;
+        let result_producer = workspace.slot_producers[self.schedule.final_slot].take();
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
-            result = result.permute(codomain, domain)?;
+            let output = match result.permute(codomain, domain) {
+                Ok(output) => output,
+                Err(error) => {
+                    return_intermediate(workspace, result, result_producer);
+                    return Err(error);
+                }
+            };
+            return_intermediate(workspace, result, result_producer);
+            result = output;
         }
         Ok(result)
+    }
+}
+
+fn identity_scalar(dtype: Dtype) -> Scalar {
+    match dtype {
+        Dtype::F64 => Scalar::F64(1.0),
+        Dtype::C64 => Scalar::C64(tenet::prelude::Complex64::new(1.0, 0.0)),
+    }
+}
+
+fn return_intermediate(
+    workspace: &mut NetworkExecutionWorkspace,
+    tensor: Tensor,
+    producer: Option<(usize, bool)>,
+) {
+    if let Some((step, oriented)) = producer {
+        let destination = if oriented {
+            &mut workspace.intermediates[step].oriented
+        } else {
+            &mut workspace.intermediates[step].contracted
+        };
+        *destination = Some(tensor);
     }
 }
 

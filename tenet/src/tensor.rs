@@ -35,11 +35,13 @@ use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::OperationError;
 use tenet_tensors::{
     DynamicFusionMapSpace, OutputAxisOrder, RecouplingCoefficientAction, TensorContractSpec,
-    TreeTransformOperation,
+    TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
-use crate::runtime::{with_rule_ctx, Ctx, Ctxs, Runtime};
+use crate::runtime::{
+    with_rule_ctx, BuiltinKey, Ctx, Ctxs, ProductKey, Runtime, Su3Key, TripleKey,
+};
 use crate::space::{with_rule, RuleKind, Space};
 
 /// The scalar type a [`Tensor`] stores, fixed at construction.
@@ -393,6 +395,119 @@ impl UserScalar for Complex64 {
 
     fn rand_unit(state: &mut u64) -> Self {
         Complex64::new(rand_unit(state), rand_unit(state))
+    }
+}
+
+/// Caller-owned host execution state for dynamic destination operations.
+/// [`Self::default`] is independent of a [`Runtime`]; use
+/// [`Self::for_runtime`] when execution must inherit and remain bound to a
+/// runtime's backend configuration.
+#[derive(Default)]
+pub struct TensorExecutionContext {
+    runtime: Option<Runtime>,
+    u1: Ctxs<BuiltinKey>,
+    z2: Ctxs<BuiltinKey>,
+    fz2: Ctxs<BuiltinKey>,
+    su2: Ctxs<BuiltinKey>,
+    u1_fz2: Ctxs<ProductKey>,
+    fz2_u1_su2: Ctxs<TripleKey>,
+    su3: Ctxs<Su3Key>,
+}
+
+impl TensorExecutionContext {
+    /// Builds caller-owned execution state with the same CPU execution
+    /// configuration as `runtime`.
+    pub fn for_runtime(runtime: &Runtime) -> Result<Self, Error> {
+        let config = runtime.execution_config();
+        let mut context = Self {
+            runtime: Some(runtime.clone()),
+            u1: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            z2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            su2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            u1_fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            fz2_u1_su2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            su3: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+        };
+        if let Some(threads) = config.recoupling_threads {
+            context.set_recoupling_threads(threads);
+        }
+        if let Some(backend) = config.transpose_backend {
+            context.set_transpose_backend(backend);
+        }
+        Ok(context)
+    }
+
+    fn accepts_runtime(&self, tensor: &Tensor) -> bool {
+        self.runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.shares_state_with(tensor.runtime()))
+    }
+
+    fn validate_runtime(&self, tensor: &Tensor) -> Result<(), Error> {
+        if self.accepts_runtime(tensor) {
+            Ok(())
+        } else {
+            Err(Error::InvalidArgument(
+                "execution context is bound to a different runtime".to_string(),
+            ))
+        }
+    }
+
+    fn set_recoupling_threads(&mut self, threads: usize) {
+        macro_rules! apply {
+            ($contexts:expr) => {
+                $contexts
+                    .f64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .set_recoupling_threads(threads);
+                $contexts
+                    .c64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .set_recoupling_threads(threads);
+            };
+        }
+        apply!(self.u1);
+        apply!(self.z2);
+        apply!(self.fz2);
+        apply!(self.su2);
+        apply!(self.u1_fz2);
+        apply!(self.fz2_u1_su2);
+        apply!(self.su3);
+    }
+
+    fn set_transpose_backend(&mut self, backend: tenet_tensors::TransposeBackend) {
+        macro_rules! apply {
+            ($contexts:expr) => {
+                $contexts
+                    .f64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .set_transpose_backend(backend);
+                $contexts
+                    .f64
+                    .contract_backend_mut()
+                    .set_transpose_backend(backend);
+                $contexts
+                    .c64
+                    .tree_context_mut()
+                    .backend_mut()
+                    .set_transpose_backend(backend);
+                $contexts
+                    .c64
+                    .contract_backend_mut()
+                    .set_transpose_backend(backend);
+            };
+        }
+        apply!(self.u1);
+        apply!(self.z2);
+        apply!(self.fz2);
+        apply!(self.su2);
+        apply!(self.u1_fz2);
+        apply!(self.fz2_u1_su2);
+        apply!(self.su3);
     }
 }
 
@@ -1979,6 +2094,50 @@ impl Tensor {
         }
         if self.dtype() != other.dtype() {
             return Err(Error::DtypeMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_host_destination(&self, input: &Self) -> Result<(), Error> {
+        self.check_same_world(input)?;
+        if self.placement() != Placement::Host {
+            return Err(Error::PlacementMismatch);
+        }
+        if self.adjoint_source.is_some() || matches!(self.data.as_ref(), Data::Diagonal(_)) {
+            return Err(Error::InvalidArgument(
+                "destination must use ordinary dense host storage".to_string(),
+            ));
+        }
+        if Arc::ptr_eq(&self.data, &input.data) {
+            return Err(Error::InvalidArgument(
+                "destination storage must not alias an input".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_exact_destination_space(
+        &self,
+        expected: &DynamicFusionMapSpace,
+    ) -> Result<(), Error> {
+        if self.space.as_ref() != expected {
+            return Err(Error::InvalidArgument(
+                "destination fusion space or block layout does not match the operation result"
+                    .to_string(),
+            ));
+        }
+        let required = expected.required_len()?;
+        let actual = match self.data.as_ref() {
+            Data::F64(data) => data.len(),
+            Data::C64(data) => data.len(),
+            Data::Diagonal(_) => 0,
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => 0,
+        };
+        if actual != required {
+            return Err(Error::InvalidArgument(format!(
+                "destination storage length {actual} does not match required length {required}"
+            )));
         }
         Ok(())
     }
@@ -3727,6 +3886,532 @@ impl Tensor {
             adjoint_source: None,
             materialized: OnceLock::new(),
         })
+    }
+}
+
+impl TensorExecutionContext {
+    /// Whether `dst` has the exact host layout required by a contraction.
+    pub fn can_contract_overwrite_into(
+        &self,
+        dst: &Tensor,
+        lhs: &Tensor,
+        rhs: &Tensor,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<bool, Error> {
+        if !self.accepts_runtime(lhs)
+            || !self.accepts_runtime(rhs)
+            || !self.accepts_runtime(dst)
+            || lhs.check_same_world(rhs).is_err()
+            || dst.check_same_world(lhs).is_err()
+            || dst.check_same_world(rhs).is_err()
+            || dst.placement() != Placement::Host
+            || lhs.adjoint_source.is_some()
+            || rhs.adjoint_source.is_some()
+            || dst.adjoint_source.is_some()
+            || matches!(lhs.data.as_ref(), Data::Diagonal(_))
+            || matches!(rhs.data.as_ref(), Data::Diagonal(_))
+            || matches!(dst.data.as_ref(), Data::Diagonal(_))
+            || Arc::ptr_eq(&dst.data, &lhs.data)
+            || Arc::ptr_eq(&dst.data, &rhs.data)
+        {
+            return Ok(false);
+        }
+        open_axes(lhs_axes, lhs.rank())?;
+        open_axes(rhs_axes, rhs.rank())?;
+        let expected = if lhs.rule == RuleKind::Su3 {
+            DynamicFusionMapSpace::contracted_generic(
+                &Su3FusionRule::new(),
+                &lhs.space,
+                &rhs.space,
+                lhs_axes,
+                rhs_axes,
+            )?
+        } else {
+            with_rule!(lhs.rule, rule, {
+                DynamicFusionMapSpace::contracted(rule, &lhs.space, &rhs.space, lhs_axes, rhs_axes)
+            })?
+        };
+        Ok(dst.validate_exact_destination_space(&expected).is_ok()
+            && Arc::strong_count(&dst.data) == 1)
+    }
+
+    /// Whether `dst` has the exact host layout required by a permutation.
+    pub fn can_permute_overwrite_into(
+        &self,
+        dst: &Tensor,
+        src: &Tensor,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<bool, Error> {
+        if !self.accepts_runtime(src)
+            || !self.accepts_runtime(dst)
+            || dst.check_same_world(src).is_err()
+            || dst.placement() != Placement::Host
+            || src.adjoint_source.is_some()
+            || dst.adjoint_source.is_some()
+            || matches!(src.data.as_ref(), Data::Diagonal(_))
+            || matches!(dst.data.as_ref(), Data::Diagonal(_))
+            || Arc::ptr_eq(&dst.data, &src.data)
+        {
+            return Ok(false);
+        }
+        let operation = TreeTransformOperation::permute(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+        );
+        let expected = if src.rule == RuleKind::Su3 {
+            src.space
+                .transformed_generic(&Su3FusionRule::new(), &operation)?
+        } else {
+            with_rule!(src.rule, rule, src.space.transformed(rule, &operation))?
+        };
+        Ok(dst.validate_exact_destination_space(&expected).is_ok()
+            && Arc::strong_count(&dst.data) == 1)
+    }
+
+    /// Overwrites an exact-layout dense host destination with
+    /// `alpha * contract(lhs, rhs)`. Validation errors leave `dst` unchanged;
+    /// an error returned after backend execution begins may leave it partially
+    /// overwritten.
+    pub fn contract_overwrite_into(
+        &mut self,
+        dst: &mut Tensor,
+        lhs: &Tensor,
+        rhs: &Tensor,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        self.validate_runtime(lhs)?;
+        self.validate_runtime(rhs)?;
+        self.validate_runtime(dst)?;
+        lhs.check_same_world(rhs)?;
+        dst.validate_host_destination(lhs)?;
+        dst.validate_host_destination(rhs)?;
+        if lhs.adjoint_source.is_some()
+            || rhs.adjoint_source.is_some()
+            || matches!(lhs.data.as_ref(), Data::Diagonal(_))
+            || matches!(rhs.data.as_ref(), Data::Diagonal(_))
+        {
+            return Err(Error::InvalidArgument(
+                "dynamic destination contraction requires ordinary dense inputs".to_string(),
+            ));
+        }
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(Error::InvalidArgument(format!(
+                "contracted axis lists differ in length: {} vs {}",
+                lhs_axes.len(),
+                rhs_axes.len()
+            )));
+        }
+        open_axes(lhs_axes, lhs.rank())?;
+        open_axes(rhs_axes, rhs.rank())?;
+
+        let expected = if lhs.rule == RuleKind::Su3 {
+            DynamicFusionMapSpace::contracted_generic(
+                &Su3FusionRule::new(),
+                &lhs.space,
+                &rhs.space,
+                lhs_axes,
+                rhs_axes,
+            )?
+        } else {
+            with_rule!(lhs.rule, rule, {
+                DynamicFusionMapSpace::contracted(rule, &lhs.space, &rhs.space, lhs_axes, rhs_axes)
+            })?
+        };
+        dst.validate_exact_destination_space(&expected)?;
+
+        match (
+            Arc::get_mut(&mut dst.data),
+            lhs.data.as_ref(),
+            rhs.data.as_ref(),
+            alpha,
+        ) {
+            (
+                Some(Data::F64(dst_data)),
+                Data::F64(lhs_data),
+                Data::F64(rhs_data),
+                Scalar::F64(alpha),
+            ) => {
+                // SU(3)'s generic plan omits destination blocks with no GEMM;
+                // zeroing only that route prevents stale arena data without
+                // taxing the fully overwriting built-in-rule fast paths.
+                if dst.rule == RuleKind::Su3 {
+                    dst_data.fill(0.0);
+                }
+                dispatch_contract_into(
+                    self, dst.rule, &expected, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes,
+                    rhs_axes, alpha, 0.0,
+                )
+            }
+            (
+                Some(Data::C64(dst_data)),
+                Data::C64(lhs_data),
+                Data::C64(rhs_data),
+                Scalar::C64(alpha),
+            ) => {
+                if dst.rule == RuleKind::Su3 {
+                    dst_data.fill(Complex64::new(0.0, 0.0));
+                }
+                dispatch_contract_into(
+                    self,
+                    dst.rule,
+                    &expected,
+                    dst_data,
+                    lhs,
+                    lhs_data,
+                    rhs,
+                    rhs_data,
+                    lhs_axes,
+                    rhs_axes,
+                    alpha,
+                    Complex64::new(0.0, 0.0),
+                )
+            }
+            (None, _, _, _) => Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            )),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    /// Overwrites an exact-layout dense host destination with
+    /// `alpha * permute(src)`. Validation errors leave `dst` unchanged; an
+    /// error returned after backend execution begins may leave it partially
+    /// overwritten.
+    pub fn permute_overwrite_into(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        self.validate_runtime(src)?;
+        self.validate_runtime(dst)?;
+        dst.validate_host_destination(src)?;
+        if src.adjoint_source.is_some() || matches!(src.data.as_ref(), Data::Diagonal(_)) {
+            return Err(Error::InvalidArgument(
+                "dynamic destination permutation requires an ordinary dense input".to_string(),
+            ));
+        }
+        let operation = TreeTransformOperation::permute(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+        );
+        let expected = if src.rule == RuleKind::Su3 {
+            src.space
+                .transformed_generic(&Su3FusionRule::new(), &operation)?
+        } else {
+            with_rule!(src.rule, rule, src.space.transformed(rule, &operation))?
+        };
+        dst.validate_exact_destination_space(&expected)?;
+
+        match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
+            (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
+                // Tree-transform plans may omit structural-zero destinations,
+                // so beta=0 alone cannot clear data retained by the arena.
+                dst_data.fill(0.0);
+                dispatch_permute_into(
+                    self, dst.rule, operation, &expected, dst_data, src, src_data, alpha, 0.0,
+                )
+            }
+            (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
+                dst_data.fill(Complex64::new(0.0, 0.0));
+                dispatch_permute_into(
+                    self,
+                    dst.rule,
+                    operation,
+                    &expected,
+                    dst_data,
+                    src,
+                    src_data,
+                    alpha,
+                    Complex64::new(0.0, 0.0),
+                )
+            }
+            (None, _, _) => Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            )),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contract_into_with_rule<R, D, Key>(
+    contexts: &mut Ctxs<Key>,
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    lhs: &Tensor,
+    lhs_data: &[D],
+    rhs: &Tensor,
+    rhs_data: &[D],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = Key>,
+    D: UserScalar,
+    Key: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    D::ctx_of(contexts)
+        .tensorcontract_fusion_dyn_into(
+            rule,
+            dst_space,
+            dst_data,
+            &lhs.space,
+            lhs_data,
+            &rhs.space,
+            rhs_data,
+            TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
+            alpha,
+            beta,
+        )
+        .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_contract_into<D: UserScalar>(
+    context: &mut TensorExecutionContext,
+    rule_kind: RuleKind,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    lhs: &Tensor,
+    lhs_data: &[D],
+    rhs: &Tensor,
+    rhs_data: &[D],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error> {
+    match rule_kind {
+        RuleKind::U1 => contract_into_with_rule(
+            &mut context.u1,
+            &tenet_core::U1FusionRule,
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            beta,
+        ),
+        RuleKind::Z2 => contract_into_with_rule(
+            &mut context.z2,
+            &tenet_core::Z2FusionRule,
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            beta,
+        ),
+        RuleKind::FZ2 => contract_into_with_rule(
+            &mut context.fz2,
+            &tenet_core::FermionParityFusionRule,
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            beta,
+        ),
+        RuleKind::SU2 => contract_into_with_rule(
+            &mut context.su2,
+            &tenet_core::SU2FusionRule,
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            beta,
+        ),
+        RuleKind::U1FZ2 => contract_into_with_rule(
+            &mut context.u1_fz2,
+            &tenet_core::ProductFusionRule::<
+                tenet_core::U1FusionRule,
+                tenet_core::FermionParityFusionRule,
+            >::new(
+                tenet_core::U1FusionRule,
+                tenet_core::FermionParityFusionRule,
+            ),
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            beta,
+        ),
+        RuleKind::FZ2U1SU2 => contract_into_with_rule(
+            &mut context.fz2_u1_su2,
+            &tenet_core::ProductFusionRule::<
+                tenet_core::ProductFusionRule<
+                    tenet_core::FermionParityFusionRule,
+                    tenet_core::U1FusionRule,
+                >,
+                tenet_core::SU2FusionRule,
+            >::new(
+                tenet_core::ProductFusionRule::<
+                    tenet_core::FermionParityFusionRule,
+                    tenet_core::U1FusionRule,
+                >::new(
+                    tenet_core::FermionParityFusionRule,
+                    tenet_core::U1FusionRule,
+                ),
+                tenet_core::SU2FusionRule,
+            ),
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            alpha,
+            beta,
+        ),
+        RuleKind::Su3 => D::ctx_of(&mut context.su3)
+            .tensorcontract_fusion_dyn_into_generic(
+                &Su3FusionRule::new(),
+                dst_space,
+                dst_data,
+                &lhs.space,
+                lhs_data,
+                &rhs.space,
+                rhs_data,
+                TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
+                alpha,
+                beta,
+            )
+            .map_err(Into::into),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn permute_into_with_rule<R, D, Key>(
+    contexts: &mut Ctxs<Key>,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src: &Tensor,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = Key>,
+    D: UserScalar,
+    Key: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    D::ctx_of(contexts)
+        .tree_context_mut()
+        .tree_transform_dyn_into(
+            rule,
+            operation,
+            dst_space.structure(),
+            src.space.structure(),
+            dst_data,
+            src_data,
+            alpha,
+            beta,
+        )
+        .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_permute_into<D: UserScalar>(
+    context: &mut TensorExecutionContext,
+    rule_kind: RuleKind,
+    operation: TreeTransformOperation,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src: &Tensor,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error> {
+    macro_rules! apply {
+        ($contexts:expr, $rule:expr) => {
+            permute_into_with_rule(
+                $contexts, $rule, operation, dst_space, dst_data, src, src_data, alpha, beta,
+            )
+        };
+    }
+    match rule_kind {
+        RuleKind::U1 => apply!(&mut context.u1, &tenet_core::U1FusionRule),
+        RuleKind::Z2 => apply!(&mut context.z2, &tenet_core::Z2FusionRule),
+        RuleKind::FZ2 => apply!(&mut context.fz2, &tenet_core::FermionParityFusionRule),
+        RuleKind::SU2 => apply!(&mut context.su2, &tenet_core::SU2FusionRule),
+        RuleKind::U1FZ2 => apply!(
+            &mut context.u1_fz2,
+            &tenet_core::ProductFusionRule::<
+                tenet_core::U1FusionRule,
+                tenet_core::FermionParityFusionRule,
+            >::new(
+                tenet_core::U1FusionRule,
+                tenet_core::FermionParityFusionRule,
+            )
+        ),
+        RuleKind::FZ2U1SU2 => apply!(
+            &mut context.fz2_u1_su2,
+            &tenet_core::ProductFusionRule::<
+                tenet_core::ProductFusionRule<
+                    tenet_core::FermionParityFusionRule,
+                    tenet_core::U1FusionRule,
+                >,
+                tenet_core::SU2FusionRule,
+            >::new(
+                tenet_core::ProductFusionRule::<
+                    tenet_core::FermionParityFusionRule,
+                    tenet_core::U1FusionRule,
+                >::new(
+                    tenet_core::FermionParityFusionRule,
+                    tenet_core::U1FusionRule,
+                ),
+                tenet_core::SU2FusionRule,
+            )
+        ),
+        RuleKind::Su3 => D::ctx_of(&mut context.su3)
+            .tree_context_mut()
+            .tree_transform_dyn_into_generic(
+                &Su3FusionRule::new(),
+                operation,
+                dst_space.structure(),
+                src.space.structure(),
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )
+            .map_err(Into::into),
     }
 }
 

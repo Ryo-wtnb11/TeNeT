@@ -68,7 +68,7 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     /// Builds the per-scalar contexts with an explicit thread count and/or CPU
     /// GEMM provider for the contraction/recoupling backend. Passing `(None,
     /// None)` reproduces [`Ctxs::default`] but through the same seam.
-    fn with_config(
+    pub(crate) fn with_config(
         threads: Option<usize>,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
     ) -> Result<Self, Error> {
@@ -313,6 +313,15 @@ pub(crate) use with_rule_ctx;
 struct RuntimeInner {
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
+    execution_config: RuntimeExecutionConfig,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RuntimeExecutionConfig {
+    pub(crate) dense_threads: Option<usize>,
+    pub(crate) gemm_kind: Option<tenet_dense::CpuBackendKind>,
+    pub(crate) recoupling_threads: Option<usize>,
+    pub(crate) transpose_backend: Option<TransposeBackend>,
 }
 
 /// Execution runtime for the user-layer [`crate::prelude::Tensor`] API.
@@ -363,6 +372,15 @@ impl Runtime {
 
     pub(crate) fn same_runtime(&self, other: &Runtime) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    #[doc(hidden)]
+    pub fn shares_state_with(&self, other: &Runtime) -> bool {
+        self.same_runtime(other)
+    }
+
+    pub(crate) fn execution_config(&self) -> RuntimeExecutionConfig {
+        self.inner.execution_config
     }
 
     /// Snapshot of this runtime's contraction-plan-cache configuration.
@@ -690,6 +708,12 @@ impl RuntimeBuilder {
             inner: Arc::new(RuntimeInner {
                 state: Mutex::new(state),
                 rand_counter: AtomicU64::new(0),
+                execution_config: RuntimeExecutionConfig {
+                    dense_threads,
+                    gemm_kind,
+                    recoupling_threads: self.recoupling_threads,
+                    transpose_backend: self.transpose_backend,
+                },
             }),
         })
     }
