@@ -2578,6 +2578,37 @@ mod tests {
     }
 
     #[test]
+    fn compact_lookup_distinguishes_rank1_tree_duality() {
+        let nondual = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [],
+            None,
+            [false],
+            [],
+            [],
+            [],
+            [],
+            [],
+        );
+        let dual = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [],
+            None,
+            [true],
+            [],
+            [],
+            [],
+            [],
+            [],
+        );
+        let structure = SectorStructure::from_keys(1, [BlockKey::from(nondual)]).unwrap();
+
+        assert!(structure.has_compact_lookup());
+        assert_eq!(structure.find_index(&BlockKey::from(dual.clone())), None);
+        assert_eq!(structure.find_fusion_tree_index(&dual), None);
+    }
+
+    #[test]
     fn fusion_tree_homspace_generates_canonical_coupled_sector_order() {
         let rule = BranchingMultiplicityFreeRule;
         let hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1)], [(1, 1), (1, 1)]);

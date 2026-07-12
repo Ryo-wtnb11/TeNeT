@@ -635,7 +635,10 @@ impl FusionTreeKey {
             && self.innerlines.is_empty()
             && self.vertices.is_empty()
         {
-            Some(self.uncoupled[0].id())
+            self.uncoupled[0]
+                .id()
+                .checked_mul(2)?
+                .checked_add(usize::from(self.is_dual[0]))
         } else {
             None
         }

@@ -989,14 +989,16 @@ where
         for index in run_start..run_end {
             let key = &keys[index];
             let shape = shapes[index].as_ref();
-            let (_, row_start, _) = row_blocks
-                .iter()
-                .find(|(tree, _, _)| *tree == key.codomain_tree())
-                .expect("row block registered above");
-            let (_, col_start, _) = col_blocks
-                .iter()
-                .find(|(tree, _, _)| *tree == key.domain_tree())
-                .expect("column block registered above");
+            let row_start = row_blocks[row_index
+                .get(key.codomain_tree())
+                .copied()
+                .expect("row block registered above")]
+            .1;
+            let col_start = col_blocks[col_index
+                .get(key.domain_tree())
+                .copied()
+                .expect("column block registered above")]
+            .1;
             let mut strides = Vec::with_capacity(rank);
             let mut stride = 1usize;
             for &dim in &shape[..nout] {
@@ -1015,7 +1017,7 @@ where
             let offset = sector_offset
                 + row_start
                 + matrix_rows
-                    .checked_mul(*col_start)
+                    .checked_mul(col_start)
                     .ok_or(CoreError::ElementCountOverflow)?;
             specs.push(BlockSpec::with_key(
                 BlockKey::FusionTree(key.clone()),
