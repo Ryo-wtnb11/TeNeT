@@ -25,6 +25,21 @@ fn su3_space_construction_and_dim() {
     assert_eq!(v.dual().dual(), v);
     // Out-of-table irrep is rejected.
     assert!(Space::su3([((5, 5), 1)]).is_err()); // dim(5,5) > 27
+    assert_eq!(Space::su3([((2, 0), 1)]).unwrap().dim(), 6);
+    assert_eq!(Space::su3([((1, 1), 1)]).unwrap().dim(), 8);
+    assert_eq!(Space::su3([((2, 2), 1)]).unwrap().dim(), 27);
+}
+
+#[test]
+fn su3_tensor_leg_dimensions_feed_network_planners() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    let tensor = Tensor::zeros(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+
+    assert_eq!(tensor.leg_dims().unwrap(), vec![v.dim(); 3]);
+    for axis in 0..3 {
+        assert_eq!(tensor.leg_dim(axis).unwrap(), v.dim());
+    }
 }
 
 #[test]

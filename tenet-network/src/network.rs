@@ -407,6 +407,11 @@ pub struct NetworkExecutionWorkspace {
 pub struct NetworkExecutionStats {
     pub owned_intermediates: u64,
     pub reused_intermediates: u64,
+    pub owned_contractions: u64,
+    pub reused_contractions: u64,
+    pub owned_orientations: u64,
+    pub reused_orientations: u64,
+    pub escaped_outputs: u64,
 }
 
 #[derive(Default)]
@@ -571,6 +576,7 @@ impl PlannedNetwork {
                         match write {
                             Ok(()) => {
                                 workspace.stats.reused_intermediates += 1;
+                                workspace.stats.reused_contractions += 1;
                                 Ok(destination)
                             }
                             Err(error) => {
@@ -581,6 +587,7 @@ impl PlannedNetwork {
                     }
                     Ok(false) => {
                         workspace.stats.owned_intermediates += 1;
+                        workspace.stats.owned_contractions += 1;
                         match lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes) {
                             Ok(result) => Ok(result),
                             Err(error) => {
@@ -596,6 +603,7 @@ impl PlannedNetwork {
                 }
             } else {
                 workspace.stats.owned_intermediates += 1;
+                workspace.stats.owned_contractions += 1;
                 lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes)
             };
             let mut result = match contraction {
@@ -633,6 +641,7 @@ impl PlannedNetwork {
                             match write {
                                 Ok(()) => {
                                     workspace.stats.reused_intermediates += 1;
+                                    workspace.stats.reused_orientations += 1;
                                     Ok(destination)
                                 }
                                 Err(error) => {
@@ -644,6 +653,7 @@ impl PlannedNetwork {
                         }
                         Ok(false) => {
                             workspace.stats.owned_intermediates += 1;
+                            workspace.stats.owned_orientations += 1;
                             match result.permute(codomain, domain) {
                                 Ok(oriented) => Ok(oriented),
                                 Err(error) => {
@@ -660,6 +670,7 @@ impl PlannedNetwork {
                     }
                 } else {
                     workspace.stats.owned_intermediates += 1;
+                    workspace.stats.owned_orientations += 1;
                     result.permute(codomain, domain)
                 };
                 let oriented = match permutation {
@@ -696,6 +707,7 @@ impl PlannedNetwork {
             return_intermediate(workspace, result, result_producer);
             result = output;
         }
+        workspace.stats.escaped_outputs += 1;
         Ok(result)
     }
 }
