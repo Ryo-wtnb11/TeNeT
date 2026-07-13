@@ -236,11 +236,43 @@ fn planned_network_reuses_execution_workspace() {
     let first = planned
         .execute_with_workspace(&tensors, &mut workspace)
         .unwrap();
+    let after_first = workspace.stats();
     let second = planned
         .execute_with_workspace(&tensors, &mut workspace)
         .unwrap();
+    let after_second = workspace.stats();
+    let third = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_third = workspace.stats();
     assert_close(first.data(), expected.data(), 1e-12);
     assert_close(second.data(), expected.data(), 1e-12);
+    assert_close(third.data(), expected.data(), 1e-12);
+    assert_eq!(
+        after_second.contract_layout_preparations - after_first.contract_layout_preparations,
+        1
+    );
+    assert_eq!(
+        after_second.orientation_layout_preparations - after_first.orientation_layout_preparations,
+        1
+    );
+    assert_eq!(
+        after_third.contract_layout_preparations - after_second.contract_layout_preparations,
+        0
+    );
+    assert_eq!(
+        after_third.orientation_layout_preparations - after_second.orientation_layout_preparations,
+        0
+    );
+    assert_eq!(
+        after_third.contract_structural_comparisons - after_second.contract_structural_comparisons,
+        0
+    );
+    assert_eq!(
+        after_third.orientation_structural_comparisons
+            - after_second.orientation_structural_comparisons,
+        0
+    );
 
     let z = Space::z2([(0, 2), (1, 2)]);
     let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();

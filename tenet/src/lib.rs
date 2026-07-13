@@ -33,8 +33,9 @@ pub mod prelude {
     };
     pub use crate::space::{SectorLabel, Space};
     pub use crate::tensor::{
-        id, rand, rand_with_seed, zeros, Dtype, EigTrunc, EighTrunc, Scalar, SvdTrunc, Tensor,
-        TensorExecutionContext, TensorScalar,
+        id, rand, rand_with_seed, zeros, ContractOverwriteCache, Dtype, EigTrunc, EighTrunc,
+        OverwriteOutcome, PermuteOverwriteCache, Scalar, SvdTrunc, Tensor, TensorExecutionContext,
+        TensorScalar,
     };
     pub use num_complex::Complex64;
     pub use tenet_core::{BlockKey, FusionTreeBlockKey, SectorId};

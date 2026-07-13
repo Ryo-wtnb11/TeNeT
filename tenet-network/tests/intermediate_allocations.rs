@@ -1,4 +1,5 @@
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -13,6 +14,9 @@ static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static REALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static DEALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+static PROBE_THREAD_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROBE_THREAD_ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+static PROBE_THREAD_REALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static DEALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -29,6 +33,10 @@ static LIVE_SIZES: [AtomicUsize; REGISTRY_CAPACITY] =
     [const { AtomicUsize::new(0) }; REGISTRY_CAPACITY];
 static REGISTRY_LOCK: AtomicBool = AtomicBool::new(false);
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    static PROBE_THREAD_ENABLED: Cell<bool> = const { Cell::new(false) };
+}
 
 struct RegistryGuard;
 
@@ -191,6 +199,9 @@ fn reset_event_counters() {
     DEALLOC_CALLS.store(0, Ordering::Relaxed);
     ALLOCATED_BYTES.store(0, Ordering::Relaxed);
     DEALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    PROBE_THREAD_ALLOC_CALLS.store(0, Ordering::Relaxed);
+    PROBE_THREAD_ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    PROBE_THREAD_REALLOC_CALLS.store(0, Ordering::Relaxed);
 }
 
 fn record_realloc_result(
@@ -234,6 +245,10 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let ptr = unsafe { System.alloc(layout) };
         if ENABLED.load(Ordering::Relaxed) && !ptr.is_null() && layout.size() != 0 {
             ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            if PROBE_THREAD_ENABLED.get() {
+                PROBE_THREAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+                PROBE_THREAD_ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            }
             ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
             register_live(ptr, layout.size());
         }
@@ -253,7 +268,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
-        record_realloc_result(ptr, new_ptr, new_size, ENABLED.load(Ordering::Relaxed));
+        let enabled = ENABLED.load(Ordering::Relaxed);
+        record_realloc_result(ptr, new_ptr, new_size, enabled);
+        if enabled && !new_ptr.is_null() && PROBE_THREAD_ENABLED.get() {
+            PROBE_THREAD_REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
         new_ptr
     }
 }
@@ -483,6 +502,26 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
         structural_after.owned_orientations - structural_before.owned_orientations;
     let reused_orientations =
         structural_after.reused_orientations - structural_before.reused_orientations;
+    assert_eq!(
+        structural_after.contract_layout_preparations
+            - structural_before.contract_layout_preparations,
+        0
+    );
+    assert_eq!(
+        structural_after.orientation_layout_preparations
+            - structural_before.orientation_layout_preparations,
+        0
+    );
+    assert_eq!(
+        structural_after.contract_structural_comparisons
+            - structural_before.contract_structural_comparisons,
+        0
+    );
+    assert_eq!(
+        structural_after.orientation_structural_comparisons
+            - structural_before.orientation_structural_comparisons,
+        0
+    );
     assert_eq!(
         structural_after.escaped_outputs - structural_before.escaped_outputs,
         3
@@ -714,6 +753,62 @@ fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
     assert!(register_live_with_capacity(pointer, 64, 1));
     assert_eq!(unregister_live_with_capacity(pointer, 1), Some(64));
     assert!(register_live_with_capacity(0x2000usize as *mut u8, 32, 1));
+}
+
+#[test]
+fn rank_nine_cached_permutation_has_no_caller_thread_operation_allocation() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::u1([(0, 1)]);
+    let source = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space; 9], [], 31_901).unwrap();
+    let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0];
+    let expected = source.permute(&axes, &[]).unwrap();
+    let mut destination = expected.scale(f64::NAN).unwrap();
+    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+    let mut cache = PermuteOverwriteCache::default();
+
+    for _ in 0..3 {
+        assert_eq!(
+            context
+                .try_permute_overwrite_into(
+                    &mut cache,
+                    &mut destination,
+                    &source,
+                    &axes,
+                    &[],
+                    Scalar::F64(1.0),
+                )
+                .unwrap(),
+            OverwriteOutcome::Written
+        );
+    }
+    assert_eq!(cache.preparations(), 1);
+    let structural_comparisons = cache.structural_comparisons();
+
+    reset_event_counters();
+    reset_live_registry();
+    PROBE_THREAD_ENABLED.set(true);
+    ENABLED.store(true, Ordering::SeqCst);
+    let outcome = context
+        .try_permute_overwrite_into(
+            &mut cache,
+            &mut destination,
+            &source,
+            &axes,
+            &[],
+            Scalar::F64(1.0),
+        )
+        .unwrap();
+    ENABLED.store(false, Ordering::SeqCst);
+    PROBE_THREAD_ENABLED.set(false);
+
+    assert_eq!(outcome, OverwriteOutcome::Written);
+    assert_eq!(cache.preparations(), 1);
+    assert_eq!(cache.structural_comparisons(), structural_comparisons);
+    assert_eq!(PROBE_THREAD_ALLOC_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(PROBE_THREAD_ALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+    assert_eq!(PROBE_THREAD_REALLOC_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(destination.data(), expected.data());
 }
 
 #[test]

@@ -414,6 +414,91 @@ pub struct TensorExecutionContext {
     su3: Ctxs<Su3Key>,
 }
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverwriteOutcome {
+    Written,
+    Incompatible,
+}
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct ContractOverwriteCache {
+    prepared: Option<PreparedContractOverwrite>,
+    preparations: u64,
+    structural_comparisons: u64,
+}
+
+struct PreparedContractOverwrite {
+    lhs_space: Arc<DynamicFusionMapSpace>,
+    rhs_space: Arc<DynamicFusionMapSpace>,
+    lhs_axes: Vec<usize>,
+    rhs_axes: Vec<usize>,
+    expected: Arc<DynamicFusionMapSpace>,
+}
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct PermuteOverwriteCache {
+    prepared: Option<PreparedPermuteOverwrite>,
+    preparations: u64,
+    structural_comparisons: u64,
+}
+
+struct PreparedPermuteOverwrite {
+    source_space: Arc<DynamicFusionMapSpace>,
+    codomain_axes: Vec<usize>,
+    domain_axes: Vec<usize>,
+    operation: TreeTransformOperation,
+    expected: Arc<DynamicFusionMapSpace>,
+}
+
+enum PreparedPermuteOperation<'a> {
+    Owned(TreeTransformOperation),
+    Borrowed(&'a TreeTransformOperation),
+}
+
+fn same_dynamic_space(lhs: &Arc<DynamicFusionMapSpace>, rhs: &Arc<DynamicFusionMapSpace>) -> bool {
+    Arc::ptr_eq(lhs, rhs) || lhs.as_ref() == rhs.as_ref()
+}
+
+fn same_dynamic_space_counted(
+    lhs: &Arc<DynamicFusionMapSpace>,
+    rhs: &Arc<DynamicFusionMapSpace>,
+    structural_comparisons: &mut u64,
+) -> bool {
+    if Arc::ptr_eq(lhs, rhs) {
+        true
+    } else {
+        *structural_comparisons += 1;
+        lhs.as_ref() == rhs.as_ref()
+    }
+}
+
+impl ContractOverwriteCache {
+    #[doc(hidden)]
+    pub fn preparations(&self) -> u64 {
+        self.preparations
+    }
+
+    #[doc(hidden)]
+    pub fn structural_comparisons(&self) -> u64 {
+        self.structural_comparisons
+    }
+}
+
+impl PermuteOverwriteCache {
+    #[doc(hidden)]
+    pub fn preparations(&self) -> u64 {
+        self.preparations
+    }
+
+    #[doc(hidden)]
+    pub fn structural_comparisons(&self) -> u64 {
+        self.structural_comparisons
+    }
+}
+
 impl TensorExecutionContext {
     /// Builds caller-owned execution state with the same CPU execution
     /// configuration as `runtime`.
@@ -2157,6 +2242,26 @@ impl Tensor {
                     .to_string(),
             ));
         }
+        self.validate_destination_storage_len(expected)
+    }
+
+    fn validate_exact_destination_space_arc(
+        &self,
+        expected: &Arc<DynamicFusionMapSpace>,
+    ) -> Result<(), Error> {
+        if !same_dynamic_space(&self.space, expected) {
+            return Err(Error::InvalidArgument(
+                "destination fusion space or block layout does not match the operation result"
+                    .to_string(),
+            ));
+        }
+        self.validate_destination_storage_len(expected)
+    }
+
+    fn validate_destination_storage_len(
+        &self,
+        expected: &DynamicFusionMapSpace,
+    ) -> Result<(), Error> {
         let required = expected.required_len()?;
         let actual = match self.data.as_ref() {
             Data::F64(data) => data.len(),
@@ -4027,6 +4132,296 @@ impl TensorExecutionContext {
             && Arc::strong_count(&dst.data) == 1)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn write_contract_prepared(
+        &mut self,
+        dst: &mut Tensor,
+        lhs: &Tensor,
+        rhs: &Tensor,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        alpha: Scalar,
+        expected: &DynamicFusionMapSpace,
+    ) -> Result<(), Error> {
+        match (
+            Arc::get_mut(&mut dst.data),
+            lhs.data.as_ref(),
+            rhs.data.as_ref(),
+            alpha,
+        ) {
+            (
+                Some(Data::F64(dst_data)),
+                Data::F64(lhs_data),
+                Data::F64(rhs_data),
+                Scalar::F64(alpha),
+            ) => {
+                // SU(3)'s generic plan omits destinations with no GEMM, while
+                // built-in plans fully overwrite and should avoid the fill.
+                if dst.rule == RuleKind::Su3 {
+                    dst_data.fill(0.0);
+                }
+                dispatch_contract_into(
+                    self, dst.rule, expected, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes,
+                    rhs_axes, alpha, 0.0,
+                )
+            }
+            (
+                Some(Data::C64(dst_data)),
+                Data::C64(lhs_data),
+                Data::C64(rhs_data),
+                Scalar::C64(alpha),
+            ) => {
+                if dst.rule == RuleKind::Su3 {
+                    dst_data.fill(Complex64::new(0.0, 0.0));
+                }
+                dispatch_contract_into(
+                    self,
+                    dst.rule,
+                    expected,
+                    dst_data,
+                    lhs,
+                    lhs_data,
+                    rhs,
+                    rhs_data,
+                    lhs_axes,
+                    rhs_axes,
+                    alpha,
+                    Complex64::new(0.0, 0.0),
+                )
+            }
+            (None, _, _, _) => Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            )),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    fn write_permute_prepared(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        alpha: Scalar,
+        operation: PreparedPermuteOperation<'_>,
+        expected: &DynamicFusionMapSpace,
+    ) -> Result<(), Error> {
+        match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
+            (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
+                // Tree transforms can omit structural-zero destinations, so
+                // beta=0 cannot clear stale arena data by itself.
+                dst_data.fill(0.0);
+                dispatch_prepared_permute_into(
+                    self, dst.rule, operation, expected, dst_data, src, src_data, alpha, 0.0,
+                )
+            }
+            (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
+                dst_data.fill(Complex64::new(0.0, 0.0));
+                dispatch_prepared_permute_into(
+                    self,
+                    dst.rule,
+                    operation,
+                    expected,
+                    dst_data,
+                    src,
+                    src_data,
+                    alpha,
+                    Complex64::new(0.0, 0.0),
+                )
+            }
+            (None, _, _) => Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            )),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_contract_overwrite_into(
+        &mut self,
+        cache: &mut ContractOverwriteCache,
+        dst: &mut Tensor,
+        lhs: &Tensor,
+        rhs: &Tensor,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<OverwriteOutcome, Error> {
+        if !self.accepts_runtime(lhs)
+            || !self.accepts_runtime(rhs)
+            || !self.accepts_runtime(dst)
+            || lhs.check_same_world(rhs).is_err()
+            || dst.check_same_world(lhs).is_err()
+            || dst.check_same_world(rhs).is_err()
+            || dst.placement() != Placement::Host
+            || lhs.adjoint_source.is_some()
+            || rhs.adjoint_source.is_some()
+            || dst.adjoint_source.is_some()
+            || matches!(lhs.data.as_ref(), Data::Diagonal(_))
+            || matches!(rhs.data.as_ref(), Data::Diagonal(_))
+            || matches!(dst.data.as_ref(), Data::Diagonal(_))
+            || Arc::ptr_eq(&dst.data, &lhs.data)
+            || Arc::ptr_eq(&dst.data, &rhs.data)
+        {
+            return Ok(OverwriteOutcome::Incompatible);
+        }
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(Error::InvalidArgument(format!(
+                "contracted axis lists differ in length: {} vs {}",
+                lhs_axes.len(),
+                rhs_axes.len()
+            )));
+        }
+        open_axes(lhs_axes, lhs.rank())?;
+        open_axes(rhs_axes, rhs.rank())?;
+
+        let cache_matches = cache.prepared.as_ref().is_some_and(|prepared| {
+            same_dynamic_space_counted(
+                &prepared.lhs_space,
+                &lhs.space,
+                &mut cache.structural_comparisons,
+            ) && same_dynamic_space_counted(
+                &prepared.rhs_space,
+                &rhs.space,
+                &mut cache.structural_comparisons,
+            ) && prepared.lhs_axes == lhs_axes
+                && prepared.rhs_axes == rhs_axes
+        });
+        if !cache_matches {
+            let expected = if lhs.rule == RuleKind::Su3 {
+                DynamicFusionMapSpace::contracted_generic(
+                    &Su3FusionRule::new(),
+                    &lhs.space,
+                    &rhs.space,
+                    lhs_axes,
+                    rhs_axes,
+                )?
+            } else {
+                with_rule!(lhs.rule, rule, {
+                    DynamicFusionMapSpace::contracted(
+                        rule, &lhs.space, &rhs.space, lhs_axes, rhs_axes,
+                    )
+                })?
+            };
+            cache.prepared = Some(PreparedContractOverwrite {
+                lhs_space: Arc::clone(&lhs.space),
+                rhs_space: Arc::clone(&rhs.space),
+                lhs_axes: lhs_axes.to_vec(),
+                rhs_axes: rhs_axes.to_vec(),
+                expected: Arc::new(expected),
+            });
+            cache.preparations += 1;
+        } else {
+            let prepared = cache.prepared.as_mut().expect("matched above");
+            if !Arc::ptr_eq(&prepared.lhs_space, &lhs.space) {
+                prepared.lhs_space = Arc::clone(&lhs.space);
+            }
+            if !Arc::ptr_eq(&prepared.rhs_space, &rhs.space) {
+                prepared.rhs_space = Arc::clone(&rhs.space);
+            }
+        }
+        {
+            let prepared = cache.prepared.as_mut().expect("prepared above");
+            if !Arc::ptr_eq(&dst.space, &prepared.expected) {
+                cache.structural_comparisons += 1;
+            }
+            if dst
+                .validate_exact_destination_space_arc(&prepared.expected)
+                .is_err()
+                || Arc::strong_count(&dst.data) != 1
+            {
+                return Ok(OverwriteOutcome::Incompatible);
+            }
+            if !Arc::ptr_eq(&dst.space, &prepared.expected) {
+                prepared.expected = Arc::clone(&dst.space);
+            }
+        }
+        let prepared = cache.prepared.as_ref().expect("prepared above");
+        self.write_contract_prepared(dst, lhs, rhs, lhs_axes, rhs_axes, alpha, &prepared.expected)?;
+        Ok(OverwriteOutcome::Written)
+    }
+
+    #[doc(hidden)]
+    pub fn try_permute_overwrite_into(
+        &mut self,
+        cache: &mut PermuteOverwriteCache,
+        dst: &mut Tensor,
+        src: &Tensor,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<OverwriteOutcome, Error> {
+        if !self.accepts_runtime(src)
+            || !self.accepts_runtime(dst)
+            || dst.check_same_world(src).is_err()
+            || dst.placement() != Placement::Host
+            || src.adjoint_source.is_some()
+            || dst.adjoint_source.is_some()
+            || matches!(src.data.as_ref(), Data::Diagonal(_))
+            || matches!(dst.data.as_ref(), Data::Diagonal(_))
+            || Arc::ptr_eq(&dst.data, &src.data)
+        {
+            return Ok(OverwriteOutcome::Incompatible);
+        }
+        let cache_matches = cache.prepared.as_ref().is_some_and(|prepared| {
+            same_dynamic_space_counted(
+                &prepared.source_space,
+                &src.space,
+                &mut cache.structural_comparisons,
+            ) && prepared.codomain_axes == codomain_axes
+                && prepared.domain_axes == domain_axes
+        });
+        if !cache_matches {
+            let operation = TreeTransformOperation::permute(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+            );
+            let expected = if src.rule == RuleKind::Su3 {
+                src.space
+                    .transformed_generic(&Su3FusionRule::new(), &operation)?
+            } else {
+                with_rule!(src.rule, rule, src.space.transformed(rule, &operation))?
+            };
+            cache.prepared = Some(PreparedPermuteOverwrite {
+                source_space: Arc::clone(&src.space),
+                codomain_axes: codomain_axes.to_vec(),
+                domain_axes: domain_axes.to_vec(),
+                operation,
+                expected: Arc::new(expected),
+            });
+            cache.preparations += 1;
+        } else {
+            let prepared = cache.prepared.as_mut().expect("matched above");
+            if !Arc::ptr_eq(&prepared.source_space, &src.space) {
+                prepared.source_space = Arc::clone(&src.space);
+            }
+        }
+        {
+            let prepared = cache.prepared.as_mut().expect("prepared above");
+            if !Arc::ptr_eq(&dst.space, &prepared.expected) {
+                cache.structural_comparisons += 1;
+            }
+            if dst
+                .validate_exact_destination_space_arc(&prepared.expected)
+                .is_err()
+                || Arc::strong_count(&dst.data) != 1
+            {
+                return Ok(OverwriteOutcome::Incompatible);
+            }
+            if !Arc::ptr_eq(&dst.space, &prepared.expected) {
+                prepared.expected = Arc::clone(&dst.space);
+            }
+        }
+        let prepared = cache.prepared.as_ref().expect("prepared above");
+        self.write_permute_prepared(
+            dst,
+            src,
+            alpha,
+            PreparedPermuteOperation::Borrowed(&prepared.operation),
+            &prepared.expected,
+        )?;
+        Ok(OverwriteOutcome::Written)
+    }
+
     /// Overwrites an exact-layout dense host destination with
     /// `alpha * contract(lhs, rhs)`. Validation errors leave `dst` unchanged;
     /// an error returned after backend execution begins may leave it partially
@@ -4080,58 +4475,7 @@ impl TensorExecutionContext {
         };
         dst.validate_exact_destination_space(&expected)?;
 
-        match (
-            Arc::get_mut(&mut dst.data),
-            lhs.data.as_ref(),
-            rhs.data.as_ref(),
-            alpha,
-        ) {
-            (
-                Some(Data::F64(dst_data)),
-                Data::F64(lhs_data),
-                Data::F64(rhs_data),
-                Scalar::F64(alpha),
-            ) => {
-                // SU(3)'s generic plan omits destination blocks with no GEMM;
-                // zeroing only that route prevents stale arena data without
-                // taxing the fully overwriting built-in-rule fast paths.
-                if dst.rule == RuleKind::Su3 {
-                    dst_data.fill(0.0);
-                }
-                dispatch_contract_into(
-                    self, dst.rule, &expected, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes,
-                    rhs_axes, alpha, 0.0,
-                )
-            }
-            (
-                Some(Data::C64(dst_data)),
-                Data::C64(lhs_data),
-                Data::C64(rhs_data),
-                Scalar::C64(alpha),
-            ) => {
-                if dst.rule == RuleKind::Su3 {
-                    dst_data.fill(Complex64::new(0.0, 0.0));
-                }
-                dispatch_contract_into(
-                    self,
-                    dst.rule,
-                    &expected,
-                    dst_data,
-                    lhs,
-                    lhs_data,
-                    rhs,
-                    rhs_data,
-                    lhs_axes,
-                    rhs_axes,
-                    alpha,
-                    Complex64::new(0.0, 0.0),
-                )
-            }
-            (None, _, _, _) => Err(Error::InvalidArgument(
-                "destination storage must be uniquely owned".to_string(),
-            )),
-            _ => Err(Error::DtypeMismatch),
-        }
+        self.write_contract_prepared(dst, lhs, rhs, lhs_axes, rhs_axes, alpha, &expected)
     }
 
     /// Overwrites an exact-layout dense host destination with
@@ -4166,34 +4510,13 @@ impl TensorExecutionContext {
         };
         dst.validate_exact_destination_space(&expected)?;
 
-        match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
-            (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
-                // Tree-transform plans may omit structural-zero destinations,
-                // so beta=0 alone cannot clear data retained by the arena.
-                dst_data.fill(0.0);
-                dispatch_permute_into(
-                    self, dst.rule, operation, &expected, dst_data, src, src_data, alpha, 0.0,
-                )
-            }
-            (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
-                dst_data.fill(Complex64::new(0.0, 0.0));
-                dispatch_permute_into(
-                    self,
-                    dst.rule,
-                    operation,
-                    &expected,
-                    dst_data,
-                    src,
-                    src_data,
-                    alpha,
-                    Complex64::new(0.0, 0.0),
-                )
-            }
-            (None, _, _) => Err(Error::InvalidArgument(
-                "destination storage must be uniquely owned".to_string(),
-            )),
-            _ => Err(Error::DtypeMismatch),
-        }
+        self.write_permute_prepared(
+            dst,
+            src,
+            alpha,
+            PreparedPermuteOperation::Owned(operation),
+            &expected,
+        )
     }
 }
 
@@ -4375,7 +4698,7 @@ fn dispatch_contract_into<D: UserScalar>(
 fn permute_into_with_rule<R, D, Key>(
     contexts: &mut Ctxs<Key>,
     rule: &R,
-    operation: TreeTransformOperation,
+    operation: &TreeTransformOperation,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],
     src: &Tensor,
@@ -4390,7 +4713,7 @@ where
 {
     D::ctx_of(contexts)
         .tree_context_mut()
-        .tree_transform_dyn_into(
+        .tree_transform_dyn_into_ref(
             rule,
             operation,
             dst_space.structure(),
@@ -4404,10 +4727,64 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+fn dispatch_prepared_permute_into<D: UserScalar>(
+    context: &mut TensorExecutionContext,
+    rule_kind: RuleKind,
+    operation: PreparedPermuteOperation<'_>,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src: &Tensor,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error> {
+    match operation {
+        PreparedPermuteOperation::Owned(operation) => dispatch_permute_into(
+            context, rule_kind, operation, dst_space, dst_data, src, src_data, alpha, beta,
+        ),
+        PreparedPermuteOperation::Borrowed(operation) => dispatch_permute_into_ref(
+            context, rule_kind, operation, dst_space, dst_data, src, src_data, alpha, beta,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn dispatch_permute_into<D: UserScalar>(
     context: &mut TensorExecutionContext,
     rule_kind: RuleKind,
     operation: TreeTransformOperation,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src: &Tensor,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), Error> {
+    if rule_kind == RuleKind::Su3 {
+        return D::ctx_of(&mut context.su3)
+            .tree_context_mut()
+            .tree_transform_dyn_into_generic(
+                &Su3FusionRule::new(),
+                operation,
+                dst_space.structure(),
+                src.space.structure(),
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )
+            .map_err(Into::into);
+    }
+    dispatch_permute_into_ref(
+        context, rule_kind, &operation, dst_space, dst_data, src, src_data, alpha, beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_permute_into_ref<D: UserScalar>(
+    context: &mut TensorExecutionContext,
+    rule_kind: RuleKind,
+    operation: &TreeTransformOperation,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],
     src: &Tensor,
@@ -4460,7 +4837,7 @@ fn dispatch_permute_into<D: UserScalar>(
             .tree_context_mut()
             .tree_transform_dyn_into_generic(
                 &Su3FusionRule::new(),
-                operation,
+                operation.clone(),
                 dst_space.structure(),
                 src.space.structure(),
                 dst_data,

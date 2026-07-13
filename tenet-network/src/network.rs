@@ -10,7 +10,10 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tenet::prelude::{Dtype, Error, Runtime, Scalar, Tensor, TensorExecutionContext};
+use tenet::prelude::{
+    ContractOverwriteCache, Dtype, Error, OverwriteOutcome, PermuteOverwriteCache, Runtime, Scalar,
+    Tensor, TensorExecutionContext,
+};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::ir::NetworkIR;
@@ -412,12 +415,18 @@ pub struct NetworkExecutionStats {
     pub owned_orientations: u64,
     pub reused_orientations: u64,
     pub escaped_outputs: u64,
+    pub contract_layout_preparations: u64,
+    pub orientation_layout_preparations: u64,
+    pub contract_structural_comparisons: u64,
+    pub orientation_structural_comparisons: u64,
 }
 
 #[derive(Default)]
 struct IntermediateBuffers {
     contracted: Option<Tensor>,
     oriented: Option<Tensor>,
+    contract_cache: ContractOverwriteCache,
+    orientation_cache: PermuteOverwriteCache,
 }
 
 impl NetworkExecutionWorkspace {
@@ -548,44 +557,41 @@ impl PlannedNetwork {
             let contraction = if let Some(mut destination) =
                 workspace.intermediates[step_index].contracted.take()
             {
-                match workspace
+                let preparations = workspace.intermediates[step_index]
+                    .contract_cache
+                    .preparations();
+                let structural_comparisons = workspace.intermediates[step_index]
+                    .contract_cache
+                    .structural_comparisons();
+                let overwrite = workspace
                     .tensor_context
-                    .as_ref()
+                    .as_mut()
                     .expect("execution context initialized")
-                    .can_contract_overwrite_into(
-                        &destination,
+                    .try_contract_overwrite_into(
+                        &mut workspace.intermediates[step_index].contract_cache,
+                        &mut destination,
                         &lhs,
                         &rhs,
                         &step.lhs_contract_axes,
                         &step.rhs_contract_axes,
-                    ) {
-                    Ok(true) => {
-                        let alpha = identity_scalar(lhs.dtype());
-                        let write = workspace
-                            .tensor_context
-                            .as_mut()
-                            .expect("execution context initialized")
-                            .contract_overwrite_into(
-                                &mut destination,
-                                &lhs,
-                                &rhs,
-                                &step.lhs_contract_axes,
-                                &step.rhs_contract_axes,
-                                alpha,
-                            );
-                        match write {
-                            Ok(()) => {
-                                workspace.stats.reused_intermediates += 1;
-                                workspace.stats.reused_contractions += 1;
-                                Ok(destination)
-                            }
-                            Err(error) => {
-                                workspace.intermediates[step_index].contracted = Some(destination);
-                                Err(error)
-                            }
-                        }
+                        identity_scalar(lhs.dtype()),
+                    );
+                workspace.stats.contract_layout_preparations += workspace.intermediates[step_index]
+                    .contract_cache
+                    .preparations()
+                    - preparations;
+                workspace.stats.contract_structural_comparisons += workspace.intermediates
+                    [step_index]
+                    .contract_cache
+                    .structural_comparisons()
+                    - structural_comparisons;
+                match overwrite {
+                    Ok(OverwriteOutcome::Written) => {
+                        workspace.stats.reused_intermediates += 1;
+                        workspace.stats.reused_contractions += 1;
+                        Ok(destination)
                     }
-                    Ok(false) => {
+                    Ok(OverwriteOutcome::Incompatible) => {
                         workspace.stats.owned_intermediates += 1;
                         workspace.stats.owned_contractions += 1;
                         match lhs.contract(&rhs, &step.lhs_contract_axes, &step.rhs_contract_axes) {
@@ -619,39 +625,41 @@ impl PlannedNetwork {
                 let permutation = if let Some(mut destination) =
                     workspace.intermediates[step_index].oriented.take()
                 {
-                    match workspace
+                    let preparations = workspace.intermediates[step_index]
+                        .orientation_cache
+                        .preparations();
+                    let structural_comparisons = workspace.intermediates[step_index]
+                        .orientation_cache
+                        .structural_comparisons();
+                    let overwrite = workspace
                         .tensor_context
-                        .as_ref()
+                        .as_mut()
                         .expect("execution context initialized")
-                        .can_permute_overwrite_into(&destination, &result, codomain, domain)
-                    {
-                        Ok(true) => {
-                            let alpha = identity_scalar(result.dtype());
-                            let write = workspace
-                                .tensor_context
-                                .as_mut()
-                                .expect("execution context initialized")
-                                .permute_overwrite_into(
-                                    &mut destination,
-                                    &result,
-                                    codomain,
-                                    domain,
-                                    alpha,
-                                );
-                            match write {
-                                Ok(()) => {
-                                    workspace.stats.reused_intermediates += 1;
-                                    workspace.stats.reused_orientations += 1;
-                                    Ok(destination)
-                                }
-                                Err(error) => {
-                                    workspace.intermediates[step_index].oriented =
-                                        Some(destination);
-                                    Err(error)
-                                }
-                            }
+                        .try_permute_overwrite_into(
+                            &mut workspace.intermediates[step_index].orientation_cache,
+                            &mut destination,
+                            &result,
+                            codomain,
+                            domain,
+                            identity_scalar(result.dtype()),
+                        );
+                    workspace.stats.orientation_layout_preparations += workspace.intermediates
+                        [step_index]
+                        .orientation_cache
+                        .preparations()
+                        - preparations;
+                    workspace.stats.orientation_structural_comparisons += workspace.intermediates
+                        [step_index]
+                        .orientation_cache
+                        .structural_comparisons()
+                        - structural_comparisons;
+                    match overwrite {
+                        Ok(OverwriteOutcome::Written) => {
+                            workspace.stats.reused_intermediates += 1;
+                            workspace.stats.reused_orientations += 1;
+                            Ok(destination)
                         }
-                        Ok(false) => {
+                        Ok(OverwriteOutcome::Incompatible) => {
                             workspace.stats.owned_intermediates += 1;
                             workspace.stats.owned_orientations += 1;
                             match result.permute(codomain, domain) {
