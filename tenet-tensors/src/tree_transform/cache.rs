@@ -1444,11 +1444,33 @@ where
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
     {
+        self.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            rule,
+            &operation,
+            dst_structure,
+            src_structure,
+            storage_conjugate,
+        )
+    }
+
+    pub fn get_or_compile_tree_pair_structures_with_storage_conjugation_ref<R>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        storage_conjugate: bool,
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        RuleKey: 'static + Send + Sync,
+    {
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,
             TreeTransformPlanScope::TreePair,
-            &operation,
+            operation,
             dst_structure,
             src_structure,
             storage_conjugate,
@@ -1491,7 +1513,7 @@ where
         self.get_or_compile_structure_from_structures_with_storage_conjugation(
             rule_key,
             TreeTransformPlanScope::TreePair,
-            operation,
+            operation.clone(),
             plan_key,
             dst_structure,
             src_structure,
