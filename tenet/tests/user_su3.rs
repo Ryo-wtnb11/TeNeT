@@ -28,6 +28,18 @@ fn su3_space_construction_and_dim() {
 }
 
 #[test]
+fn su3_tensor_leg_dimensions_feed_network_planners() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    let tensor = Tensor::zeros(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+
+    assert_eq!(tensor.leg_dims().unwrap(), vec![v.dim(); 3]);
+    for axis in 0..3 {
+        assert_eq!(tensor.leg_dim(axis).unwrap(), v.dim());
+    }
+}
+
+#[test]
 fn su3_sector_readback_is_nonbreaking() {
     // Stage B3c-2: SU(3) read-back rides dedicated `(p, q)` accessors, NOT an
     // `SectorLabel::Su3` variant — the public enum (and every downstream

@@ -1980,6 +1980,24 @@ impl Tensor {
     /// planners use it as a size/FLOP proxy.
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
         let hom = self.space.homspace();
+        if self.rule == RuleKind::Su3 {
+            use tenet_core::GenericRigidSymbols;
+            let rule = Su3FusionRule::new();
+            return Ok(hom
+                .codomain()
+                .legs()
+                .iter()
+                .chain(hom.domain().legs())
+                .map(|leg| {
+                    leg.iter()
+                        .map(|(sector, deg)| {
+                            let sqrt = rule.sqrt_dim_scalar(sector);
+                            deg * (sqrt * sqrt).round() as usize
+                        })
+                        .sum()
+                })
+                .collect());
+        }
         with_rule!(self.rule, rule, {
             Ok(hom
                 .codomain()
@@ -2010,6 +2028,17 @@ impl Tensor {
                 hom.rank()
             )));
         };
+        if self.rule == RuleKind::Su3 {
+            use tenet_core::GenericRigidSymbols;
+            let rule = Su3FusionRule::new();
+            return Ok(leg
+                .iter()
+                .map(|(sector, deg)| {
+                    let sqrt = rule.sqrt_dim_scalar(sector);
+                    deg * (sqrt * sqrt).round() as usize
+                })
+                .sum());
+        }
         with_rule!(self.rule, rule, {
             Ok(leg
                 .iter()
