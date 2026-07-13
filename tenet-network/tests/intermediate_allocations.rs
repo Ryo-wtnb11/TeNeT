@@ -1,6 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use tenet::prelude::*;
 use tenet_network::{GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, TemporaryLabel};
@@ -19,6 +20,7 @@ static PAYLOAD_SIZE: AtomicUsize = AtomicUsize::new(0);
 static PAYLOAD_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static PAYLOAD_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 static PAYLOAD_PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+static REGISTRY_OVERFLOWS: AtomicU64 = AtomicU64::new(0);
 const REGISTRY_CAPACITY: usize = 1 << 16;
 const TOMBSTONE: usize = usize::MAX;
 static LIVE_POINTERS: [AtomicUsize; REGISTRY_CAPACITY] =
@@ -26,50 +28,62 @@ static LIVE_POINTERS: [AtomicUsize; REGISTRY_CAPACITY] =
 static LIVE_SIZES: [AtomicUsize; REGISTRY_CAPACITY] =
     [const { AtomicUsize::new(0) }; REGISTRY_CAPACITY];
 static REGISTRY_LOCK: AtomicBool = AtomicBool::new(false);
-static TEST_LOCK: AtomicBool = AtomicBool::new(false);
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock_test() {
-    while TEST_LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        std::hint::spin_loop();
+struct RegistryGuard;
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        REGISTRY_LOCK.store(false, Ordering::Release);
     }
 }
 
-fn unlock_test() {
-    TEST_LOCK.store(false, Ordering::Release);
+fn lock_unpoisoned(mutex: &Mutex<()>) -> MutexGuard<'_, ()> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn lock_registry() {
+fn lock_registry() -> RegistryGuard {
     while REGISTRY_LOCK
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
         std::hint::spin_loop();
     }
+    RegistryGuard
 }
 
-fn unlock_registry() {
-    REGISTRY_LOCK.store(false, Ordering::Release);
+fn pointer_hash(pointer: usize, capacity: usize) -> usize {
+    pointer.wrapping_mul(0x9e37_79b9_7f4a_7c15) % capacity
 }
 
-fn pointer_hash(pointer: usize) -> usize {
-    pointer.wrapping_mul(0x9e37_79b9_7f4a_7c15) & (REGISTRY_CAPACITY - 1)
-}
-
-fn register_live(pointer: *mut u8, size: usize) {
-    lock_registry();
+fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -> bool {
+    if pointer.is_null()
+        || pointer as usize == TOMBSTONE
+        || size == 0
+        || capacity == 0
+        || capacity > REGISTRY_CAPACITY
+    {
+        return false;
+    }
+    let _guard = lock_registry();
     let pointer = pointer as usize;
-    let start = pointer_hash(pointer);
-    for offset in 0..REGISTRY_CAPACITY {
-        let index = (start + offset) & (REGISTRY_CAPACITY - 1);
+    let start = pointer_hash(pointer, capacity);
+    let mut first_available = None;
+    for offset in 0..capacity {
+        let index = (start + offset) % capacity;
         let current = LIVE_POINTERS[index].load(Ordering::Relaxed);
-        if (current == 0 || current == TOMBSTONE)
-            && LIVE_POINTERS[index]
-                .compare_exchange(current, pointer, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
+        if current == pointer {
+            return true;
+        }
+        if current == TOMBSTONE {
+            first_available.get_or_insert(index);
+            continue;
+        }
+        if current == 0 {
+            let index = first_available.unwrap_or(index);
+            LIVE_POINTERS[index].store(pointer, Ordering::Relaxed);
             LIVE_SIZES[index].store(size, Ordering::Relaxed);
             add_live(size as u64);
             if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
@@ -78,22 +92,43 @@ fn register_live(pointer: *mut u8, size: usize) {
                     PAYLOAD_LIVE_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
                 PAYLOAD_PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
             }
-            unlock_registry();
-            return;
+            return true;
         }
     }
-    unlock_registry();
+    if let Some(index) = first_available {
+        LIVE_POINTERS[index].store(pointer, Ordering::Relaxed);
+        LIVE_SIZES[index].store(size, Ordering::Relaxed);
+        add_live(size as u64);
+        if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
+            PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            let live = PAYLOAD_LIVE_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
+            PAYLOAD_PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
+        }
+        return true;
+    }
+    REGISTRY_OVERFLOWS.fetch_add(1, Ordering::Relaxed);
+    false
 }
 
-fn unregister_live(pointer: *mut u8) -> Option<usize> {
-    lock_registry();
+fn register_live(pointer: *mut u8, size: usize) -> bool {
+    register_live_with_capacity(pointer, size, REGISTRY_CAPACITY)
+}
+
+fn unregister_live_with_capacity(pointer: *mut u8, capacity: usize) -> Option<usize> {
+    if pointer.is_null()
+        || pointer as usize == TOMBSTONE
+        || capacity == 0
+        || capacity > REGISTRY_CAPACITY
+    {
+        return None;
+    }
+    let _guard = lock_registry();
     let pointer = pointer as usize;
-    let start = pointer_hash(pointer);
-    for offset in 0..REGISTRY_CAPACITY {
-        let index = (start + offset) & (REGISTRY_CAPACITY - 1);
+    let start = pointer_hash(pointer, capacity);
+    for offset in 0..capacity {
+        let index = (start + offset) % capacity;
         let current = LIVE_POINTERS[index].load(Ordering::Relaxed);
         if current == 0 {
-            unlock_registry();
             return None;
         }
         if current == pointer
@@ -106,16 +141,38 @@ fn unregister_live(pointer: *mut u8) -> Option<usize> {
             if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
                 PAYLOAD_LIVE_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
             }
-            unlock_registry();
             return Some(size);
         }
     }
-    unlock_registry();
+    None
+}
+
+fn unregister_live(pointer: *mut u8) -> Option<usize> {
+    unregister_live_with_capacity(pointer, REGISTRY_CAPACITY)
+}
+
+fn registered_size(pointer: *const u8) -> Option<usize> {
+    if pointer.is_null() || pointer as usize == TOMBSTONE {
+        return None;
+    }
+    let _guard = lock_registry();
+    let pointer = pointer as usize;
+    let start = pointer_hash(pointer, REGISTRY_CAPACITY);
+    for offset in 0..REGISTRY_CAPACITY {
+        let index = (start + offset) % REGISTRY_CAPACITY;
+        let current = LIVE_POINTERS[index].load(Ordering::Relaxed);
+        if current == 0 {
+            return None;
+        }
+        if current == pointer {
+            return Some(LIVE_SIZES[index].load(Ordering::Relaxed));
+        }
+    }
     None
 }
 
 fn reset_live_registry() {
-    lock_registry();
+    let _guard = lock_registry();
     for index in 0..REGISTRY_CAPACITY {
         LIVE_POINTERS[index].store(0, Ordering::Relaxed);
         LIVE_SIZES[index].store(0, Ordering::Relaxed);
@@ -125,7 +182,35 @@ fn reset_live_registry() {
     PAYLOAD_ALLOC_CALLS.store(0, Ordering::Relaxed);
     PAYLOAD_LIVE_BYTES.store(0, Ordering::Relaxed);
     PAYLOAD_PEAK_LIVE_BYTES.store(0, Ordering::Relaxed);
-    unlock_registry();
+    REGISTRY_OVERFLOWS.store(0, Ordering::Relaxed);
+}
+
+fn reset_event_counters() {
+    ALLOC_CALLS.store(0, Ordering::Relaxed);
+    REALLOC_CALLS.store(0, Ordering::Relaxed);
+    DEALLOC_CALLS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+    DEALLOCATED_BYTES.store(0, Ordering::Relaxed);
+}
+
+fn record_realloc_result(
+    old_ptr: *mut u8,
+    new_ptr: *mut u8,
+    new_size: usize,
+    count_event: bool,
+) -> bool {
+    if new_ptr.is_null() {
+        return false;
+    }
+    let Some(old_size) = unregister_live(old_ptr) else {
+        return false;
+    };
+    if count_event {
+        REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        DEALLOCATED_BYTES.fetch_add(old_size as u64, Ordering::Relaxed);
+    }
+    register_live(new_ptr, new_size)
 }
 
 fn add_live(bytes: u64) {
@@ -147,7 +232,7 @@ fn add_live(bytes: u64) {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };
-        if ENABLED.load(Ordering::Relaxed) && !ptr.is_null() {
+        if ENABLED.load(Ordering::Relaxed) && !ptr.is_null() && layout.size() != 0 {
             ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
             ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
             register_live(ptr, layout.size());
@@ -156,25 +241,19 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unregister_live(ptr);
+        let probe_origin_size = unregister_live(ptr);
         if ENABLED.load(Ordering::Relaxed) {
-            DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
-            DEALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            if let Some(size) = probe_origin_size {
+                DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+                DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+            }
         }
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
-        if !new_ptr.is_null() {
-            unregister_live(ptr);
-            if ENABLED.load(Ordering::Relaxed) {
-                REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
-                ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-                DEALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-                register_live(new_ptr, new_size);
-            }
-        }
+        record_realloc_result(ptr, new_ptr, new_size, ENABLED.load(Ordering::Relaxed));
         new_ptr
     }
 }
@@ -196,6 +275,8 @@ struct AllocationSample {
     payload_peak_live_bytes: u64,
     payload_retained_live_bytes: u64,
     payload_output_live_bytes: u64,
+    payload_size_bytes: u64,
+    registry_overflows: u64,
 }
 
 fn measure_execute(
@@ -204,18 +285,17 @@ fn measure_execute(
     arena: &mut NetworkExecutionWorkspace,
     oracle: &Tensor,
 ) -> AllocationSample {
-    ALLOC_CALLS.store(0, Ordering::Relaxed);
-    REALLOC_CALLS.store(0, Ordering::Relaxed);
-    DEALLOC_CALLS.store(0, Ordering::Relaxed);
-    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
-    DEALLOCATED_BYTES.store(0, Ordering::Relaxed);
-    PAYLOAD_SIZE.store(
-        match oracle.dtype() {
-            Dtype::F64 => oracle.data().len() * std::mem::size_of::<f64>(),
-            Dtype::C64 => oracle.data_c64().len() * std::mem::size_of::<Complex64>(),
-        },
-        Ordering::Relaxed,
-    );
+    reset_event_counters();
+    let payload_size_bytes = match oracle.dtype() {
+        Dtype::F64 => oracle.data().len().checked_mul(std::mem::size_of::<f64>()),
+        Dtype::C64 => oracle
+            .data_c64()
+            .len()
+            .checked_mul(std::mem::size_of::<Complex64>()),
+    };
+    let payload_size_bytes = payload_size_bytes.expect("oracle payload byte size overflowed");
+    assert!(payload_size_bytes > 0);
+    PAYLOAD_SIZE.store(payload_size_bytes, Ordering::Relaxed);
     reset_live_registry();
     ENABLED.store(true, Ordering::SeqCst);
 
@@ -224,13 +304,30 @@ fn measure_execute(
         Dtype::F64 => assert_eq!(output.data(), oracle.data()),
         Dtype::C64 => assert_eq!(output.data_c64(), oracle.data_c64()),
     }
+    let (output_pointer, output_payload_bytes) = match output.dtype() {
+        Dtype::F64 => (
+            output.data().as_ptr().cast::<u8>(),
+            output.data().len().checked_mul(std::mem::size_of::<f64>()),
+        ),
+        Dtype::C64 => (
+            output.data_c64().as_ptr().cast::<u8>(),
+            output
+                .data_c64()
+                .len()
+                .checked_mul(std::mem::size_of::<Complex64>()),
+        ),
+    };
+    assert_eq!(output_payload_bytes, Some(payload_size_bytes));
+    assert_eq!(registered_size(output_pointer), Some(payload_size_bytes));
     let live_with_output = LIVE_BYTES.load(Ordering::Relaxed);
     let payload_live_with_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     let peak_live_delta = PEAK_LIVE_BYTES.load(Ordering::Relaxed);
     drop(output);
+    assert_eq!(registered_size(output_pointer), None);
     let live_after_output = LIVE_BYTES.load(Ordering::Relaxed);
     let payload_live_after_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     ENABLED.store(false, Ordering::SeqCst);
+    assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
 
     AllocationSample {
         alloc_calls: ALLOC_CALLS.load(Ordering::Relaxed),
@@ -246,6 +343,8 @@ fn measure_execute(
         payload_retained_live_bytes: PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed),
         payload_output_live_bytes: payload_live_with_output
             .saturating_sub(payload_live_after_output),
+        payload_size_bytes: payload_size_bytes as u64,
+        registry_overflows: REGISTRY_OVERFLOWS.load(Ordering::Relaxed),
     }
 }
 
@@ -409,7 +508,7 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
     }
     for sample in samples {
         println!(
-            "TENET_ALLOC_SAMPLE {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            "TENET_ALLOC_SAMPLE {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             workload.name(),
             chi,
             u8::from(reuse),
@@ -425,6 +524,8 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
             sample.payload_peak_live_bytes,
             sample.payload_retained_live_bytes,
             sample.payload_output_live_bytes,
+            sample.payload_size_bytes,
+            sample.registry_overflows,
             owned * 1_000_000 + reused,
         );
     }
@@ -460,7 +561,7 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
             let values = fields
                 .map(|value| value.parse::<u64>().unwrap())
                 .collect::<Vec<_>>();
-            assert_eq!(values.len(), 13);
+            assert_eq!(values.len(), 15);
             let expected_structural = if reuse {
                 if workload.permutes_intermediate() {
                     3_000_006
@@ -470,7 +571,7 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
             } else {
                 9_000_000
             };
-            assert_eq!(values[12], expected_structural);
+            assert_eq!(values[14], expected_structural);
             AllocationSample {
                 alloc_calls: values[0],
                 realloc_calls: values[1],
@@ -484,6 +585,8 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
                 payload_peak_live_bytes: values[9],
                 payload_retained_live_bytes: values[10],
                 payload_output_live_bytes: values[11],
+                payload_size_bytes: values[12],
+                registry_overflows: values[13],
             }
         })
         .collect()
@@ -496,28 +599,136 @@ fn median3(mut values: [u64; 3]) -> u64 {
 
 #[test]
 fn origin_registry_attributes_output_lifetime() {
-    lock_test();
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
     const SIZE: usize = 4096;
     PAYLOAD_SIZE.store(SIZE, Ordering::Relaxed);
     reset_live_registry();
     ENABLED.store(true, Ordering::SeqCst);
 
+    let decoy = std::hint::black_box(vec![3u8; SIZE]);
     let output = std::hint::black_box(vec![7u8; SIZE]);
+    let output_pointer = output.as_ptr();
+    let decoy_pointer = decoy.as_ptr();
+    assert_eq!(registered_size(output_pointer), Some(SIZE));
+    assert_eq!(registered_size(decoy_pointer), Some(SIZE));
     let live_with_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     drop(output);
+    assert_eq!(registered_size(output_pointer), None);
+    assert_eq!(registered_size(decoy_pointer), Some(SIZE));
     let live_after_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     ENABLED.store(false, Ordering::SeqCst);
 
-    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
-    assert_eq!(live_with_output, SIZE as u64);
-    assert_eq!(live_after_output, 0);
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(live_with_output, (2 * SIZE) as u64);
+    assert_eq!(live_after_output, SIZE as u64);
     assert_eq!(live_with_output - live_after_output, SIZE as u64);
-    unlock_test();
+    drop(decoy);
+}
+
+#[test]
+fn realloc_tracks_only_successful_probe_origin_transitions() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    reset_event_counters();
+    reset_live_registry();
+    ENABLED.store(false, Ordering::SeqCst);
+    let first = 0x1000usize as *mut u8;
+    let moved = 0x2000usize as *mut u8;
+    let untracked = 0x3000usize as *mut u8;
+
+    assert!(register_live(first, 8));
+    assert!(!record_realloc_result(
+        first,
+        std::ptr::null_mut(),
+        16,
+        true
+    ));
+    assert_eq!(registered_size(first), Some(8));
+    assert!(record_realloc_result(first, moved, 16, true));
+    assert_eq!(registered_size(first), None);
+    assert_eq!(registered_size(moved), Some(16));
+    assert!(record_realloc_result(moved, moved, 4, true));
+    assert_eq!(registered_size(moved), Some(4));
+    assert!(!record_realloc_result(untracked, first, 32, true));
+    assert_eq!(registered_size(first), None);
+    ENABLED.store(false, Ordering::SeqCst);
+
+    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 20);
+    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 24);
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn pre_probe_free_is_excluded_from_origin_counters() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(false, Ordering::SeqCst);
+    let allocation = std::hint::black_box(Box::new([9u8; 256]));
+    reset_event_counters();
+    reset_live_registry();
+    ENABLED.store(true, Ordering::SeqCst);
+    drop(allocation);
+    ENABLED.store(false, Ordering::SeqCst);
+
+    assert_eq!(DEALLOC_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn registry_overflow_invalidates_a_bounded_probe() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    reset_live_registry();
+    assert!(register_live_with_capacity(0x1000usize as *mut u8, 8, 2));
+    assert!(register_live_with_capacity(0x2000usize as *mut u8, 8, 2));
+    assert!(!register_live_with_capacity(0x3000usize as *mut u8, 8, 2));
+    assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    PAYLOAD_SIZE.store(64, Ordering::Relaxed);
+    reset_live_registry();
+    let pointer = 0x1000usize as *mut u8;
+
+    assert!(!register_live(std::ptr::null_mut(), 64));
+    assert!(!register_live(TOMBSTONE as *mut u8, 64));
+    assert!(!register_live(pointer, 0));
+    assert!(!register_live_with_capacity(pointer, 64, 0));
+    assert!(!register_live_with_capacity(
+        pointer,
+        64,
+        REGISTRY_CAPACITY + 1
+    ));
+    assert_eq!(unregister_live_with_capacity(pointer, 0), None);
+    assert_eq!(
+        unregister_live_with_capacity(pointer, REGISTRY_CAPACITY + 1),
+        None
+    );
+    assert!(register_live(pointer, 64));
+    assert!(register_live(pointer, 64));
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 64);
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(unregister_live(pointer), Some(64));
+    assert_eq!(unregister_live(pointer), None);
+    reset_live_registry();
+    assert!(register_live_with_capacity(pointer, 64, 1));
+    assert_eq!(unregister_live_with_capacity(pointer, 1), Some(64));
+    assert!(register_live_with_capacity(0x2000usize as *mut u8, 32, 1));
+}
+
+#[test]
+fn test_mutex_recovers_after_poisoning() {
+    let poisoned = std::panic::catch_unwind(|| {
+        let _guard = lock_unpoisoned(&TEST_LOCK);
+        panic!("poison test mutex");
+    });
+    assert!(poisoned.is_err());
+    let _recovered = lock_unpoisoned(&TEST_LOCK);
 }
 
 #[test]
 fn measured_intermediate_arena_accounting() {
-    lock_test();
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
     if let Ok(name) = std::env::var("TENET_ALLOC_WORKLOAD") {
         let workload = Workload::parse(&name);
         let chi = std::env::var("TENET_ALLOC_CHI").unwrap().parse().unwrap();
@@ -527,7 +738,6 @@ fn measured_intermediate_arena_accounting() {
             mode => panic!("unknown allocator mode {mode:?}"),
         };
         worker(workload, chi, reuse);
-        unlock_test();
         return;
     }
 
@@ -579,11 +789,12 @@ fn measured_intermediate_arena_accounting() {
             assert!(fresh_payload_peak > reused_payload_peak);
             assert!(fresh
                 .iter()
-                .all(|sample| sample.payload_output_live_bytes > 0));
+                .all(|sample| sample.payload_output_live_bytes == sample.payload_size_bytes));
             assert!(reused
                 .iter()
-                .all(|sample| sample.payload_output_live_bytes > 0));
+                .all(|sample| sample.payload_output_live_bytes == sample.payload_size_bytes));
+            assert!(fresh.iter().all(|sample| sample.registry_overflows == 0));
+            assert!(reused.iter().all(|sample| sample.registry_overflows == 0));
         }
     }
-    unlock_test();
 }
