@@ -615,6 +615,14 @@ impl Space {
         if self.rule != other.rule {
             return Err(Error::RuleMismatch);
         }
+        // SU(3) cannot use the multiplicity-free dispatch below; keep the
+        // public Result boundary recoverable until a generic fuse is wired.
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::UnsupportedForRule {
+                operation: "Space::fuse",
+                rule: "SU(3)",
+            });
+        }
         let fused = with_rule!(self.rule, rule, {
             fn fuse_sectors<R: FusionRule>(
                 rule: &R,
@@ -650,6 +658,15 @@ impl Space {
         let (first, rest) = spaces
             .split_first()
             .ok_or_else(|| Error::InvalidArgument("fuse_all needs at least one space".into()))?;
+        if !rest.is_empty()
+            && first.rule == RuleKind::Su3
+            && rest.iter().all(|space| space.rule == first.rule)
+        {
+            return Err(Error::UnsupportedForRule {
+                operation: "Space::fuse_all",
+                rule: "SU(3)",
+            });
+        }
         // flip: stored sectors are already external, so dropping the dual
         // flag yields the isomorphic non-dual space.
         let mut fused = Space {
