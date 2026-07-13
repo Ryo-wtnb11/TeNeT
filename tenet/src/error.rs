@@ -35,6 +35,14 @@ pub enum Error {
     /// which. Device tensors never fall back to host execution silently —
     /// move the tensor explicitly with `to_host()`.
     UnsupportedOnDevice(String),
+    /// The operation is part of the public API but is not implemented for the
+    /// operand's fusion rule yet.
+    UnsupportedForRule {
+        /// Stable public operation name, such as `Tensor::eigh_full`.
+        operation: &'static str,
+        /// User-facing fusion-rule name, such as `SU(3)`.
+        rule: &'static str,
+    },
     /// Invalid user input (axes, sectors, spaces); the message says what.
     InvalidArgument(String),
 }
@@ -53,6 +61,9 @@ impl fmt::Display for Error {
             ),
             Self::UnsupportedOnDevice(message) => {
                 write!(f, "unsupported on device: {message}")
+            }
+            Self::UnsupportedForRule { operation, rule } => {
+                write!(f, "{operation} is not supported for {rule}")
             }
             Self::InvalidArgument(message) => write!(f, "invalid argument: {message}"),
         }

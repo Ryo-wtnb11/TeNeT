@@ -1450,6 +1450,7 @@ impl Tensor {
         if legs.is_empty() {
             return Ok(self.clone());
         }
+        self.reject_unwired_su3("Tensor::twist")?;
         let nout = self.codomain_rank();
         let rule = self.rule;
         // TensorKit `has_shared_twist` (`indexmanipulations.jl`): the twist is
@@ -1541,6 +1542,7 @@ impl Tensor {
         if legs.is_empty() {
             return Ok(self.clone());
         }
+        self.reject_unwired_su3("Tensor::flip")?;
         let hom = self.space.homspace();
         let nout = hom.codomain().len();
         let leg_of = |leg: usize| {
@@ -2811,11 +2813,10 @@ impl Tensor {
         // recoupling (`multiplicity_free_permute_tree_pair`); its generic
         // sibling is Stage B3c-3. Full trace (`tr`) IS wired generically.
         if self.rule == RuleKind::Su3 {
-            return Err(Error::InvalidArgument(
-                "SU(3) partial trace (trace_pairs) is not yet wired (Stage B3c-3); \
-                 tr() supports SU(3)"
-                    .to_string(),
-            ));
+            return Err(Error::UnsupportedForRule {
+                operation: "Tensor::trace_pairs",
+                rule: "SU(3)",
+            });
         }
         let rank = self.rank();
         let mut seen = vec![false; rank];
@@ -3142,6 +3143,7 @@ impl Tensor {
     /// dtype.
     pub fn inner(&self, other: &Self) -> Result<Scalar, Error> {
         self.check_same_space(other)?;
+        self.reject_unwired_su3("Tensor::inner")?;
         match (self.coupled_data(), other.coupled_data()) {
             (Data::F64(a), Data::F64(b)) => with_rule!(self.rule, rule, {
                 weighted_inner(rule, self.space.structure(), a, b).map(|v| Scalar::F64(v.re))
@@ -3163,6 +3165,17 @@ impl Tensor {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Stops Generic rules before they reach multiplicity-free-only dispatch.
+    fn reject_unwired_su3(&self, operation: &'static str) -> Result<(), Error> {
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::UnsupportedForRule {
+                operation,
+                rule: "SU(3)",
+            });
         }
         Ok(())
     }
@@ -3378,10 +3391,10 @@ impl Tensor {
         // yet — svd_compact/svd_trunc cover the physics workflows; add the
         // `build_left_right_pair_generic` chain in B3c-3 if a caller needs it.
         if self.rule == RuleKind::Su3 {
-            return Err(Error::InvalidArgument(
-                "SU(3) svd_full is not yet wired (Stage B3c-3); use svd_compact or svd_trunc"
-                    .to_string(),
-            ));
+            return Err(Error::UnsupportedForRule {
+                operation: "Tensor::svd_full",
+                rule: "SU(3)",
+            });
         }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
@@ -3495,9 +3508,10 @@ impl Tensor {
         // ponytail: see svd_full — the square-Q completion has no generic
         // sibling yet (B3c-3); qr_compact covers left_orth and the workflows.
         if self.rule == RuleKind::Su3 {
-            return Err(Error::InvalidArgument(
-                "SU(3) qr_full is not yet wired (Stage B3c-3); use qr_compact".to_string(),
-            ));
+            return Err(Error::UnsupportedForRule {
+                operation: "Tensor::qr_full",
+                rule: "SU(3)",
+            });
         }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
@@ -3536,9 +3550,10 @@ impl Tensor {
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
         // ponytail: see svd_full/qr_full (B3c-3); lq_compact covers right_orth.
         if self.rule == RuleKind::Su3 {
-            return Err(Error::InvalidArgument(
-                "SU(3) lq_full is not yet wired (Stage B3c-3); use lq_compact".to_string(),
-            ));
+            return Err(Error::UnsupportedForRule {
+                operation: "Tensor::lq_full",
+                rule: "SU(3)",
+            });
         }
         let mut guard = self.rt.lock();
         let state = &mut *guard;
@@ -3565,6 +3580,7 @@ impl Tensor {
     /// Left null space `n : codomain <- W` with `n^H * t = 0` (MatrixAlgebraKit
     /// `left_null`).
     pub fn left_null(&self) -> Result<Self, Error> {
+        self.reject_unwired_su3("Tensor::left_null")?;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3578,6 +3594,7 @@ impl Tensor {
     /// Right null space `n : W <- domain` with `t * n^H = 0` (MatrixAlgebraKit
     /// `right_null`).
     pub fn right_null(&self) -> Result<Self, Error> {
+        self.reject_unwired_su3("Tensor::right_null")?;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3591,6 +3608,7 @@ impl Tensor {
     /// Left polar decomposition `t = w * p` (MatrixAlgebraKit `left_polar`):
     /// `w` isometric, `p` positive on the domain.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
+        self.reject_unwired_su3("Tensor::left_polar")?;
         with_data!(self, data, self.left_polar_impl(data))
     }
 
@@ -3612,6 +3630,7 @@ impl Tensor {
     /// Right polar decomposition `t = p * w` (MatrixAlgebraKit
     /// `right_polar`): `p` positive on the codomain, `w` isometric.
     pub fn right_polar(&self) -> Result<(Self, Self), Error> {
+        self.reject_unwired_su3("Tensor::right_polar")?;
         with_data!(self, data, self.right_polar_impl(data))
     }
 
@@ -3636,6 +3655,7 @@ impl Tensor {
     /// (TensorKit: real `D`); `d` keeps the input dtype so it composes with
     /// `v` directly.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+        self.reject_unwired_su3("Tensor::eigh_full")?;
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.data.as_ref() {
             let out = self.eigh_cuda(storage, None)?;
@@ -3662,6 +3682,7 @@ impl Tensor {
     /// Truncated Hermitian eigendecomposition (MatrixAlgebraKit
     /// `eigh_trunc`); see [`EighTrunc`].
     pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc, Error> {
+        self.reject_unwired_su3("Tensor::eigh_trunc")?;
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.eigh_cuda(storage, Some(truncation));
@@ -3694,6 +3715,7 @@ impl Tensor {
     /// All Hermitian eigenvalues per coupled sector, descending by magnitude
     /// (MatrixAlgebraKit `eigh_vals`). Real for both dtypes.
     pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
+        self.reject_unwired_su3("Tensor::eigh_vals")?;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3710,6 +3732,7 @@ impl Tensor {
     /// (real matrices have complex eigenpairs), matching TensorKit's
     /// `eigen`, whose `D` and `V` are `ComplexF64` for real input.
     pub fn eig_full(&self) -> Result<(Self, Self), Error> {
+        self.reject_unwired_su3("Tensor::eig_full")?;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3727,6 +3750,7 @@ impl Tensor {
     /// kept by descending `|eigenvalue|`); see [`EigTrunc`]. Output tensors
     /// are always c64.
     pub fn eig_trunc(&self, truncation: &Truncation) -> Result<EigTrunc, Error> {
+        self.reject_unwired_su3("Tensor::eig_trunc")?;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3751,6 +3775,7 @@ impl Tensor {
     /// All general eigenvalues per coupled sector, descending by magnitude
     /// (MatrixAlgebraKit `eig_vals`). Complex for both dtypes.
     pub fn eig_vals(&self) -> Result<Vec<SectorSpectrum<Complex64>>, Error> {
+        self.reject_unwired_su3("Tensor::eig_vals")?;
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         with_data!(self, data, {
@@ -3764,6 +3789,7 @@ impl Tensor {
     /// Matrix exponential of a Hermitian endomorphism, `exp(t) = v exp(d)
     /// v^H` (TensorKit `exp`, via the eigendecomposition).
     pub fn exp(&self) -> Result<Self, Error> {
+        self.reject_unwired_su3("Tensor::exp")?;
         with_data!(self, data, self.exp_impl(data))
     }
 
@@ -3791,6 +3817,7 @@ impl Tensor {
         if let Data::Diagonal(diagonal) = self.data.as_ref() {
             return Ok(self.with_diagonal(diagonal.try_recip()?));
         }
+        self.reject_unwired_su3("Tensor::inv")?;
         with_data!(self, data, self.inv_impl(data))
     }
 
@@ -3818,6 +3845,7 @@ impl Tensor {
         if let Data::Diagonal(diagonal) = self.data.as_ref() {
             return Ok(self.with_diagonal(diagonal.pinv(rcond)));
         }
+        self.reject_unwired_su3("Tensor::pinv")?;
         with_data!(self, data, self.pinv_impl(data, rcond))
     }
 
