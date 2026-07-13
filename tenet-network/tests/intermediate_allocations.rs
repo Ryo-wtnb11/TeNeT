@@ -26,6 +26,20 @@ static LIVE_POINTERS: [AtomicUsize; REGISTRY_CAPACITY] =
 static LIVE_SIZES: [AtomicUsize; REGISTRY_CAPACITY] =
     [const { AtomicUsize::new(0) }; REGISTRY_CAPACITY];
 static REGISTRY_LOCK: AtomicBool = AtomicBool::new(false);
+static TEST_LOCK: AtomicBool = AtomicBool::new(false);
+
+fn lock_test() {
+    while TEST_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        std::hint::spin_loop();
+    }
+}
+
+fn unlock_test() {
+    TEST_LOCK.store(false, Ordering::Release);
+}
 
 fn lock_registry() {
     while REGISTRY_LOCK
@@ -181,6 +195,7 @@ struct AllocationSample {
     payload_alloc_calls: u64,
     payload_peak_live_bytes: u64,
     payload_retained_live_bytes: u64,
+    payload_output_live_bytes: u64,
 }
 
 fn measure_execute(
@@ -210,9 +225,11 @@ fn measure_execute(
         Dtype::C64 => assert_eq!(output.data_c64(), oracle.data_c64()),
     }
     let live_with_output = LIVE_BYTES.load(Ordering::Relaxed);
+    let payload_live_with_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     let peak_live_delta = PEAK_LIVE_BYTES.load(Ordering::Relaxed);
     drop(output);
     let live_after_output = LIVE_BYTES.load(Ordering::Relaxed);
+    let payload_live_after_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     ENABLED.store(false, Ordering::SeqCst);
 
     AllocationSample {
@@ -227,6 +244,8 @@ fn measure_execute(
         payload_alloc_calls: PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed),
         payload_peak_live_bytes: PAYLOAD_PEAK_LIVE_BYTES.load(Ordering::Relaxed),
         payload_retained_live_bytes: PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed),
+        payload_output_live_bytes: payload_live_with_output
+            .saturating_sub(payload_live_after_output),
     }
 }
 
@@ -262,7 +281,7 @@ impl Workload {
         Self::ALL
             .into_iter()
             .find(|workload| workload.name() == name)
-            .unwrap()
+            .unwrap_or_else(|| panic!("unknown allocator workload {name:?}"))
     }
 
     fn dtype(self) -> Dtype {
@@ -369,23 +388,28 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
         structural_after.escaped_outputs - structural_before.escaped_outputs,
         3
     );
-    if reuse {
-        assert_eq!(owned_orientations, 0);
-        assert!(reused_contractions > 0);
-        if workload.permutes_intermediate() {
-            assert!(reused_orientations > 0);
+    if workload.permutes_intermediate() {
+        if reuse {
+            assert_eq!((owned, reused), (3, 6));
+            assert_eq!((owned_contractions, reused_contractions), (3, 3));
+            assert_eq!((owned_orientations, reused_orientations), (0, 3));
+        } else {
+            assert_eq!((owned, reused), (9, 0));
+            assert_eq!((owned_contractions, reused_contractions), (6, 0));
+            assert_eq!((owned_orientations, reused_orientations), (3, 0));
         }
+    } else if reuse {
+        assert_eq!((owned, reused), (3, 6));
+        assert_eq!((owned_contractions, reused_contractions), (3, 6));
+        assert_eq!((owned_orientations, reused_orientations), (0, 0));
     } else {
-        assert_eq!(reused_contractions, 0);
-        assert_eq!(reused_orientations, 0);
-        assert!(owned_contractions > 0);
-        if workload.permutes_intermediate() {
-            assert!(owned_orientations > 0);
-        }
+        assert_eq!((owned, reused), (9, 0));
+        assert_eq!((owned_contractions, reused_contractions), (9, 0));
+        assert_eq!((owned_orientations, reused_orientations), (0, 0));
     }
     for sample in samples {
         println!(
-            "TENET_ALLOC_SAMPLE {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            "TENET_ALLOC_SAMPLE {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             workload.name(),
             chi,
             u8::from(reuse),
@@ -400,6 +424,7 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
             sample.payload_alloc_calls,
             sample.payload_peak_live_bytes,
             sample.payload_retained_live_bytes,
+            sample.payload_output_live_bytes,
             owned * 1_000_000 + reused,
         );
     }
@@ -427,11 +452,25 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
         .lines()
         .filter(|line| line.starts_with("TENET_ALLOC_SAMPLE "))
         .map(|line| {
-            let values = line
-                .split_whitespace()
-                .skip(4)
+            let mut fields = line.split_whitespace();
+            assert_eq!(fields.next(), Some("TENET_ALLOC_SAMPLE"));
+            assert_eq!(fields.next(), Some(workload.name()));
+            assert_eq!(fields.next().unwrap().parse::<usize>().unwrap(), chi);
+            assert_eq!(fields.next().unwrap(), if reuse { "1" } else { "0" });
+            let values = fields
                 .map(|value| value.parse::<u64>().unwrap())
                 .collect::<Vec<_>>();
+            assert_eq!(values.len(), 13);
+            let expected_structural = if reuse {
+                if workload.permutes_intermediate() {
+                    3_000_006
+                } else {
+                    3_000_006
+                }
+            } else {
+                9_000_000
+            };
+            assert_eq!(values[12], expected_structural);
             AllocationSample {
                 alloc_calls: values[0],
                 realloc_calls: values[1],
@@ -444,6 +483,7 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
                 payload_alloc_calls: values[8],
                 payload_peak_live_bytes: values[9],
                 payload_retained_live_bytes: values[10],
+                payload_output_live_bytes: values[11],
             }
         })
         .collect()
@@ -455,15 +495,39 @@ fn median3(mut values: [u64; 3]) -> u64 {
 }
 
 #[test]
+fn origin_registry_attributes_output_lifetime() {
+    lock_test();
+    const SIZE: usize = 4096;
+    PAYLOAD_SIZE.store(SIZE, Ordering::Relaxed);
+    reset_live_registry();
+    ENABLED.store(true, Ordering::SeqCst);
+
+    let output = std::hint::black_box(vec![7u8; SIZE]);
+    let live_with_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
+    drop(output);
+    let live_after_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
+    ENABLED.store(false, Ordering::SeqCst);
+
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(live_with_output, SIZE as u64);
+    assert_eq!(live_after_output, 0);
+    assert_eq!(live_with_output - live_after_output, SIZE as u64);
+    unlock_test();
+}
+
+#[test]
 fn measured_intermediate_arena_accounting() {
+    lock_test();
     if let Ok(name) = std::env::var("TENET_ALLOC_WORKLOAD") {
         let workload = Workload::parse(&name);
         let chi = std::env::var("TENET_ALLOC_CHI").unwrap().parse().unwrap();
-        worker(
-            workload,
-            chi,
-            std::env::var("TENET_ALLOC_MODE").unwrap() == "reuse",
-        );
+        let reuse = match std::env::var("TENET_ALLOC_MODE").unwrap().as_str() {
+            "fresh" => false,
+            "reuse" => true,
+            mode => panic!("unknown allocator mode {mode:?}"),
+        };
+        worker(workload, chi, reuse);
+        unlock_test();
         return;
     }
 
@@ -513,8 +577,13 @@ fn measured_intermediate_arena_accounting() {
             assert!(fresh_payload_allocs > reused_payload_allocs);
             assert!(fresh_payload_retained > reused_payload_retained);
             assert!(fresh_payload_peak > reused_payload_peak);
-            assert!(fresh.iter().all(|sample| sample.output_live_bytes > 0));
-            assert!(reused.iter().all(|sample| sample.output_live_bytes > 0));
+            assert!(fresh
+                .iter()
+                .all(|sample| sample.payload_output_live_bytes > 0));
+            assert!(reused
+                .iter()
+                .all(|sample| sample.payload_output_live_bytes > 0));
         }
     }
+    unlock_test();
 }

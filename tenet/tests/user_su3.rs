@@ -25,6 +25,9 @@ fn su3_space_construction_and_dim() {
     assert_eq!(v.dual().dual(), v);
     // Out-of-table irrep is rejected.
     assert!(Space::su3([((5, 5), 1)]).is_err()); // dim(5,5) > 27
+    assert_eq!(Space::su3([((2, 0), 1)]).unwrap().dim(), 6);
+    assert_eq!(Space::su3([((1, 1), 1)]).unwrap().dim(), 8);
+    assert_eq!(Space::su3([((2, 2), 1)]).unwrap().dim(), 27);
 }
 
 #[test]
