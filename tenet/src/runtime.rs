@@ -93,35 +93,169 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             ),
         })
     }
+
+    pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
+        self.f64
+            .tree_context_mut()
+            .backend_mut()
+            .set_recoupling_threads(threads);
+        self.c64
+            .tree_context_mut()
+            .backend_mut()
+            .set_recoupling_threads(threads);
+    }
+
+    pub(crate) fn set_transpose_backend(&mut self, backend: TransposeBackend) {
+        self.f64
+            .tree_context_mut()
+            .backend_mut()
+            .set_transpose_backend(backend);
+        self.f64
+            .contract_backend_mut()
+            .set_transpose_backend(backend);
+        self.c64
+            .tree_context_mut()
+            .backend_mut()
+            .set_transpose_backend(backend);
+        self.c64
+            .contract_backend_mut()
+            .set_transpose_backend(backend);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
+        self.f64
+            .tree_context_mut()
+            .backend_mut()
+            .recoupling_threads()
+            == expected
+            && self
+                .c64
+                .tree_context_mut()
+                .backend_mut()
+                .recoupling_threads()
+                == expected
+    }
+
+    #[cfg(test)]
+    fn transpose_backend_is(&mut self, expected: TransposeBackend) -> bool {
+        self.f64
+            .tree_context_mut()
+            .backend_mut()
+            .transpose_backend()
+            == expected
+            && self.f64.contract_backend().transpose_backend() == expected
+            && self
+                .c64
+                .tree_context_mut()
+                .backend_mut()
+                .transpose_backend()
+                == expected
+            && self.c64.contract_backend().transpose_backend() == expected
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_cpu_context(&mut self, shared: &tenet_dense::SharedCpuContext) -> bool {
+        self.f64
+            .tree_context_mut()
+            .backend_mut()
+            .dense()
+            .shares_cpu_context(shared)
+            && self
+                .f64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared)
+            && self
+                .c64
+                .tree_context_mut()
+                .backend_mut()
+                .dense()
+                .shares_cpu_context(shared)
+            && self
+                .c64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared)
+    }
 }
 
-/// Per-rule expert-layer execution contexts (contraction resolution caches,
-/// tree-transform replay caches, dense backends and workspaces).
-///
-/// One field per supported rule; each context is created eagerly because the
-/// empty contexts are cheap, and filled lazily by use.
-pub(crate) struct RuntimeState {
-    pub(crate) u1: Ctxs<BuiltinKey>,
-    pub(crate) z2: Ctxs<BuiltinKey>,
-    pub(crate) fz2: Ctxs<BuiltinKey>,
-    pub(crate) su2: Ctxs<BuiltinKey>,
-    pub(crate) u1_fz2: Ctxs<ProductKey>,
-    pub(crate) fz2_u1_su2: Ctxs<TripleKey>,
-    /// Stage B3b: SU(3) generic-fusion execution context (permute/braid/
-    /// transpose). Keyed by the table provenance hash, so a swapped table never
-    /// reuses another table's compiled plans.
-    pub(crate) su3: Ctxs<Su3Key>,
-    /// Rule-independent dense-factorization executor (SVD / QR / eigh on the
-    /// coupled-sector matrices), shared by all decomposition methods. Boxed
-    /// behind [`tenet_dense::DenseExecutor`] so the CPU linear-algebra backend
-    /// is selectable at [`RuntimeBuilder::with_dense_executor`]; the default is
-    /// the faer-backed [`tenet_dense::DefaultDenseExecutor`].
-    pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
-    /// CUDA device context when the runtime was built with
-    /// [`RuntimeBuilder::cuda`]; `None` on CPU-only runtimes.
-    #[cfg(feature = "cuda")]
-    pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
+macro_rules! rule_lanes {
+    ($callback:ident) => {
+        $callback! {
+            u1: $crate::runtime::BuiltinKey,
+            z2: $crate::runtime::BuiltinKey,
+            fz2: $crate::runtime::BuiltinKey,
+            su2: $crate::runtime::BuiltinKey,
+            u1_fz2: $crate::runtime::ProductKey,
+            fz2_u1_su2: $crate::runtime::TripleKey,
+            su3: $crate::runtime::Su3Key,
+        }
+    };
 }
+
+pub(crate) use rule_lanes;
+
+// Why not keep separate field and visitor lists: heterogeneous cache-key types
+// prevent a homogeneous iterator, while separate lists let a new rule compile
+// without inheriting every runtime setting.
+macro_rules! define_runtime_state {
+    ($( $field:ident: $key:ty ),+ $(,)?) => {
+        /// Per-rule expert-layer execution contexts plus the rule-independent
+        /// dense executor.
+        pub(crate) struct RuntimeState {
+            $(pub(crate) $field: Ctxs<$key>,)+
+            pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
+            #[cfg(feature = "cuda")]
+            pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
+        }
+
+        impl RuntimeState {
+            // Why not use `Ctxs::default()`: each default context creates a
+            // private env-driven pool instead of sharing the runtime CPU pool.
+            fn with_config(
+                dense: Box<dyn tenet_dense::DenseExecutor + Send>,
+                ctx: &tenet_dense::SharedCpuContext,
+                gemm_kind: Option<tenet_dense::CpuBackendKind>,
+            ) -> Result<Self, Error> {
+                Ok(Self {
+                    $($field: Ctxs::with_config(ctx, gemm_kind)?,)+
+                    dense,
+                    #[cfg(feature = "cuda")]
+                    cuda: None,
+                })
+            }
+
+            fn set_recoupling_threads(&mut self, threads: usize) {
+                $(self.$field.set_recoupling_threads(threads);)+
+            }
+
+            fn set_transpose_backend(&mut self, backend: TransposeBackend) {
+                $(self.$field.set_transpose_backend(backend);)+
+            }
+
+            #[cfg(test)]
+            pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
+                true $(&& self.$field.recoupling_threads_are(expected))+
+            }
+
+            #[cfg(test)]
+            fn transpose_backend_is(&mut self, expected: TransposeBackend) -> bool {
+                true $(&& self.$field.transpose_backend_is(expected))+
+            }
+
+            #[cfg(test)]
+            pub(crate) fn shares_cpu_context(
+                &mut self,
+                shared: &tenet_dense::SharedCpuContext,
+            ) -> bool {
+                true $(&& self.$field.shares_cpu_context(shared))+
+            }
+        }
+    };
+}
+
+rule_lanes!(define_runtime_state);
 
 /// Contraction-plan cache home, behind its own mutex in [`RuntimeInner`] rather
 /// than the coarse `state` mutex (#155): the network hot path locks only this,
@@ -137,91 +271,6 @@ struct PlanCacheHome {
     /// hold them behind `dyn Any`; `tenet-network` claims and downcasts the
     /// slot on first use.
     slot: Option<Box<dyn Any + Send>>,
-}
-
-impl RuntimeState {
-    // Why no `Ctxs::default()` fast path anymore: even the "default" runtime
-    // must route every executor through the shared CPU context — the default
-    // constructors each build a private env-driven rayon pool, and 28 of them
-    // per runtime is exactly the thread explosion #155's pools amplified.
-    fn with_config(
-        dense: Box<dyn tenet_dense::DenseExecutor + Send>,
-        ctx: &tenet_dense::SharedCpuContext,
-        gemm_kind: Option<tenet_dense::CpuBackendKind>,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            u1: Ctxs::with_config(ctx, gemm_kind)?,
-            z2: Ctxs::with_config(ctx, gemm_kind)?,
-            fz2: Ctxs::with_config(ctx, gemm_kind)?,
-            su2: Ctxs::with_config(ctx, gemm_kind)?,
-            u1_fz2: Ctxs::with_config(ctx, gemm_kind)?,
-            fz2_u1_su2: Ctxs::with_config(ctx, gemm_kind)?,
-            su3: Ctxs::with_config(ctx, gemm_kind)?,
-            dense,
-            #[cfg(feature = "cuda")]
-            cuda: None,
-        })
-    }
-
-    /// Applies the tree-transform replay worker count to every per-rule
-    /// execution context (parallelism is a property of the backend, so the
-    /// setting lives on each context's transform backend).
-    fn set_recoupling_threads(&mut self, threads: usize) {
-        fn apply<Key: Clone + Eq + Hash + Send + Sync + 'static>(
-            ctxs: &mut Ctxs<Key>,
-            threads: usize,
-        ) {
-            ctxs.f64
-                .tree_context_mut()
-                .backend_mut()
-                .set_recoupling_threads(threads);
-            ctxs.c64
-                .tree_context_mut()
-                .backend_mut()
-                .set_recoupling_threads(threads);
-        }
-        apply(&mut self.u1, threads);
-        apply(&mut self.z2, threads);
-        apply(&mut self.fz2, threads);
-        apply(&mut self.su2, threads);
-        apply(&mut self.u1_fz2, threads);
-        apply(&mut self.fz2_u1_su2, threads);
-    }
-
-    /// Applies the transpose-kernel selection to every per-rule execution
-    /// context. Unlike the replay worker count (a tree-transform-only
-    /// property), the transpose kernel drives pure permuted copies in BOTH
-    /// backends each context holds — the tree-transform backend (replay
-    /// pack/scatter) and the contraction backend (fusion-block pack/scatter)
-    /// — so both are set, for every rule including SU(3).
-    fn set_transpose_backend(&mut self, backend: TransposeBackend) {
-        fn apply<Key: Clone + Eq + Hash + Send + Sync + 'static>(
-            ctxs: &mut Ctxs<Key>,
-            backend: TransposeBackend,
-        ) {
-            ctxs.f64
-                .tree_context_mut()
-                .backend_mut()
-                .set_transpose_backend(backend);
-            ctxs.f64
-                .contract_backend_mut()
-                .set_transpose_backend(backend);
-            ctxs.c64
-                .tree_context_mut()
-                .backend_mut()
-                .set_transpose_backend(backend);
-            ctxs.c64
-                .contract_backend_mut()
-                .set_transpose_backend(backend);
-        }
-        apply(&mut self.u1, backend);
-        apply(&mut self.z2, backend);
-        apply(&mut self.fz2, backend);
-        apply(&mut self.su2, backend);
-        apply(&mut self.u1_fz2, backend);
-        apply(&mut self.fz2_u1_su2, backend);
-        apply(&mut self.su3, backend);
-    }
 }
 
 struct RuntimeInner {
@@ -952,37 +1001,9 @@ mod tests {
     /// `transpose_backend_field_switches_the_route`.
     #[test]
     fn builder_transpose_backend_reaches_every_context_backend() {
-        fn assert_all<Key: Clone + Eq + Hash + Send + Sync + 'static>(
-            ctxs: &mut Ctxs<Key>,
-            expected: TransposeBackend,
-        ) {
-            assert_eq!(
-                ctxs.f64
-                    .tree_context_mut()
-                    .backend_mut()
-                    .transpose_backend(),
-                expected
-            );
-            assert_eq!(ctxs.f64.contract_backend().transpose_backend(), expected);
-            assert_eq!(
-                ctxs.c64
-                    .tree_context_mut()
-                    .backend_mut()
-                    .transpose_backend(),
-                expected
-            );
-            assert_eq!(ctxs.c64.contract_backend().transpose_backend(), expected);
-        }
         fn assert_state(runtime: &Runtime, expected: TransposeBackend) {
             let mut state = runtime.inner.state.lock().unwrap();
-            let state = &mut *state;
-            assert_all(&mut state.u1, expected);
-            assert_all(&mut state.z2, expected);
-            assert_all(&mut state.fz2, expected);
-            assert_all(&mut state.su2, expected);
-            assert_all(&mut state.u1_fz2, expected);
-            assert_all(&mut state.fz2_u1_su2, expected);
-            assert_all(&mut state.su3, expected);
+            assert!(state.transpose_backend_is(expected));
         }
 
         let selected = Runtime::builder()

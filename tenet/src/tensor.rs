@@ -41,9 +41,7 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::runtime::{
-    BuiltinKey, Ctx, Ctxs, ProductKey, Runtime, RuntimeExecutionConfig, Su3Key, TripleKey,
-};
+use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 
 /// The scalar type a [`Tensor`] stores, fixed at construction.
@@ -476,21 +474,57 @@ impl UserScalar for Complex64 {
     }
 }
 
-/// Caller-owned host execution state for dynamic destination operations.
-/// [`Self::default`] is independent of a [`Runtime`]; use
-/// [`Self::for_runtime`] when execution must inherit and remain bound to a
-/// runtime's backend configuration.
-#[derive(Default)]
-pub struct TensorExecutionContext {
-    runtime: Option<Runtime>,
-    u1: Ctxs<BuiltinKey>,
-    z2: Ctxs<BuiltinKey>,
-    fz2: Ctxs<BuiltinKey>,
-    su2: Ctxs<BuiltinKey>,
-    u1_fz2: Ctxs<ProductKey>,
-    fz2_u1_su2: Ctxs<TripleKey>,
-    su3: Ctxs<Su3Key>,
+macro_rules! define_tensor_execution_context {
+    ($( $field:ident: $key:ty ),+ $(,)?) => {
+        /// Caller-owned host execution state for dynamic destination operations.
+        /// [`Self::default`] is independent of a [`Runtime`]; use
+        /// [`Self::for_runtime`] when execution must inherit and remain bound to a
+        /// runtime's backend configuration.
+        #[derive(Default)]
+        pub struct TensorExecutionContext {
+            runtime: Option<Runtime>,
+            $($field: Ctxs<$key>,)+
+        }
+
+        impl TensorExecutionContext {
+            // Why not retain a Runtime here: pooled contexts live inside that
+            // Runtime, so the back-reference would form an Arc cycle.
+            pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
+                let mut context = Self {
+                    runtime: None,
+                    $($field: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,)+
+                };
+                if let Some(threads) = config.recoupling_threads {
+                    context.set_recoupling_threads(threads);
+                }
+                if let Some(backend) = config.transpose_backend {
+                    context.set_transpose_backend(backend);
+                }
+                Ok(context)
+            }
+
+            fn set_recoupling_threads(&mut self, threads: usize) {
+                $(self.$field.set_recoupling_threads(threads);)+
+            }
+
+            fn set_transpose_backend(&mut self, backend: tenet_tensors::TransposeBackend) {
+                $(self.$field.set_transpose_backend(backend);)+
+            }
+
+            #[cfg(test)]
+            fn recoupling_threads_are(&mut self, expected: usize) -> bool {
+                true $(&& self.$field.recoupling_threads_are(expected))+
+            }
+
+            #[cfg(test)]
+            fn shares_cpu_context(&mut self, shared: &tenet_dense::SharedCpuContext) -> bool {
+                true $(&& self.$field.shares_cpu_context(shared))+
+            }
+        }
+    };
 }
+
+rule_lanes!(define_tensor_execution_context);
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -589,36 +623,6 @@ impl TensorExecutionContext {
         Ok(context)
     }
 
-    /// Builds execution state from a runtime's execution configuration WITHOUT
-    /// the runtime back-reference. Used by the standalone-op context pool
-    /// (#155): a pooled context lives inside the runtime, so storing a `Runtime`
-    /// clone here would form a reference cycle that leaks the runtime. Standalone
-    /// ops drive the per-rule contexts directly (they never call the
-    /// runtime-validating `try_*` methods), so the back-reference is unneeded.
-    pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
-        // All 28 transform backends built here ride the runtime's ONE shared
-        // CPU context — a fresh context per executor would multiply rayon
-        // pools per pooled/cloned TensorExecutionContext (the macOS
-        // thread-cap failure behind #155's context pool).
-        let mut context = Self {
-            runtime: None,
-            u1: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-            z2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-            fz2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-            su2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-            u1_fz2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-            fz2_u1_su2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-            su3: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
-        };
-        if let Some(threads) = config.recoupling_threads {
-            context.set_recoupling_threads(threads);
-        }
-        if let Some(backend) = config.transpose_backend {
-            context.set_transpose_backend(backend);
-        }
-        Ok(context)
-    }
-
     fn accepts_runtime(&self, tensor: &Tensor) -> bool {
         self.runtime
             .as_ref()
@@ -633,62 +637,6 @@ impl TensorExecutionContext {
                 "execution context is bound to a different runtime".to_string(),
             ))
         }
-    }
-
-    fn set_recoupling_threads(&mut self, threads: usize) {
-        macro_rules! apply {
-            ($contexts:expr) => {
-                $contexts
-                    .f64
-                    .tree_context_mut()
-                    .backend_mut()
-                    .set_recoupling_threads(threads);
-                $contexts
-                    .c64
-                    .tree_context_mut()
-                    .backend_mut()
-                    .set_recoupling_threads(threads);
-            };
-        }
-        apply!(self.u1);
-        apply!(self.z2);
-        apply!(self.fz2);
-        apply!(self.su2);
-        apply!(self.u1_fz2);
-        apply!(self.fz2_u1_su2);
-        apply!(self.su3);
-    }
-
-    fn set_transpose_backend(&mut self, backend: tenet_tensors::TransposeBackend) {
-        macro_rules! apply {
-            ($contexts:expr) => {
-                $contexts
-                    .f64
-                    .tree_context_mut()
-                    .backend_mut()
-                    .set_transpose_backend(backend);
-                $contexts
-                    .f64
-                    .contract_backend_mut()
-                    .set_transpose_backend(backend);
-                $contexts
-                    .c64
-                    .tree_context_mut()
-                    .backend_mut()
-                    .set_transpose_backend(backend);
-                $contexts
-                    .c64
-                    .contract_backend_mut()
-                    .set_transpose_backend(backend);
-            };
-        }
-        apply!(self.u1);
-        apply!(self.z2);
-        apply!(self.fz2);
-        apply!(self.su2);
-        apply!(self.u1_fz2);
-        apply!(self.fz2_u1_su2);
-        apply!(self.su3);
     }
 }
 
@@ -6532,64 +6480,39 @@ mod shared_context_tests {
     /// eager rayon pool per rule, dtype, and concurrent lease.
     #[test]
     fn runtime_and_leased_contexts_share_one_cpu_context() {
-        fn assert_shared<Key: Clone + Eq + std::hash::Hash + Send + Sync + 'static>(
-            ctxs: &mut Ctxs<Key>,
-            shared: &tenet_dense::SharedCpuContext,
-        ) {
-            assert!(ctxs
-                .f64
-                .tree_context_mut()
-                .backend_mut()
-                .dense()
-                .shares_cpu_context(shared));
-            assert!(ctxs
-                .f64
-                .contract_backend()
-                .dense()
-                .shares_cpu_context(shared));
-            assert!(ctxs
-                .c64
-                .tree_context_mut()
-                .backend_mut()
-                .dense()
-                .shares_cpu_context(shared));
-            assert!(ctxs
-                .c64
-                .contract_backend()
-                .dense()
-                .shares_cpu_context(shared));
-        }
-
-        fn assert_all_rules(
-            context: &mut TensorExecutionContext,
-            shared: &tenet_dense::SharedCpuContext,
-        ) {
-            assert_shared(&mut context.u1, shared);
-            assert_shared(&mut context.z2, shared);
-            assert_shared(&mut context.fz2, shared);
-            assert_shared(&mut context.su2, shared);
-            assert_shared(&mut context.u1_fz2, shared);
-            assert_shared(&mut context.fz2_u1_su2, shared);
-            assert_shared(&mut context.su3, shared);
-        }
-
         let rt = Runtime::builder().build().expect("runtime");
         let shared = rt.execution_config().shared_ctx.clone();
         {
             let mut state = rt.lock();
-            assert_shared(&mut state.u1, &shared);
-            assert_shared(&mut state.z2, &shared);
-            assert_shared(&mut state.fz2, &shared);
-            assert_shared(&mut state.su2, &shared);
-            assert_shared(&mut state.u1_fz2, &shared);
-            assert_shared(&mut state.fz2_u1_su2, &shared);
-            assert_shared(&mut state.su3, &shared);
+            assert!(state.shares_cpu_context(&shared));
         }
 
         let mut lease = rt.lease_context().expect("lease");
-        assert_all_rules(lease.context(), &shared);
+        assert!(lease.context().shares_cpu_context(&shared));
         let mut network_context = TensorExecutionContext::for_runtime(&rt).expect("context");
-        assert_all_rules(&mut network_context, &shared);
+        assert!(network_context.shares_cpu_context(&shared));
+    }
+
+    #[test]
+    fn runtime_builder_recoupling_threads_reach_every_runtime_and_context_lane() {
+        fn assert_runtime_and_context(runtime: &Runtime, expected: usize) {
+            {
+                let mut state = runtime.lock();
+                assert!(state.recoupling_threads_are(expected));
+            }
+
+            let mut context = TensorExecutionContext::for_runtime(runtime).expect("context");
+            assert!(context.recoupling_threads_are(expected));
+        }
+
+        let configured = Runtime::builder()
+            .recoupling_threads(3)
+            .build()
+            .expect("configured runtime");
+        assert_runtime_and_context(&configured, 3);
+
+        let default = Runtime::builder().build().expect("default runtime");
+        assert_runtime_and_context(&default, 1);
     }
 }
 
