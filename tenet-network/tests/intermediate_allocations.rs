@@ -224,6 +224,19 @@ fn record_realloc_result(
     register_live(new_ptr, new_size)
 }
 
+fn record_dealloc_result(pointer: *mut u8, count_event: bool) -> bool {
+    let Some(size) = unregister_live(pointer) else {
+        return false;
+    };
+    // Why not gate unregistering: probe-origin storage can outlive the measurement
+    // window, and leaving it registered corrupts retained-live accounting.
+    if count_event {
+        DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+    }
+    true
+}
+
 fn add_live(bytes: u64) {
     let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
     let mut peak = PEAK_LIVE_BYTES.load(Ordering::Relaxed);
@@ -256,13 +269,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let probe_origin_size = unregister_live(ptr);
-        if ENABLED.load(Ordering::Relaxed) {
-            if let Some(size) = probe_origin_size {
-                DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
-                DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
-            }
-        }
+        record_dealloc_result(ptr, ENABLED.load(Ordering::Relaxed));
         unsafe { System.dealloc(ptr, layout) }
     }
 
