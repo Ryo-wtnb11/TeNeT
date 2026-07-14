@@ -3974,17 +3974,21 @@ impl Tensor {
         Ok(self.is_isometric(tol)? && self.adjoint()?.is_isometric(tol)?)
     }
 
-    /// Tests whether the tensor is Hermitian and positive definite within `tol`
-    /// (TensorKit `isposdef`): every Hermitian eigenvalue is `> -tol`.
+    /// Tests whether the tensor is Hermitian and positive definite (TensorKit
+    /// `isposdef`, which is Cholesky-based and strict): every Hermitian
+    /// eigenvalue must exceed `tol * max(norm, 1)`. Positive *semi*definite
+    /// spectra (an eigenvalue at zero) return `false`; with `tol = 0.0` the
+    /// check is exact strict positivity up to floating point.
     pub fn is_posdef(&self, tol: f64) -> Result<bool, Error> {
         if !self.is_hermitian(tol)? {
             return Ok(false);
         }
+        let threshold = tol * self.norm()?.max(1.0);
         Ok(self
             .eigh_vals()?
             .iter()
             .flat_map(|spectrum| spectrum.values.iter())
-            .all(|&lambda| lambda > -tol))
+            .all(|&lambda| lambda > threshold))
     }
 
     /// Tests whether the tensor equals minus its own adjoint within `tol`,
@@ -6833,6 +6837,17 @@ mod tk_user_api_tests {
             .unwrap();
         assert!(minus_id.is_hermitian(1e-12).unwrap());
         assert!(!minus_id.is_posdef(1e-12).unwrap());
+    }
+
+    #[test]
+    fn zero_tensor_is_not_posdef() {
+        // What: a zero spectrum is positive SEMIdefinite, so strict posdef
+        // (TK isposdef = Cholesky) must reject it.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+        assert!(zero.is_hermitian(1e-12).unwrap());
+        assert!(!zero.is_posdef(1e-12).unwrap());
     }
 
     #[test]
