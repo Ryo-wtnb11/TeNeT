@@ -564,15 +564,41 @@ fn dynamic_alias_matches(alias: &StaticAlias, network: &Network, tensors: &[&Ten
         && alias.topology.output_codomain_rank == network.output_codomain_rank
 }
 
-fn cached_plan_is_resident(
-    cache: &PlanCache,
+/// Outcome of a warm-path alias lookup done under the single plan-cache lock
+/// (shared by the static and dynamic paths; `Disabled` fallbacks differ).
+enum Lookup {
+    /// Caching is off; execute uncached.
+    Disabled,
+    Hit(CachedPlan),
+    Miss,
+}
+
+/// Confirms the alias still points at the resident cache entry AND promotes it
+/// to most-recently-used in ONE `LruCache::get` (#155): `get` moves the entry to
+/// MRU and hands it back, so the residency check (Arc identity) and the LRU
+/// touch share a single `NetworkTopology` hash instead of a `peek` (residency)
+/// followed by a `promote`. Counts the hit only on a confirmed match. A miss
+/// here (evicted, or the topology now maps to a different plan) is harmless: the
+/// caller replans, and promoting whatever currently holds the key — or nothing —
+/// changes only LRU order.
+fn promote_if_resident(
+    cache: &mut PlanCache,
     topology: &Arc<NetworkTopology>,
-    cached: &CachedPlan,
-) -> bool {
-    cache.map.peek(topology).is_some_and(|entry| {
-        Arc::ptr_eq(&entry.planned, &cached.planned)
-            && Arc::ptr_eq(&entry.workspaces, &cached.workspaces)
-    })
+    cached: CachedPlan,
+) -> Option<CachedPlan> {
+    let resident = match cache.map.get(topology) {
+        Some(entry) => {
+            Arc::ptr_eq(&entry.planned, &cached.planned)
+                && Arc::ptr_eq(&entry.workspaces, &cached.workspaces)
+        }
+        None => false,
+    };
+    if resident {
+        cache.hits += 1;
+        Some(cached)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn execute_static(
@@ -583,41 +609,47 @@ pub(crate) fn execute_static(
     let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
         return spec.network()?.contract_with(tensors, optimizer);
     };
-    let config = runtime.plan_cache_config();
-    if !config.enabled {
-        return spec.network()?.contract_with(tensors, optimizer);
-    }
     let key = StaticTopologyKey {
         spec,
         optimizer: topology_optimizer(optimizer),
     };
-    let hit = runtime.with_extension_slot(|slot| -> Result<Option<CachedPlan>, Error> {
+    // Warm hit path under ONE plan-cache lock (#155): resolve enable/replan
+    // policy and do the alias lookup + LRU touch together instead of a separate
+    // `plan_cache_config()` acquisition followed by a `with_extension_slot` one.
+    // `needs_replan_tensors` stays inside — for the default `BakeOnce` policy it
+    // is a rank-only guard (no leg-dim scan, no lock), so it is not the hot
+    // cost; the two `NetworkTopology` hashes were, and residency + promote now
+    // fold into one `LruCache::get`.
+    let lookup = runtime.with_plan_cache(|config, slot| -> Result<Lookup, Error> {
+        if !config.enabled {
+            return Ok(Lookup::Disabled);
+        }
         let cache = cache_mut(slot);
         let Some(aliases) = cache.static_aliases.get(&key) else {
-            return Ok(None);
+            return Ok(Lookup::Miss);
         };
         let Some(alias) = aliases
             .iter()
             .find(|alias| static_alias_matches(alias, tensors))
         else {
-            return Ok(None);
+            return Ok(Lookup::Miss);
         };
         if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
-            return Ok(None);
+            return Ok(Lookup::Miss);
         }
         let Some(cached) = alias.cached() else {
-            return Ok(None);
+            return Ok(Lookup::Miss);
         };
         let topology = alias.topology.clone();
-        if !cached_plan_is_resident(cache, &topology, &cached) {
-            return Ok(None);
-        }
-        cache.hits += 1;
-        cache.map.promote(&topology);
-        Ok(Some(cached))
+        Ok(match promote_if_resident(cache, &topology, cached) {
+            Some(cached) => Lookup::Hit(cached),
+            None => Lookup::Miss,
+        })
     })?;
-    if let Some(cached) = hit {
-        return cached.execute(tensors);
+    match lookup {
+        Lookup::Disabled => return spec.network()?.contract_with(tensors, optimizer),
+        Lookup::Hit(cached) => return cached.execute(tensors),
+        Lookup::Miss => {}
     }
 
     let network = spec.network()?;
@@ -631,7 +663,7 @@ pub(crate) fn execute_static(
         .iter()
         .map(|tensor| tensor.leg_dims())
         .collect::<Result<_, _>>()?;
-    runtime.with_extension_slot(|slot| {
+    runtime.with_plan_cache(|config, slot| {
         let cache = cache_mut(slot);
         let capacity = lru_capacity(config.capacity);
         if cache.static_aliases.cap() != capacity {
@@ -803,48 +835,51 @@ fn get_or_plan_internal(
             workspaces: Arc::new(WorkspacePool::default()),
         });
     };
-    let config = runtime.plan_cache_config();
-    if !config.enabled {
-        return Ok(CachedPlan {
-            planned: Arc::new(plan_fresh(network, tensors, optimizer)?),
-            workspaces: Arc::new(WorkspacePool::default()),
-        });
-    }
-
     let dynamic_key = register_dynamic_alias.then(|| DynamicTopologyKey {
         network_id: network.cache_id(),
         optimizer: topology_optimizer(optimizer),
     });
-    if let Some(key) = dynamic_key.as_ref() {
-        let alias_hit =
-            runtime.with_extension_slot(|slot| -> Result<Option<CachedPlan>, Error> {
-                let cache = cache_mut(slot);
-                let Some(aliases) = cache.dynamic_aliases.get(key) else {
-                    return Ok(None);
-                };
-                let Some(alias) = aliases
-                    .iter()
-                    .find(|alias| dynamic_alias_matches(alias, network, tensors))
-                else {
-                    return Ok(None);
-                };
-                if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
-                    return Ok(None);
-                }
-                let Some(cached) = alias.cached() else {
-                    return Ok(None);
-                };
-                let topology = alias.topology.clone();
-                if !cached_plan_is_resident(cache, &topology, &cached) {
-                    return Ok(None);
-                }
-                cache.hits += 1;
-                cache.map.promote(&topology);
-                Ok(Some(cached))
-            })?;
-        if let Some(cached) = alias_hit {
-            return Ok(cached);
+    // Warm alias hit path under ONE plan-cache lock (#155): same shrink as
+    // `execute_static` — config + alias lookup + LRU touch in one acquisition,
+    // residency + promote folded into one `LruCache::get`.
+    let lookup = runtime.with_plan_cache(|config, slot| -> Result<Lookup, Error> {
+        if !config.enabled {
+            return Ok(Lookup::Disabled);
         }
+        let Some(key) = dynamic_key.as_ref() else {
+            return Ok(Lookup::Miss);
+        };
+        let cache = cache_mut(slot);
+        let Some(aliases) = cache.dynamic_aliases.get(key) else {
+            return Ok(Lookup::Miss);
+        };
+        let Some(alias) = aliases
+            .iter()
+            .find(|alias| dynamic_alias_matches(alias, network, tensors))
+        else {
+            return Ok(Lookup::Miss);
+        };
+        if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
+            return Ok(Lookup::Miss);
+        }
+        let Some(cached) = alias.cached() else {
+            return Ok(Lookup::Miss);
+        };
+        let topology = alias.topology.clone();
+        Ok(match promote_if_resident(cache, &topology, cached) {
+            Some(cached) => Lookup::Hit(cached),
+            None => Lookup::Miss,
+        })
+    })?;
+    match lookup {
+        Lookup::Disabled => {
+            return Ok(CachedPlan {
+                planned: Arc::new(plan_fresh(network, tensors, optimizer)?),
+                workspaces: Arc::new(WorkspacePool::default()),
+            })
+        }
+        Lookup::Hit(cached) => return Ok(cached),
+        Lookup::Miss => {}
     }
 
     runtime.with_extension_slot(|slot| cache_mut(slot).topology_materializations += 1);
@@ -860,7 +895,7 @@ fn get_or_plan_internal(
         Replan,
         Miss,
     }
-    let outcome = runtime.with_extension_slot(|slot| {
+    let outcome = runtime.with_plan_cache(|config, slot| {
         let cache = cache_mut(slot);
         // `peek` inspects without touching LRU order, so a stale entry that will
         // be replanned does not count as a use; a genuine hit is promoted to
@@ -891,7 +926,7 @@ fn get_or_plan_internal(
             workspaces: Arc::downgrade(&planned.workspaces),
         };
         if let Some(dynamic_key) = dynamic_key {
-            runtime.with_extension_slot(|slot| {
+            runtime.with_plan_cache(|config, slot| {
                 let cache = cache_mut(slot);
                 let capacity = lru_capacity(config.capacity);
                 if cache.dynamic_aliases.cap() != capacity {
@@ -951,7 +986,7 @@ fn get_or_plan_internal(
         planned: Arc::downgrade(&planned),
         workspaces: Arc::downgrade(&workspaces),
     };
-    runtime.with_extension_slot(|slot| {
+    runtime.with_plan_cache(|config, slot| {
         let cache = cache_mut(slot);
         match outcome {
             Outcome::Replan => cache.replans += 1,
