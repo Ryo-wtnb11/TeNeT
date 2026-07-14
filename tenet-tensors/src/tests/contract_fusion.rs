@@ -1470,6 +1470,33 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
             "element {index}: got {actual}, TensorKit reference {want}"
         );
     }
+
+    dst.data_mut().fill(0.0);
+    let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
+    let mut profile = TensorContractFusionProfile::default();
+    context
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            1.0,
+            0.0,
+            &mut profile,
+        )
+        .unwrap();
+
+    // What: an already-core LHS is borrowed while the twist-bearing RHS is materialized.
+    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    assert_eq!(profile.lhs_transform_calls, 0);
+    assert_eq!(profile.rhs_transform_calls, 1);
+    for (index, (&actual, &want)) in dst.data().iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - want).abs() < 1.0e-12,
+            "profiled element {index}: got {actual}, TensorKit reference {want}"
+        );
+    }
 }
 
 #[test]
