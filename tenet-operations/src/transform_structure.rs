@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
@@ -25,6 +27,7 @@ pub struct TreeTransformStructure<T> {
     pub blocks: Vec<TreeTransformBlock>,
     pub layouts: TreeTransformLayoutTable,
     pub recoupling_coefficients_dst_src: Vec<T>,
+    inactive_dst_layouts: Vec<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
@@ -301,6 +304,7 @@ impl<T: Copy> TreeTransformStructure<T> {
                 actual: src_structure.rank(),
             });
         }
+        validate_destination_injective(&dst_structure)?;
 
         let mut layouts = TreeTransformLayoutTable::default();
         let mut blocks = Vec::with_capacity(specs.len());
@@ -406,6 +410,15 @@ impl<T: Copy> TreeTransformStructure<T> {
                 });
             }
         }
+        let mut inactive_dst_layouts = Vec::new();
+        for (dst_block, touched) in touched_dst_blocks.into_iter().enumerate() {
+            if touched {
+                continue;
+            }
+            let block = dst_structure.block(dst_block)?;
+            inactive_dst_layouts.push(layouts.entry_count());
+            layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+        }
         blocks.sort_by(|lhs, rhs| {
             tree_transform_block_weight(rhs, &layouts)
                 .cmp(&tree_transform_block_weight(lhs, &layouts))
@@ -419,6 +432,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             blocks,
             layouts,
             recoupling_coefficients_dst_src,
+            inactive_dst_layouts,
             recoupling_plan,
             dst_structure,
             src_structure,
@@ -489,6 +503,11 @@ impl<T: Copy> TreeTransformStructure<T> {
         self.recoupling_coefficients_dst_src[index]
     }
 
+    #[inline]
+    pub(crate) fn inactive_destination_layouts(&self) -> &[usize] {
+        &self.inactive_dst_layouts
+    }
+
     pub fn validate_replay_structures(
         &self,
         dst_structure: &Arc<BlockStructure>,
@@ -496,6 +515,166 @@ impl<T: Copy> TreeTransformStructure<T> {
     ) -> Result<(), OperationError> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
         validate_structure_identity("src", &self.src_structure, src_structure)
+    }
+}
+
+fn validate_destination_injective(dst_structure: &BlockStructure) -> Result<(), OperationError> {
+    // Why-not deduplicate only the beta scale: aliased logical destination
+    // blocks can also require distinct alpha contributions, so no replay order
+    // can represent their outputs in one physical element.
+    #[derive(Clone, Copy)]
+    struct BoundedBlock {
+        dst_block: usize,
+        start: usize,
+        end: usize,
+        proven_injective: bool,
+    }
+
+    let mut bounded = Vec::with_capacity(dst_structure.block_count());
+    for dst_block in 0..dst_structure.block_count() {
+        let block = dst_structure.block(dst_block)?;
+        let Some((start, end)) = layout_bounds(block.shape(), block.strides(), block.offset())?
+        else {
+            continue;
+        };
+        bounded.push(BoundedBlock {
+            dst_block,
+            start,
+            end,
+            proven_injective: layout_is_proven_injective(block.shape(), block.strides()),
+        });
+    }
+    bounded.sort_by_key(|block| block.start);
+
+    let mut component_start = 0;
+    while component_start < bounded.len() {
+        let mut component_end = component_start + 1;
+        let mut max_end = bounded[component_start].end;
+        while component_end < bounded.len() && bounded[component_end].start <= max_end {
+            max_end = max_end.max(bounded[component_end].end);
+            component_end += 1;
+        }
+        let component = &bounded[component_start..component_end];
+        if component.len() == 1 && component[0].proven_injective {
+            component_start = component_end;
+            continue;
+        }
+
+        // Range-connected layouts may be physically disjoint (coupled and
+        // interleaved blocks), so enumerate each suspicious footprint once.
+        let mut offsets = FxHashSet::<usize>::default();
+        for bounded_block in component {
+            let block = dst_structure.block(bounded_block.dst_block)?;
+            let mut overlap = false;
+            visit_layout_offsets(block.shape(), block.strides(), block.offset(), |offset| {
+                overlap = !offsets.insert(offset);
+                overlap
+            })?;
+            if overlap {
+                // Why not expose block/offset details in a new variant:
+                // OperationError is a public exhaustive enum, so that would
+                // break downstream matches for a validation-only diagnostic.
+                return Err(OperationError::InvalidArgument {
+                    message: "tree transform destination layouts overlap",
+                });
+            }
+        }
+        component_start = component_end;
+    }
+    Ok(())
+}
+
+fn layout_is_proven_injective(shape: &[usize], strides: &[usize]) -> bool {
+    let mut axes = shape
+        .iter()
+        .copied()
+        .zip(strides.iter().copied())
+        .filter(|&(extent, _)| extent > 1)
+        .collect::<SmallVec<[(usize, usize); 8]>>();
+    axes.sort_unstable_by_key(|&(_, stride)| stride);
+    let mut lower_span = 0usize;
+    for (extent, stride) in axes {
+        if stride == 0 || stride <= lower_span {
+            return false;
+        }
+        let Some(span) = (extent - 1).checked_mul(stride) else {
+            return false;
+        };
+        let Some(next_span) = lower_span.checked_add(span) else {
+            return false;
+        };
+        lower_span = next_span;
+    }
+    true
+}
+
+fn layout_bounds(
+    shape: &[usize],
+    strides: &[usize],
+    offset: usize,
+) -> Result<Option<(usize, usize)>, OperationError> {
+    if shape.contains(&0) {
+        return Ok(None);
+    }
+    let mut end = offset;
+    for (&extent, &stride) in shape.iter().zip(strides) {
+        end = end
+            .checked_add(
+                extent
+                    .saturating_sub(1)
+                    .checked_mul(stride)
+                    .ok_or(OperationError::ElementCountOverflow)?,
+            )
+            .ok_or(OperationError::ElementCountOverflow)?;
+    }
+    Ok(Some((offset, end)))
+}
+
+fn visit_layout_offsets<F>(
+    shape: &[usize],
+    strides: &[usize],
+    offset: usize,
+    mut stop: F,
+) -> Result<Option<usize>, OperationError>
+where
+    F: FnMut(usize) -> bool,
+{
+    if shape.contains(&0) {
+        return Ok(None);
+    }
+    let mut indices = shape
+        .iter()
+        .map(|_| 0usize)
+        .collect::<SmallVec<[usize; 8]>>();
+    loop {
+        let physical =
+            indices
+                .iter()
+                .zip(strides)
+                .try_fold(offset, |physical, (&index, &stride)| {
+                    physical
+                        .checked_add(
+                            index
+                                .checked_mul(stride)
+                                .ok_or(OperationError::ElementCountOverflow)?,
+                        )
+                        .ok_or(OperationError::ElementCountOverflow)
+                })?;
+        if stop(physical) {
+            return Ok(Some(physical));
+        }
+        let mut axis = 0;
+        while axis < indices.len() {
+            indices[axis] += 1;
+            if indices[axis] < shape[axis] {
+                break;
+            }
+            indices[axis] = 0;
+            axis += 1;
+        }
+        if axis == indices.len() {
+            return Ok(None);
+        }
     }
 }
 
