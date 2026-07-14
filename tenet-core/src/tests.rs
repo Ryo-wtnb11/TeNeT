@@ -1402,6 +1402,49 @@ mod tests {
     }
 
     #[test]
+    fn unique_identity_tree_operations_reject_simple_fusion_rules() {
+        // What: identity axes do not let a Simple rule enter APIs whose
+        // contract requires Unique fusion.
+        let tree = FusionTreeKey::from_sector_ids([1], Some(1), [false], [], []);
+        let expected = CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: FusionStyleKind::Simple,
+        };
+
+        assert_eq!(
+            unique_braid_tree(&SU2FusionRule, &tree, &[0], &[7]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            unique_permute_tree(&SU2FusionRule, &tree, &[0]).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn same_split_transpose_of_dual_tree_pair_skips_bend_symbols() {
+        // What: a real codomain/domain tree pair at its current 2|1 split is
+        // source => one without consulting bend/fold data.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1],
+            Some(1),
+            [false, true],
+            [true],
+            [],
+            [],
+            [1],
+            [],
+        );
+
+        assert_eq!(
+            unique_transpose_tree_pair(&IdentitySymbolPanicRule, &source, &[0, 1], &[2])
+                .unwrap(),
+            (source, 1.0)
+        );
+    }
+
+    #[test]
     fn identity_braid_rows_are_exact_for_supported_symmetry_families_and_rank_zero() {
         // What: identity rows preserve their exact source key and unit
         // coefficient for fermionic, non-abelian, product, and scalar spaces.

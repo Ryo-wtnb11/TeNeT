@@ -864,6 +864,131 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
 }
 
 #[test]
+fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() {
+    // What: exact 2|1 fZ2 and SU2 transposes preserve the source tree with a
+    // unit coefficient, while a cyclic split change retains recoupling.
+    let fz2_source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &FermionParityFusionRule,
+            [SectorId::new(1), SectorId::new(0)],
+            Some(SectorId::new(1)),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &FermionParityFusionRule,
+            [SectorId::new(1)],
+            Some(SectorId::new(1)),
+            [true],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
+    let fz2_key = BlockKey::from(fz2_source);
+    let fz2_structure = packed_fixture_structure(3, [(fz2_key.clone(), vec![1, 1, 1])]).unwrap();
+    let exact = TreeTransformOperation::transpose([0, 1], [2]);
+    let fz2_plan = build_tree_pair_transform_group_plan(
+        &FermionParityFusionRule,
+        exact.clone(),
+        &fz2_structure,
+    )
+    .unwrap();
+    assert_eq!(fz2_plan.specs().len(), 1);
+    assert_eq!(fz2_plan.specs()[0].src_keys(), &[fz2_key.clone()]);
+    assert_eq!(fz2_plan.specs()[0].dst_keys(), &[fz2_key]);
+    assert_eq!(
+        fz2_plan.specs()[0].recoupling_coefficients_dst_src(),
+        &[1.0]
+    );
+    assert!(!fz2_plan
+        .compile_structures(&fz2_structure, &fz2_structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let one = SU2Irrep::from_twice_spin(2).sector_id();
+    let su2_source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [one, one],
+            Some(one),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], Some(one), [true], [], []).unwrap(),
+    );
+    let su2_rows = tenet_core::multiplicity_free_transpose_tree_pair(
+        &SU2FusionRule,
+        &su2_source,
+        &[0, 1],
+        &[2],
+    )
+    .unwrap();
+    assert_eq!(su2_rows, vec![(su2_source.clone(), 1.0)]);
+
+    let su2_key = BlockKey::from(su2_source);
+    let su2_structure = packed_fixture_structure(3, [(su2_key.clone(), vec![1, 1, 1])]).unwrap();
+    let su2_plan =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, exact, &su2_structure).unwrap();
+    assert_eq!(su2_plan.specs()[0].src_keys(), &[su2_key.clone()]);
+    assert_eq!(su2_plan.specs()[0].dst_keys(), &[su2_key]);
+    assert_eq!(
+        su2_plan.specs()[0].recoupling_coefficients_dst_src(),
+        &[1.0]
+    );
+    assert!(!su2_plan
+        .compile_structures(&su2_structure, &su2_structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let control_keys = [0, 2, 4].map(|inner| {
+        BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [one, one, one],
+                Some(one),
+                [false, false, false],
+                [SectorId::new(inner)],
+                [SectorId::new(1), SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], Some(one), [true], [], [])
+                .unwrap(),
+        ))
+    });
+    let control_src = packed_fixture_structure(
+        4,
+        control_keys
+            .iter()
+            .cloned()
+            .map(|key| (key, vec![1, 1, 1, 1])),
+    )
+    .unwrap();
+    let split_change = TreeTransformOperation::transpose([3, 0, 1], [2]);
+    assert!(!split_change.is_identity_for(3, 1));
+    let control =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, split_change, &control_src).unwrap();
+    assert_eq!(control.specs()[0].src_keys().len(), control_keys.len());
+    let dst_structure = packed_fixture_structure(
+        4,
+        control
+            .specs()
+            .iter()
+            .flat_map(|spec| spec.dst_keys().iter().cloned())
+            .map(|key| (key, vec![1, 1, 1, 1])),
+    )
+    .unwrap();
+    assert!(control
+        .compile_structures(&dst_structure, &control_src)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+}
+
+#[test]
 fn tree_row_memo_survives_structure_change() {
     // TensorKit fstranspose/fsbraid cache parity: a truncation step changes the tree
     // subset of a structure, so the sector-keyed plan cache misses — but
