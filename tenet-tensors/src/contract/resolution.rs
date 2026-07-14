@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
-use tenet_core::{BlockStructure, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
+use tenet_core::{BlockStructure, FusionTreeHomSpace, HomSpaceId, MultiplicityFreeRigidSymbols};
 
 use super::structure::TensorContractStructure;
 use crate::cache::{
@@ -98,9 +98,30 @@ impl FullSpaceKey {
     }
 }
 
-/// Pointer-identity fast key: serves many distinct keys without structural
-/// hashing, so loops cycling through several fixed contractions (an iPEPS
-/// unit cell, energy environments) stay O(1) even when they alternate.
+/// Content-identity fast key: the cheap-hash precursor to [`FullKey`], serving
+/// many distinct keys without the full key's deep hom-space hash, so loops
+/// cycling through several fixed contractions (an iPEPS unit cell, energy
+/// environments) stay O(1) on the key hash even when they alternate. Keyed on
+/// the same interned semantic identities `FullKey` resolves to — the hom space's
+/// [`HomSpaceId`] (O(1) prehash) and the block structure's `content_id` —
+/// instead of the deep clone-and-hash of the whole `FusionTreeHomSpace`.
+///
+/// Why-not (raw `Arc::as_ptr` keys, the previous form): a pointer key is
+/// principally unsound (ABA — a freed operand Arc's address can be reused by an
+/// unrelated live structure) and hits only when the *same* Arc recurs. Content
+/// keys are sound and additionally hit when identical content arrives in a fresh
+/// Arc — a hit the pointer key missed. That extra hit is semantically safe for
+/// every [`Resolution`] payload: `Core`/`Structure` carry their own pinned
+/// operand structures and replay re-validates them against the live operands
+/// (`validate_structure_identity`), and `DynamicTree` plans are pure functions
+/// of (rank, axes, conj) and content-independent (the χ1-vs-χ3 regression test
+/// pins that invariant). This is exactly what a `FullKey` hit already does —
+/// `FullKey` and `FastKey` now share one content-equivalence class, so a
+/// `FastKey` hit is always a would-be `FullKey` hit, never a divergent one.
+///
+/// Why-not (pin the operand Arcs instead, à la [`LastSpace`]): pinning keeps
+/// dead structures alive only to keep a pointer key valid; re-keying on content
+/// removes the unsoundness at the root without extending any lifetime.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FastKey<RuleKey> {
     rule: RuleKey,
@@ -114,16 +135,16 @@ struct FastKey<RuleKey> {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FastSpaceKey {
     nout: usize,
-    homspace_ptr: usize,
-    structure_ptr: usize,
+    homspace_id: HomSpaceId,
+    structure_id: usize,
 }
 
 impl FastSpaceKey {
     fn from_space(space: &DynamicFusionMapSpace) -> Self {
         Self {
             nout: space.nout(),
-            homspace_ptr: Arc::as_ptr(space.homspace_arc()) as usize,
-            structure_ptr: Arc::as_ptr(space.structure()) as usize,
+            homspace_id: space.homspace().id(),
+            structure_id: space.structure().content_id(),
         }
     }
 }
@@ -209,6 +230,15 @@ impl RawAxes {
 /// scratch keys per replay, so a single slot would thrash on every call.
 const LAST_RING_CAPACITY: usize = 16;
 
+/// Cap on the content-keyed fast map. The fast map is a pure accelerator —
+/// every entry is reconstructible from `resolved`, so bounding it only costs a
+/// re-promotion (a `FullKey` hash) on the next miss, never correctness. This
+/// bounds fast-map growth even under the unbounded `TaskLocal` policy (the P3
+/// hardening: a long-lived process no longer grows it monotonically). Under an
+/// LRU policy the fast cap tracks `max_entries`, so fast never falls behind
+/// `resolved` and no working-set key needlessly pays the deep `FullKey` hash.
+const FAST_MAP_CAPACITY: usize = 4096;
+
 #[derive(Clone, Debug)]
 pub(crate) struct ContractionResolutionCache<RuleKey> {
     last: Vec<LastEntry<RuleKey>>,
@@ -271,6 +301,18 @@ where
             self.fast.clear();
             self.last.clear();
         }
+    }
+
+    fn fast_insert(&mut self, key: FastKey<RuleKey>, resolution: Resolution) {
+        // ponytail: nuke-on-full, not per-entry LRU — keeps the hot fast-hit
+        // path free of reorder bookkeeping (the `last` ring already absorbs the
+        // hottest keys, and a lost fast entry only falls through to `resolved`).
+        // Upgrade to keyed LRU only if fast-map churn shows up in a profile.
+        let cap = self.policy.max_entries().unwrap_or(FAST_MAP_CAPACITY);
+        if self.fast.len() >= cap && !self.fast.contains_key(&key) {
+            self.fast.clear();
+        }
+        self.fast.insert(key, resolution);
     }
 
     fn touch(&mut self, key: &FullKey<RuleKey>) {
@@ -431,7 +473,7 @@ where
                 self.stats.hits += 1;
                 let resolution = resolution.clone();
                 self.touch(&full_key);
-                self.fast.insert(fast_key, resolution.clone());
+                self.fast_insert(fast_key, resolution.clone());
                 self.remember_last(
                     &rule_key,
                     dst,
@@ -458,7 +500,7 @@ where
                     self.lru_order.push_back(full_key.clone());
                     self.enforce_lru_limit(max_entries);
                 }
-                self.fast.insert(fast_key, resolution.clone());
+                self.fast_insert(fast_key, resolution.clone());
                 self.remember_last(
                     &rule_key,
                     dst,
@@ -482,7 +524,7 @@ where
                 self.lru_order.push_back(full_key.clone());
                 self.enforce_lru_limit(max_entries);
             }
-            self.fast.insert(fast_key, resolution.clone());
+            self.fast_insert(fast_key, resolution.clone());
             self.remember_last(
                 &rule_key,
                 dst,
@@ -581,4 +623,73 @@ where
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn;
+    use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
+    use tenet_operations::axis::OutputAxisOrder;
+
+    // Two-leg-per-side U(1) matrix space (three charges) in a chosen bond
+    // dimension `deg`. Each call builds a fresh hom-space `Arc` (see
+    // `from_degeneracy_shapes`), so content-equal spaces from separate calls
+    // carry distinct pointers — the case that made the old raw-pointer key miss.
+    fn u1_matrix_space(rule: &U1FusionRule, deg: usize) -> DynamicFusionMapSpace {
+        let sectors = [
+            U1Irrep::new(-1).sector_id(),
+            U1Irrep::new(0).sector_id(),
+            U1Irrep::new(1).sector_id(),
+        ];
+        let leg = || SectorLeg::new(sectors.map(|sector| (sector, deg)), false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let count = hom.fusion_tree_keys(rule).len();
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![deg; 4]; count]).unwrap()
+    }
+
+    // New capability of content re-keying: content-equal spaces backed by
+    // distinct Arcs now collapse to one fast key (a would-be `FullKey` hit),
+    // where the old `Arc::as_ptr` key saw two distinct keys and missed.
+    #[test]
+    fn fast_space_key_hits_on_equal_content_across_distinct_arcs() {
+        let rule = U1FusionRule;
+        let a = u1_matrix_space(&rule, 3);
+        let b = u1_matrix_space(&rule, 3);
+        // Precondition: independently built content-equal spaces do carry
+        // distinct hom-space Arcs, so this is a genuine ABA-shaped case.
+        assert!(!Arc::ptr_eq(a.homspace_arc(), b.homspace_arc()));
+        // Content keys agree, and they agree exactly where `FullKey` does —
+        // `FastKey` and `FullKey` share one content-equivalence class.
+        assert_eq!(FastSpaceKey::from_space(&a), FastSpaceKey::from_space(&b));
+        assert_eq!(
+            FullSpaceKey::from_space(&a).unwrap(),
+            FullSpaceKey::from_space(&b).unwrap()
+        );
+        // Distinct content (different bond dimension) still keys apart.
+        let c = u1_matrix_space(&rule, 4);
+        assert_ne!(FastSpaceKey::from_space(&a), FastSpaceKey::from_space(&c));
+    }
+
+    // Pins the invariant the fast key's safety argument rests on: a
+    // `DynamicTree` plan is a pure function of (rank, axes, conj) and carries no
+    // degeneracy, so the same swap contraction at χ=1 and χ=3 compiles to a
+    // byte-identical plan. If a future plan change made plans degeneracy-
+    // dependent, this loud failure flags that the Why-not comment on
+    // [`FastKey`] no longer holds.
+    #[test]
+    fn dynamic_tree_plan_is_content_independent_across_chi() {
+        let rule = U1FusionRule;
+        // Swap contraction (permutes rhs), forcing the tree-transform route.
+        let axes =
+            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
+        let plan = |deg| {
+            let space = u1_matrix_space(&rule, deg);
+            prepare_tensorcontract_fusion_plan_dyn(&rule, &space, &space, &space, axes).unwrap()
+        };
+        assert_eq!(plan(1), plan(3));
+    }
 }

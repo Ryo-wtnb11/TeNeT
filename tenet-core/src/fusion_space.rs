@@ -143,6 +143,12 @@ struct FusionTreeHomSpaceLayout {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct CoupledBlockStructureCacheKey {
+    // `layout_ptr` is a raw-pointer key into `fusion_tree_layout_cache`. It is
+    // sound only because that cache is insert-only (`or_insert_with`, never
+    // evicted): a layout Arc, once interned, lives forever, so its address is a
+    // stable identity. Adding eviction to `fusion_tree_layout_cache` would make
+    // this key unsound (freed address recycled by an unrelated layout → ABA).
+    // Re-key on the layout's content identity first if that cache ever bounds.
     layout_ptr: usize,
     nout: usize,
     rank: usize,

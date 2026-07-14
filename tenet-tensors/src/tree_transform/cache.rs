@@ -930,6 +930,13 @@ struct TreeTransformLastStructure<T, RuleKey> {
     rule: RuleKey,
     scope: TreeTransformPlanScope,
     operation: TreeTransformOperation,
+    // `dst_ptr`/`src_ptr` are raw-pointer keys, sound only because the payload
+    // `structure: Arc<TreeTransformStructure<T>>` transitively pins the dst/src
+    // structures it was built from (it owns `dst_structure`/`src_structure`
+    // Arcs — see transform_structure.rs). While this entry lives, those
+    // addresses cannot be recycled, so a pointer match is a true identity match.
+    // This safety depends on that payload pinning: if `TreeTransformStructure`
+    // ever stopped holding those Arcs, these keys would become unsound (ABA).
     dst_ptr: usize,
     src_ptr: usize,
     storage_conjugate: bool,
