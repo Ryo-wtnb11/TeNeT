@@ -29,7 +29,10 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
-use super::fusion_block::{compile_fusion_block_contract_plan, is_core_form_fusion_block_contract};
+use super::fusion_block::{
+    compile_fusion_block_contract_plan_validated, is_core_form_fusion_block_contract,
+    validate_fusion_contract_rule,
+};
 use super::structure::TensorContractAxisPlan;
 
 type GlobalContractionResolutionMap<RuleKey> = RwLock<FxHashMap<FullKey<RuleKey>, Resolution>>;
@@ -329,7 +332,7 @@ where
         RuleKey: 'static + Send + Sync,
     {
         let resolution = self.get_or_resolve_with(rule, dst, lhs, rhs, axes, true, || {
-            compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)
+            compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)
                 .map(|plan| Resolution::Core(Arc::new(plan)))
         })?;
         match resolution {
@@ -356,6 +359,7 @@ where
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
         RuleKey: 'static + Send + Sync,
     {
+        validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
         let rule_key = rule.tree_transform_rule_cache_key();
         if self.policy.stores_entries() {
             let position = self.last.iter().position(|last| {
@@ -543,7 +547,7 @@ where
         if is_core_form_fusion_block_contract(rule, dst, lhs, rhs, axes)?
             && !rhs_contract_requires_twist(rule, rhs, axes)?
         {
-            let plan = compile_fusion_block_contract_plan(rule, dst, lhs, rhs, axes)?;
+            let plan = compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)?;
             if plan.is_fully_direct() {
                 return Ok(Resolution::Core(Arc::new(plan)));
             }

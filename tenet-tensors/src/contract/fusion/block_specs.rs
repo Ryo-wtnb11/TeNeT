@@ -11,6 +11,7 @@ use crate::OperationError;
 use tenet_operations::TensorContractSpec;
 
 use super::super::dynamic_space::DynamicFusionMapSpace;
+use super::super::fusion_block::validate_fusion_contract_rule;
 use super::super::structure::{
     TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,
 };
@@ -187,14 +188,12 @@ pub fn tensorcontract_fusion_block_specs<
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    let dst = DynamicFusionMapSpace::from_typed(dst);
+    let lhs = DynamicFusionMapSpace::from_typed(lhs);
+    let rhs = DynamicFusionMapSpace::from_typed(rhs);
+    validate_fusion_contract_rule(rule, &dst, &lhs, &rhs)?;
     reject_fusion_contract_conjugation(axes)?;
-    tensorcontract_fusion_block_specs_lowered(
-        rule,
-        &DynamicFusionMapSpace::from_typed(dst),
-        &DynamicFusionMapSpace::from_typed(lhs),
-        &DynamicFusionMapSpace::from_typed(rhs),
-        axes,
-    )
+    tensorcontract_fusion_block_specs_lowered(rule, &dst, &lhs, &rhs, axes)
 }
 
 fn tensorcontract_fusion_block_specs_lowered<R>(

@@ -1101,6 +1101,8 @@ impl ProductComplexFixture {
             rhs_hom,
             packed_fixture_structure(0, [(scalar_key, vec![])]).unwrap(),
         )
+        .unwrap()
+        .try_bind_rule(&rule)
         .unwrap();
         let lhs_core_hom = src_space
             .homspace()

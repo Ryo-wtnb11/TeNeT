@@ -22,7 +22,8 @@ use super::fusion::{
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
-    is_core_form_fusion_block_contract, tensorcontract_core_fusion_blocks_into_raw,
+    compile_fusion_block_contract_plan_validated, is_core_form_fusion_block_contract,
+    tensorcontract_core_fusion_blocks_with_plan_into_raw, validate_fusion_contract_rule,
 };
 use super::resolution::rhs_contract_requires_twist;
 use super::structure::{tensorcontract_structure, TensorContractStructure};
@@ -881,36 +882,37 @@ where
     let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
     let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
     let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+    validate_fusion_contract_rule(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic)?;
     if !axes.lhs_conjugate()
         && !axes.rhs_conjugate()
         && is_core_form_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
         && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
-        && super::fusion_block::compile_fusion_block_contract_plan(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-        )?
-        .is_fully_direct()
     {
-        return tensorcontract_core_fusion_blocks_into_raw(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                backend.transpose_backend(),
-            ),
-            backend,
-            workspace,
+        let plan = compile_fusion_block_contract_plan_validated(
             rule,
             &dst_dynamic,
-            dst.data_mut(),
             &lhs_dynamic,
-            lhs.data(),
             &rhs_dynamic,
-            rhs.data(),
             axes,
-            alpha,
-            beta,
-        );
+        )?;
+        if plan.is_fully_direct() {
+            return tensorcontract_core_fusion_blocks_with_plan_into_raw(
+                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                    backend.transpose_backend(),
+                ),
+                backend,
+                workspace,
+                &plan,
+                &dst_dynamic,
+                dst.data_mut(),
+                &lhs_dynamic,
+                lhs.data(),
+                &rhs_dynamic,
+                rhs.data(),
+                alpha,
+                beta,
+            );
+        }
     }
 
     match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
@@ -978,36 +980,37 @@ where
     let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
     let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
     let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
+    validate_fusion_contract_rule(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic)?;
     if !axes.lhs_conjugate()
         && !axes.rhs_conjugate()
         && is_core_form_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
         && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
-        && super::fusion_block::compile_fusion_block_contract_plan(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-        )?
-        .is_fully_direct()
     {
-        return tensorcontract_core_fusion_blocks_into_raw(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                contract_backend.transpose_backend(),
-            ),
-            contract_backend,
-            contract_workspace,
+        let plan = compile_fusion_block_contract_plan_validated(
             rule,
             &dst_dynamic,
-            dst.data_mut(),
             &lhs_dynamic,
-            lhs.data(),
             &rhs_dynamic,
-            rhs.data(),
             axes,
-            alpha,
-            beta,
-        );
+        )?;
+        if plan.is_fully_direct() {
+            return tensorcontract_core_fusion_blocks_with_plan_into_raw(
+                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                    contract_backend.transpose_backend(),
+                ),
+                contract_backend,
+                contract_workspace,
+                &plan,
+                &dst_dynamic,
+                dst.data_mut(),
+                &lhs_dynamic,
+                lhs.data(),
+                &rhs_dynamic,
+                rhs.data(),
+                alpha,
+                beta,
+            );
+        }
     }
 
     match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
