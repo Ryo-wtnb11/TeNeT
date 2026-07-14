@@ -39,6 +39,11 @@ thread_local! {
     static PROBE_THREAD_ENABLED: Cell<bool> = const { Cell::new(false) };
     static PROBE_THREAD_DEALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
     static PROBE_THREAD_DEALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    // Why not assert the global event counters in deterministic helper tests:
+    // a libtest thread may finish an earlier enabled realloc after their reset.
+    static TEST_THREAD_REALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
+    static TEST_THREAD_REALLOC_ALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static TEST_THREAD_REALLOC_DEALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
     static DEALLOC_BOUNDARY_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
     #[cfg(test)]
     static REALLOC_TRANSITION_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
@@ -257,6 +262,12 @@ fn reset_event_counters() {
     PROBE_THREAD_REALLOC_CALLS.store(0, Ordering::Relaxed);
 }
 
+fn reset_test_thread_realloc_counters() {
+    TEST_THREAD_REALLOC_CALLS.set(0);
+    TEST_THREAD_REALLOC_ALLOCATED_BYTES.set(0);
+    TEST_THREAD_REALLOC_DEALLOCATED_BYTES.set(0);
+}
+
 #[derive(Clone, Copy)]
 struct DetachedReallocOrigin {
     pointer: *mut u8,
@@ -313,6 +324,11 @@ fn finish_realloc_result(
         REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
         DEALLOCATED_BYTES.fetch_add(origin.size as u64, Ordering::Relaxed);
+        let _ = TEST_THREAD_REALLOC_CALLS.try_with(|calls| calls.set(calls.get() + 1));
+        let _ = TEST_THREAD_REALLOC_ALLOCATED_BYTES
+            .try_with(|bytes| bytes.set(bytes.get() + new_size as u64));
+        let _ = TEST_THREAD_REALLOC_DEALLOCATED_BYTES
+            .try_with(|bytes| bytes.set(bytes.get() + origin.size as u64));
     }
     true
 }
@@ -792,6 +808,7 @@ fn origin_registry_attributes_output_lifetime() {
 fn realloc_moved_transition_preserves_concurrently_reused_old_address() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     reset_event_counters();
+    reset_test_thread_realloc_counters();
     reset_live_registry();
     ENABLED.store(false, Ordering::SeqCst);
     let old = 0x1000usize as *mut u8;
@@ -814,9 +831,9 @@ fn realloc_moved_transition_preserves_concurrently_reused_old_address() {
 
     assert_eq!(registered_size(old), Some(32));
     assert_eq!(registered_size(moved), Some(16));
-    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 1);
-    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 16);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 8);
+    assert_eq!(TEST_THREAD_REALLOC_CALLS.get(), 1);
+    assert_eq!(TEST_THREAD_REALLOC_ALLOCATED_BYTES.get(), 16);
+    assert_eq!(TEST_THREAD_REALLOC_DEALLOCATED_BYTES.get(), 8);
     assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 48);
 }
 
@@ -825,6 +842,7 @@ fn realloc_failed_transition_restores_origin_without_duplicate_metrics() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
+    reset_test_thread_realloc_counters();
     PAYLOAD_SIZE.store(8, Ordering::Relaxed);
     reset_live_registry();
     let old = 0x1000usize as *mut u8;
@@ -842,9 +860,9 @@ fn realloc_failed_transition_restores_origin_without_duplicate_metrics() {
         true
     ));
     assert_eq!(registered_size(old), Some(8));
-    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 0);
-    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 0);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+    assert_eq!(TEST_THREAD_REALLOC_CALLS.get(), 0);
+    assert_eq!(TEST_THREAD_REALLOC_ALLOCATED_BYTES.get(), 0);
+    assert_eq!(TEST_THREAD_REALLOC_DEALLOCATED_BYTES.get(), 0);
     assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 8);
     assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
     assert_eq!(PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed), 8);
@@ -855,6 +873,7 @@ fn realloc_in_place_transition_replaces_only_its_detached_origin() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
+    reset_test_thread_realloc_counters();
     PAYLOAD_SIZE.store(0, Ordering::Relaxed);
     reset_live_registry();
     let pointer = 0x1000usize as *mut u8;
@@ -864,9 +883,9 @@ fn realloc_in_place_transition_replaces_only_its_detached_origin() {
     // What: an in-place realloc replaces its own generation with the new size.
     assert!(finish_realloc_result(origin, pointer, 4, true));
     assert_eq!(registered_size(pointer), Some(4));
-    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 1);
-    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 4);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 8);
+    assert_eq!(TEST_THREAD_REALLOC_CALLS.get(), 1);
+    assert_eq!(TEST_THREAD_REALLOC_ALLOCATED_BYTES.get(), 4);
+    assert_eq!(TEST_THREAD_REALLOC_DEALLOCATED_BYTES.get(), 8);
     assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 4);
 }
 
@@ -875,6 +894,7 @@ fn realloc_transition_never_exposes_a_zero_live_metrics_window() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
+    reset_test_thread_realloc_counters();
     PAYLOAD_SIZE.store(0, Ordering::Relaxed);
     reset_live_registry();
     let old = 0x1000usize as *mut u8;
