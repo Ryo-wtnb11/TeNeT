@@ -425,8 +425,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use tenet_core::{
         BlockStructure, FusionTensorMapSpace, FusionTreeHomSpace, SectorId, TensorMapSpace,
+        TensorStorage,
     };
 
     fn scratch_space(len: usize) -> Arc<DynamicFusionMapSpace> {
@@ -452,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_fusion_scratch_reuse_zeros_existing_buffer() {
+    fn dynamic_fusion_scratch_same_shape_reuse_keeps_initialized_contents() {
         let space = scratch_space(3);
         let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
         {
@@ -462,6 +465,119 @@ mod tests {
 
         let scratch = workspace.prepare_lhs(space).unwrap();
 
-        assert_eq!(scratch.data(), &[0.0, 0.0, 0.0]);
+        assert_eq!(scratch.data(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn dynamic_fusion_scratch_growth_initializes_only_the_new_tail() {
+        let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
+        workspace
+            .prepare_lhs(scratch_space(3))
+            .unwrap()
+            .data_mut()
+            .copy_from_slice(&[1.0, 2.0, 3.0]);
+
+        let scratch = workspace.prepare_lhs(scratch_space(5)).unwrap();
+
+        assert_eq!(scratch.data(), &[1.0, 2.0, 3.0, 0.0, 0.0]);
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct FillCounts {
+        allocation_calls: usize,
+        allocation_elements: usize,
+        reset_calls: usize,
+        reset_elements: usize,
+    }
+
+    #[derive(Clone)]
+    struct TrackingStorage {
+        counts: Rc<RefCell<FillCounts>>,
+    }
+
+    struct TrackingScratch {
+        data: Vec<f64>,
+        counts: Rc<RefCell<FillCounts>>,
+    }
+
+    impl TensorStorage<f64> for TrackingStorage {
+        fn len(&self) -> usize {
+            0
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl SimilarStorage<f64> for TrackingStorage {
+        type Similar = TrackingScratch;
+
+        fn similar_filled(&self, len: usize, value: f64) -> Self::Similar {
+            let mut counts = self.counts.borrow_mut();
+            counts.allocation_calls += 1;
+            counts.allocation_elements += len;
+            drop(counts);
+            TrackingScratch {
+                data: vec![value; len],
+                counts: Rc::clone(&self.counts),
+            }
+        }
+    }
+
+    impl TensorStorage<f64> for TrackingScratch {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl ScratchStorage<f64> for TrackingScratch {
+        fn reset_filled(&mut self, len: usize, value: f64) {
+            let mut counts = self.counts.borrow_mut();
+            counts.reset_calls += 1;
+            counts.reset_elements += len;
+            drop(counts);
+            self.data.clear();
+            self.data.resize(len, value);
+        }
+    }
+
+    #[test]
+    fn storage_scratch_same_length_reuse_writes_zero_reset_elements() {
+        let counts = Rc::new(RefCell::new(FillCounts::default()));
+        let storage = TrackingStorage {
+            counts: Rc::clone(&counts),
+        };
+        let space = scratch_space(3);
+        let mut workspace = StorageDynamicFusionScratchWorkspace::<
+            TrackingScratch,
+            TrackingScratch,
+            TrackingScratch,
+        >::default();
+        workspace
+            .prepare_lhs_from_storage(space.clone(), &storage, 0.0)
+            .unwrap()
+            .buffer_mut()
+            .data
+            .copy_from_slice(&[1.0, 2.0, 3.0]);
+
+        let scratch = workspace
+            .prepare_lhs_from_storage(space, &storage, 0.0)
+            .unwrap();
+
+        assert_eq!(scratch.buffer().data, [1.0, 2.0, 3.0]);
+        assert_eq!(
+            *counts.borrow(),
+            FillCounts {
+                allocation_calls: 1,
+                allocation_elements: 3,
+                reset_calls: 0,
+                reset_elements: 0,
+            }
+        );
     }
 }
