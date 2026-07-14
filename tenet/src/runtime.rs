@@ -46,39 +46,34 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Default for Ctxs<Key> {
     }
 }
 
-/// Builds one contraction/recoupling backend for the requested thread count and
-/// CPU GEMM provider. Both `None` yields the faer default; a `gemm_kind` of
-/// `Blas` fails if no `cpu-blas`/`blas-*` provider was compiled in.
+/// Builds one contraction/recoupling backend on the runtime's shared CPU
+/// context (one rayon pool per runtime — see `RuntimeExecutionConfig::
+/// shared_ctx`); a `gemm_kind` of `Blas` fails if no `cpu-blas`/`blas-*`
+/// provider was compiled in.
 fn make_transform_ops(
-    threads: Option<usize>,
+    ctx: &tenet_dense::SharedCpuContext,
     gemm_kind: Option<tenet_dense::CpuBackendKind>,
 ) -> Result<DenseTreeTransformOperations, Error> {
-    let ops = match (threads, gemm_kind) {
-        (Some(threads), Some(kind)) => {
-            DenseTreeTransformOperations::with_threads_and_kind(threads, kind)
-        }
-        (None, Some(kind)) => DenseTreeTransformOperations::with_kind(kind),
-        (Some(threads), None) => DenseTreeTransformOperations::with_threads(threads),
-        (None, None) => Ok(DenseTreeTransformOperations::default_executor()),
-    };
-    Ok(ops?)
+    Ok(DenseTreeTransformOperations::new(
+        tenet_dense::DefaultDenseExecutor::with_shared_context(ctx, gemm_kind)
+            .map_err(tenet_tensors::OperationError::Dense)?,
+    ))
 }
 
 impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
-    /// Builds the per-scalar contexts with an explicit thread count and/or CPU
-    /// GEMM provider for the contraction/recoupling backend. Passing `(None,
-    /// None)` reproduces [`Ctxs::default`] but through the same seam.
+    /// Builds the per-scalar contexts on the runtime's shared CPU context,
+    /// optionally with an explicit CPU GEMM provider.
     pub(crate) fn with_config(
-        threads: Option<usize>,
+        ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
     ) -> Result<Self, Error> {
         Ok(Self {
             f64:
                 Ctx::with_parts(
                     tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
-                        threads, gemm_kind,
+                        ctx, gemm_kind,
                     )?),
-                    make_transform_ops(threads, gemm_kind)?,
+                    make_transform_ops(ctx, gemm_kind)?,
                     <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
                         f64,
                         f64,
@@ -87,9 +82,9 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 ),
             c64: Ctx::with_parts(
                 tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
-                    threads, gemm_kind,
+                    ctx, gemm_kind,
                 )?),
-                make_transform_ops(threads, gemm_kind)?,
+                make_transform_ops(ctx, gemm_kind)?,
                 <DenseTreeTransformOperations as tenet_tensors::TensorContractBackend<
                     Complex64,
                     f64,
@@ -145,34 +140,23 @@ struct PlanCacheHome {
 }
 
 impl RuntimeState {
-    fn new(dense: Box<dyn tenet_dense::DenseExecutor + Send>) -> Self {
-        Self {
-            u1: Ctxs::default(),
-            z2: Ctxs::default(),
-            fz2: Ctxs::default(),
-            su2: Ctxs::default(),
-            u1_fz2: Ctxs::default(),
-            fz2_u1_su2: Ctxs::default(),
-            su3: Ctxs::default(),
-            dense,
-            #[cfg(feature = "cuda")]
-            cuda: None,
-        }
-    }
-
+    // Why no `Ctxs::default()` fast path anymore: even the "default" runtime
+    // must route every executor through the shared CPU context — the default
+    // constructors each build a private env-driven rayon pool, and 28 of them
+    // per runtime is exactly the thread explosion #155's pools amplified.
     fn with_config(
         dense: Box<dyn tenet_dense::DenseExecutor + Send>,
-        threads: Option<usize>,
+        ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
     ) -> Result<Self, Error> {
         Ok(Self {
-            u1: Ctxs::with_config(threads, gemm_kind)?,
-            z2: Ctxs::with_config(threads, gemm_kind)?,
-            fz2: Ctxs::with_config(threads, gemm_kind)?,
-            su2: Ctxs::with_config(threads, gemm_kind)?,
-            u1_fz2: Ctxs::with_config(threads, gemm_kind)?,
-            fz2_u1_su2: Ctxs::with_config(threads, gemm_kind)?,
-            su3: Ctxs::with_config(threads, gemm_kind)?,
+            u1: Ctxs::with_config(ctx, gemm_kind)?,
+            z2: Ctxs::with_config(ctx, gemm_kind)?,
+            fz2: Ctxs::with_config(ctx, gemm_kind)?,
+            su2: Ctxs::with_config(ctx, gemm_kind)?,
+            u1_fz2: Ctxs::with_config(ctx, gemm_kind)?,
+            fz2_u1_su2: Ctxs::with_config(ctx, gemm_kind)?,
+            su3: Ctxs::with_config(ctx, gemm_kind)?,
             dense,
             #[cfg(feature = "cuda")]
             cuda: None,
@@ -237,12 +221,6 @@ impl RuntimeState {
         apply(&mut self.u1_fz2, backend);
         apply(&mut self.fz2_u1_su2, backend);
         apply(&mut self.su3, backend);
-    }
-}
-
-impl Default for RuntimeState {
-    fn default() -> Self {
-        Self::new(Box::new(tenet_dense::DefaultDenseExecutor::default()))
     }
 }
 
@@ -355,24 +333,13 @@ struct RuntimeInner {
 /// re-mint cannot fail. ponytail: CPU executors are cheap to construct; the pool
 /// exists to skip per-call construction, not because minting is expensive.
 fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExecutor + Send> {
-    let make = || -> Result<Box<dyn tenet_dense::DenseExecutor + Send>, Error> {
-        Ok(match (config.linalg_kind, config.dense_threads) {
-            (Some(kind), Some(threads)) => Box::new(
-                tenet_dense::DefaultDenseExecutor::with_threads_and_kind(threads, kind)
-                    .map_err(tenet_tensors::OperationError::Dense)?,
-            ),
-            (Some(kind), None) => Box::new(
-                tenet_dense::DefaultDenseExecutor::with_kind(kind)
-                    .map_err(tenet_tensors::OperationError::Dense)?,
-            ),
-            (None, Some(threads)) => Box::new(
-                tenet_dense::DefaultDenseExecutor::with_threads(threads)
-                    .map_err(tenet_tensors::OperationError::Dense)?,
-            ),
-            (None, None) => Box::new(tenet_dense::DefaultDenseExecutor::default()),
-        })
-    };
-    make().expect("dense executor config validated at Runtime build time")
+    Box::new(
+        tenet_dense::DefaultDenseExecutor::with_shared_context(
+            &config.shared_ctx,
+            config.linalg_kind,
+        )
+        .expect("dense executor config validated at Runtime build time"),
+    )
 }
 
 /// RAII lease of a pooled per-rule execution context (#155). Returns it to the
@@ -453,9 +420,10 @@ impl Drop for DenseLease<'_> {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+// No `dense_threads` field: the thread count is baked into `shared_ctx` at
+// build time, so executors minted later cannot drift from it.
+#[derive(Clone)]
 pub(crate) struct RuntimeExecutionConfig {
-    pub(crate) dense_threads: Option<usize>,
     pub(crate) gemm_kind: Option<tenet_dense::CpuBackendKind>,
     pub(crate) recoupling_threads: Option<usize>,
     pub(crate) transpose_backend: Option<TransposeBackend>,
@@ -463,6 +431,13 @@ pub(crate) struct RuntimeExecutionConfig {
     /// standalone-op executor pool can re-mint an executor identical to the one
     /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
+    /// THE runtime's CPU context: one rayon pool shared by every executor this
+    /// runtime mints — the state's, the executor pool's, and all 28 transform
+    /// backends of every pooled `TensorExecutionContext`. Without it each
+    /// executor built its own eager env-sized pool, and the #155 context pool
+    /// multiplied that into a process-thread-cap failure (macOS `WouldBlock`)
+    /// under concurrent leases.
+    pub(crate) shared_ctx: tenet_dense::SharedCpuContext,
 }
 
 /// Execution runtime for the user-layer [`crate::prelude::Tensor`] API.
@@ -520,8 +495,8 @@ impl Runtime {
         self.same_runtime(other)
     }
 
-    pub(crate) fn execution_config(&self) -> RuntimeExecutionConfig {
-        self.inner.execution_config
+    pub(crate) fn execution_config(&self) -> &RuntimeExecutionConfig {
+        &self.inner.execution_config
     }
 
     /// Leases a per-rule execution context for one standalone op (#155): pop a
@@ -539,7 +514,9 @@ impl Runtime {
             .pop();
         let context = match pooled {
             Some(context) => context,
-            None => crate::tensor::TensorExecutionContext::for_config(self.inner.execution_config)?,
+            None => {
+                crate::tensor::TensorExecutionContext::for_config(&self.inner.execution_config)?
+            }
         };
         Ok(ContextLease {
             pool: &self.inner.context_pool,
@@ -871,35 +848,27 @@ impl RuntimeBuilder {
         // runtimes fall back to the state lock for factorizations (#155).
         let executor_mintable = self.dense_executor.is_none();
         let linalg_kind = self.linalg_backend.map(LinalgBackend::to_kind);
+        // THE runtime's one CPU context (rayon pool): every executor below —
+        // factorization, executor-pool mints, all per-rule transform backends,
+        // and every pooled TensorExecutionContext — shares it. dense_threads
+        // pins the count; otherwise the environment decides once, here, instead
+        // of once per executor.
+        let shared_ctx = match dense_threads {
+            Some(threads) => tenet_dense::SharedCpuContext::with_threads(threads)
+                .map_err(tenet_tensors::OperationError::Dense)?,
+            None => tenet_dense::SharedCpuContext::from_env(),
+        };
         // Injected backend wins; otherwise build the selected provider (faer by
-        // default), honoring the dense-thread count when set.
+        // default) on the shared context.
         let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
             Some(executor) => executor,
-            None => {
-                let kind = linalg_kind;
-                match (kind, dense_threads) {
-                    (Some(kind), Some(threads)) => Box::new(
-                        tenet_dense::DefaultDenseExecutor::with_threads_and_kind(threads, kind)
-                            .map_err(tenet_tensors::OperationError::Dense)?,
-                    ),
-                    (Some(kind), None) => Box::new(
-                        tenet_dense::DefaultDenseExecutor::with_kind(kind)
-                            .map_err(tenet_tensors::OperationError::Dense)?,
-                    ),
-                    (None, Some(threads)) => Box::new(
-                        tenet_dense::DefaultDenseExecutor::with_threads(threads)
-                            .map_err(tenet_tensors::OperationError::Dense)?,
-                    ),
-                    (None, None) => Box::new(tenet_dense::DefaultDenseExecutor::default()),
-                }
-            }
+            None => Box::new(
+                tenet_dense::DefaultDenseExecutor::with_shared_context(&shared_ctx, linalg_kind)
+                    .map_err(tenet_tensors::OperationError::Dense)?,
+            ),
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
-        let mut state = if dense_threads.is_some() || gemm_kind.is_some() {
-            RuntimeState::with_config(dense, dense_threads, gemm_kind)?
-        } else {
-            RuntimeState::new(dense)
-        };
+        let mut state = RuntimeState::with_config(dense, &shared_ctx, gemm_kind)?;
         let plan_cache = PlanCacheHome {
             config: self.plan_cache,
             slot: None,
@@ -928,11 +897,11 @@ impl RuntimeBuilder {
                 state: Mutex::new(state),
                 rand_counter: AtomicU64::new(0),
                 execution_config: RuntimeExecutionConfig {
-                    dense_threads,
                     gemm_kind,
                     recoupling_threads: self.recoupling_threads,
                     transpose_backend: self.transpose_backend,
                     linalg_kind,
+                    shared_ctx,
                 },
                 context_pool: Mutex::new(Vec::new()),
                 executor_pool: Mutex::new(Vec::new()),
@@ -1020,17 +989,25 @@ macro_rules! default {
 mod tests {
     use super::*;
 
-    // All four provider/thread combinations of the contraction-backend builder
-    // must construct on faer (always compiled). Guards the `with_config` /
-    // `make_transform_ops` matrix, incl. the plain-default `(None, None)` arm
-    // that the builder's fast path would otherwise never exercise.
+    // All context/provider combinations of the contraction-backend builder
+    // must construct on faer (always compiled), and each must land on the
+    // context it was given (the one-pool-per-Runtime invariant, #155).
     #[test]
     fn transform_ops_builds_for_every_faer_config() {
         let faer = tenet_dense::CpuBackendKind::Faer;
-        assert!(make_transform_ops(None, None).is_ok());
-        assert!(make_transform_ops(Some(1), None).is_ok());
-        assert!(make_transform_ops(None, Some(faer)).is_ok());
-        assert!(make_transform_ops(Some(1), Some(faer)).is_ok());
+        let serial = tenet_dense::SharedCpuContext::with_threads(1).expect("serial context");
+        let env = tenet_dense::SharedCpuContext::from_env();
+        for ctx in [&serial, &env] {
+            let ops = make_transform_ops(ctx, None).expect("default transform ops");
+            assert!(ops.dense().shares_cpu_context(ctx));
+            // Explicit-kind arm: build must succeed; context sharing holds
+            // whenever the kind IS the compiled default (all-faer builds), but
+            // an explicit non-default kind keeps a private context (see
+            // `DefaultDenseExecutor::with_shared_context`), so no sharing
+            // assert here — it would flip on blas-featured builds.
+            let ops = make_transform_ops(ctx, Some(faer)).expect("faer transform ops");
+            drop(ops);
+        }
     }
 
     /// `RuntimeBuilder::transpose_backend(StridedPerm)` must reach BOTH

@@ -598,16 +598,20 @@ impl TensorExecutionContext {
     /// clone here would form a reference cycle that leaks the runtime. Standalone
     /// ops drive the per-rule contexts directly (they never call the
     /// runtime-validating `try_*` methods), so the back-reference is unneeded.
-    pub(crate) fn for_config(config: RuntimeExecutionConfig) -> Result<Self, Error> {
+    pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
+        // All 28 transform backends built here ride the runtime's ONE shared
+        // CPU context — a fresh context per executor would multiply rayon
+        // pools per pooled/cloned TensorExecutionContext (the macOS
+        // thread-cap failure behind #155's context pool).
         let mut context = Self {
             runtime: None,
-            u1: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            z2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            su2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            u1_fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            fz2_u1_su2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            su3: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            u1: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            z2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            fz2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            su2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            u1_fz2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            fz2_u1_su2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            su3: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
         };
         if let Some(threads) = config.recoupling_threads {
             context.set_recoupling_threads(threads);
@@ -6008,3 +6012,83 @@ where
 
 #[cfg(test)]
 mod compact_diagonal_tests;
+
+#[cfg(test)]
+mod shared_context_tests {
+    use super::*;
+
+    /// One rayon pool per Runtime (#155 follow-up): the CI thread-cap failure
+    /// (`failed to spawn thread: WouldBlock` on macOS) came from every minted
+    /// executor building its own eager env-sized rayon pool — 28 transform
+    /// backends per `TensorExecutionContext`, times one context per concurrent
+    /// lease. Every transform backend in the runtime STATE and in a freshly
+    /// leased pooled context must therefore share the build-time
+    /// `SharedCpuContext`. The dense factorization executors go through the
+    /// same `with_shared_context` seam (`build` / `mint_dense`), pinned by
+    /// `transform_ops_builds_for_every_faer_config` in `runtime`.
+    #[test]
+    fn runtime_and_leased_contexts_share_one_cpu_context() {
+        fn assert_shared<Key: Clone + Eq + std::hash::Hash + Send + Sync + 'static>(
+            ctxs: &mut Ctxs<Key>,
+            shared: &tenet_dense::SharedCpuContext,
+        ) {
+            assert!(ctxs
+                .f64
+                .tree_context_mut()
+                .backend_mut()
+                .dense()
+                .shares_cpu_context(shared));
+            assert!(ctxs
+                .f64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared));
+            assert!(ctxs
+                .c64
+                .tree_context_mut()
+                .backend_mut()
+                .dense()
+                .shares_cpu_context(shared));
+            assert!(ctxs
+                .c64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared));
+        }
+
+        fn assert_all_rules(
+            context: &mut TensorExecutionContext,
+            shared: &tenet_dense::SharedCpuContext,
+        ) {
+            assert_shared(&mut context.u1, shared);
+            assert_shared(&mut context.z2, shared);
+            assert_shared(&mut context.fz2, shared);
+            assert_shared(&mut context.su2, shared);
+            assert_shared(&mut context.u1_fz2, shared);
+            assert_shared(&mut context.fz2_u1_su2, shared);
+            assert_shared(&mut context.su3, shared);
+        }
+
+        let rt = Runtime::builder().build().expect("runtime");
+        let shared = rt.execution_config().shared_ctx.clone();
+
+        // Runtime state: all 7 rules x 2 dtypes x 2 backends.
+        {
+            let mut state = rt.lock();
+            assert_shared(&mut state.u1, &shared);
+            assert_shared(&mut state.z2, &shared);
+            assert_shared(&mut state.fz2, &shared);
+            assert_shared(&mut state.su2, &shared);
+            assert_shared(&mut state.u1_fz2, &shared);
+            assert_shared(&mut state.fz2_u1_su2, &shared);
+            assert_shared(&mut state.su3, &shared);
+        }
+
+        // A pooled standalone-op context, and the network path's per-call
+        // context, ride the same shared context.
+        let mut lease = rt.lease_context().expect("lease");
+        assert_all_rules(lease.context(), &shared);
+        let mut network_context = TensorExecutionContext::for_runtime(&rt).expect("context");
+        assert_all_rules(&mut network_context, &shared);
+    }
+}
