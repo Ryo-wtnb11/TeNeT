@@ -1378,7 +1378,7 @@ mod tests {
 
     fn assert_mixed_tree_pair_block_group_is_rejected(keys: &[FusionTreeBlockKey]) {
         let expected = CoreError::MalformedFusionTree {
-            message: "fusion-tree block keys must share one group",
+            message: TREE_PAIR_BLOCK_GROUP_ERROR,
         };
         let rule = IdentitySymbolPanicRule;
 
@@ -1452,6 +1452,23 @@ mod tests {
             // What: validation errors do not alter caller-owned source keys.
             assert_eq!(keys, snapshot);
         }
+    }
+
+    #[test]
+    fn tree_pair_block_apis_reject_mixed_product_sector_components() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = FpU1Rule::default();
+        let sector_a = rule.encode_sector(z2_even(), u1(2)).id();
+        let sector_b = rule.encode_sector(z2_even(), u1(3)).id();
+        let coupled = rule.encode_sector(z2_even(), u1(5)).id();
+        let keys = [
+            tree_pair_group_fixture(&[sector_a, sector_a], &[sector_a], coupled, &[false; 2], &[false]),
+            tree_pair_group_fixture(&[sector_a, sector_b], &[sector_a], coupled, &[false; 2], &[false]),
+        ];
+
+        // What: a changed component of an interned product-sector label is a
+        // different shared basis group, even when ranks and duality match.
+        assert_mixed_tree_pair_block_group_is_rejected(&keys);
     }
 
     #[test]

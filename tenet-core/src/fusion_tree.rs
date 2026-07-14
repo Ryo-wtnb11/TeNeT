@@ -1462,6 +1462,51 @@ where
     Ok((next_basis, next_columns))
 }
 
+#[derive(Clone, Copy)]
+struct ValidatedTreePairBlockGroup {
+    codomain_rank: usize,
+    domain_rank: usize,
+}
+
+const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
+
+fn validate_tree_pair_block_group(
+    src_keys: &[FusionTreeBlockKey],
+) -> Result<Option<ValidatedTreePairBlockGroup>, CoreError> {
+    let Some(reference) = src_keys.first() else {
+        return Ok(None);
+    };
+    let reference_codomain = reference.codomain_tree();
+    let reference_domain = reference.domain_tree();
+    let same_group = |key: &FusionTreeBlockKey| {
+        let codomain = key.codomain_tree();
+        let domain = key.domain_tree();
+        codomain.uncoupled() == reference_codomain.uncoupled()
+            && domain.uncoupled() == reference_domain.uncoupled()
+            && codomain.is_dual() == reference_codomain.is_dual()
+            && domain.is_dual() == reference_domain.is_dual()
+            && codomain.coupled() == reference_codomain.coupled()
+            && domain.coupled() == reference_domain.coupled()
+            && codomain.has_multiplicity() == reference_codomain.has_multiplicity()
+            && domain.has_multiplicity() == reference_domain.has_multiplicity()
+    };
+    let reference_is_well_formed =
+        reference_codomain.uncoupled().len() == reference_codomain.is_dual().len()
+            && reference_domain.uncoupled().len() == reference_domain.is_dual().len();
+    // Why not infer a block from matching ranks or tree shape: coefficients
+    // share a basis only when every external sector, orientation, and coupled
+    // group invariant agrees before any symbol is evaluated.
+    if !reference_is_well_formed || !src_keys.iter().all(same_group) {
+        return Err(CoreError::MalformedFusionTree {
+            message: TREE_PAIR_BLOCK_GROUP_ERROR,
+        });
+    }
+    Ok(Some(ValidatedTreePairBlockGroup {
+        codomain_rank: reference_codomain.uncoupled().len(),
+        domain_rank: reference_domain.uncoupled().len(),
+    }))
+}
+
 /// Batched [`multiplicity_free_braid_tree_pair`] over every source tree-pair of
 /// a block (all sharing the same uncoupled sectors / duality). Returns, per
 /// source (in `src_keys` order), its `(destination tree-pair, coefficient)`
@@ -1472,6 +1517,10 @@ where
 /// destination by several paths differs from the per-source accumulator, so
 /// results agree with the per-source version to double-precision rounding, not
 /// necessarily bit-for-bit.
+///
+/// `src_keys` must be empty or share one external-sector, duality, coupled,
+/// and multiplicity group. Empty input returns an empty transform; mixed groups
+/// return [`CoreError::MalformedFusionTree`] before any symbol evaluation.
 pub fn multiplicity_free_braid_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -1484,11 +1533,36 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    if src_keys.is_empty() {
+    let Some(group) = validate_tree_pair_block_group(src_keys)? else {
         return Ok(Vec::new());
-    }
-    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
-    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    };
+    multiplicity_free_braid_tree_pair_block_validated(
+        rule,
+        src_keys,
+        group,
+        codomain_permutation,
+        domain_permutation,
+        codomain_levels,
+        domain_levels,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn multiplicity_free_braid_tree_pair_block_validated<R>(
+    rule: &R,
+    src_keys: &[FusionTreeBlockKey],
+    group: ValidatedTreePairBlockGroup,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let codomain_rank = group.codomain_rank;
+    let domain_rank = group.domain_rank;
     if codomain_levels.len() != codomain_rank {
         return Err(CoreError::DimensionMismatch {
             expected: codomain_rank,
@@ -1507,18 +1581,12 @@ where
             actual: rule.fusion_style(),
         });
     }
-    let all_keys_match_rank = src_keys.iter().all(|key| {
-        key.codomain_tree().uncoupled().len() == codomain_rank
-            && key.domain_tree().uncoupled().len() == domain_rank
-    });
-    if all_keys_match_rank
-        && tree_pair_axis_map_is_identity(
-            codomain_permutation,
-            domain_permutation,
-            codomain_rank,
-            domain_rank,
-        )
-    {
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
         return Ok(src_keys
             .iter()
             .map(|key| vec![(key.clone(), rule.scalar_one())])
@@ -1624,6 +1692,9 @@ where
 
 /// Batched [`multiplicity_free_permute_tree_pair`] over a block: symmetric
 /// braiding with the trivial level ordering.
+///
+/// The empty/group contract is identical to
+/// [`multiplicity_free_braid_tree_pair_block`].
 pub fn multiplicity_free_permute_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -1634,45 +1705,23 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    let Some(group) = validate_tree_pair_block_group(src_keys)? else {
+        return Ok(Vec::new());
+    };
     if !rule.braiding_style().is_symmetric() {
         return Err(CoreError::UnsupportedBraidingStyle {
             expected: "symmetric braiding",
             actual: rule.braiding_style(),
         });
     }
-    if src_keys.is_empty() {
-        return Ok(Vec::new());
-    }
-    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
-    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
-    if !rule.fusion_style().is_multiplicity_free() {
-        return Err(CoreError::UnsupportedFusionStyle {
-            expected: FusionStyleKind::Simple,
-            actual: rule.fusion_style(),
-        });
-    }
-    let all_keys_match_rank = src_keys.iter().all(|key| {
-        key.codomain_tree().uncoupled().len() == codomain_rank
-            && key.domain_tree().uncoupled().len() == domain_rank
-    });
-    if all_keys_match_rank
-        && tree_pair_axis_map_is_identity(
-            codomain_permutation,
-            domain_permutation,
-            codomain_rank,
-            domain_rank,
-        )
-    {
-        return Ok(src_keys
-            .iter()
-            .map(|key| vec![(key.clone(), rule.scalar_one())])
-            .collect());
-    }
+    let codomain_rank = group.codomain_rank;
+    let domain_rank = group.domain_rank;
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
-    multiplicity_free_braid_tree_pair_block(
+    multiplicity_free_braid_tree_pair_block_validated(
         rule,
         src_keys,
+        group,
         codomain_permutation,
         domain_permutation,
         &codomain_levels,
@@ -1692,6 +1741,9 @@ where
 /// As with the braid block port, coefficients that reach a destination by
 /// several paths sum in a different order than the per-source accumulator, so
 /// results agree to double-precision rounding, not necessarily bit-for-bit.
+///
+/// The empty/group contract is identical to
+/// [`multiplicity_free_braid_tree_pair_block`].
 pub fn multiplicity_free_transpose_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -1702,11 +1754,11 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    if src_keys.is_empty() {
+    let Some(group) = validate_tree_pair_block_group(src_keys)? else {
         return Ok(Vec::new());
-    }
-    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
-    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    };
+    let codomain_rank = group.codomain_rank;
+    let domain_rank = group.domain_rank;
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
         domain_permutation,
