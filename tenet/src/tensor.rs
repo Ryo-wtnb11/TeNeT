@@ -3423,13 +3423,10 @@ impl Tensor {
         self.transformed(&codomain_axes, &domain_axes, TransformKind::Transpose)
     }
 
-    /// TensorKit `repartition(t, N₁, N₂)`: re-split the legs so the codomain
-    /// holds the first `num_codomain` indices and the domain the rest, keeping
-    /// the linear index order (`allind` = codomain then domain) unchanged. The
-    /// domain rank is fixed by `rank() - num_codomain`, so only the split point
-    /// is a parameter. Thin wrapper over [`Self::permute`] with identity axes;
-    /// for a fermionic rule the bent legs pick up the fusion twist exactly as
-    /// `permute` does.
+    /// TensorKit `repartition(t, N₁, N₂)`: move the planar boundary so the
+    /// codomain holds `num_codomain` legs and the domain holds the rest. The
+    /// boundary order is codomain followed by reversed domain; legs which cross
+    /// the boundary are bent without introducing a symmetric braid.
     pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
         if num_codomain > self.rank() {
             return Err(Error::InvalidArgument(format!(
@@ -3437,8 +3434,19 @@ impl Tensor {
                 self.rank()
             )));
         }
-        let all: Vec<usize> = (0..self.rank()).collect();
-        self.permute(&all[..num_codomain], &all[num_codomain..])
+        if num_codomain == self.codomain_rank() {
+            return Ok(self.clone());
+        }
+
+        let mut axes = (0..self.codomain_rank())
+            .chain((self.codomain_rank()..self.rank()).rev())
+            .collect::<Vec<_>>();
+        axes[num_codomain..].reverse();
+        let (codomain_axes, domain_axes) = axes.split_at(num_codomain);
+
+        // Why not identity `permute`: domain trees run opposite to the planar
+        // boundary, and flattening them would braid a different leg across it.
+        self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
     }
 
     fn transformed(
