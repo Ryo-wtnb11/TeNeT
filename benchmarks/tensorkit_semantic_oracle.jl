@@ -9,6 +9,8 @@
 # Section 3 produces the basis-independent invariant stream (norm, tr,
 # singular values) for the seeded operation sequence mirrored by
 # `cross_library_invariant_stream_*` in `tenet/tests/semantic_suite.rs`.
+# Section 4 records planar repartition fixtures consumed by the user-layer
+# regression tests in `tenet/src/tensor.rs`.
 #
 # Run (TensorKit v0.16.2 / TensorKitSectors v0.3.6):
 #   julia benchmarks/tensorkit_semantic_oracle.jl
@@ -175,3 +177,49 @@ end
 
 stream("U1", U1Space(-1 => 2, 0 => 3, 1 => 2))
 stream("SU2", SU2Space(0 => 2, 1 // 2 => 2, 1 => 1))
+
+# ---------------------------------------------------------------------------
+# Section 4: planar repartition fixtures
+# ---------------------------------------------------------------------------
+println("== section 4: planar repartition fixtures ==")
+
+function sequential_tensor(A, B, C, D)
+    tensor = zeros(Float64, A ⊗ B ← C ⊗ D)
+    tensor.data .= eachindex(tensor.data)
+    return tensor
+end
+
+function repartition_fixture(name, tensor, numout)
+    output = repartition(tensor, numout)
+    println("-- $name --")
+    println("ranks = $(numout),$(numind(output) - numout)")
+    println("data = [", join(fmt.(output.data), ", "), "]")
+    return
+end
+
+u1_spaces = (
+    U1Space(0 => 1), U1Space(0 => 2), U1Space(0 => 3), U1Space(0 => 4),
+)
+fz2_spaces = (
+    Vect[fZ2](0 => 1, 1 => 1), Vect[fZ2](0 => 2, 1 => 1),
+    Vect[fZ2](0 => 1, 1 => 2), Vect[fZ2](0 => 2, 1 => 2),
+)
+su2_spaces = (
+    SU2Space(0 => 1, 1 // 2 => 1), SU2Space(0 => 1, 1 // 2 => 1),
+    SU2Space(0 => 1, 1 // 2 => 1), SU2Space(0 => 1, 1 // 2 => 2),
+)
+i3_spaces = (
+    Vect[I3]((0, 0, 0) => 1, (1, 0, 1 // 2) => 1),
+    Vect[I3]((0, 0, 0) => 1, (1, 0, 1 // 2) => 1),
+    Vect[I3]((0, 0, 0) => 1, (1, 0, 1 // 2) => 1),
+    Vect[I3]((0, 0, 0) => 1, (1, 0, 1 // 2) => 2),
+)
+
+repartition_fixture("U1 2|2 -> 3|1", sequential_tensor(u1_spaces...), 3)
+repartition_fixture("fZ2 2|2 -> 3|1", sequential_tensor(fz2_spaces...), 3)
+repartition_fixture("SU2 2|2 -> 3|1", sequential_tensor(su2_spaces...), 3)
+repartition_fixture("fZ2xU1xSU2 2|2 -> 3|1", sequential_tensor(i3_spaces...), 3)
+repartition_fixture("fZ2 2|2 -> 1|3", sequential_tensor(fz2_spaces...), 1)
+repartition_fixture("fZ2xU1xSU2 2|2 -> 1|3", sequential_tensor(i3_spaces...), 1)
+repartition_fixture("fZ2xU1xSU2 2|2 -> 0|4", sequential_tensor(i3_spaces...), 0)
+repartition_fixture("fZ2xU1xSU2 2|2 -> 4|0", sequential_tensor(i3_spaces...), 4)
