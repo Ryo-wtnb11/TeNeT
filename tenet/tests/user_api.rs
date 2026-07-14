@@ -287,6 +287,13 @@ fn vector_interface_identities() {
         let scaled = c.scale(0.5).unwrap();
         assert!((scaled.norm().unwrap() - 0.5 * norm).abs() <= 1e-10 * (1.0 + norm));
 
+        // dot is inner (same conjugation, same weighting).
+        assert_eq!(c.dot(&d).unwrap().re(), c.inner(&d).unwrap().re());
+
+        // normalize returns a unit-norm tensor.
+        let unit = c.normalize().unwrap();
+        assert!((unit.norm().unwrap() - 1.0).abs() <= 1e-10);
+
         // w = c - d; |w|^2 = <c,c> - 2<c,d> + <d,d>.
         let w = c.add(&d, 1.0, -1.0).unwrap();
         let expected = inner_cc - 2.0 * c.inner(&d).unwrap().re() + d.inner(&d).unwrap().re();
