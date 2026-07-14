@@ -1,7 +1,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use tenet_core::{unique_permute_tree, FusionTreeKey, Z2FusionRule, Z2Irrep};
+use tenet_core::{
+    multiplicity_free_permute_tree_pair_block, unique_permute_tree, FusionTreeBlockKey,
+    FusionTreeKey, Z2FusionRule, Z2Irrep,
+};
 
 struct CountingAllocator;
 
@@ -58,4 +61,33 @@ fn unique_identity_permute_does_not_allocate() {
     assert_eq!(transformed.0, tree);
     assert_eq!(transformed.1, 1.0);
     assert_eq!(ALLOCATIONS.get(), 0);
+}
+
+#[test]
+fn block_identity_permute_allocates_only_owned_output() {
+    let source = FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 1],
+        [0],
+        Some(0),
+        [false, false],
+        [false],
+        [],
+        [],
+        [],
+        [],
+    );
+    let sources = [source.clone()];
+    let _ =
+        multiplicity_free_permute_tree_pair_block(&Z2FusionRule, &sources, &[0, 1], &[2]).unwrap();
+
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let transformed =
+        multiplicity_free_permute_tree_pair_block(&Z2FusionRule, &sources, &[0, 1], &[2]).unwrap();
+    COUNTING.set(false);
+
+    // What: identity block permutation allocates only the intentional owned
+    // outer result and its one owned row, with no level-vector temporaries.
+    assert_eq!(transformed, vec![vec![(source, 1.0)]]);
+    assert_eq!(ALLOCATIONS.get(), 2);
 }

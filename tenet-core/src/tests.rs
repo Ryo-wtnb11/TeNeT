@@ -1356,6 +1356,195 @@ mod tests {
         assert_eq!(block, vec![vec![(source, 1.0)]]);
     }
 
+    fn tree_pair_group_fixture(
+        codomain: &[usize],
+        domain: &[usize],
+        coupled: usize,
+        codomain_dual: &[bool],
+        domain_dual: &[bool],
+    ) -> FusionTreeBlockKey {
+        FusionTreeBlockKey::pair_from_sector_ids(
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            Some(coupled),
+            codomain_dual.iter().copied(),
+            domain_dual.iter().copied(),
+            [],
+            [],
+            [],
+            [],
+        )
+    }
+
+    fn assert_mixed_tree_pair_block_group_is_rejected(keys: &[FusionTreeBlockKey]) {
+        let expected = CoreError::MalformedFusionTree {
+            message: TREE_PAIR_BLOCK_GROUP_ERROR,
+        };
+        let rule = IdentitySymbolPanicRule;
+
+        // What: identity and non-identity braid entry paths reject before
+        // returning a shared coefficient matrix or evaluating rigid symbols.
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(
+                &rule,
+                keys,
+                &[0, 1],
+                &[2],
+                &[0, 1],
+                &[2],
+            )
+            .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(
+                &rule,
+                keys,
+                &[1, 0],
+                &[2],
+                &[0, 1],
+                &[2],
+            )
+            .unwrap_err(),
+            expected
+        );
+
+        // What: symmetric permutation validates the same block invariant on
+        // both its identity shortcut and general braid delegation.
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(&rule, keys, &[0, 1], &[2]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(&rule, keys, &[1, 0], &[2]).unwrap_err(),
+            expected
+        );
+
+        // What: planar transpose validates before either its identity return or
+        // cyclic repartition path can consume symbols.
+        assert_eq!(
+            multiplicity_free_transpose_tree_pair_block(&rule, keys, &[0, 1], &[2]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_transpose_tree_pair_block(&rule, keys, &[1, 2], &[0]).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn tree_pair_block_apis_reject_mixed_fusion_tree_groups_before_symbols() {
+        let base = tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[false]);
+        let mixed = [
+            tree_pair_group_fixture(&[1, 2, 4], &[3], 7, &[false, false, false], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3, 4], 7, &[false, false], &[false, false]),
+            tree_pair_group_fixture(&[1, 4], &[3], 7, &[false, false], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[4], 7, &[false, false], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, true], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[true]),
+        ];
+
+        for other in mixed {
+            let keys = [base.clone(), other];
+            let snapshot = keys.clone();
+            assert_mixed_tree_pair_block_group_is_rejected(&keys);
+            // What: validation errors do not alter caller-owned source keys.
+            assert_eq!(keys, snapshot);
+        }
+    }
+
+    #[test]
+    fn tree_pair_block_apis_reject_mixed_product_sector_components() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = FpU1Rule::default();
+        let sector_a = rule.encode_sector(z2_even(), u1(2)).id();
+        let sector_b = rule.encode_sector(z2_even(), u1(3)).id();
+        let coupled = rule.encode_sector(z2_even(), u1(5)).id();
+        let keys = [
+            tree_pair_group_fixture(&[sector_a, sector_a], &[sector_a], coupled, &[false; 2], &[false]),
+            tree_pair_group_fixture(&[sector_a, sector_b], &[sector_a], coupled, &[false; 2], &[false]),
+        ];
+
+        // What: a changed component of an interned product-sector label is a
+        // different shared basis group, even when ranks and duality match.
+        assert_mixed_tree_pair_block_group_is_rejected(&keys);
+    }
+
+    #[test]
+    fn tree_pair_block_empty_and_valid_group_identity_policies_are_stable() {
+        let rule = IdentitySymbolPanicRule;
+        let empty: &[FusionTreeBlockKey] = &[];
+        // What: an empty block remains a valid empty coefficient transform.
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(&rule, empty, &[], &[], &[], &[]).unwrap(),
+            Vec::<Vec<(FusionTreeBlockKey, f64)>>::new()
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(&rule, empty, &[], &[]).unwrap(),
+            Vec::<Vec<(FusionTreeBlockKey, f64)>>::new()
+        );
+        assert_eq!(
+            multiplicity_free_transpose_tree_pair_block(&rule, empty, &[], &[]).unwrap(),
+            Vec::<Vec<(FusionTreeBlockKey, f64)>>::new()
+        );
+
+        let keys = vec![
+            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3], 8, &[false, false], &[false]),
+        ];
+        let expected = keys
+            .iter()
+            .cloned()
+            .map(|key| vec![(key, 1.0)])
+            .collect::<Vec<_>>();
+        // What: distinct coupled labels remain valid basis states in one
+        // external-sector group, preserving source order, destinations, and
+        // coefficients on the symbol-free identity path.
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(
+                &rule,
+                &keys,
+                &[0, 1],
+                &[2],
+                &[0, 1],
+                &[2],
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn empty_block_permute_preserves_braiding_style_error_precedence() {
+        // What: an empty source block does not bypass the public permutation
+        // API's symmetric-braiding capability check.
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(
+                &FibonacciFusionRule,
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap_err(),
+            CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: BraidingStyleKind::Anyonic,
+            }
+        );
+    }
+
+    #[test]
+    fn tree_pair_block_apis_reject_mixed_multiplicity_flags() {
+        let codomain = FusionTreeKey::from_sector_ids([1, 2], Some(7), [false, false], [], []);
+        let domain = FusionTreeKey::from_sector_ids([3], Some(7), [false], [], []);
+        let base = FusionTreeBlockKey::pair(codomain.clone(), domain.clone());
+        let generic = FusionTreeBlockKey::pair(codomain.with_has_multiplicity(true), domain);
+
+        // What: equal external labels do not form one block group when their
+        // outer-multiplicity semantics differ.
+        assert_mixed_tree_pair_block_group_is_rejected(&[base, generic]);
+    }
+
     #[test]
     fn identity_braid_tree_pair_validates_levels_before_symbol_free_return() {
         // What: malformed levels remain errors even when the axis map is the
