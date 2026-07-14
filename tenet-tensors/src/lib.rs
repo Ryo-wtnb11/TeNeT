@@ -16,6 +16,8 @@ mod contract;
 mod facade;
 mod lowering;
 mod tensortrace;
+#[cfg(test)]
+mod test_support;
 mod tree_context;
 mod tree_transform;
 

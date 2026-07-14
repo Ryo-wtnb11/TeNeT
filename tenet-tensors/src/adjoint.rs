@@ -556,6 +556,14 @@ mod cache_tests {
 
     #[test]
     fn equal_source_returns_the_cached_layout() {
+        // What: the adjoint-space cache lives in the same process-global
+        // registry `reset_global_operation_caches` clears (see the accessor
+        // doc above), so a concurrent reset landing between the two builds
+        // below could evict the first entry and hand the second a fresh
+        // `Arc`, breaking the ptr_eq this test exists to check.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rule = U1FusionRule;
         let src = u1_source(1, 2);
         let first = adjoint_space_dyn(&rule, &src).unwrap();

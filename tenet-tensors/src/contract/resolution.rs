@@ -656,6 +656,16 @@ mod tests {
     // where the old `Arc::as_ptr` key saw two distinct keys and missed.
     #[test]
     fn fast_space_key_hits_on_equal_content_across_distinct_arcs() {
+        // What: `FastSpaceKey`/`FullSpaceKey` embed the block structure's
+        // interned `content_id`, so this relies on the tenet-core intern
+        // table handing `a` and `b`'s content-equal structures the *same*
+        // id. A concurrent `reset_global_operation_caches` (which chains
+        // into `reset_core_intern_tables`) landing between the two builds
+        // would evict the first entry and re-intern the second with a
+        // fresh id, breaking the `assert_eq!` below.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rule = U1FusionRule;
         let a = u1_matrix_space(&rule, 3);
         let b = u1_matrix_space(&rule, 3);
