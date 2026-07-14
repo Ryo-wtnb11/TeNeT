@@ -19,12 +19,17 @@ use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
 };
 
-static COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
+static COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct RejectExecutorCalls;
 
 #[derive(Default)]
 struct FailAfterObservingSvdInput {
+    observed: Vec<Vec<f64>>,
+}
+
+#[derive(Default)]
+struct FailAfterObservingQrInput {
     observed: Vec<Vec<f64>>,
 }
 
@@ -200,6 +205,55 @@ impl DenseExecutor for FailAfterObservingSvdInput {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("test only exercises SVD")
+    }
+}
+
+impl DenseExecutor for FailAfterObservingQrInput {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises QR")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("compact QR must use the destination API")
+    }
+
+    fn qr_into(
+        &mut self,
+        input: DenseRead<'_>,
+        q: DenseWrite<'_>,
+        r: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        let DenseWrite::F64(q) = q else {
+            panic!("test Q must be f64")
+        };
+        let DenseWrite::F64(r) = r else {
+            panic!("test R must be f64")
+        };
+        assert!(q.data().iter().all(|&value| value == 0.0));
+        assert!(r.data().iter().all(|&value| value == 0.0));
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "qr_into",
+            message: "injected failure".to_string(),
+        })
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises QR")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises QR")
     }
 }
 
@@ -410,6 +464,103 @@ fn compact_svd_noncanonical_layout_uses_copy_fallback() {
 }
 
 #[test]
+fn compact_qr_canonical_layout_skips_input_pack_and_factor_scatter() {
+    // What: canonical compact QR reads source regions and writes final factor regions directly.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe(),
+        crate::factorize::CompactQrCopyProbe::default()
+    );
+}
+
+#[test]
+fn compact_qr_noncanonical_layout_uses_copy_fallback() {
+    // What: expert noncanonical compact QR retains positive pack-and-scatter copy evidence.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    qr_compact_dyn(&mut dense, &input).unwrap();
+    let probe = crate::factorize::compact_qr_copy_probe();
+
+    assert!(probe.input_pack_bytes > 0);
+    assert!(probe.output_scatter_bytes > 0);
+}
+
+#[test]
+fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
+    // What: a QR backend failure leaves borrowed storage unchanged and returns no factor pair.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let mut dense = FailAfterObservingQrInput::default();
+
+    let result = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert!(!dense.observed.is_empty());
+    assert!(dense
+        .observed
+        .iter()
+        .all(|sector| before.windows(sector.len()).any(|window| window == sector)));
+}
+
+#[test]
+fn compact_qr_factors_retain_each_callers_exact_provider_arc() {
+    // What: a shared geometry plan rebinds both QR factors to each caller's provider allocation.
+    let tensor = rectangular_svd_tensor(7, 5);
+    let first_provider = Arc::new(Z2FusionRule);
+    let second_provider = Arc::new(Z2FusionRule);
+    let first = bound_tensor(Arc::clone(&first_provider), &tensor);
+    let second = bound_tensor(Arc::clone(&second_provider), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let (first_q, first_r) = qr_compact(&mut dense, &first.as_ref()).unwrap();
+    let (second_q, second_r) = qr_compact(&mut dense, &second.as_ref()).unwrap();
+
+    for factor in [&first_q, &first_r] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &first_provider));
+    }
+    for factor in [&second_q, &second_r] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &second_provider));
+    }
+}
+
+#[test]
+fn compact_svd_and_qr_preserve_one_factor_plan_generation() {
+    // What: compact SVD and QR keep the same factor-plan generation alive across both operations.
+    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tensor = rectangular_svd_tensor(17, 13);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    tenet_tensors::reset_global_operation_caches();
+    let before = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    svd_compact(&mut dense, &bound.as_ref()).unwrap();
+    qr_compact(&mut dense, &bound.as_ref()).unwrap();
+    let after = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&before, &after));
+}
+
+#[test]
 fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
     // What: a provider failure cannot mutate borrowed tensor storage or return partial factors.
     let rule = Z2FusionRule;
@@ -429,9 +580,9 @@ fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
 }
 
 #[test]
-fn compact_svd_plan_reuses_clone_before_init_and_concurrent_first_use() {
-    // What: one semantic compact-SVD plan serves clones made before and during first use.
-    let _guard = COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK
+fn compact_factor_plan_reuses_clone_before_init_and_concurrent_first_use() {
+    // What: one semantic compact-factor plan serves clones made before and during first use.
+    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tensor = rectangular_svd_tensor(23, 17);
@@ -443,7 +594,7 @@ fn compact_svd_plan_reuses_clone_before_init_and_concurrent_first_use() {
             .iter()
             .map(|space| {
                 scope.spawn(|| {
-                    crate::factorize::compact_svd_plan_for_test(space)
+                    crate::factorize::compact_factor_plan_for_test(space)
                         .unwrap()
                         .unwrap()
                 })
@@ -454,7 +605,7 @@ fn compact_svd_plan_reuses_clone_before_init_and_concurrent_first_use() {
             .collect::<Vec<_>>()
     });
     let after_init = bound.space().clone();
-    let after = crate::factorize::compact_svd_plan_for_test(&after_init)
+    let after = crate::factorize::compact_factor_plan_for_test(&after_init)
         .unwrap()
         .unwrap();
 
@@ -465,7 +616,7 @@ fn compact_svd_plan_reuses_clone_before_init_and_concurrent_first_use() {
 #[test]
 fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
     // What: one semantic plan serves distinct provider Arcs while U/S/Vh inherit each caller.
-    let _guard = COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK
+    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tensor = rectangular_svd_tensor(7, 5);
@@ -473,10 +624,10 @@ fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
     let second_provider = Arc::new(Z2FusionRule);
     let first = bound_tensor(Arc::clone(&first_provider), &tensor);
     let second = bound_tensor(Arc::clone(&second_provider), &tensor);
-    let first_plan = crate::factorize::compact_svd_plan_for_test(first.space())
+    let first_plan = crate::factorize::compact_factor_plan_for_test(first.space())
         .unwrap()
         .unwrap();
-    let second_plan = crate::factorize::compact_svd_plan_for_test(second.space())
+    let second_plan = crate::factorize::compact_factor_plan_for_test(second.space())
         .unwrap()
         .unwrap();
     assert!(Arc::ptr_eq(&first_plan, &second_plan));
@@ -496,33 +647,33 @@ fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
 }
 
 #[test]
-fn global_operation_reset_replaces_compact_svd_plan_generation() {
+fn global_operation_reset_replaces_compact_factor_plan_generation() {
     // What: a completed global reset invalidates both the shared plan and this thread's front.
-    let _guard = COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK
+    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tensor = rectangular_svd_tensor(29, 23);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let before = crate::factorize::compact_svd_plan_for_test(bound.space())
+    let before = crate::factorize::compact_factor_plan_for_test(bound.space())
         .unwrap()
         .unwrap();
 
     tenet_tensors::reset_global_operation_caches();
 
-    let after = crate::factorize::compact_svd_plan_for_test(bound.space())
+    let after = crate::factorize::compact_factor_plan_for_test(bound.space())
         .unwrap()
         .unwrap();
     assert!(!Arc::ptr_eq(&before, &after));
 }
 
 #[test]
-fn compact_svd_cached_plan_does_not_retain_first_provider() {
+fn compact_factor_cached_plan_does_not_retain_first_provider() {
     // What: a cached semantic plan never owns the provider that first built it.
     let tensor = rectangular_svd_tensor(19, 11);
     let provider = Arc::new(Z2FusionRule);
     let weak = Arc::downgrade(&provider);
     let bound = bound_tensor(Arc::clone(&provider), &tensor);
-    let plan = crate::factorize::compact_svd_plan_for_test(bound.space())
+    let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
         .unwrap()
         .unwrap();
 
@@ -534,35 +685,49 @@ fn compact_svd_cached_plan_does_not_retain_first_provider() {
 }
 
 #[test]
-fn compact_svd_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
-    // What: every nonzero source sector has exactly one shape-correct U/Vh route and no extras.
+fn compact_factor_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
+    // What: every nonzero source sector has one shape-correct left/right route and no extras.
     let rule = Z2FusionRule;
     let tensor = rectangular_svd_tensor(17, 13);
     let bound = bound_tensor(Arc::new(rule), &tensor);
-    let plan = crate::factorize::compact_svd_plan_for_test(bound.space())
+    let plan = crate::factorize::compact_factor_plan_for_test(bound.space())
         .unwrap()
         .unwrap();
-    let (source, u, vh) = crate::factorize::compact_svd_plan_regions_for_test(&plan);
+    let (source, u, vh) = crate::factorize::compact_factor_plan_regions_for_test(&plan);
 
     let mut duplicate = u.to_vec();
     duplicate.push(u[0].clone());
-    assert!(crate::factorize::validate_compact_svd_routes_for_test(
+    assert!(crate::factorize::validate_compact_factor_routes_for_test(
         &rule, &source, &duplicate, &vh,
     )
     .is_err());
     assert!(
-        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &[], &vh,).is_err()
+        crate::factorize::validate_compact_factor_routes_for_test(&rule, &source, &[], &vh,)
+            .is_err()
     );
     assert!(
-        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &vh, &vh,).is_err()
+        crate::factorize::validate_compact_factor_routes_for_test(&rule, &source, &vh, &vh,)
+            .is_err()
     );
 
     let multi = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let multi_bound = bound_tensor(Arc::new(rule), &multi);
-    let multi_plan = crate::factorize::compact_svd_plan_for_test(multi_bound.space())
+    let multi_plan = crate::factorize::compact_factor_plan_for_test(multi_bound.space())
         .unwrap()
         .unwrap();
-    let (_, multi_u, _) = crate::factorize::compact_svd_plan_regions_for_test(&multi_plan);
+    let (multi_source, multi_u, multi_vh) =
+        crate::factorize::compact_factor_plan_regions_for_test(&multi_plan);
+    let mut reversed_u = multi_u.to_vec();
+    let mut reversed_vh = multi_vh.to_vec();
+    reversed_u.reverse();
+    reversed_vh.reverse();
+    crate::factorize::validate_compact_factor_routes_for_test(
+        &rule,
+        &multi_source,
+        &reversed_u,
+        &reversed_vh,
+    )
+    .unwrap();
     let mut extra = u.to_vec();
     extra.push(
         multi_u
@@ -572,7 +737,7 @@ fn compact_svd_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
             .clone(),
     );
     assert!(
-        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &extra, &vh,)
+        crate::factorize::validate_compact_factor_routes_for_test(&rule, &source, &extra, &vh,)
             .is_err()
     );
 }
@@ -684,6 +849,41 @@ fn compact_svd_direct_plan_accepts_zero_rank_sectors() {
     // What: empty row or column sectors publish an empty spectrum without factor routes.
     assert_rectangular_direct_svd(0, 3);
     assert_rectangular_direct_svd(3, 0);
+}
+
+fn assert_rectangular_direct_qr(rows: usize, cols: usize) {
+    let rule = Z2FusionRule;
+    let tensor = rectangular_svd_tensor(rows, cols);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_qr_copy_probe();
+    let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe(),
+        crate::factorize::CompactQrCopyProbe::default()
+    );
+    let rank = rows.min(cols);
+    for col in 0..cols {
+        for row in 0..rows {
+            let reconstructed = (0..rank)
+                .map(|bond| q.data()[row + rows * bond] * r.data()[bond + rank * col])
+                .sum::<f64>();
+            assert!((reconstructed - tensor.data()[row + rows * col]).abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn compact_qr_direct_spans_reconstruct_tall_and_wide_matrices() {
+    // What: exact final Q/R spans reconstruct both compact rectangular orientations.
+    assert_rectangular_direct_qr(5, 3);
+    assert_rectangular_direct_qr(3, 5);
+}
+
+#[test]
+fn compact_qr_direct_plan_accepts_zero_rank_sectors() {
+    // What: empty row or column sectors publish empty Q/R without calling invalid routes.
+    assert_rectangular_direct_qr(0, 3);
+    assert_rectangular_direct_qr(3, 0);
 }
 
 #[test]
@@ -857,6 +1057,66 @@ fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
         space,
     )
     .unwrap()
+}
+
+#[test]
+fn compact_qr_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
+    use num_complex::Complex64;
+
+    // What: one complex QR call reconstructs mixed rectangular sectors in final storage.
+    let rule = Z2FusionRule;
+    let source = mixed_rectangular_c32_tensor();
+    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        source
+            .data()
+            .iter()
+            .map(|value| Complex64::new(value.re as f64, value.im as f64))
+            .collect(),
+        source.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_qr_copy_probe();
+
+    let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe(),
+        crate::factorize::CompactQrCopyProbe::default()
+    );
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let q_regions = q.structure().coupled_sector_regions(1).unwrap().unwrap();
+    let r_regions = r.structure().coupled_sector_regions(1).unwrap().unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled().unwrap();
+        let q_region = q_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let r_region = r_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let rows = input_region.rows();
+        let cols = input_region.cols();
+        let rank = rows.min(cols);
+        for col in 0..cols {
+            for row in 0..rows {
+                let reconstructed = (0..rank)
+                    .map(|bond| {
+                        q.data()[q_region.range().start + row + rows * bond]
+                            * r.data()[r_region.range().start + bond + rank * col]
+                    })
+                    .sum::<Complex64>();
+                let expected = tensor.data()[input_region.range().start + row + rows * col];
+                assert!((reconstructed - expected).norm() < 1e-10);
+            }
+        }
+    }
 }
 
 #[test]
@@ -1514,6 +1774,56 @@ fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
     }
 }
 
+fn assert_compact_qr_reconstructs_rule<R>(rule: &R, sectors: &[SectorId])
+where
+    R: Clone + MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
+    let tensor = tsvd_test_tensor(rule, sectors);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let (q, r) = qr_compact(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
+    )
+    .unwrap();
+    let reconstructed = contract_pair(rule, &tensor, &q, &r);
+    assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn compact_qr_reconstructs_u1_fermion_parity_and_product_rules() {
+    // What: direct Q/R routes preserve abelian, fermionic, and encoded product sector labels.
+    assert_compact_qr_reconstructs_rule(
+        &U1FusionRule,
+        &[
+            U1Irrep::new(-1).sector_id(),
+            U1Irrep::new(0).sector_id(),
+            U1Irrep::new(1).sector_id(),
+        ],
+    );
+    assert_compact_qr_reconstructs_rule(
+        &FermionParityFusionRule,
+        &[SectorId::new(0), SectorId::new(1)],
+    );
+    let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+    let product_sectors = [
+        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+    ];
+    assert_compact_qr_reconstructs_rule(&product, &product_sectors);
+
+    let nested = product_fusion_rule(product, SU2FusionRule);
+    let nested_sectors = [
+        nested.encode_sector(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
+        nested.encode_sector(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
+    ];
+    crate::factorize::reset_compact_qr_copy_probe();
+    assert_compact_qr_reconstructs_rule(&nested, &nested_sectors);
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe(),
+        crate::factorize::CompactQrCopyProbe::default()
+    );
+}
+
 #[test]
 fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
     {
@@ -1555,16 +1865,14 @@ fn contract_pair<R>(
     right: &TensorMap<f64, 1, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; template.data().len()],
         template.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
     context
         .tensorcontract_fusion_into(
             rule,
