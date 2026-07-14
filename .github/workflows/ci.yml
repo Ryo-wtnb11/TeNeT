@@ -315,3 +315,41 @@ jobs:
       - name: Check per-file thresholds
         run: python3 scripts/check-coverage.py coverage.json
         working-directory: tenet
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: clippy
+      # Non-gating for now (#153). `-A clippy::result_large_err` silences
+      # the one deliberate, already-reviewed trade-off (public
+      # `tenet::Error` is boxed; the internal expert layer is intentionally
+      # unboxed). Past that allow, `cargo clippy --workspace --all-targets`
+      # still turns up ~130 pre-existing warnings spread across ~25 other
+      # lint categories (clippy::too_many_arguments, clippy::type_complexity,
+      # clippy::manual_contains, clippy::doc_lazy_continuation,
+      # clippy::needless_range_loop, clippy::useless_vec,
+      # clippy::large_enum_variant, clippy::wrong_self_convention, ...) —
+      # too broad and too shallow a spread per category to allowlist away
+      # without also hiding genuinely new signal. Ratchet plan: burn these
+      # down category by category in follow-up PRs (tackle the largest
+      # counts first), then flip this job to `-D warnings` once clippy is
+      # clean. `continue-on-error: true` keeps the job's output visible in
+      # the Actions UI without blocking merges in the meantime.
+      - run: cargo clippy --workspace --all-targets -- -A clippy::result_large_err
+        working-directory: tenet
+        continue-on-error: true
