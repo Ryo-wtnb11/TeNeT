@@ -148,6 +148,26 @@ reconsidering the default.
    `tenet`; the heavy transpose/contract kernels (HPTT, TBLIS) sit behind
    adapters in `tenferro`. `tenet` routes; it does not embed kernels.
 
+## Parallel execution (current state)
+
+Standalone `Tensor` ops (`contract`, `permute`, …) hold their owning
+`Runtime`'s single state mutex for the whole op — across *all* rules and
+dtypes, not just the one in flight. Two threads calling standalone ops on the
+same `Runtime` fully serialize, even on unrelated work.
+
+Data-parallel callers today should use one of:
+
+- **One `Runtime` per thread.** Global structure caches are process-shared
+  and read-mostly, so this parallelizes fully — no cross-thread contention.
+- **The network / `tensor!` cached-plan path.** Its per-call workspace clones
+  `TensorExecutionContext` and executes lock-free after a brief pool-mutex
+  lease; this path is already parallel-safe on a shared `Runtime`.
+
+See #155 for the planned context-lease + executor-pool design that would
+bring standalone ops to the same level, and its measurement gate (evals/s
+across N threads on a shared `Runtime` must show real scaling before that
+work starts).
+
 ## Adding a backend (checklist)
 
 - Implement the relevant backend trait; keep it `tenferro`-side if it is a heavy
