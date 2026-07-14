@@ -147,10 +147,6 @@ where
             .expect("dst dynamic scratch prepared before replay")
     }
 
-    pub(crate) fn lhs_rhs(&self) -> (&DynamicFusionScratch<T>, &DynamicFusionScratch<T>) {
-        (self.lhs(), self.rhs())
-    }
-
     pub(crate) fn lhs_rhs_dst_mut(
         &mut self,
     ) -> (
@@ -162,6 +158,18 @@ where
         (
             lhs.as_ref()
                 .expect("lhs dynamic scratch prepared before replay"),
+            rhs.as_ref()
+                .expect("rhs dynamic scratch prepared before replay"),
+            dst.as_mut()
+                .expect("dst dynamic scratch prepared before replay"),
+        )
+    }
+
+    pub(crate) fn rhs_dst_mut(
+        &mut self,
+    ) -> (&DynamicFusionScratch<T>, &mut DynamicFusionScratch<T>) {
+        let Self { rhs, dst, .. } = self;
+        (
             rhs.as_ref()
                 .expect("rhs dynamic scratch prepared before replay"),
             dst.as_mut()
@@ -333,20 +341,16 @@ impl<LhsScratch, RhsScratch, DstScratch>
             .expect("dst storage dynamic scratch prepared before replay")
     }
 
-    pub(crate) fn lhs_rhs(
-        &self,
-    ) -> (
-        &StorageDynamicFusionScratch<LhsScratch>,
-        &StorageDynamicFusionScratch<RhsScratch>,
-    ) {
-        (
-            self.lhs
-                .as_ref()
-                .expect("lhs storage dynamic scratch prepared before replay"),
-            self.rhs
-                .as_ref()
-                .expect("rhs storage dynamic scratch prepared before replay"),
-        )
+    pub(crate) fn lhs(&self) -> &StorageDynamicFusionScratch<LhsScratch> {
+        self.lhs
+            .as_ref()
+            .expect("lhs storage dynamic scratch prepared before replay")
+    }
+
+    pub(crate) fn rhs(&self) -> &StorageDynamicFusionScratch<RhsScratch> {
+        self.rhs
+            .as_ref()
+            .expect("rhs storage dynamic scratch prepared before replay")
     }
 
     pub(crate) fn lhs_rhs_dst_mut(
@@ -364,6 +368,20 @@ impl<LhsScratch, RhsScratch, DstScratch>
                 .expect("rhs storage dynamic scratch prepared before replay"),
             dst.as_mut()
                 .expect("dst storage dynamic scratch prepared before replay"),
+        )
+    }
+    pub(crate) fn rhs_dst_mut(
+        &mut self,
+    ) -> (
+        &StorageDynamicFusionScratch<RhsScratch>,
+        &mut StorageDynamicFusionScratch<DstScratch>,
+    ) {
+        let Self { rhs, dst, .. } = self;
+        (
+            rhs.as_ref()
+                .expect("rhs dynamic scratch prepared before replay"),
+            dst.as_mut()
+                .expect("dst dynamic scratch prepared before replay"),
         )
     }
 }
