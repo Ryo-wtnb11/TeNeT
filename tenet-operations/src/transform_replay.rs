@@ -218,6 +218,125 @@ mod coefficient_cache_tests {
     }
 }
 
+#[cfg(test)]
+mod inactive_destination_tests {
+    use super::*;
+    use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
+    use tenet_core::{TensorMapSpace, Trivial};
+    use tenet_dense::DefaultDenseExecutor;
+
+    type TestTensor = TensorMap<f64, 1, 0, Trivial, Vec<f64>>;
+
+    fn fixture() -> (TestTensor, TestTensor, TreeTransformStructure<f64>) {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+        let src = TensorMap::from_vec_with_structure(
+            vec![3.0],
+            TensorMapSpace::from_dims([1], []).unwrap(),
+            src_structure,
+        )
+        .unwrap();
+        let dst = TensorMap::from_vec_with_structure(
+            vec![10.0, 20.0],
+            TensorMapSpace::from_dims([2], []).unwrap(),
+            dst_structure,
+        )
+        .unwrap();
+        let structure = TreeTransformStructure::compile(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::single(0, 0, 2.0)],
+        )
+        .unwrap();
+        (dst, src, structure)
+    }
+
+    fn expected(beta: f64) -> [f64; 2] {
+        [6.0 + beta * 10.0, beta * 20.0]
+    }
+
+    #[test]
+    fn structural_serial_replay_scales_inactive_destinations() {
+        for beta in [0.0, 0.5, 1.0] {
+            let (mut dst, src, structure) = fixture();
+            tree_transform_structure_with_structural_recoupling(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &mut dst,
+                &src,
+                1.0,
+                beta,
+                1,
+            )
+            .unwrap();
+            assert_eq!(dst.data(), &expected(beta));
+        }
+    }
+
+    #[test]
+    fn structural_threaded_replay_scales_inactive_destinations() {
+        for beta in [0.0, 0.5, 1.0] {
+            let (mut dst, src, structure) = fixture();
+            tree_transform_structure_with_structural_recoupling(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &mut dst,
+                &src,
+                1.0,
+                beta,
+                2,
+            )
+            .unwrap();
+            assert_eq!(dst.data(), &expected(beta));
+        }
+    }
+
+    #[test]
+    fn storage_workspace_replay_scales_inactive_destinations() {
+        for beta in [0.0, 0.5, 1.0] {
+            let (mut dst, src, structure) = fixture();
+            tree_transform_structure_with_storage_workspace_strided_kernel(
+                &mut StridedHostKernelAdapter::default(),
+                &mut StorageTreeTransformWorkspace::<Vec<f64>, Vec<f64>>::default(),
+                &structure,
+                &mut dst,
+                &src,
+                1.0,
+                beta,
+            )
+            .unwrap();
+            assert_eq!(dst.data(), &expected(beta));
+        }
+    }
+
+    #[test]
+    fn strided_replay_scales_inactive_destinations() {
+        for beta in [0.0, 0.5, 1.0] {
+            let (mut dst, src, structure) = fixture();
+            let dst_structure = Arc::clone(dst.structure());
+            let src_structure = Arc::clone(src.structure());
+            tree_transform_structure_with_strided_kernel_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &dst_structure,
+                &src_structure,
+                dst.data_mut(),
+                src.data(),
+                1.0,
+                beta,
+            )
+            .unwrap();
+            assert_eq!(dst.data(), &expected(beta));
+        }
+    }
+}
+
 pub fn tensoradd_structure_with_strided_kernel<
     T,
     const NOUT: usize,
