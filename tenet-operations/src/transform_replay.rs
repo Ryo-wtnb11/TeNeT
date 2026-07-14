@@ -688,6 +688,169 @@ mod inactive_destination_tests {
         assert!(dst.data().iter().all(|value| value.is_nan()));
     }
 
+    #[test]
+    fn generic_beta_zero_keeps_existing_ieee_inactive_behavior() {
+        let (mut dst, src, structure) = fixture();
+        dst.data_mut().fill(f64::NAN);
+
+        tree_transform_structure_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            src.data(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst.data()[0], 6.0);
+        assert!(dst.data()[1].is_nan());
+    }
+
+    #[test]
+    fn overwrite_single_does_not_read_nan_destinations_in_any_driver() {
+        for threads in [1, 2] {
+            let (mut dst, src, structure) = fixture();
+            dst.data_mut().fill(f64::NAN);
+            tree_transform_structure_overwrite_with_structural_recoupling(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &mut dst,
+                &src,
+                1.0,
+                threads,
+            )
+            .unwrap();
+            assert_eq!(dst.data(), &[6.0, 0.0]);
+        }
+
+        let (mut dst, src, structure) = fixture();
+        dst.data_mut().fill(f64::NAN);
+        tree_transform_structure_overwrite_with_storage_workspace_strided_kernel(
+            &mut StridedHostKernelAdapter::default(),
+            &mut StorageTreeTransformWorkspace::<Vec<f64>, Vec<f64>>::default(),
+            &structure,
+            &mut dst,
+            &src,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(dst.data(), &[6.0, 0.0]);
+
+        let (mut dst, src, structure) = fixture();
+        dst.data_mut().fill(f64::NAN);
+        tree_transform_structure_overwrite_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            src.data(),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(dst.data(), &[6.0, 0.0]);
+
+        let (mut dst, src, structure) = fixture();
+        dst.data_mut().fill(f64::NAN);
+        tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            src.data(),
+            1.0,
+            1,
+            &mut TreeTransformReplayProfile::default(),
+        )
+        .unwrap();
+        assert_eq!(dst.data(), &[6.0, 0.0]);
+    }
+
+    #[test]
+    fn overwrite_multi_does_not_read_nan_active_or_inactive_destinations() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(1, [vec![1], vec![1], vec![1]]).unwrap();
+        let structure = TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )],
+        )
+        .unwrap();
+        let mut dst = vec![f64::NAN; 3];
+
+        tree_transform_structure_overwrite_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::new(dst_structure),
+            &Arc::new(src_structure),
+            &mut dst,
+            &[3.0, 4.0],
+            2.0,
+        )
+        .unwrap();
+
+        assert_eq!(dst, [6.0, 8.0, 0.0]);
+    }
+
+    #[test]
+    fn overwrite_multi_c64_does_not_read_nan_destinations() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+        let dst_structure =
+            BlockStructure::packed_column_major(1, [vec![1], vec![1], vec![1]]).unwrap();
+        let structure = TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )],
+        )
+        .unwrap();
+        let nan = num_complex::Complex64::new(f64::NAN, f64::NAN);
+        let mut dst = vec![nan; 3];
+
+        tree_transform_structure_overwrite_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::new(dst_structure),
+            &Arc::new(src_structure),
+            &mut dst,
+            &[
+                num_complex::Complex64::new(3.0, 1.0),
+                num_complex::Complex64::new(4.0, -1.0),
+            ],
+            num_complex::Complex64::new(2.0, 0.0),
+        )
+        .unwrap();
+
+        assert_eq!(
+            dst,
+            [
+                num_complex::Complex64::new(6.0, 2.0),
+                num_complex::Complex64::new(8.0, -2.0),
+                num_complex::Complex64::new(0.0, 0.0),
+            ]
+        );
+    }
+
     #[derive(Clone, Default)]
     struct SlowScaleAdapter(StridedHostKernelAdapter);
 
