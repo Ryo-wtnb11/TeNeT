@@ -498,6 +498,40 @@ fn compact_qr_noncanonical_layout_uses_copy_fallback() {
 }
 
 #[test]
+fn eigh_canonical_layout_skips_input_pack_and_vector_scatter() {
+    // What: canonical EIGH reads source regions and writes final eigenvector regions directly.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_eigh_copy_probe();
+    eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::eigh_copy_probe(),
+        crate::factorize::EighCopyProbe::default()
+    );
+}
+
+#[test]
+fn eigh_noncanonical_layout_uses_copy_fallback() {
+    // What: expert noncanonical EIGH retains positive pack-and-vector-scatter copy evidence.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_eigh_copy_probe();
+    eigh_full_dyn(&mut dense, &input).unwrap();
+    let probe = crate::factorize::eigh_copy_probe();
+
+    assert!(probe.input_pack_bytes > 0);
+    assert!(probe.output_scatter_bytes > 0);
+}
+
+#[test]
 fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
     // What: a QR backend failure leaves borrowed storage unchanged and returns no factor pair.
     let rule = Z2FusionRule;
