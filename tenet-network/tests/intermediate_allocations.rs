@@ -40,11 +40,25 @@ thread_local! {
     static PROBE_THREAD_DEALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
     static PROBE_THREAD_DEALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
     static DEALLOC_BOUNDARY_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static REALLOC_TRANSITION_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
 }
 
 struct DeallocBoundaryHook {
     reached: SyncSender<()>,
     resume: Receiver<()>,
+}
+
+#[cfg(test)]
+fn cross_realloc_transition_hook() {
+    let hook = REALLOC_TRANSITION_HOOK
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten();
+    if let Some(hook) = hook {
+        hook.reached.send(()).unwrap();
+        hook.resume.recv().unwrap();
+    }
 }
 
 struct RegistryGuard;
@@ -270,6 +284,8 @@ fn finish_realloc_result(
     if origin.size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
         PAYLOAD_LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
     }
+    #[cfg(test)]
+    cross_realloc_transition_hook();
     if count_event {
         REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
@@ -827,6 +843,42 @@ fn realloc_in_place_transition_replaces_only_its_detached_origin() {
     assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 4);
     assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 8);
     assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn realloc_transition_never_exposes_a_zero_live_metrics_window() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    reset_event_counters();
+    PAYLOAD_SIZE.store(0, Ordering::Relaxed);
+    reset_live_registry();
+    let old = 0x1000usize as *mut u8;
+    let moved = 0x2000usize as *mut u8;
+    let concurrent = 0x3000usize;
+    assert!(register_live(old, 8));
+    let origin = detach_realloc_origin(old).expect("old origin must be tracked");
+    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+    REALLOC_TRANSITION_HOOK.with_borrow_mut(|slot| {
+        *slot = Some(DeallocBoundaryHook {
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+    });
+    let worker = std::thread::spawn(move || {
+        reached_rx.recv().unwrap();
+        // What: a complete concurrent allocation lifetime overlaps the realloc
+        // transition and must overlap either its old or new live metrics.
+        let pointer = concurrent as *mut u8;
+        assert!(register_live(pointer, 64));
+        assert_eq!(unregister_live(pointer), Some(64));
+        resume_tx.send(()).unwrap();
+    });
+
+    assert!(finish_realloc_result(origin, moved, 16, true));
+    worker.join().unwrap();
+    assert_eq!(registered_size(moved), Some(16));
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 16);
+    assert_eq!(PEAK_LIVE_BYTES.load(Ordering::Relaxed), 72);
 }
 
 #[test]
