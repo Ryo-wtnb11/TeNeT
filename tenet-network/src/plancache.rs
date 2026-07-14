@@ -479,12 +479,34 @@ fn needs_replan_tensors(
     snapshot: &[Vec<usize>],
     tensors: &[&Tensor],
 ) -> Result<bool, Error> {
-    let mut changed = false;
-    let mut exceeds_factor = false;
+    // The per-operand rank guard must run for every policy: a cache hit can
+    // arrive via `static_alias_matches`, which compares codomain rank only, so a
+    // tensor whose full rank differs from the snapshot reaches here and must
+    // force a replan. Hoisting an early-out above this loop would reuse a plan
+    // built for a different rank — the reason a naive top-level early-out is
+    // unsafe.
     for (operand, dims) in snapshot.iter().enumerate() {
         if tensors[operand].rank() != dims.len() {
             return Ok(true);
         }
+    }
+
+    // Past the rank guard the per-axis `leg_dim` scan is dead work for the
+    // policies whose result never depends on it: `AlwaysReuse` never replans on
+    // drift, and a non-degenerate `BakeOnce` snapshot is frozen for any real
+    // dims. Skipping the scan drops `leg_dim(axis)?`, but that call errors only
+    // on `axis >= rank` (see `Tensor::leg_dim`), which the guard above already
+    // precludes — so no error side effect is lost. `DriftFactor` (and a
+    // degenerate `BakeOnce` seed) still need the full comparison.
+    match policy {
+        ReplanPolicy::AlwaysReuse => return Ok(false),
+        ReplanPolicy::BakeOnce if !snapshot_is_degenerate(snapshot) => return Ok(false),
+        _ => {}
+    }
+
+    let mut changed = false;
+    let mut exceeds_factor = false;
+    for (operand, dims) in snapshot.iter().enumerate() {
         for (axis, &snap) in dims.iter().enumerate() {
             let current = tensors[operand].leg_dim(axis)?;
             changed |= snap != current;
@@ -968,8 +990,8 @@ fn get_or_plan_internal(
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_plan_cache, get_or_plan, plan_cache_stats, Optimizer, PlanCacheConfig,
-        ReplanPolicy, WorkspacePool, MAX_IDLE_WORKSPACES_PER_PLAN,
+        configure_plan_cache, get_or_plan, needs_replan_tensors, plan_cache_stats, Optimizer,
+        PlanCacheConfig, ReplanPolicy, WorkspacePool, MAX_IDLE_WORKSPACES_PER_PLAN,
     };
     use crate::{Network, TemporaryLabel};
     use std::sync::atomic::Ordering;
@@ -1089,5 +1111,72 @@ mod tests {
 
         let stats = plan_cache_stats(&runtime);
         assert_eq!((stats.hits, stats.misses, stats.entries), (0, 3, 1));
+    }
+
+    /// The rank guard in `needs_replan_tensors` fires for *every* policy,
+    /// including the ones whose dim-drift result would otherwise early-out to
+    /// `Ok(false)`. This pins the reachability the issue #149 fix depends on: a
+    /// static-alias hit compares codomain rank only, so a full-rank mismatch
+    /// must still force a replan and the early-out must sit below the guard.
+    #[test]
+    fn rank_mismatch_forces_replan_for_all_policies() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 2)]);
+        // rank-2 tensor (one codomain, one domain leg).
+        let t = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 1491).unwrap();
+        let tensors = [&t];
+        // Snapshot claims rank 3, non-degenerate dims — the BakeOnce/AlwaysReuse
+        // early-out would say "reuse" if it ran before the rank guard.
+        let snapshot = vec![vec![2, 2, 2]];
+        for policy in [
+            ReplanPolicy::AlwaysReuse,
+            ReplanPolicy::BakeOnce,
+            ReplanPolicy::DriftFactor(2.0),
+        ] {
+            assert!(
+                needs_replan_tensors(policy, &snapshot, &tensors).unwrap(),
+                "rank mismatch must force replan for {policy:?}"
+            );
+        }
+    }
+
+    /// Observable dim-drift behavior is identical before and after the #149
+    /// early-out for all three policies.
+    #[test]
+    fn needs_replan_tensors_matches_policy_semantics() {
+        let runtime = Runtime::builder().build().unwrap();
+        // rank-2 tensor with both legs dim 2.
+        let d2 = Space::u1([(0, 2)]);
+        let t = Tensor::rand_with_seed(&runtime, Dtype::F64, [&d2], [&d2], 1492).unwrap();
+        let tensors = [&t];
+
+        // AlwaysReuse: never replans on drift (matching rank).
+        assert!(
+            !needs_replan_tensors(ReplanPolicy::AlwaysReuse, &vec![vec![8, 8]], &tensors).unwrap()
+        );
+
+        // BakeOnce, non-degenerate snapshot: frozen even when dims drift (the
+        // early-out path).
+        assert!(
+            !needs_replan_tensors(ReplanPolicy::BakeOnce, &vec![vec![8, 8]], &tensors).unwrap()
+        );
+
+        // BakeOnce, degenerate seed: replans once dims move off the seed...
+        assert!(needs_replan_tensors(ReplanPolicy::BakeOnce, &vec![vec![1, 2]], &tensors).unwrap());
+        // ...but a degenerate seed that still matches current dims stays put.
+        let d1 = Space::u1([(0, 1)]);
+        let deg = Tensor::rand_with_seed(&runtime, Dtype::F64, [&d1], [&d1], 1493).unwrap();
+        assert!(!needs_replan_tensors(ReplanPolicy::BakeOnce, &vec![vec![1, 1]], &[&deg]).unwrap());
+
+        // DriftFactor: replans past the factor, holds within it. Current dims
+        // are 2, snapshot 8 → ratio 4.
+        assert!(
+            needs_replan_tensors(ReplanPolicy::DriftFactor(2.0), &vec![vec![8, 8]], &tensors)
+                .unwrap()
+        );
+        assert!(
+            !needs_replan_tensors(ReplanPolicy::DriftFactor(8.0), &vec![vec![8, 8]], &tensors)
+                .unwrap()
+        );
     }
 }
