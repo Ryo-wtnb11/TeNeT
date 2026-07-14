@@ -10,6 +10,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Why-not keep default DWARF: heavy Linux tests do not inspect it, while its
+  # artifacts exhaust hosted-runner disk and linker memory.
+  # Why-not delete more image paths: that treats the symptom and can destabilize
+  # hosted images. Why-not coverage: llvm-cov owns its instrumentation contract.
+  CI_HEAVY_TEST_DEBUG: '0'
 
 # TeNeT depends on tenferro-rs via a sibling path dependency
 # (`../../tenferro-rs`). CI checks out tenferro-rs at `main` next to this repo
@@ -146,6 +151,8 @@ jobs:
           key: feature-${{ matrix.name }}
       - run: cargo test --workspace --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
+        env:
+          CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
 
   no-backend-contract:
     name: no backend is rejected explicitly
@@ -246,14 +253,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
-      - name: Run cargo test
-        run: |
-          if [ "${{ needs.changes.outputs.light_rust }}" = "true" ]; then
-            cargo test -p tenet-krylov
-          else
-            cargo test --workspace
-          fi
+      - name: Run light Rust tests
+        if: needs.changes.outputs.light_rust == 'true'
+        run: cargo test -p tenet-krylov
         working-directory: tenet
+      - name: Run workspace tests
+        if: needs.changes.outputs.light_rust != 'true'
+        run: cargo test --workspace
+        working-directory: tenet
+        env:
+          CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
 
   test-macos:
     name: cargo test (macos-latest)
