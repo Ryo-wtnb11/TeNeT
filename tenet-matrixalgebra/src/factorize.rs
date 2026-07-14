@@ -949,6 +949,7 @@ pub(crate) struct CompactSvdCopyProbe {
 thread_local! {
     static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
     static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
+    static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
 }
 
@@ -1037,6 +1038,48 @@ fn record_compact_qr_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
 #[cfg(test)]
 fn record_compact_qr_output_scatter<D>(elements: usize) {
     COMPACT_QR_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.output_scatter_calls += 1;
+        current.output_scatter_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct EighCopyProbe {
+    pub input_pack_calls: usize,
+    pub input_pack_bytes: usize,
+    pub output_scatter_calls: usize,
+    pub output_scatter_bytes: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn reset_eigh_copy_probe() {
+    EIGH_COPY_PROBE.with(|probe| probe.set(EighCopyProbe::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn eigh_copy_probe() -> EighCopyProbe {
+    EIGH_COPY_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_eigh_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
+    EIGH_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.input_pack_calls += matricizations.len();
+        current.input_pack_bytes += matricizations
+            .iter()
+            .map(|matrix| matrix.data.len() * std::mem::size_of::<D>())
+            .sum::<usize>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_eigh_output_scatter<D>(elements: usize) {
+    EIGH_COPY_PROBE.with(|probe| {
         let mut current = probe.get();
         current.output_scatter_calls += 1;
         current.output_scatter_bytes += elements * std::mem::size_of::<D>();
@@ -2487,8 +2530,13 @@ where
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
+    if let Some(plan) = compact_factor_plan(input.space())? {
+        return eigh_full_direct_regions(dense, input, &plan);
+    }
     let matricizations =
         sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_eigh_input_pack(&matricizations);
 
     let ranks = matricizations
         .iter()
@@ -2575,6 +2623,127 @@ where
             &sorted_vectors,
             n,
         )?;
+        #[cfg(test)]
+        record_eigh_output_scatter::<D>(n * n);
+    }
+
+    Ok(EighFullDyn {
+        v: BoundDynFactor::from_bound(v_space, v_data, space.nout(), 1)?,
+        eigenvalues,
+    })
+}
+
+fn eigh_full_direct_regions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    plan: &CompactFactorPlan,
+) -> Result<EighFullDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    if plan
+        .source
+        .regions
+        .iter()
+        .any(|region| region.rows() != region.cols())
+    {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires square coupled-sector matrices",
+        });
+    }
+
+    let v_space = input.space().rebind_validated(&plan.left_layout)?;
+    let mut v_data = vec![D::zero(); plan.left_layout.required_len()?];
+    let max_n = plan
+        .source
+        .regions
+        .iter()
+        .map(CoupledSectorRegion::rows)
+        .max()
+        .unwrap_or(0);
+    let mut values_workspace = vec![D::Real::zero(); max_n];
+    let mut order = Vec::with_capacity(max_n);
+    let mut visited = vec![false; max_n];
+    let mut column_scratch = vec![D::zero(); max_n];
+    let mut eigenvalues = Vec::with_capacity(plan.routes.len());
+
+    for route in plan.routes.iter().copied() {
+        let source = &plan.source.regions[route.source_region];
+        let n = source.rows();
+        if n == 0 {
+            eigenvalues.push(SectorSpectrum {
+                sector: route.sector,
+                values: Vec::new(),
+            });
+            continue;
+        }
+        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
+        let input_shape = [n, n];
+        let input_strides = [1usize, n];
+        let values_shape = [n];
+        let values_strides = [1usize];
+        let vectors_shape = [n, n];
+        let vectors_strides = [1usize, n];
+        let input_view = DenseView::new(
+            &input.data()[source.range()],
+            &input_shape,
+            &input_strides,
+            0,
+        )
+        .map_err(OperationError::Dense)?;
+        let values_view = DenseViewMut::new(
+            &mut values_workspace[..n],
+            &values_shape,
+            &values_strides,
+            0,
+        )
+        .map_err(OperationError::Dense)?;
+        let vectors_view = DenseViewMut::new(
+            &mut v_data[left.range()],
+            &vectors_shape,
+            &vectors_strides,
+            0,
+        )
+        .map_err(OperationError::Dense)?;
+        dense
+            .eigh_into(
+                D::dense_read(input_view),
+                D::Real::dense_write(values_view),
+                D::dense_write(vectors_view),
+            )
+            .map_err(OperationError::Dense)?;
+
+        order.clear();
+        order.extend(0..n);
+        order.sort_by(|&a, &b| {
+            let a_value: f64 = values_workspace[a].into();
+            let b_value: f64 = values_workspace[b].into();
+            b_value
+                .abs()
+                .partial_cmp(&a_value.abs())
+                .expect("finite eigenvalues")
+                .then(a.cmp(&b))
+        });
+        let sorted_values = order
+            .iter()
+            .map(|&index| values_workspace[index].into())
+            .collect();
+        reorder_columns_in_place(
+            &mut v_data[left.range()],
+            n,
+            &order,
+            &mut visited,
+            &mut column_scratch,
+        );
+        eigenvector_gauge(&mut v_data[left.range()], n, n, n);
+        eigenvalues.push(SectorSpectrum {
+            sector: route.sector,
+            values: sorted_values,
+        });
     }
 
     Ok(EighFullDyn {
@@ -3136,6 +3305,35 @@ pub(crate) fn eigenvector_gauge<D: FactorScalar>(
         let (phase, needs_scaling) = phase_of_largest_abs_col(vectors, rows, leading, j);
         if needs_scaling {
             scale_col(vectors, rows, leading, j, FactorScalar::adjoint(phase));
+        }
+    }
+}
+
+fn reorder_columns_in_place<D: Copy>(
+    vectors: &mut [D],
+    n: usize,
+    order: &[usize],
+    visited: &mut [bool],
+    scratch: &mut [D],
+) {
+    visited[..n].fill(false);
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+        scratch[..n].copy_from_slice(&vectors[start * n..(start + 1) * n]);
+        let mut destination = start;
+        loop {
+            visited[destination] = true;
+            let source = order[destination];
+            if source == start {
+                vectors[destination * n..(destination + 1) * n].copy_from_slice(&scratch[..n]);
+                break;
+            }
+            for row in 0..n {
+                vectors[destination * n + row] = vectors[source * n + row];
+            }
+            destination = source;
         }
     }
 }

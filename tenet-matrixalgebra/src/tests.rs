@@ -33,6 +33,13 @@ struct FailAfterObservingQrInput {
     observed: Vec<Vec<f64>>,
 }
 
+#[derive(Default)]
+struct FailAfterObservingEighInput {
+    observed: Vec<Vec<f64>>,
+}
+
+struct EqualMagnitudeEigh;
+
 #[derive(Clone)]
 struct IdentityQdimRule {
     identity: RuleIdentity,
@@ -254,6 +261,101 @@ impl DenseExecutor for FailAfterObservingQrInput {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("test only exercises QR")
+    }
+}
+
+impl DenseExecutor for FailAfterObservingEighInput {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("canonical EIGH must use the destination API")
+    }
+
+    fn eigh_into(
+        &mut self,
+        input: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        let DenseWrite::F64(values) = values else {
+            panic!("test eigenvalues must be f64")
+        };
+        let DenseWrite::F64(vectors) = vectors else {
+            panic!("test eigenvectors must be f64")
+        };
+        assert!(values.data().iter().all(|&value| value == 0.0));
+        assert!(vectors.data().iter().all(|&value| value == 0.0));
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "injected failure".to_string(),
+        })
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises EIGH")
+    }
+}
+
+impl DenseExecutor for EqualMagnitudeEigh {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("canonical EIGH must use the destination API")
+    }
+
+    fn eigh_into(
+        &mut self,
+        _: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let DenseWrite::F64(mut values) = values else {
+            panic!("test eigenvalues must be f64")
+        };
+        let DenseWrite::F64(mut vectors) = vectors else {
+            panic!("test eigenvectors must be f64")
+        };
+        assert_eq!(values.data().len(), 3);
+        values.data_mut().copy_from_slice(&[1.0, -2.0, 2.0]);
+        vectors.data_mut().copy_from_slice(&[
+            1.0, 0.0, 0.0, // first backend column
+            0.0, 1.0, 0.0, // second backend column
+            0.0, 0.0, 1.0, // third backend column
+        ]);
+        Ok(())
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises EIGH")
     }
 }
 
@@ -498,6 +600,119 @@ fn compact_qr_noncanonical_layout_uses_copy_fallback() {
 }
 
 #[test]
+fn eigh_canonical_layout_skips_input_pack_and_vector_scatter() {
+    // What: canonical EIGH reads source regions and writes final eigenvector regions directly.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_eigh_copy_probe();
+    eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::eigh_copy_probe(),
+        crate::factorize::EighCopyProbe::default()
+    );
+}
+
+#[test]
+fn eigh_noncanonical_layout_uses_copy_fallback() {
+    // What: expert noncanonical EIGH retains positive pack-and-vector-scatter copy evidence.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_eigh_copy_probe();
+    eigh_full_dyn(&mut dense, &input).unwrap();
+    let probe = crate::factorize::eigh_copy_probe();
+
+    assert!(probe.input_pack_bytes > 0);
+    assert!(probe.output_scatter_bytes > 0);
+}
+
+#[test]
+fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
+    // What: an EIGH backend failure leaves borrowed storage unchanged and returns no vectors.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let mut dense = FailAfterObservingEighInput::default();
+
+    let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert!(!dense.observed.is_empty());
+    assert!(dense
+        .observed
+        .iter()
+        .all(|sector| before.windows(sector.len()).any(|window| window == sector)));
+}
+
+#[test]
+fn eigh_stably_orders_equal_magnitudes_and_reorders_vectors_in_place() {
+    // What: equal magnitudes retain backend order while larger-magnitude columns move together.
+    let tensor = rectangular_svd_tensor(3, 3);
+    let mut dense = EqualMagnitudeEigh;
+
+    let eigh = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap();
+
+    assert_eq!(eigh.eigenvalues[0].values, vec![-2.0, 2.0, 1.0]);
+    assert_eq!(
+        eigh.v.data(),
+        &[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn eigh_vectors_retain_each_callers_exact_provider_arc() {
+    // What: a shared geometry plan rebinds EIGH vectors to each caller's provider allocation.
+    let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+    let first_provider = Arc::new(Z2FusionRule);
+    let second_provider = Arc::new(Z2FusionRule);
+    let first = bound_tensor(Arc::clone(&first_provider), &tensor);
+    let second = bound_tensor(Arc::clone(&second_provider), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let first_eigh = eigh_full(&mut dense, &first.as_ref()).unwrap();
+    let second_eigh = eigh_full(&mut dense, &second.as_ref()).unwrap();
+
+    assert!(Arc::ptr_eq(
+        first_eigh.v.space().provider_arc(),
+        &first_provider
+    ));
+    assert!(Arc::ptr_eq(
+        second_eigh.v.space().provider_arc(),
+        &second_provider
+    ));
+}
+
+#[test]
+fn eigh_accepts_a_zero_square_sector_without_dense_execution() {
+    // What: a natural zero-dimensional endomorphism publishes empty vectors and spectrum.
+    let tensor = rectangular_svd_tensor(0, 0);
+    let mut dense = RejectExecutorCalls;
+
+    let eigh = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap();
+
+    assert!(eigh.v.data().is_empty());
+    assert!(eigh.d.data().is_empty());
+    assert_eq!(eigh.eigenvalues.len(), 1);
+    assert!(eigh.eigenvalues[0].values.is_empty());
+}
+
+#[test]
 fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
     // What: a QR backend failure leaves borrowed storage unchanged and returns no factor pair.
     let rule = Z2FusionRule;
@@ -538,12 +753,12 @@ fn compact_qr_factors_retain_each_callers_exact_provider_arc() {
 }
 
 #[test]
-fn compact_svd_and_qr_preserve_one_factor_plan_generation() {
-    // What: compact SVD and QR keep the same factor-plan generation alive across both operations.
+fn compact_svd_qr_and_eigh_preserve_one_factor_plan_generation() {
+    // What: SVD, QR, and EIGH keep one factor-plan generation alive across all operations.
     let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tensor = rectangular_svd_tensor(17, 13);
+    let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
     let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
@@ -553,6 +768,7 @@ fn compact_svd_and_qr_preserve_one_factor_plan_generation() {
         .unwrap();
     svd_compact(&mut dense, &bound.as_ref()).unwrap();
     qr_compact(&mut dense, &bound.as_ref()).unwrap();
+    eigh_full(&mut dense, &bound.as_ref()).unwrap();
     let after = crate::factorize::compact_factor_plan_for_test(bound.space())
         .unwrap()
         .unwrap();
@@ -2212,11 +2428,9 @@ fn assert_eigen_equation<R>(
     v: &TensorMap<f64, 2, 1>,
     d: &TensorMap<f64, 1, 1>,
 ) where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
     // t . V
     let mut tv = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
         vec![0.0; v.data().len()],
@@ -2286,6 +2500,127 @@ fn eigh_full_satisfies_the_eigen_equation() {
         }
     }
     assert_eigen_equation(&rule, &tensor, &eigh.v, &eigh.d);
+}
+
+fn assert_eigh_reconstructs_rule<R>(rule: &R, sectors: &[SectorId])
+where
+    R: Clone + MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
+    let tensor = hermitian_test_tensor(rule, sectors);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let eigh = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
+    )
+    .unwrap();
+    for entry in &eigh.eigenvalues {
+        for pair in entry.values.windows(2) {
+            assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
+        }
+    }
+    assert_eigen_equation(rule, &tensor, &eigh.v, &eigh.d);
+}
+
+#[test]
+fn eigh_reconstructs_u1_fermion_parity_and_product_rules() {
+    // What: direct EIGH preserves abelian, fermionic, product, and nested sector identities.
+    assert_eigh_reconstructs_rule(
+        &U1FusionRule,
+        &[
+            U1Irrep::new(-1).sector_id(),
+            U1Irrep::new(0).sector_id(),
+            U1Irrep::new(1).sector_id(),
+        ],
+    );
+    assert_eigh_reconstructs_rule(
+        &FermionParityFusionRule,
+        &[SectorId::new(0), SectorId::new(1)],
+    );
+    let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+    let product_sectors = [
+        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+    ];
+    assert_eigh_reconstructs_rule(&product, &product_sectors);
+
+    let nested = product_fusion_rule(product, SU2FusionRule);
+    let nested_sectors = [
+        nested.encode_sector(product_sectors[0], SU2Irrep::from_twice_spin(0).sector_id()),
+        nested.encode_sector(product_sectors[1], SU2Irrep::from_twice_spin(1).sector_id()),
+    ];
+    crate::factorize::reset_eigh_copy_probe();
+    assert_eigh_reconstructs_rule(&nested, &nested_sectors);
+    assert_eq!(
+        crate::factorize::eigh_copy_probe(),
+        crate::factorize::EighCopyProbe::default()
+    );
+}
+
+#[test]
+fn eigh_c64_reconstructs_multi_sector_hermitian_input_and_fixes_gauge() {
+    use num_complex::Complex64;
+
+    // What: complex direct vectors reconstruct every sector and use the canonical phase gauge.
+    let rule = Z2FusionRule;
+    let real = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let tensor = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        real.data()
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect(),
+        real.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let eigh = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let vector_regions = eigh
+        .v
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled().unwrap();
+        let vector_region = vector_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let values = &eigh
+            .eigenvalues
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .unwrap()
+            .values;
+        let n = input_region.rows();
+        for bond in 0..n {
+            let column = &eigh.v.data()[vector_region.range().start + bond * n
+                ..vector_region.range().start + (bond + 1) * n];
+            let pivot = column
+                .iter()
+                .max_by(|a, b| a.norm_sqr().partial_cmp(&b.norm_sqr()).unwrap())
+                .unwrap();
+            assert!(pivot.im.abs() < 1e-12);
+            assert!(pivot.re >= 0.0);
+        }
+        for col in 0..n {
+            for row in 0..n {
+                let reconstructed = (0..n)
+                    .map(|bond| {
+                        eigh.v.data()[vector_region.range().start + row + n * bond]
+                            * values[bond]
+                            * eigh.v.data()[vector_region.range().start + col + n * bond].conj()
+                    })
+                    .sum::<Complex64>();
+                let expected = tensor.data()[input_region.range().start + row + n * col];
+                assert!((reconstructed - expected).norm() < 1e-9);
+            }
+        }
+    }
 }
 
 #[test]
