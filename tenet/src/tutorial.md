@@ -628,9 +628,6 @@ Honest list, as of this writing:
 - **No hyperedge/batch labels in `tensor!`** (a label appearing three or
   more times is a compile error). Partial traces (`a[i, i; j]`) and full
   traces are supported.
-- **Plan-cache eviction is a full clear** at the (configurable) capacity
-  bound rather than LRU; see `tenet-network`'s plan-cache docs for the
-  policy knobs (topology-keyed reuse, drift-factor replanning).
 - **No automatic dtype promotion**: mixing `f64` and `c64` operands is a
   typed error; widen explicitly with `to_c64()`.
 - **Memory-bounded slicing is planned but not executable yet**: the

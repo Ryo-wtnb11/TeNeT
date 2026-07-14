@@ -2,6 +2,29 @@
 
 //! Public facade for the active TeNeT rebuild.
 //!
+//! # Execution model
+//!
+//! A [`prelude::Tensor`] is a block-sparse symmetric tensor map stored as
+//! TensorKit-equivalent reduced blocks indexed by fusion trees (one coupled
+//! sector per block, column-major dense storage inside). Every op is dispatched
+//! through a symmetry **rule provider** inherited from the tensor's
+//! [`prelude::Space`]s (U(1), Z2, fZ2, SU(2), and their products), so the user
+//! layer is rule-erased while the machinery stays fusion-tree-aware.
+//!
+//! A [`prelude::Runtime`] owns the shared execution state: the per-rule
+//! contraction/tree-transform contexts, the dense backend (selectable per
+//! [`prelude::LinalgBackend`] / [`prelude::TransposeBackend`]), and the
+//! contraction-plan cache the `tensor!` frontend keys by network topology.
+//!
+//! **Parallelism.** Ops on a shared `Runtime` scale with outer threads: each
+//! standalone op leases a per-rule context (and, for factorizations, a dense
+//! executor) from a pool for its own duration and runs lock-free, and the
+//! `tensor!` cached-plan path holds only its own plan-cache mutex. A `Runtime`
+//! is therefore cheap to `clone` across threads; the one path that still
+//! serializes is a custom executor injected via
+//! [`prelude::RuntimeBuilder::with_dense_executor`]. See `docs/backend_policy.md`
+//! for the pool design and measured scaling.
+//!
 #![doc = include_str!("tutorial.md")]
 
 mod error;
