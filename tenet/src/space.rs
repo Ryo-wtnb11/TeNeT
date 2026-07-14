@@ -536,11 +536,36 @@ impl Space {
     /// TensorKit's `sectors(V)`: for a dual space they are the duals of the
     /// sectors the space was constructed with, exactly as [`Self::dual`]
     /// stores them.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an SU(3) space: its `(p, q)` irreps do not fit the
+    /// [`SectorLabel`] enum without a breaking `Su3` variant. Use the fallible
+    /// [`Self::try_sectors`] (typed [`Error::UnsupportedForRule`]) to probe, or
+    /// [`Self::su3_sectors`] to read the concrete `(p, q)` labels.
     pub fn sectors(&self) -> Vec<(SectorLabel, usize)> {
         self.sectors
             .iter()
             .map(|&(sector, deg)| (self.decode_sector(sector), deg))
             .collect()
+    }
+
+    /// Fallible sibling of [`Self::sectors`]: `Ok` with byte-identical content
+    /// on every multiplicity-free rule, [`Error::UnsupportedForRule`] on SU(3)
+    /// (whose `(p, q)` irreps do not fit [`SectorLabel`]). Read SU(3) sectors
+    /// with [`Self::su3_sectors`] instead.
+    ///
+    /// A separate method rather than changing [`Self::sectors`] to return
+    /// `Result`: that signature change breaks every multiplicity-free caller,
+    /// a breaking change disproportionate to closing one SU(3) panic surface.
+    pub fn try_sectors(&self) -> Result<Vec<(SectorLabel, usize)>, Error> {
+        if self.rule == RuleKind::Su3 {
+            return Err(Error::UnsupportedForRule {
+                operation: "Space::try_sectors",
+                rule: "SU(3)",
+            });
+        }
+        Ok(self.sectors())
     }
 
     /// Degeneracy of the sector with the given (external) label, `None` when
