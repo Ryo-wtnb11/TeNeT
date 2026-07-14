@@ -15,8 +15,8 @@ use std::sync::{Arc, OnceLock};
 
 use num_complex::Complex64;
 use tenet_core::{
-    BlockKey, BlockStructure, FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreeKey,
-    MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
+    BlockKey, BlockStructure, CoupledSectorRegion, FusionProductSpace, FusionRule,
+    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -1837,9 +1837,9 @@ impl Tensor {
         let Data::F64(data) = Arc::make_mut(&mut t.data) else {
             unreachable!("structural constructors build f64 host tensors");
         };
-        for region in &regions {
-            for i in 0..region.rows.min(region.cols) {
-                data[region.offset + i * (region.rows + 1)] = 1.0;
+        for region in regions.iter() {
+            for i in 0..region.rows().min(region.cols()) {
+                data[region.range().start + i * (region.rows() + 1)] = 1.0;
             }
         }
         Ok(match dtype {
@@ -5586,23 +5586,7 @@ fn sqrt_diagonal_impl<D: UserScalar + PartialEq>(
 // (truncation and gauge decisions are host scalar logic).
 // ---------------------------------------------------------------------------
 
-/// One coupled sector of the packed coupled-sector matrix layout: a
-/// contiguous column-major `rows x cols` region at `offset`, with the
-/// per-fusion-tree row/column extents needed for factor assembly.
-struct SectorRegion {
-    /// Coupled sector (`None` only for degenerate vacuum-coupled trees).
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    coupled: Option<SectorId>,
-    rows: usize,
-    cols: usize,
-    offset: usize,
-    /// `(codomain tree, row offset, row count)` in row order.
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    row_trees: Vec<(FusionTreeKey, usize, usize)>,
-    /// `(domain tree, column offset, column count)` in column order.
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-    col_trees: Vec<(FusionTreeKey, usize, usize)>,
-}
+type SectorRegion = CoupledSectorRegion;
 
 #[cfg(feature = "cuda")]
 fn dense_err(err: tenet_dense::DenseError) -> Error {
@@ -5631,104 +5615,10 @@ fn internal_layout_error(what: &str) -> Error {
 /// packed column-major sector matrix. The structural constructors and the
 /// device paths rely on these offsets, so any other layout is an explicit
 /// error, never silent misaddressing.
-fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Vec<SectorRegion>, Error> {
-    let mut regions: Vec<SectorRegion> = Vec::new();
-    let mut block_index = 0usize;
-    let mut next_offset = 0usize;
-    while block_index < structure.block_count() {
-        let first = structure.block(block_index)?;
-        let BlockKey::FusionTree(first_key) = first.key() else {
-            return Err(internal_layout_error("non-fusion-tree block layout"));
-        };
-        let coupled = first_key.codomain_tree().coupled();
-
-        // Pass 1: extents of this sector's matrix and per-tree offsets.
-        let mut row_trees: Vec<(FusionTreeKey, usize, usize)> = Vec::new();
-        let mut col_trees: Vec<(FusionTreeKey, usize, usize)> = Vec::new();
-        let mut rows = 0usize;
-        let mut cols = 0usize;
-        let mut end = block_index;
-        while end < structure.block_count() {
-            let block = structure.block(end)?;
-            let BlockKey::FusionTree(key) = block.key() else {
-                return Err(internal_layout_error("non-fusion-tree block layout"));
-            };
-            if key.codomain_tree().coupled() != coupled {
-                break;
-            }
-            let shape = block.shape();
-            let sub_rows: usize = shape[..nout].iter().product();
-            let sub_cols: usize = shape[nout..].iter().product();
-            if !row_trees
-                .iter()
-                .any(|(tree, _, _)| tree == key.codomain_tree())
-            {
-                row_trees.push((key.codomain_tree().clone(), rows, sub_rows));
-                rows += sub_rows;
-            }
-            if !col_trees
-                .iter()
-                .any(|(tree, _, _)| tree == key.domain_tree())
-            {
-                col_trees.push((key.domain_tree().clone(), cols, sub_cols));
-                cols += sub_cols;
-            }
-            end += 1;
-        }
-
-        // Pass 2: verify packed addressing for every block of the sector.
-        let offset = next_offset;
-        let mut covered = 0usize;
-        for index in block_index..end {
-            let block = structure.block(index)?;
-            let BlockKey::FusionTree(key) = block.key() else {
-                unreachable!("checked in pass 1");
-            };
-            let row_offset = row_trees
-                .iter()
-                .find(|(tree, _, _)| tree == key.codomain_tree())
-                .map(|(_, offset, _)| *offset)
-                .expect("recorded in pass 1");
-            let col_offset = col_trees
-                .iter()
-                .find(|(tree, _, _)| tree == key.domain_tree())
-                .map(|(_, offset, _)| *offset)
-                .expect("recorded in pass 1");
-            let shape = block.shape();
-            let mut expected_strides = Vec::with_capacity(shape.len());
-            let mut stride = 1usize;
-            for axis in 0..nout {
-                expected_strides.push(stride);
-                stride *= shape[axis];
-            }
-            let mut stride = rows;
-            for axis in nout..shape.len() {
-                expected_strides.push(stride);
-                stride *= shape[axis];
-            }
-            if block.strides() != expected_strides.as_slice()
-                || block.offset() != offset + row_offset + rows * col_offset
-            {
-                return Err(internal_layout_error("non-packed coupled-sector layout"));
-            }
-            covered += shape.iter().product::<usize>();
-        }
-        if covered != rows * cols {
-            return Err(internal_layout_error("coupled sector with layout holes"));
-        }
-
-        regions.push(SectorRegion {
-            coupled,
-            rows,
-            cols,
-            offset,
-            row_trees,
-            col_trees,
-        });
-        next_offset = offset + rows * cols;
-        block_index = end;
-    }
-    Ok(regions)
+fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Arc<[SectorRegion]>, Error> {
+    structure
+        .coupled_sector_regions(nout)?
+        .ok_or_else(|| internal_layout_error("non-packed coupled-sector layout"))
 }
 
 #[cfg(feature = "cuda")]
@@ -5736,7 +5626,7 @@ fn coupled_sector_of<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     region: &SectorRegion,
     rule: &R,
 ) -> SectorId {
-    region.coupled.unwrap_or_else(|| rule.vacuum())
+    region.coupled().unwrap_or_else(|| rule.vacuum())
 }
 
 #[cfg(feature = "cuda")]
@@ -5747,7 +5637,7 @@ fn find_source<'a>(
     regions
         .iter()
         .enumerate()
-        .find(|(_, region)| region.coupled == target.coupled)
+        .find(|(_, region)| region.coupled() == target.coupled())
         .ok_or_else(|| internal_layout_error("factor bond sector missing in the source tensor"))
 }
 
@@ -5824,28 +5714,29 @@ fn assemble_left_factor(
     selector: &CudaStorage,
     kept: usize,
 ) -> Result<(), Error> {
-    for (tree, dst_row, sub_rows) in &target.row_trees {
-        if *sub_rows == 0 {
+    for target_tree in target.row_trees() {
+        let sub_rows = target_tree.extent()?;
+        if sub_rows == 0 {
             continue;
         }
         let src_row = source
-            .row_trees
+            .row_trees()
             .iter()
-            .find(|(source_tree, _, _)| source_tree == tree)
-            .map(|(_, offset, _)| *offset)
+            .find(|source_tree| source_tree.tree() == target_tree.tree())
+            .map(|source_tree| source_tree.offset())
             .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
         cuda_gemm_region_into(
             cuda,
             &mut dst.0,
-            target.offset + dst_row,
-            target.rows,
+            target.range().start + target_tree.offset(),
+            target.rows(),
             factor,
             src_row,
-            source.rows,
+            source.rows(),
             &selector.0,
             0,
             k_full,
-            *sub_rows,
+            sub_rows,
             k_full,
             kept,
             1.0,
@@ -5871,21 +5762,22 @@ fn assemble_right_factor(
     k_full: usize,
     factor: &CudaDenseStorage,
 ) -> Result<(), Error> {
-    for (tree, dst_col, sub_cols) in &target.col_trees {
-        if *sub_cols == 0 {
+    for target_tree in target.col_trees() {
+        let sub_cols = target_tree.extent()?;
+        if sub_cols == 0 {
             continue;
         }
         let src_col = source
-            .col_trees
+            .col_trees()
             .iter()
-            .find(|(source_tree, _, _)| source_tree == tree)
-            .map(|(_, offset, _)| *offset)
+            .find(|source_tree| source_tree.tree() == target_tree.tree())
+            .map(|source_tree| source_tree.offset())
             .ok_or_else(|| internal_layout_error("domain tree missing in the source sector"))?;
         cuda_gemm_region_into(
             cuda,
             &mut dst.0,
-            target.offset + target.rows * dst_col,
-            target.rows,
+            target.range().start + target.rows() * target_tree.offset(),
+            target.rows(),
             &selector.0,
             0,
             kept,
@@ -5894,7 +5786,7 @@ fn assemble_right_factor(
             k_full,
             kept,
             k_full,
-            *sub_cols,
+            sub_cols,
             1.0,
             0.0,
         )
@@ -5946,7 +5838,7 @@ impl Tensor {
         let cuda = require_cuda(state.cuda.as_mut())?;
         let mut partials = CudaStorage::upload(cuda, &vec![0.0; regions.len().max(1)])?;
         for (index, region) in regions.iter().enumerate() {
-            let len = region.rows * region.cols;
+            let len = region.rows() * region.cols();
             if len == 0 {
                 continue;
             }
@@ -5956,10 +5848,10 @@ impl Tensor {
                 index,
                 1,
                 &a.0,
-                region.offset,
+                region.range().start,
                 1,
                 &b.0,
-                region.offset,
+                region.range().start,
                 len,
                 1,
                 len,
@@ -6033,9 +5925,9 @@ impl Tensor {
             let mut spectra: Vec<SectorSpectrum> = Vec::with_capacity(regions.len());
             let mut factors: Vec<Option<(CudaDenseStorage, CudaDenseStorage)>> =
                 Vec::with_capacity(regions.len());
-            for region in &regions {
+            for region in regions.iter() {
                 let sector = coupled_sector_of(region, rule);
-                if region.rows == 0 || region.cols == 0 {
+                if region.rows() == 0 || region.cols() == 0 {
                     spectra.push(SectorSpectrum {
                         sector,
                         values: Vec::new(),
@@ -6043,9 +5935,14 @@ impl Tensor {
                     factors.push(None);
                     continue;
                 }
-                let (u, s, vt) =
-                    cuda_svd_region(cuda, &storage.0, region.offset, region.rows, region.cols)
-                        .map_err(dense_err)?;
+                let (u, s, vt) = cuda_svd_region(
+                    cuda,
+                    &storage.0,
+                    region.range().start,
+                    region.rows(),
+                    region.cols(),
+                )
+                .map_err(dense_err)?;
                 spectra.push(SectorSpectrum { sector, values: s });
                 factors.push(Some((u, vt)));
             }
@@ -6076,8 +5973,8 @@ impl Tensor {
             ))?;
 
             let mut u_data = CudaStorage::upload(cuda, &vec![0.0; u_space.required_len()?])?;
-            for target in &sector_regions(u_space.structure(), u_space.nout())? {
-                let kept = target.cols;
+            for target in sector_regions(u_space.structure(), u_space.nout())?.iter() {
+                let kept = target.cols();
                 if kept == 0 {
                     continue;
                 }
@@ -6085,7 +5982,7 @@ impl Tensor {
                 let Some((u_dev, _)) = &factors[index] else {
                     return Err(internal_layout_error("kept sector without a device factor"));
                 };
-                let k_full = source.rows.min(source.cols);
+                let k_full = source.rows().min(source.cols());
                 let selector = upload_selector(cuda, k_full, kept, (0..kept).map(|j| (j, j, 1.0)))?;
                 assemble_left_factor(
                     cuda,
@@ -6100,8 +5997,8 @@ impl Tensor {
             }
 
             let mut vh_data = CudaStorage::upload(cuda, &vec![0.0; vh_space.required_len()?])?;
-            for target in &sector_regions(vh_space.structure(), vh_space.nout())? {
-                let kept = target.rows;
+            for target in sector_regions(vh_space.structure(), vh_space.nout())?.iter() {
+                let kept = target.rows();
                 if kept == 0 {
                     continue;
                 }
@@ -6109,7 +6006,7 @@ impl Tensor {
                 let Some((_, vt_dev)) = &factors[index] else {
                     return Err(internal_layout_error("kept sector without a device factor"));
                 };
-                let k_full = source.rows.min(source.cols);
+                let k_full = source.rows().min(source.cols());
                 let selector = upload_selector(cuda, kept, k_full, (0..kept).map(|j| (j, j, 1.0)))?;
                 assemble_right_factor(
                     cuda,
@@ -6152,16 +6049,21 @@ impl Tensor {
             let mut factors: Vec<Option<(CudaDenseStorage, CudaDenseStorage, Vec<f64>)>> =
                 Vec::with_capacity(regions.len());
             let mut bond_pairs: Vec<(SectorId, usize)> = Vec::with_capacity(regions.len());
-            for region in &regions {
+            for region in regions.iter() {
                 let sector = coupled_sector_of(region, rule);
-                if region.rows == 0 || region.cols == 0 {
+                if region.rows() == 0 || region.cols() == 0 {
                     bond_pairs.push((sector, 0));
                     factors.push(None);
                     continue;
                 }
-                let (q, r, diag) =
-                    cuda_qr_region(cuda, &storage.0, region.offset, region.rows, region.cols)
-                        .map_err(dense_err)?;
+                let (q, r, diag) = cuda_qr_region(
+                    cuda,
+                    &storage.0,
+                    region.range().start,
+                    region.rows(),
+                    region.cols(),
+                )
+                .map_err(dense_err)?;
                 // Positive-diagonal gauge (host `positive_diagonal_gauge`,
                 // real scalars): flip where R's diagonal is negative, leave
                 // exact zeros untouched.
@@ -6169,7 +6071,7 @@ impl Tensor {
                     .iter()
                     .map(|&value| if value < 0.0 { -1.0 } else { 1.0 })
                     .collect();
-                bond_pairs.push((sector, region.rows.min(region.cols)));
+                bond_pairs.push((sector, region.rows().min(region.cols())));
                 factors.push(Some((q, r, signs)));
             }
 
@@ -6189,8 +6091,8 @@ impl Tensor {
             ))?;
 
             let mut q_data = CudaStorage::upload(cuda, &vec![0.0; q_space.required_len()?])?;
-            for target in &sector_regions(q_space.structure(), q_space.nout())? {
-                let kept = target.cols;
+            for target in sector_regions(q_space.structure(), q_space.nout())?.iter() {
+                let kept = target.cols();
                 if kept == 0 {
                     continue;
                 }
@@ -6217,8 +6119,8 @@ impl Tensor {
             }
 
             let mut r_data = CudaStorage::upload(cuda, &vec![0.0; r_space.required_len()?])?;
-            for target in &sector_regions(r_space.structure(), r_space.nout())? {
-                let kept = target.rows;
+            for target in sector_regions(r_space.structure(), r_space.nout())?.iter() {
+                let kept = target.rows();
                 if kept == 0 {
                     continue;
                 }
@@ -6279,9 +6181,9 @@ impl Tensor {
             let mut spectra: Vec<SectorSpectrum> = Vec::with_capacity(regions.len());
             let mut factors: Vec<Option<(CudaDenseStorage, Vec<usize>)>> =
                 Vec::with_capacity(regions.len());
-            for region in &regions {
+            for region in regions.iter() {
                 let sector = coupled_sector_of(region, rule);
-                let n = region.rows;
+                let n = region.rows();
                 if n == 0 {
                     spectra.push(SectorSpectrum {
                         sector,
@@ -6290,8 +6192,8 @@ impl Tensor {
                     factors.push(None);
                     continue;
                 }
-                let (values, vectors) =
-                    cuda_eigh_region(cuda, &storage.0, region.offset, n).map_err(dense_err)?;
+                let (values, vectors) = cuda_eigh_region(cuda, &storage.0, region.range().start, n)
+                    .map_err(dense_err)?;
                 // Host ordering contract: descending by |eigenvalue|,
                 // stable on ties (mirrors `eigh_full_dyn`).
                 let mut order: Vec<usize> = (0..n).collect();
@@ -6332,8 +6234,8 @@ impl Tensor {
             ))?;
 
             let mut v_data = CudaStorage::upload(cuda, &vec![0.0; v_space.required_len()?])?;
-            for target in &sector_regions(v_space.structure(), v_space.nout())? {
-                let kept = target.cols;
+            for target in sector_regions(v_space.structure(), v_space.nout())?.iter() {
+                let kept = target.cols();
                 if kept == 0 {
                     continue;
                 }
@@ -6341,7 +6243,7 @@ impl Tensor {
                 let Some((v_dev, order)) = &factors[index] else {
                     return Err(internal_layout_error("kept sector without a device factor"));
                 };
-                let n = source.rows;
+                let n = source.rows();
                 let selector = upload_selector(
                     cuda,
                     n,

@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use num_complex::Complex64;
 use num_traits::Zero;
 use tenet_core::{
-    BlockKey, BlockStructure, CoreError, FusionProductSpace, FusionRule, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreeKey, GenericRigidSymbols, MultiplicityFreeRigidSymbols, SectorId,
-    SectorLeg, TensorMap, TensorMapSpace,
+    BlockKey, BlockStructure, CoreError, CoupledSectorRegion, FusionProductSpace, FusionRule,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, GenericRigidSymbols,
+    MultiplicityFreeRigidSymbols, SectorId, SectorLeg, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
 
@@ -882,6 +885,53 @@ struct SectorMatricization<D> {
     data: Vec<D>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CompactSvdCopyProbe {
+    pub input_pack_calls: usize,
+    pub input_pack_bytes: usize,
+    pub output_scatter_calls: usize,
+    pub output_scatter_bytes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
+}
+
+#[cfg(test)]
+pub(crate) fn reset_compact_svd_copy_probe() {
+    COMPACT_SVD_COPY_PROBE.with(|probe| probe.set(CompactSvdCopyProbe::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn compact_svd_copy_probe() -> CompactSvdCopyProbe {
+    COMPACT_SVD_COPY_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_compact_svd_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
+    COMPACT_SVD_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.input_pack_calls += matricizations.len();
+        current.input_pack_bytes += matricizations
+            .iter()
+            .map(|matrix| matrix.data.len() * std::mem::size_of::<D>())
+            .sum::<usize>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_svd_output_scatter<D>(elements: usize) {
+    COMPACT_SVD_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.output_scatter_calls += 1;
+        current.output_scatter_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1056,8 +1106,13 @@ where
 {
     let rule = input.space().provider();
     let space = input.space().space();
+    if let Some(regions) = checked_sector_regions(space.structure(), space.nout())? {
+        return svd_compact_direct_regions(dense, input, &regions);
+    }
     let matricizations =
         sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_svd_input_pack(&matricizations);
 
     let ranks = matricizations
         .iter()
@@ -1148,6 +1203,8 @@ where
             &u_workspace,
             max_rows,
         )?;
+        #[cfg(test)]
+        record_compact_svd_output_scatter::<D>(matrix.rows * rank);
         scatter_right_sector_blocks(
             rule,
             vt_space.space(),
@@ -1156,11 +1213,209 @@ where
             &vt_workspace,
             max_rank,
         )?;
+        #[cfg(test)]
+        record_compact_svd_output_scatter::<D>(rank * matrix.cols);
     }
 
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
     let vh = BoundDynFactor::from_bound(vt_space, vt_data, 1, space.nin())?;
     Ok((u, vh, singular_values))
+}
+
+fn svd_compact_direct_regions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    regions: &[CoupledSectorRegion],
+) -> Result<SvdFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    let ranks = regions
+        .iter()
+        .map(|region| SectorRank {
+            sector: region_sector(input.space().provider(), region),
+            kept: region.rows().min(region.cols()),
+        })
+        .collect::<Vec<_>>();
+    let layouts = region_matricization_skeletons::<R, D>(input.space().provider(), regions);
+    let provider = input.space().provider_arc();
+    let (u_space, vh_space) =
+        build_left_right_bound_spaces(provider, space.homspace(), &layouts, &ranks)?;
+    let u_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "compact SVD left factor is not a coupled-sector matrix layout",
+        })?;
+    let vh_regions = checked_sector_regions(vh_space.space().structure(), vh_space.space().nout())?
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "compact SVD right factor is not a coupled-sector matrix layout",
+        })?;
+    let u_by_sector = sector_region_map(provider.as_ref(), &u_regions)?;
+    let vh_by_sector = sector_region_map(provider.as_ref(), &vh_regions)?;
+
+    let mut u_data = vec![D::zero(); u_space.space().required_len()?];
+    let mut vh_data = vec![D::zero(); vh_space.space().required_len()?];
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut singular_workspace = vec![D::Real::zero(); max_rank];
+    let mut singular_values = Vec::with_capacity(regions.len());
+
+    for region in regions {
+        let sector = region_sector(provider.as_ref(), region);
+        let rank = region.rows().min(region.cols());
+        if rank == 0 {
+            singular_values.push(SectorSpectrum {
+                sector,
+                values: Vec::new(),
+            });
+            continue;
+        }
+        let u_region = sector_region_of(&u_by_sector, sector, "left")?;
+        let vh_region = sector_region_of(&vh_by_sector, sector, "right")?;
+        validate_factor_region(u_region, region.rows(), rank, "left")?;
+        validate_factor_region(vh_region, rank, region.cols(), "right")?;
+
+        let input_shape = [region.rows(), region.cols()];
+        let input_strides = [1usize, region.rows()];
+        let u_shape = [region.rows(), rank];
+        let u_strides = [1usize, region.rows()];
+        let s_shape = [rank];
+        let s_strides = [1usize];
+        let vh_shape = [rank, region.cols()];
+        let vh_strides = [1usize, rank];
+        let input_view = DenseView::new(
+            &input.data()[region.range()],
+            &input_shape,
+            &input_strides,
+            0,
+        )
+        .map_err(OperationError::Dense)?;
+        let u_view = DenseViewMut::new(&mut u_data[u_region.range()], &u_shape, &u_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let s_view = DenseViewMut::new(&mut singular_workspace[..rank], &s_shape, &s_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let vh_view = DenseViewMut::new(&mut vh_data[vh_region.range()], &vh_shape, &vh_strides, 0)
+            .map_err(OperationError::Dense)?;
+        dense
+            .svd_into(
+                D::dense_read(input_view),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vh_view),
+            )
+            .map_err(OperationError::Dense)?;
+        svd_compact_gauge(
+            &mut u_data[u_region.range()],
+            region.rows(),
+            region.rows(),
+            &mut vh_data[vh_region.range()],
+            rank,
+            region.cols(),
+            rank,
+        );
+        singular_values.push(SectorSpectrum {
+            sector,
+            values: singular_workspace[..rank]
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect(),
+        });
+    }
+
+    let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
+    let vh = BoundDynFactor::from_bound(vh_space, vh_data, 1, space.nin())?;
+    Ok((u, vh, singular_values))
+}
+
+fn region_matricization_skeletons<R, D>(
+    rule: &R,
+    regions: &[CoupledSectorRegion],
+) -> Vec<SectorMatricization<D>>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    regions
+        .iter()
+        .map(|region| SectorMatricization {
+            sector: region_sector(rule, region),
+            rows: region.rows(),
+            cols: region.cols(),
+            row_trees: region
+                .row_trees()
+                .iter()
+                .map(|tree| (tree.tree().clone(), tree.offset(), tree.shape().to_vec()))
+                .collect(),
+            col_trees: region
+                .col_trees()
+                .iter()
+                .map(|tree| (tree.tree().clone(), tree.offset(), tree.shape().to_vec()))
+                .collect(),
+            data: Vec::new(),
+        })
+        .collect()
+}
+
+fn region_sector<R>(rule: &R, region: &CoupledSectorRegion) -> SectorId
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    region.coupled().unwrap_or_else(|| rule.vacuum())
+}
+
+fn sector_region_map<'a, R>(
+    rule: &R,
+    regions: &'a [CoupledSectorRegion],
+) -> Result<HashMap<SectorId, &'a CoupledSectorRegion>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let mut by_sector = HashMap::with_capacity(regions.len());
+    for region in regions {
+        if by_sector
+            .insert(region_sector(rule, region), region)
+            .is_some()
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "coupled-sector region description contains a duplicate sector",
+            });
+        }
+    }
+    Ok(by_sector)
+}
+
+fn sector_region_of<'a>(
+    regions: &'a HashMap<SectorId, &'a CoupledSectorRegion>,
+    sector: SectorId,
+    side: &'static str,
+) -> Result<&'a CoupledSectorRegion, OperationError> {
+    regions
+        .get(&sector)
+        .copied()
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: match side {
+                "left" => "compact SVD left factor is missing a nonzero-rank sector",
+                _ => "compact SVD right factor is missing a nonzero-rank sector",
+            },
+        })
+}
+
+fn validate_factor_region(
+    region: &CoupledSectorRegion,
+    rows: usize,
+    cols: usize,
+    side: &'static str,
+) -> Result<(), OperationError> {
+    if region.rows() != rows || region.cols() != cols {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: match side {
+                "left" => "compact SVD left sector region has an unexpected shape",
+                _ => "compact SVD right sector region has an unexpected shape",
+            },
+        });
+    }
+    Ok(())
 }
 
 /// Dynamic-rank [`svd_compact`]: the [`svd_compact_factors_dyn`] core plus the
@@ -3925,6 +4180,15 @@ fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Result<(), Oper
         });
     }
     Ok(())
+}
+
+fn checked_sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
+    structure
+        .coupled_sector_regions(nout)
+        .map_err(OperationError::from_core_preserving_context)
 }
 
 /// Packs every coupled sector of the source data into its dense column-major

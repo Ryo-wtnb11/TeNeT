@@ -809,6 +809,79 @@ impl<'a> BlockRef<'a> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+/// One fusion tree's contiguous row or column extent inside a coupled-sector matrix.
+pub struct CoupledTreeExtent {
+    tree: FusionTreeKey,
+    offset: usize,
+    shape: DimVec,
+}
+
+impl CoupledTreeExtent {
+    /// Fusion tree identifying this row or column extent.
+    pub fn tree(&self) -> &FusionTreeKey {
+        &self.tree
+    }
+
+    /// Row or column offset from the start of the coupled-sector matrix.
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Degeneracy shape whose element count is this tree's matrix extent.
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    /// Checked product of the degeneracy shape.
+    pub fn extent(&self) -> Result<usize, CoreError> {
+        checked_element_count(&self.shape)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+/// Checked contiguous column-major storage region for one coupled sector.
+pub struct CoupledSectorRegion {
+    coupled: Option<SectorId>,
+    rows: usize,
+    cols: usize,
+    range: core::ops::Range<usize>,
+    row_trees: Vec<CoupledTreeExtent>,
+    col_trees: Vec<CoupledTreeExtent>,
+}
+
+impl CoupledSectorRegion {
+    /// Coupled-sector label, or `None` for a vacuum-coupled degenerate tree.
+    pub fn coupled(&self) -> Option<SectorId> {
+        self.coupled
+    }
+
+    /// Number of rows across all codomain-tree extents.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of columns across all domain-tree extents.
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Exact element range of the contiguous sector matrix in flat storage.
+    pub fn range(&self) -> core::ops::Range<usize> {
+        self.range.clone()
+    }
+
+    /// Codomain trees with their row offsets and degeneracy shapes.
+    pub fn row_trees(&self) -> &[CoupledTreeExtent] {
+        &self.row_trees
+    }
+
+    /// Domain trees with their column offsets and degeneracy shapes.
+    pub fn col_trees(&self) -> &[CoupledTreeExtent] {
+        &self.col_trees
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct BlockStructureContentBlock {
     key: BlockKey,
@@ -839,11 +912,26 @@ impl BlockStructureContentBlock {
     }
 }
 
-#[derive(Clone, Debug, Eq)]
+type CoupledRegionResult = Result<Option<Arc<[CoupledSectorRegion]>>, CoreError>;
+type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
+
+#[derive(Clone, Eq)]
 pub struct BlockStructureContent {
     id: usize,
     rank: usize,
     blocks: Arc<[BlockStructureContentBlock]>,
+    coupled_region_cache: OnceLock<CoupledRegionCache>,
+}
+
+impl core::fmt::Debug for BlockStructureContent {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("BlockStructureContent")
+            .field("id", &self.id)
+            .field("rank", &self.rank)
+            .field("blocks", &self.blocks)
+            .finish()
+    }
 }
 
 // Content equality deliberately ignores `id`: the id is a process-local
@@ -970,6 +1058,7 @@ fn intern_block_structure_content(
         id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
         rank: sector.rank(),
         blocks,
+        coupled_region_cache: OnceLock::new(),
     });
     write.put(key, Arc::clone(&content));
     content
@@ -1236,4 +1325,228 @@ impl BlockStructure {
     pub fn required_len(&self) -> Result<usize, CoreError> {
         Ok(self.required_len)
     }
+
+    /// Compiles the canonical coupled-sector matrix layout of this structure.
+    ///
+    /// `Ok(Some(_))` contains immutable checked regions covering storage exactly once.
+    /// `Ok(None)` means the structure is valid but is not the canonical contiguous
+    /// coupled-sector layout. `Err` reports a structural lookup or size overflow.
+    pub fn coupled_sector_regions(
+        &self,
+        nout: usize,
+    ) -> Result<Option<Arc<[CoupledSectorRegion]>>, CoreError> {
+        if nout > self.rank() {
+            return Ok(None);
+        }
+        self.content
+            .coupled_region_cache
+            .get_or_init(|| new_coupled_region_cache(self.rank()))[nout]
+            .get_or_init(|| {
+                compile_coupled_sector_regions(self, nout)
+                    .map(|regions| regions.map(Arc::from))
+            })
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn coupled_region_cache_is_initialized(&self) -> bool {
+        self.content.coupled_region_cache.get().is_some()
+    }
+}
+
+fn new_coupled_region_cache(rank: usize) -> CoupledRegionCache {
+    (0..=rank)
+        .map(|_| OnceLock::new())
+        .collect::<Vec<_>>()
+        .into()
+}
+
+fn compile_coupled_sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Option<Vec<CoupledSectorRegion>>, CoreError> {
+        let mut regions = Vec::new();
+        let mut seen_coupled = FxHashMap::<Option<SectorId>, ()>::default();
+        let mut block_index = 0usize;
+        let mut next_offset = 0usize;
+        while block_index < structure.block_count() {
+            let first = structure.block(block_index)?;
+            let BlockKey::FusionTree(first_key) = first.key() else {
+                return Ok(None);
+            };
+            let coupled = first_key.codomain_tree().coupled();
+            if first_key.domain_tree().coupled() != coupled
+                || seen_coupled.insert(coupled, ()).is_some()
+            {
+                return Ok(None);
+            }
+
+            let mut row_trees = Vec::<CoupledTreeExtent>::new();
+            let mut col_trees = Vec::<CoupledTreeExtent>::new();
+            let mut end = block_index;
+            while end < structure.block_count() {
+                let block = structure.block(end)?;
+                let BlockKey::FusionTree(key) = block.key() else {
+                    return Ok(None);
+                };
+                if key.codomain_tree().coupled() != coupled {
+                    break;
+                }
+                if key.domain_tree().coupled() != coupled {
+                    return Ok(None);
+                }
+                let row_shape: DimVec = block.shape()[..nout].iter().copied().collect();
+                let col_shape: DimVec = block.shape()[nout..].iter().copied().collect();
+                if !insert_coupled_tree_extent(
+                    &mut row_trees,
+                    key.codomain_tree(),
+                    row_shape,
+                )? || !insert_coupled_tree_extent(
+                    &mut col_trees,
+                    key.domain_tree(),
+                    col_shape,
+                )? {
+                    return Ok(None);
+                }
+                end += 1;
+            }
+
+            let rows = coupled_tree_total(&row_trees)?;
+            let cols = coupled_tree_total(&col_trees)?;
+            let expected_blocks = row_trees
+                .len()
+                .checked_mul(col_trees.len())
+                .ok_or(CoreError::ElementCountOverflow)?;
+            if end - block_index != expected_blocks {
+                return Ok(None);
+            }
+            let mut seen_pairs = FxHashMap::<(FusionTreeKey, FusionTreeKey), ()>::default();
+            for index in block_index..end {
+                let block = structure.block(index)?;
+                let BlockKey::FusionTree(key) = block.key() else {
+                    unreachable!("fusion-tree keys checked above")
+                };
+                if seen_pairs
+                    .insert(
+                        (key.codomain_tree().clone(), key.domain_tree().clone()),
+                        (),
+                    )
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                let row_offset = row_trees
+                    .iter()
+                    .find(|extent| extent.tree() == key.codomain_tree())
+                    .expect("row tree recorded above")
+                    .offset();
+                let col_offset = col_trees
+                    .iter()
+                    .find(|extent| extent.tree() == key.domain_tree())
+                    .expect("column tree recorded above")
+                    .offset();
+                let expected_offset = next_offset
+                    .checked_add(row_offset)
+                    .and_then(|offset| {
+                        rows
+                            .checked_mul(col_offset)
+                            .and_then(|column| offset.checked_add(column))
+                    })
+                    .ok_or(CoreError::ElementCountOverflow)?;
+                if block.offset() != expected_offset
+                    || !coupled_sector_strides(block.shape(), block.strides(), nout, rows)?
+                {
+                    return Ok(None);
+                }
+            }
+            let elements = rows
+                .checked_mul(cols)
+                .ok_or(CoreError::ElementCountOverflow)?;
+            let end_offset = next_offset
+                .checked_add(elements)
+                .ok_or(CoreError::ElementCountOverflow)?;
+            if end_offset > structure.required_len {
+                return Ok(None);
+            }
+            regions.push(CoupledSectorRegion {
+                coupled,
+                rows,
+                cols,
+                range: next_offset..end_offset,
+                row_trees,
+                col_trees,
+            });
+            next_offset = end_offset;
+            block_index = end;
+        }
+        if next_offset != structure.required_len {
+            return Ok(None);
+        }
+        Ok(Some(regions))
+}
+
+fn insert_coupled_tree_extent(
+    trees: &mut Vec<CoupledTreeExtent>,
+    tree: &FusionTreeKey,
+    shape: DimVec,
+) -> Result<bool, CoreError> {
+    if let Some(known) = trees.iter().find(|known| known.tree() == tree) {
+        return Ok(known.shape() == shape.as_slice());
+    }
+    let offset = coupled_tree_total(trees)?;
+    offset
+        .checked_add(checked_element_count(&shape)?)
+        .ok_or(CoreError::ElementCountOverflow)?;
+    trees.push(CoupledTreeExtent {
+        tree: tree.clone(),
+        offset,
+        shape,
+    });
+    Ok(true)
+}
+
+fn coupled_tree_total(trees: &[CoupledTreeExtent]) -> Result<usize, CoreError> {
+    trees.iter().try_fold(0usize, |total, tree| {
+        total
+            .checked_add(tree.extent()?)
+            .ok_or(CoreError::ElementCountOverflow)
+    })
+}
+
+fn checked_element_count(shape: &[usize]) -> Result<usize, CoreError> {
+    shape.iter().try_fold(1usize, |count, &extent| {
+        count
+            .checked_mul(extent)
+            .ok_or(CoreError::ElementCountOverflow)
+    })
+}
+
+fn coupled_sector_strides(
+    shape: &[usize],
+    strides: &[usize],
+    nout: usize,
+    rows: usize,
+) -> Result<bool, CoreError> {
+    if shape.len() != strides.len() || nout > shape.len() {
+        return Ok(false);
+    }
+    let mut expected = 1usize;
+    for axis in 0..nout {
+        if strides[axis] != expected {
+            return Ok(false);
+        }
+        expected = expected
+            .checked_mul(shape[axis])
+            .ok_or(CoreError::ElementCountOverflow)?;
+    }
+    expected = rows;
+    for axis in nout..shape.len() {
+        if strides[axis] != expected {
+            return Ok(false);
+        }
+        expected = expected
+            .checked_mul(shape[axis])
+            .ok_or(CoreError::ElementCountOverflow)?;
+    }
+    Ok(true)
 }
