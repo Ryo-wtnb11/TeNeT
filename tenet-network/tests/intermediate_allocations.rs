@@ -75,7 +75,12 @@ fn pointer_hash(pointer: usize, capacity: usize) -> usize {
     pointer.wrapping_mul(0x9e37_79b9_7f4a_7c15) % capacity
 }
 
-fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -> bool {
+fn insert_live_with_capacity(
+    pointer: *mut u8,
+    size: usize,
+    capacity: usize,
+    count_payload_origin: bool,
+) -> bool {
     if pointer.is_null()
         || pointer as usize == TOMBSTONE
         || size == 0
@@ -104,7 +109,9 @@ fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -
             LIVE_SIZES[index].store(size, Ordering::Relaxed);
             add_live(size as u64);
             if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
-                PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+                if count_payload_origin {
+                    PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+                }
                 let live =
                     PAYLOAD_LIVE_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
                 PAYLOAD_PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
@@ -117,7 +124,9 @@ fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -
         LIVE_SIZES[index].store(size, Ordering::Relaxed);
         add_live(size as u64);
         if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
-            PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            if count_payload_origin {
+                PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+            }
             let live = PAYLOAD_LIVE_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
             PAYLOAD_PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
         }
@@ -127,8 +136,18 @@ fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -
     false
 }
 
+fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -> bool {
+    insert_live_with_capacity(pointer, size, capacity, true)
+}
+
 fn register_live(pointer: *mut u8, size: usize) -> bool {
     register_live_with_capacity(pointer, size, REGISTRY_CAPACITY)
+}
+
+fn restore_live(pointer: *mut u8, size: usize) -> bool {
+    // Why not call register_live: restoring a failed realloc revives the same
+    // allocation origin and must not report a second payload allocation.
+    insert_live_with_capacity(pointer, size, REGISTRY_CAPACITY, false)
 }
 
 fn unregister_live_with_capacity(pointer: *mut u8, capacity: usize) -> Option<usize> {
@@ -213,22 +232,30 @@ fn reset_event_counters() {
     PROBE_THREAD_REALLOC_CALLS.store(0, Ordering::Relaxed);
 }
 
-fn record_realloc_result(
-    old_ptr: *mut u8,
+#[derive(Clone, Copy)]
+struct DetachedReallocOrigin {
+    pointer: *mut u8,
+    size: usize,
+}
+
+fn detach_realloc_origin(pointer: *mut u8) -> Option<DetachedReallocOrigin> {
+    unregister_live(pointer).map(|size| DetachedReallocOrigin { pointer, size })
+}
+
+fn finish_realloc_result(
+    origin: DetachedReallocOrigin,
     new_ptr: *mut u8,
     new_size: usize,
     count_event: bool,
 ) -> bool {
     if new_ptr.is_null() {
+        restore_live(origin.pointer, origin.size);
         return false;
     }
-    let Some(old_size) = unregister_live(old_ptr) else {
-        return false;
-    };
     if count_event {
         REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-        DEALLOCATED_BYTES.fetch_add(old_size as u64, Ordering::Relaxed);
+        DEALLOCATED_BYTES.fetch_add(origin.size as u64, Ordering::Relaxed);
     }
     register_live(new_ptr, new_size)
 }
@@ -301,9 +328,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // The origin is detached before System can release its address. Why not
+        // hold REGISTRY_LOCK across System.realloc: allocator reentrancy would
+        // deadlock every registry operation on this thread.
+        let origin = detach_realloc_origin(ptr);
         let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
         let enabled = ENABLED.load(Ordering::Relaxed);
-        record_realloc_result(ptr, new_ptr, new_size, enabled);
+        if let Some(origin) = origin {
+            finish_realloc_result(origin, new_ptr, new_size, enabled);
+        }
         if enabled && !new_ptr.is_null() && PROBE_THREAD_ENABLED.get() {
             PROBE_THREAD_REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         }
@@ -712,9 +745,11 @@ fn realloc_moved_transition_preserves_concurrently_reused_old_address() {
     let old_address = old as usize;
     // What: another allocator thread may reuse the freed address before the moved
     // realloc result is committed to the registry.
-    assert!(std::thread::spawn(move || register_live(old_address as *mut u8, 32))
-        .join()
-        .unwrap());
+    assert!(
+        std::thread::spawn(move || register_live(old_address as *mut u8, 32))
+            .join()
+            .unwrap()
+    );
     assert!(finish_realloc_result(origin, moved, 16, true));
 
     assert_eq!(registered_size(old), Some(32));
