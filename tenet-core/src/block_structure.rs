@@ -839,11 +839,25 @@ impl BlockStructureContentBlock {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq)]
 pub struct BlockStructureContent {
     id: usize,
     rank: usize,
     blocks: Arc<[BlockStructureContentBlock]>,
+}
+
+// Content equality deliberately ignores `id`: the id is a process-local
+// intern handle (monotonic since the LRU-cap change, never reused across
+// eviction or reset), not part of the content. Including it in the derived
+// PartialEq made content-equal structures interned in different reset
+// epochs compare unequal, which broke replay's content-fallback validation
+// (caught by reset_and_concurrent_rebuild_keep_structure_semantics in CI).
+// Id-keyed caches are unaffected: they key on `id()` explicitly and rely on
+// monotonicity, not on equality of the full content struct.
+impl PartialEq for BlockStructureContent {
+    fn eq(&self, other: &Self) -> bool {
+        self.rank == other.rank && self.blocks == other.blocks
+    }
 }
 
 impl BlockStructureContent {
