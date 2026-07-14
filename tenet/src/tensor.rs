@@ -3971,6 +3971,29 @@ impl Tensor {
             .all(|&lambda| lambda > -tol))
     }
 
+    /// Tests whether the tensor equals minus its own adjoint within `tol`,
+    /// relative to its norm (TensorKit `isantihermitian`). Non-endomorphisms
+    /// return `false` without error (cf. [`Self::is_hermitian`]).
+    pub fn is_antihermitian(&self, tol: f64) -> Result<bool, Error> {
+        if self.codomain_spaces() != self.domain_spaces() {
+            return Ok(false);
+        }
+        let sum = self.add(&self.adjoint()?, 1.0, 1.0)?.norm()?;
+        Ok(sum <= tol * self.norm()?.max(1.0))
+    }
+
+    /// The Hermitian part `(t + t†)/2` (TensorKit `project_hermitian`), the
+    /// nearest Hermitian tensor. Requires an endomorphism.
+    pub fn project_hermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, 0.5, 0.5)
+    }
+
+    /// The anti-Hermitian part `(t - t†)/2` (TensorKit `project_antihermitian`).
+    /// Requires an endomorphism.
+    pub fn project_antihermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, 0.5, -0.5)
+    }
+
     fn check_same_space(&self, other: &Self) -> Result<(), Error> {
         self.check_same_world(other)?;
         if *self.space != *other.space {
@@ -6794,5 +6817,21 @@ mod tk_user_api_tests {
             .unwrap();
         assert!(minus_id.is_hermitian(1e-12).unwrap());
         assert!(!minus_id.is_posdef(1e-12).unwrap());
+    }
+
+    #[test]
+    fn hermitian_projectors_split_a_general_endomorphism() {
+        // What: t = project_hermitian(t) + project_antihermitian(t), and each
+        // part satisfies its predicate.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let t = Tensor::rand(&rt, Dtype::C64, [&v], [&v]).unwrap();
+        let herm = t.project_hermitian().unwrap();
+        let anti = t.project_antihermitian().unwrap();
+        assert!(herm.is_hermitian(1e-10).unwrap());
+        assert!(anti.is_antihermitian(1e-10).unwrap());
+        // Reassembled parts recover the original tensor.
+        let recomposed = herm.add(&anti, 1.0, 1.0).unwrap();
+        assert!(recomposed.add(&t, 1.0, -1.0).unwrap().norm().unwrap() < 1e-10);
     }
 }
