@@ -103,3 +103,29 @@ impl TreeTransformOperation {
         matches!(self, Self::Permute { .. })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TreeTransformOperation;
+
+    #[test]
+    fn identity_axis_map_requires_the_current_split_and_valid_braid_levels() {
+        // What: identity classification accepts exact axes only after the
+        // operation itself has a complete source-level description.
+        assert!(TreeTransformOperation::permute([0, 1], [2]).is_identity_for(2, 1));
+        assert!(TreeTransformOperation::braid([0, 1], [2], [7, 3], [5]).is_identity_for(2, 1));
+        assert!(!TreeTransformOperation::braid([0, 1], [2], [7], [5]).is_identity_for(2, 1));
+        assert!(!TreeTransformOperation::permute([0], [1, 2]).is_identity_for(2, 1));
+        assert!(!TreeTransformOperation::permute([1, 0], [2]).is_identity_for(2, 1));
+        assert!(!TreeTransformOperation::transpose([0, 1], [2]).is_identity_for(2, 1));
+    }
+
+    #[test]
+    fn rank_zero_identity_axis_map_is_well_formed() {
+        // What: empty Permute/Braid descriptions are valid rank-zero
+        // identities, while an empty Transpose remains outside this slice.
+        assert!(TreeTransformOperation::permute([], []).is_identity_for(0, 0));
+        assert!(TreeTransformOperation::braid([], [], [], []).is_identity_for(0, 0));
+        assert!(!TreeTransformOperation::transpose([], []).is_identity_for(0, 0));
+    }
+}
