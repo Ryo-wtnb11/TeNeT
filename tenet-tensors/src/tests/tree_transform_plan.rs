@@ -785,6 +785,23 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     let compiled = serial.compile_structures(&structure, &structure).unwrap();
     assert!(!compiled.has_pack_gemm_scatter_blocks());
 
+    let transpose = build_tree_pair_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::transpose([0, 1, 2, 3], []),
+        &structure,
+    )
+    .unwrap();
+    assert_eq!(transpose.specs().len(), keys.len());
+    assert!(transpose.specs().iter().all(|spec| {
+        spec.src_keys().len() == 1
+            && spec.dst_keys() == spec.src_keys()
+            && spec.recoupling_coefficients_dst_src() == [1.0]
+    }));
+    assert!(!transpose
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
     let all_codomain =
         build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
             .unwrap();
