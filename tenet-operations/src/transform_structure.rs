@@ -25,6 +25,7 @@ pub struct TreeTransformStructure<T> {
     pub blocks: Vec<TreeTransformBlock>,
     pub layouts: TreeTransformLayoutTable,
     pub recoupling_coefficients_dst_src: Vec<T>,
+    inactive_dst_layouts: Vec<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
@@ -406,6 +407,15 @@ impl<T: Copy> TreeTransformStructure<T> {
                 });
             }
         }
+        let mut inactive_dst_layouts = Vec::new();
+        for (dst_block, touched) in touched_dst_blocks.into_iter().enumerate() {
+            if touched {
+                continue;
+            }
+            let block = dst_structure.block(dst_block)?;
+            inactive_dst_layouts.push(layouts.entry_count());
+            layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
+        }
         blocks.sort_by(|lhs, rhs| {
             tree_transform_block_weight(rhs, &layouts)
                 .cmp(&tree_transform_block_weight(lhs, &layouts))
@@ -419,6 +429,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             blocks,
             layouts,
             recoupling_coefficients_dst_src,
+            inactive_dst_layouts,
             recoupling_plan,
             dst_structure,
             src_structure,
@@ -487,6 +498,11 @@ impl<T: Copy> TreeTransformStructure<T> {
 
     pub fn coefficient(&self, index: usize) -> T {
         self.recoupling_coefficients_dst_src[index]
+    }
+
+    #[inline]
+    pub(crate) fn inactive_destination_layouts(&self) -> &[usize] {
+        &self.inactive_dst_layouts
     }
 
     pub fn validate_replay_structures(

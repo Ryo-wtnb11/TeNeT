@@ -179,6 +179,35 @@ fn recoupling_multi_block<C>(
     }
 }
 
+fn scale_inactive_destinations<A, D, C>(
+    kernels: &mut A,
+    structure: &TreeTransformStructure<C>,
+    dst_data: &mut [D],
+    beta: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy + PartialEq + One,
+    C: Copy,
+{
+    if beta == D::one() {
+        return Ok(());
+    }
+    // Scaling the complete storage would also mutate padding not owned by any
+    // block, so compile only the destination layouts with no active replay.
+    for &layout_index in structure.inactive_destination_layouts() {
+        let layout = structure.layouts.entry(layout_index);
+        kernels.scale_strided(
+            dst_data,
+            structure.layouts.shape(layout),
+            structure.layouts.strides(layout),
+            layout.offset,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod coefficient_cache_tests {
     use super::*;
@@ -229,8 +258,7 @@ mod inactive_destination_tests {
 
     fn fixture() -> (TestTensor, TestTensor, TreeTransformStructure<f64>) {
         let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
-        let dst_structure =
-            BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+        let dst_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
         let src = TensorMap::from_vec_with_structure(
             vec![3.0],
             TensorMapSpace::from_dims([1], []).unwrap(),
@@ -491,6 +519,8 @@ where
     validate_replay_storage_len(&dst_structure, dst.storage().len())?;
     validate_replay_storage_len(&src_structure, src.storage().len())?;
 
+    scale_inactive_destinations(kernels, structure, dst.data_mut(), beta)?;
+
     let src_data = src.data();
     for block in &structure.blocks {
         match *block {
@@ -585,6 +615,7 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
+    scale_inactive_destinations(kernels, structure, dst_data, beta)?;
     for block in &structure.blocks {
         match *block {
             TreeTransformBlock::Single {
@@ -714,6 +745,7 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
+    scale_inactive_destinations(kernels, structure, dst_data, beta)?;
     if threads > 1 {
         return tree_transform_blocks_with_batched_recoupling_parallel(
             kernels, dense, workspace, structure, dst_data, src_data, alpha, beta, threads, None,
@@ -752,6 +784,8 @@ where
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
     profile.validate += start.elapsed();
+
+    scale_inactive_destinations(kernels, structure, dst_data, beta)?;
 
     if threads > 1 {
         tree_transform_blocks_with_batched_recoupling_parallel(
