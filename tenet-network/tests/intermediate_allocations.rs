@@ -1,7 +1,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard};
 
 use tenet::prelude::*;
@@ -36,6 +37,14 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static PROBE_THREAD_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static PROBE_THREAD_DEALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
+    static PROBE_THREAD_DEALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static DEALLOC_BOUNDARY_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
+}
+
+struct DeallocBoundaryHook {
+    reached: SyncSender<()>,
+    resume: Receiver<()>,
 }
 
 struct RegistryGuard;
@@ -224,6 +233,37 @@ fn record_realloc_result(
     register_live(new_ptr, new_size)
 }
 
+fn record_dealloc_result(pointer: *mut u8) -> bool {
+    let Some(size) = unregister_live(pointer) else {
+        return false;
+    };
+    // Why not gate unregistering: probe-origin storage can outlive the measurement
+    // window, and leaving it registered corrupts retained-live accounting.
+    // Why not use infallible TLS access: the allocator also observes frees
+    // performed while a worker thread's TLS values are being destroyed.
+    let boundary_hook = DEALLOC_BOUNDARY_HOOK
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten();
+    if let Some(hook) = boundary_hook {
+        // Why not leave the hook installed: synchronization may enter the allocator,
+        // so the one-shot hook must be removed before crossing the test boundary.
+        hook.reached.send(()).unwrap();
+        hook.resume.recv().unwrap();
+    }
+    let count_event = ENABLED.load(Ordering::Relaxed);
+    if count_event {
+        DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+        if PROBE_THREAD_ENABLED.try_with(Cell::get).unwrap_or(false) {
+            let _ = PROBE_THREAD_DEALLOC_CALLS.try_with(|calls| calls.set(calls.get() + 1));
+            let _ = PROBE_THREAD_DEALLOCATED_BYTES
+                .try_with(|bytes| bytes.set(bytes.get() + size as u64));
+        }
+    }
+    true
+}
+
 fn add_live(bytes: u64) {
     let live = LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
     let mut peak = PEAK_LIVE_BYTES.load(Ordering::Relaxed);
@@ -256,13 +296,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let probe_origin_size = unregister_live(ptr);
-        if ENABLED.load(Ordering::Relaxed) {
-            if let Some(size) = probe_origin_size {
-                DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
-                DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
-            }
-        }
+        record_dealloc_result(ptr);
         unsafe { System.dealloc(ptr, layout) }
     }
 
@@ -698,18 +732,70 @@ fn realloc_tracks_only_successful_probe_origin_transitions() {
 }
 
 #[test]
-fn pre_probe_free_is_excluded_from_origin_counters() {
+fn dealloc_counts_only_enabled_probe_origin() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     ENABLED.store(false, Ordering::SeqCst);
-    let allocation = std::hint::black_box(Box::new([9u8; 256]));
     reset_event_counters();
     reset_live_registry();
-    ENABLED.store(true, Ordering::SeqCst);
-    drop(allocation);
-    ENABLED.store(false, Ordering::SeqCst);
+    PROBE_THREAD_DEALLOC_CALLS.set(0);
+    PROBE_THREAD_DEALLOCATED_BYTES.set(0);
 
-    assert_eq!(DEALLOC_CALLS.load(Ordering::Relaxed), 0);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+    let untracked = std::hint::black_box(Box::new([9u8; 128]));
+    PROBE_THREAD_ENABLED.set(true);
+    ENABLED.store(true, Ordering::SeqCst);
+
+    // What: freeing memory allocated before a probe never enters its counters.
+    drop(untracked);
+    assert_eq!(PROBE_THREAD_DEALLOC_CALLS.get(), 0);
+    assert_eq!(PROBE_THREAD_DEALLOCATED_BYTES.get(), 0);
+
+    let tracked = std::hint::black_box(Box::new([7u8; 256]));
+    PROBE_THREAD_DEALLOC_CALLS.set(0);
+    PROBE_THREAD_DEALLOCATED_BYTES.set(0);
+
+    // What: a real probe-origin free records its exact allocation size.
+    drop(tracked);
+    ENABLED.store(false, Ordering::SeqCst);
+    PROBE_THREAD_ENABLED.set(false);
+    assert_eq!(PROBE_THREAD_DEALLOC_CALLS.get(), 1);
+    assert_eq!(PROBE_THREAD_DEALLOCATED_BYTES.get(), 256);
+}
+
+#[test]
+fn dealloc_snapshots_probe_state_after_unregistering_origin() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(true, Ordering::SeqCst);
+    reset_live_registry();
+    let tracked = std::hint::black_box(Box::new([5u8; 64]));
+    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+
+    let worker = std::thread::spawn(move || {
+        PROBE_THREAD_DEALLOC_CALLS.set(0);
+        PROBE_THREAD_DEALLOCATED_BYTES.set(0);
+        PROBE_THREAD_ENABLED.set(true);
+        DEALLOC_BOUNDARY_HOOK.with_borrow_mut(|slot| {
+            *slot = Some(DeallocBoundaryHook {
+                reached: reached_tx,
+                resume: resume_rx,
+            });
+        });
+        drop(tracked);
+        DEALLOC_BOUNDARY_HOOK.with_borrow_mut(Option::take);
+        PROBE_THREAD_ENABLED.set(false);
+        (
+            PROBE_THREAD_DEALLOC_CALLS.get(),
+            PROBE_THREAD_DEALLOCATED_BYTES.get(),
+        )
+    });
+
+    // What: disabling the probe after unregister but before attribution excludes the free.
+    reached_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("deallocation did not expose its unregister boundary");
+    ENABLED.store(false, Ordering::SeqCst);
+    resume_tx.send(()).unwrap();
+    assert_eq!(worker.join().unwrap(), (0, 0));
 }
 
 #[test]
