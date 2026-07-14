@@ -295,13 +295,23 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        specs.push(assemble_all_codomain_group_spec(
-            rule,
-            src_structure,
-            &group,
-            &source_axes,
-            &mut |codomain_tree| rows_for(&operation, codomain_tree),
-        )?);
+        if operation.is_identity_for(group.group_key().codomain_uncoupled().len(), 0) {
+            specs.extend(assemble_identity_all_codomain_group_specs(
+                rule,
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |codomain_tree| rows_for(&operation, codomain_tree),
+            )?);
+        } else {
+            specs.push(assemble_all_codomain_group_spec(
+                rule,
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |codomain_tree| rows_for(&operation, codomain_tree),
+            )?);
+        }
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -464,22 +474,79 @@ where
         .into_par_iter()
         .with_min_len(group_chunk)
         .map(|group| {
-            assemble_all_codomain_group_spec(
-                rule,
-                src_structure,
-                &group,
-                &source_axes,
-                &mut |codomain_tree| match rows_by_codomain.get(codomain_tree) {
+            let mut rows_for =
+                |codomain_tree: &FusionTreeKey| match rows_by_codomain.get(codomain_tree) {
                     Some(rows) => Ok(Arc::clone(rows)),
                     None => {
                         transformed_all_codomain_rows(rule, &operation, codomain_tree).map(Arc::new)
                     }
-                },
-            )
+                };
+            if operation.is_identity_for(group.group_key().codomain_uncoupled().len(), 0) {
+                assemble_identity_all_codomain_group_specs(
+                    rule,
+                    src_structure,
+                    &group,
+                    &source_axes,
+                    &mut rows_for,
+                )
+            } else {
+                assemble_all_codomain_group_spec(
+                    rule,
+                    src_structure,
+                    &group,
+                    &source_axes,
+                    &mut rows_for,
+                )
+                .map(|spec| vec![spec])
+            }
         })
-        .collect::<Result<Vec<_>, OperationError>>()?;
+        .collect::<Result<Vec<_>, OperationError>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+fn assemble_identity_all_codomain_group_specs<R, T, F>(
+    rule: &R,
+    src_structure: &BlockStructure,
+    group: &FusionTreeBlockGroup,
+    source_axes: &[usize],
+    rows_for: &mut F,
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
+where
+    R: FusionRule,
+    T: Clone,
+    F: FnMut(&FusionTreeKey) -> Result<Arc<Vec<(FusionTreeKey, T)>>, OperationError>,
+{
+    let mut specs = Vec::with_capacity(group.block_indices().len());
+    for &src_block_index in group.block_indices() {
+        let block = src_structure.block(src_block_index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index: src_block_index,
+            });
+        };
+        validate_all_codomain_fusion_tree_block(rule, src_block_index, src_key)?;
+        let transformed = rows_for(src_key.codomain_tree())?;
+        let [(dst_codomain_tree, coefficient)] = transformed.as_slice() else {
+            return Err(OperationError::EmptyTransformBlock);
+        };
+        let dst_key =
+            FusionTreeBlockKey::pair(dst_codomain_tree.clone(), src_key.domain_tree().clone());
+        specs.push(
+            TreeTransformGroupBlockSpec::single(
+                group.group_key().clone(),
+                dst_key,
+                src_key.clone(),
+                coefficient.clone(),
+            )
+            .with_source_axes(source_axes.to_vec()),
+        );
+    }
+    Ok(specs)
 }
 
 fn assemble_all_codomain_group_spec<R, T, F>(
@@ -749,14 +816,28 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        specs.push(assemble_tree_pair_group_spec(
-            src_structure,
-            &group,
-            &source_axes,
-            &mut |src_key| {
-                transformed_generic_tree_pair_rows(rule, &operation, src_key).map(Arc::new)
-            },
-        )?);
+        if operation.is_identity_for(
+            group.group_key().codomain_uncoupled().len(),
+            group.group_key().domain_uncoupled().len(),
+        ) {
+            specs.extend(assemble_identity_tree_pair_group_specs(
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |src_key| {
+                    transformed_generic_tree_pair_rows(rule, &operation, src_key).map(Arc::new)
+                },
+            )?);
+        } else {
+            specs.push(assemble_tree_pair_group_spec(
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |src_key| {
+                    transformed_generic_tree_pair_rows(rule, &operation, src_key).map(Arc::new)
+                },
+            )?);
+        }
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -958,16 +1039,31 @@ where
         .into_par_iter()
         .with_min_len(group_chunk)
         .map(|group| {
-            assemble_tree_pair_group_spec(src_structure, &group, &source_axes, &mut |src_key| {
-                match rows_by_src.get(src_key) {
-                    Some(rows) => Ok(Arc::clone(rows)),
-                    // Unreachable by construction (every tree was collected
-                    // above); recomputing is pure, so stay correct anyway.
-                    None => transformed_tree_pair_rows(rule, &operation, src_key).map(Arc::new),
-                }
-            })
+            let mut rows_for = |src_key: &FusionTreeBlockKey| match rows_by_src.get(src_key) {
+                Some(rows) => Ok(Arc::clone(rows)),
+                // Unreachable by construction (every tree was collected
+                // above); recomputing is pure, so stay correct anyway.
+                None => transformed_tree_pair_rows(rule, &operation, src_key).map(Arc::new),
+            };
+            if operation.is_identity_for(
+                group.group_key().codomain_uncoupled().len(),
+                group.group_key().domain_uncoupled().len(),
+            ) {
+                assemble_identity_tree_pair_group_specs(
+                    src_structure,
+                    &group,
+                    &source_axes,
+                    &mut rows_for,
+                )
+            } else {
+                assemble_tree_pair_group_spec(src_structure, &group, &source_axes, &mut rows_for)
+                    .map(|spec| vec![spec])
+            }
         })
-        .collect::<Result<Vec<_>, OperationError>>()?;
+        .collect::<Result<Vec<_>, OperationError>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     Ok(TreeTransformGroupPlan::new(specs))
 }
@@ -997,15 +1093,66 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        specs.push(assemble_tree_pair_group_spec(
-            src_structure,
-            &group,
-            &source_axes,
-            &mut |src_key| rows_for(&operation, src_key),
-        )?);
+        if operation.is_identity_for(
+            group.group_key().codomain_uncoupled().len(),
+            group.group_key().domain_uncoupled().len(),
+        ) {
+            specs.extend(assemble_identity_tree_pair_group_specs(
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |src_key| rows_for(&operation, src_key),
+            )?);
+        } else {
+            specs.push(assemble_tree_pair_group_spec(
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |src_key| rows_for(&operation, src_key),
+            )?);
+        }
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+fn assemble_identity_tree_pair_group_specs<T, F>(
+    src_structure: &BlockStructure,
+    group: &FusionTreeBlockGroup,
+    source_axes: &[usize],
+    rows_for: &mut F,
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
+where
+    T: Clone,
+    F: FnMut(&FusionTreeBlockKey) -> Result<Arc<Vec<(FusionTreeBlockKey, T)>>, OperationError>,
+{
+    let mut specs = Vec::with_capacity(group.block_indices().len());
+    for &src_block_index in group.block_indices() {
+        let block = src_structure.block(src_block_index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index: src_block_index,
+            });
+        };
+        let transformed = rows_for(src_key)?;
+        let [(dst_key, coefficient)] = transformed.as_slice() else {
+            return Err(OperationError::EmptyTransformBlock);
+        };
+        // Identity rows are singleton by construction. Why not synthesize the
+        // coefficient here: consuming the cached row preserves memo/stat and
+        // scalar-conversion semantics across serial and parallel builders.
+        specs.push(
+            TreeTransformGroupBlockSpec::single(
+                group.group_key().clone(),
+                dst_key.clone(),
+                src_key.clone(),
+                coefficient.clone(),
+            )
+            .with_source_axes(source_axes.to_vec()),
+        );
+    }
+    Ok(specs)
 }
 
 /// Assemble one group's block spec (destination-key dedup plus the

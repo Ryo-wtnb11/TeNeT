@@ -425,6 +425,112 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
+    struct IdentitySymbolPanicRule;
+
+    impl FusionRule for IdentitySymbolPanicRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new(left.id() ^ right.id())]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for IdentitySymbolPanicRule {}
+
+    impl MultiplicityFreeFusionSymbols for IdentitySymbolPanicRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            panic!("identity braid evaluated an F symbol")
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            panic!("identity braid evaluated an R symbol")
+        }
+    }
+
+    impl MultiplicityFreePivotalSymbols for IdentitySymbolPanicRule {
+        fn bendright_scalar(
+            &self,
+            _left_coupled: SectorId,
+            _bent_sector: SectorId,
+            _coupled: SectorId,
+            _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            panic!("identity braid evaluated a bend symbol")
+        }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
+        ) -> Self::Scalar {
+            panic!("identity braid evaluated a fold symbol")
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for IdentitySymbolPanicRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     struct AsymmetricAnyonicRule;
 
     impl FusionRule for AsymmetricAnyonicRule {
@@ -1197,6 +1303,237 @@ mod tests {
                 permutation: vec![0, 0, 1, 2],
                 rank: 4,
             }
+        );
+    }
+
+    #[test]
+    fn identity_braid_tree_pair_skips_symbols_and_repartition() {
+        // What: an exact same-split braid is source => one for both Unique and
+        // multiplicity-free entry points, without consulting F/R/bend data.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        );
+
+        let unique = unique_braid_tree_pair(
+            &IdentitySymbolPanicRule,
+            &source,
+            &[0],
+            &[1],
+            &[19],
+            &[3],
+        )
+        .unwrap();
+        assert_eq!(unique, (source.clone(), 1.0));
+
+        let multiplicity_free = multiplicity_free_braid_tree_pair(
+            &IdentitySymbolPanicRule,
+            &source,
+            &[0],
+            &[1],
+            &[19],
+            &[3],
+        )
+        .unwrap();
+        assert_eq!(multiplicity_free, vec![(source.clone(), 1.0)]);
+
+        let block = multiplicity_free_braid_tree_pair_block(
+            &IdentitySymbolPanicRule,
+            &[source.clone()],
+            &[0],
+            &[1],
+            &[19],
+            &[3],
+        )
+        .unwrap();
+        assert_eq!(block, vec![vec![(source, 1.0)]]);
+    }
+
+    #[test]
+    fn identity_braid_tree_pair_validates_levels_before_symbol_free_return() {
+        // What: malformed levels remain errors even when the axis map is the
+        // exact current split.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        );
+
+        assert!(unique_braid_tree_pair(
+            &IdentitySymbolPanicRule,
+            &source,
+            &[0],
+            &[1],
+            &[],
+            &[3],
+        )
+        .is_err());
+        assert!(multiplicity_free_braid_tree_pair(
+            &IdentitySymbolPanicRule,
+            &source,
+            &[0],
+            &[1],
+            &[19],
+            &[],
+        )
+        .is_err());
+        assert!(unique_braid_tree_pair(
+            &IdentitySymbolPanicRule,
+            &source,
+            &[0],
+            &[0],
+            &[19],
+            &[3],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unique_identity_tree_operations_reject_simple_fusion_rules() {
+        // What: identity axes do not let a Simple rule enter APIs whose
+        // contract requires Unique fusion.
+        let tree = FusionTreeKey::from_sector_ids([1], Some(1), [false], [], []);
+        let expected = CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: FusionStyleKind::Simple,
+        };
+
+        assert_eq!(
+            unique_braid_tree(&SU2FusionRule, &tree, &[0], &[7]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            unique_permute_tree(&SU2FusionRule, &tree, &[0]).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn same_split_transpose_of_dual_tree_pair_skips_bend_symbols() {
+        // What: a real codomain/domain tree pair at its current 2|1 split is
+        // source => one without consulting bend/fold data.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1],
+            Some(1),
+            [false, true],
+            [true],
+            [],
+            [],
+            [1],
+            [],
+        );
+
+        assert_eq!(
+            unique_transpose_tree_pair(&IdentitySymbolPanicRule, &source, &[0, 1], &[2])
+                .unwrap(),
+            (source, 1.0)
+        );
+    }
+
+    #[test]
+    fn identity_braid_rows_are_exact_for_supported_symmetry_families_and_rank_zero() {
+        // What: identity rows preserve their exact source key and unit
+        // coefficient for fermionic, non-abelian, product, and scalar spaces.
+        let pair = |sector: SectorId| {
+            FusionTreeBlockKey::pair_from_sector_ids(
+                [sector.id()],
+                [sector.id()],
+                Some(sector.id()),
+                [false],
+                [false],
+                [],
+                [],
+                [],
+                [],
+            )
+        };
+
+        let fz2_source = pair(z2_odd());
+        assert_eq!(
+            unique_braid_tree_pair(
+                &FermionParityFusionRule,
+                &fz2_source,
+                &[0],
+                &[1],
+                &[41],
+                &[2],
+            )
+            .unwrap(),
+            (fz2_source, 1.0)
+        );
+
+        let su2_source = pair(su2(1));
+        assert_eq!(
+            multiplicity_free_braid_tree_pair(
+                &SU2FusionRule,
+                &su2_source,
+                &[0],
+                &[1],
+                &[13],
+                &[5],
+            )
+            .unwrap(),
+            vec![(su2_source, 1.0)]
+        );
+
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let product_rule = FpU1Su2Rule::default();
+        let product_sector = product_rule.encode_sector(
+            left_rule.encode_sector(z2_odd(), u1(2)),
+            su2(1),
+        );
+        let product_source = pair(product_sector);
+        assert_eq!(
+            multiplicity_free_braid_tree_pair(
+                &product_rule,
+                &product_source,
+                &[0],
+                &[1],
+                &[8],
+                &[3],
+            )
+            .unwrap(),
+            vec![(product_source, 1.0)]
+        );
+
+        let scalar_source = FusionTreeBlockKey::pair_from_sector_ids(
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+            Some(z2_even().id()),
+            Vec::<bool>::new(),
+            Vec::<bool>::new(),
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+        );
+        assert_eq!(
+            unique_braid_tree_pair(
+                &Z2FusionRule,
+                &scalar_source,
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap(),
+            (scalar_source, 1.0)
         );
     }
 

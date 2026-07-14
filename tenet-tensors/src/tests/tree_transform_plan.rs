@@ -719,6 +719,276 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
 }
 
 #[test]
+fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
+    // What: an identity operation over a multi-tree SU2 fusion group compiles
+    // to independent direct copies, not one identity-matrix recoupling job.
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+    };
+
+    let key = |coupled: usize, inner: [usize; 2]| {
+        all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(coupled),
+            [false, false, false, false],
+            inner,
+            [1, 1, 1],
+        )
+    };
+    let keys = [
+        key(0, [0, 1]),
+        key(0, [2, 1]),
+        key(2, [2, 1]),
+        key(2, [2, 3]),
+    ];
+    let structure =
+        packed_fixture_structure(4, keys.iter().map(|key| (key.clone(), vec![1usize; 4]))).unwrap();
+    let operation = TreeTransformOperation::braid([0, 1, 2, 3], [], [17, 3, 11, 5], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+
+    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+            &SU2FusionRule,
+            &rule_key,
+            operation.clone(),
+            &structure,
+            memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        )
+        .unwrap();
+        (plan, hits, misses)
+    };
+
+    let mut serial_memo = TreePairRowMemo::default();
+    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
+    let mut parallel_memo = TreePairRowMemo::default();
+    let (parallel, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
+
+    assert_eq!(parallel, serial);
+    assert_eq!(
+        (parallel_hits, parallel_misses),
+        (serial_hits, serial_misses)
+    );
+    assert_eq!(serial_misses, keys.len());
+    assert_eq!(serial.specs().len(), keys.len());
+    for spec in serial.specs() {
+        assert_eq!(spec.src_keys().len(), 1);
+        assert_eq!(spec.dst_keys(), spec.src_keys());
+        assert_eq!(spec.recoupling_coefficients_dst_src(), &[1.0]);
+        assert_eq!(spec.source_axes(), Some([0, 1, 2, 3].as_slice()));
+    }
+
+    let compiled = serial.compile_structures(&structure, &structure).unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+
+    let transpose = build_tree_pair_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::transpose([0, 1, 2, 3], []),
+        &structure,
+    )
+    .unwrap();
+    assert_eq!(transpose.specs().len(), keys.len());
+    assert!(transpose.specs().iter().all(|spec| {
+        spec.src_keys().len() == 1
+            && spec.dst_keys() == spec.src_keys()
+            && spec.recoupling_coefficients_dst_src() == [1.0]
+    }));
+    assert!(!transpose
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let all_codomain =
+        build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
+            .unwrap();
+    assert_eq!(all_codomain.specs().len(), keys.len());
+    for spec in all_codomain.specs() {
+        assert_eq!(spec.src_keys().len(), 1);
+        assert_eq!(spec.dst_keys(), spec.src_keys());
+        assert_eq!(spec.recoupling_coefficients_dst_src(), &[1.0]);
+    }
+    assert!(!all_codomain
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let tensor_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![1.0, 2.0, 3.0, 4.0],
+        tensor_space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![5.0, 6.0, 7.0, 8.0],
+        tensor_space,
+        structure.clone(),
+    )
+    .unwrap();
+    let compiled = serial.compile(&dst, &src).unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+    assert_eq!(dst.data(), &[17.0, 22.0, 27.0, 32.0]);
+
+    dst.data_mut().fill(f64::NAN);
+    backend.set_recoupling_threads(4);
+    backend.set_transform_parallel_min_len(0);
+    tree_transform_overwrite_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        -2.0,
+    )
+    .unwrap();
+    assert_eq!(dst.data(), &[-2.0, -4.0, -6.0, -8.0]);
+
+    let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
+    assert_eq!(warm, serial);
+    assert_eq!((warm_hits, warm_misses), (keys.len(), 0));
+}
+
+#[test]
+fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() {
+    // What: exact 2|1 fZ2 and SU2 transposes preserve the source tree with a
+    // unit coefficient, while a cyclic split change retains recoupling.
+    let fz2_source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &FermionParityFusionRule,
+            [SectorId::new(1), SectorId::new(0)],
+            Some(SectorId::new(1)),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &FermionParityFusionRule,
+            [SectorId::new(1)],
+            Some(SectorId::new(1)),
+            [true],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
+    let fz2_key = BlockKey::from(fz2_source);
+    let fz2_structure = packed_fixture_structure(3, [(fz2_key.clone(), vec![1, 1, 1])]).unwrap();
+    let exact = TreeTransformOperation::transpose([0, 1], [2]);
+    let fz2_plan = build_tree_pair_transform_group_plan(
+        &FermionParityFusionRule,
+        exact.clone(),
+        &fz2_structure,
+    )
+    .unwrap();
+    assert_eq!(fz2_plan.specs().len(), 1);
+    assert_eq!(fz2_plan.specs()[0].src_keys(), &[fz2_key.clone()]);
+    assert_eq!(fz2_plan.specs()[0].dst_keys(), &[fz2_key]);
+    assert_eq!(
+        fz2_plan.specs()[0].recoupling_coefficients_dst_src(),
+        &[1.0]
+    );
+    assert!(!fz2_plan
+        .compile_structures(&fz2_structure, &fz2_structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let one = SU2Irrep::from_twice_spin(2).sector_id();
+    let su2_source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [one, one],
+            Some(one),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], Some(one), [true], [], []).unwrap(),
+    );
+    let su2_rows = tenet_core::multiplicity_free_transpose_tree_pair(
+        &SU2FusionRule,
+        &su2_source,
+        &[0, 1],
+        &[2],
+    )
+    .unwrap();
+    assert_eq!(su2_rows, vec![(su2_source.clone(), 1.0)]);
+
+    let su2_key = BlockKey::from(su2_source);
+    let su2_structure = packed_fixture_structure(3, [(su2_key.clone(), vec![1, 1, 1])]).unwrap();
+    let su2_plan =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, exact, &su2_structure).unwrap();
+    assert_eq!(su2_plan.specs()[0].src_keys(), &[su2_key.clone()]);
+    assert_eq!(su2_plan.specs()[0].dst_keys(), &[su2_key]);
+    assert_eq!(
+        su2_plan.specs()[0].recoupling_coefficients_dst_src(),
+        &[1.0]
+    );
+    assert!(!su2_plan
+        .compile_structures(&su2_structure, &su2_structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let control_keys = [0, 2, 4].map(|inner| {
+        BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [one, one, one],
+                Some(one),
+                [false, false, false],
+                [SectorId::new(inner)],
+                [SectorId::new(1), SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], Some(one), [true], [], [])
+                .unwrap(),
+        ))
+    });
+    let control_src = packed_fixture_structure(
+        4,
+        control_keys
+            .iter()
+            .cloned()
+            .map(|key| (key, vec![1, 1, 1, 1])),
+    )
+    .unwrap();
+    let split_change = TreeTransformOperation::transpose([3, 0, 1], [2]);
+    assert!(!split_change.is_identity_for(3, 1));
+    let control =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, split_change, &control_src).unwrap();
+    assert_eq!(control.specs()[0].src_keys().len(), control_keys.len());
+    let dst_structure = packed_fixture_structure(
+        4,
+        control
+            .specs()
+            .iter()
+            .flat_map(|spec| spec.dst_keys().iter().cloned())
+            .map(|key| (key, vec![1, 1, 1, 1])),
+    )
+    .unwrap();
+    assert!(control
+        .compile_structures(&dst_structure, &control_src)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+}
+
+#[test]
 fn tree_row_memo_survives_structure_change() {
     // TensorKit fstranspose/fsbraid cache parity: a truncation step changes the tree
     // subset of a structure, so the sector-keyed plan cache misses — but
@@ -3615,6 +3885,10 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
     assert_plan_matches(
         TreeTransformOperation::braid([1, 0], [], [0, 1], []),
         generic_braid_tree_pair(&rule, &src_pair, &[1, 0], &[], &[0, 1], &[]).unwrap(),
+    );
+    assert_plan_matches(
+        TreeTransformOperation::braid([0, 1], [], [29, 7], []),
+        vec![(src_pair.clone(), 1.0)],
     );
     assert_plan_matches(
         TreeTransformOperation::transpose([1, 0], []),
