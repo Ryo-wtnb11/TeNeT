@@ -27,25 +27,56 @@ use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
 };
 use super::scratch::{
-    DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratchWorkspace,
+    DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratch,
+    StorageDynamicFusionScratchWorkspace,
 };
 use crate::storage_scratch::StorageFusionBlockContractWorkspace;
 use tenet_operations::TensorContractFusionProfile;
 
 #[derive(Clone, Copy)]
-struct CoreSourceView<'a, D> {
+struct CoreSource<'a, D> {
     space: &'a DynamicFusionMapSpace,
-    structure: &'a Arc<BlockStructure>,
     data: &'a [D],
 }
 
-impl<'a, D> CoreSourceView<'a, D> {
+impl<'a, D> CoreSource<'a, D> {
+    fn borrowed(space: &'a DynamicFusionMapSpace, data: &'a [D]) -> Self {
+        Self { space, data }
+    }
+
+    fn materialized(space: &'a DynamicFusionMapSpace, data: &'a [D]) -> Self {
+        Self { space, data }
+    }
+
     fn from_host_scratch(scratch: &'a DynamicFusionScratch<D>) -> Self {
-        Self {
-            space: scratch.space(),
-            structure: scratch.space().structure(),
-            data: scratch.data(),
-        }
+        Self::materialized(scratch.space(), scratch.data())
+    }
+
+    fn space(self) -> &'a DynamicFusionMapSpace {
+        self.space
+    }
+
+    fn structure(self) -> &'a Arc<BlockStructure> {
+        // Why not retain the input structure separately: borrowability proves
+        // identical core layout, so the core space remains the single authority.
+        self.space().structure()
+    }
+
+    fn data(self) -> &'a [D] {
+        self.data
+    }
+}
+
+fn select_core_source<'a, D>(
+    borrow: bool,
+    borrowed_space: &'a DynamicFusionMapSpace,
+    borrowed_data: &'a [D],
+    materialize: impl FnOnce() -> CoreSource<'a, D>,
+) -> CoreSource<'a, D> {
+    if borrow {
+        CoreSource::borrowed(borrowed_space, borrowed_data)
+    } else {
+        materialize()
     }
 }
 
@@ -56,15 +87,7 @@ fn source_is_borrowable_core_layout(
     operation: &TreeTransformOperation,
     source_conjugate: bool,
 ) -> bool {
-    // Why not compare only the source's declared structure: even identity axes
-    // can complete a sparse fusion-tree grid with structural-zero core blocks.
-    if source_conjugate
-        || core_space.nout() != source_space.nout()
-        || core_space.rank() != source_space.rank()
-        || core_space.homspace() != source_space.homspace()
-        || !(Arc::ptr_eq(core_space.structure(), source_structure)
-            || core_space.structure().as_ref() == source_structure.as_ref())
-    {
+    if source_conjugate {
         return false;
     }
     let TreeTransformOperation::Permute {
@@ -74,14 +97,32 @@ fn source_is_borrowable_core_layout(
     else {
         return false;
     };
-    codomain_permutation
+    if !codomain_permutation
         .iter()
         .copied()
         .eq(0..source_space.nout())
-        && domain_permutation
+        || !domain_permutation
             .iter()
             .copied()
             .eq(source_space.nout()..source_space.rank())
+    {
+        return false;
+    }
+    if core_space.nout() != source_space.nout()
+        || core_space.rank() != source_space.rank()
+        || core_space.homspace().id() != source_space.homspace().id()
+    {
+        return false;
+    }
+
+    let core_structure = core_space.structure();
+    // Why not compare only the source's declared structure: even identity axes
+    // can complete a sparse fusion-tree grid with structural-zero core blocks.
+    Arc::ptr_eq(core_structure, source_structure)
+        || core_structure.content_id() == source_structure.content_id()
+        // Why not rely on content ids alone: an intern reset can assign a new
+        // monotonic id to equal live content while an operation cache pins both.
+        || core_structure.as_ref() == source_structure.as_ref()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,14 +294,10 @@ where
     }
 
     let lhs_core = match lhs_core.as_ref() {
-        Some(scratch) => CoreSourceView::from_host_scratch(scratch),
-        None => CoreSourceView {
-            space: &lhs_transformed.0,
-            structure: lhs.structure(),
-            data: lhs.data(),
-        },
+        Some(scratch) => CoreSource::from_host_scratch(scratch),
+        None => CoreSource::borrowed(&lhs_transformed.0, lhs.data()),
     };
-    let rhs_core_view = CoreSourceView::from_host_scratch(&rhs_core);
+    let rhs_core_view = CoreSource::from_host_scratch(&rhs_core);
 
     if plan.output_transform_is_identity() {
         let dst_space = DynamicFusionMapSpace::from_typed(
@@ -284,7 +321,7 @@ where
     }
 
     let core_dst_space =
-        DynamicFusionMapSpace::core_dst(rule, lhs_core.space, rhs_core.space(), plan)?;
+        DynamicFusionMapSpace::core_dst(rule, lhs_core.space(), rhs_core.space(), plan)?;
     let mut core_dst = DynamicFusionScratch::<D>::zeroed(Arc::new(core_dst_space))?;
     let core_dst_space_for_contract = core_dst.space().clone();
     let core_dst_structure = std::sync::Arc::clone(core_dst.space().structure());
@@ -504,16 +541,10 @@ where
             &rhs_core_space,
             plan.core_axes().as_spec(),
         )?;
-        let lhs_core = if lhs_borrowed {
-            CoreSourceView {
-                space: &lhs_core_space,
-                structure: lhs_structure,
-                data: lhs_data,
-            }
-        } else {
-            CoreSourceView::from_host_scratch(scratch.lhs())
-        };
-        let rhs_core = CoreSourceView::from_host_scratch(scratch.rhs());
+        let lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
+            CoreSource::from_host_scratch(scratch.lhs())
+        });
+        let rhs_core = CoreSource::from_host_scratch(scratch.rhs());
         return block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
                 tree_context.backend().transpose_backend(),
@@ -525,10 +556,10 @@ where
             fusion_block_workspace,
             dst_structure,
             dst_data,
-            lhs_core.structure,
-            lhs_core.data,
-            rhs_core.structure,
-            rhs_core.data,
+            lhs_core.structure(),
+            lhs_core.data(),
+            rhs_core.structure(),
+            rhs_core.data(),
             alpha,
             beta,
         );
@@ -553,8 +584,7 @@ where
     let core_dst_structure = std::sync::Arc::clone(core_dst_space.structure());
     scratch.prepare_dst(core_dst_space.clone())?;
     {
-        let mut execute = |lhs_structure: &Arc<BlockStructure>,
-                           lhs_data: &[D],
+        let mut execute = |lhs_core: CoreSource<'_, D>,
                            rhs_core: &DynamicFusionScratch<D>,
                            core_dst: &mut DynamicFusionScratch<D>| {
             block_plan.execute_raw(
@@ -568,8 +598,8 @@ where
                 fusion_block_workspace,
                 &core_dst_structure,
                 core_dst.data_mut(),
-                lhs_structure,
-                lhs_data,
+                lhs_core.structure(),
+                lhs_core.data(),
                 rhs_core.space().structure(),
                 rhs_core.data(),
                 alpha,
@@ -578,15 +608,14 @@ where
         };
         if !lhs_borrowed {
             let (lhs_core, rhs_core, core_dst) = scratch.lhs_rhs_dst_mut();
+            execute(CoreSource::from_host_scratch(lhs_core), rhs_core, core_dst)?;
+        } else {
+            let (rhs_core, core_dst) = scratch.rhs_dst_mut();
             execute(
-                lhs_core.space().structure(),
-                lhs_core.data(),
+                CoreSource::borrowed(&lhs_core_space, lhs_data),
                 rhs_core,
                 core_dst,
             )?;
-        } else {
-            let (rhs_core, core_dst) = scratch.rhs_dst_mut();
-            execute(lhs_structure, lhs_data, rhs_core, core_dst)?;
         }
     }
     tree_context.tree_transform_structure_into_raw(
@@ -743,12 +772,10 @@ where
             &rhs_space,
             plan.core_axes().as_spec(),
         )?;
-        let (lhs_structure, lhs_data) = if lhs_borrowed {
-            (lhs.structure(), lhs.data())
-        } else {
+        let lhs_core = select_core_source(lhs_borrowed, &lhs_space, lhs.data(), || {
             let lhs_core = scratch.lhs();
-            (lhs_core.space().structure(), lhs_core.buffer().as_slice())
-        };
+            CoreSource::materialized(lhs_core.space(), lhs_core.buffer().as_slice())
+        });
         let rhs_core = scratch.rhs();
         return block_plan.execute_storage_raw_sources(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
@@ -762,8 +789,8 @@ where
             lhs.storage(),
             rhs.storage(),
             dst,
-            lhs_structure,
-            lhs_data,
+            lhs_core.structure(),
+            lhs_core.data(),
             rhs_core.space().structure(),
             rhs_core.buffer().as_slice(),
             alpha,
@@ -794,51 +821,45 @@ where
     let core_dst_structure = std::sync::Arc::clone(core_dst_space.structure());
     scratch.prepare_dst_from_storage(core_dst_space.clone(), dst.storage(), D::zero())?;
     {
+        let mut execute =
+            |lhs_core: CoreSource<'_, D>,
+             rhs_core: &StorageDynamicFusionScratch<DRhs::Similar>,
+             core_dst: &mut StorageDynamicFusionScratch<DDst::Similar>| {
+                block_plan.execute_storage_raw(
+                    &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                        tree_context.backend().transpose_backend(),
+                    ),
+                    &mut super::fusion_block::BackendRank2Gemm {
+                        backend: contract_backend,
+                        workspace: contract_workspace,
+                    },
+                    fusion_block_workspace,
+                    lhs.storage(),
+                    rhs.storage(),
+                    dst.storage(),
+                    &core_dst_structure,
+                    core_dst.buffer_mut().as_mut_slice(),
+                    lhs_core.structure(),
+                    lhs_core.data(),
+                    rhs_core.space().structure(),
+                    rhs_core.buffer().as_slice(),
+                    alpha,
+                    D::zero(),
+                )
+            };
         if !lhs_borrowed {
             let (lhs_core, rhs_core, core_dst) = scratch.lhs_rhs_dst_mut();
-            block_plan.execute_storage_raw(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_context.backend().transpose_backend(),
-                ),
-                &mut super::fusion_block::BackendRank2Gemm {
-                    backend: contract_backend,
-                    workspace: contract_workspace,
-                },
-                fusion_block_workspace,
-                lhs.storage(),
-                rhs.storage(),
-                dst.storage(),
-                &core_dst_structure,
-                core_dst.buffer_mut().as_mut_slice(),
-                lhs_core.space().structure(),
-                lhs_core.buffer().as_slice(),
-                rhs_core.space().structure(),
-                rhs_core.buffer().as_slice(),
-                alpha,
-                D::zero(),
+            execute(
+                CoreSource::materialized(lhs_core.space(), lhs_core.buffer().as_slice()),
+                rhs_core,
+                core_dst,
             )?;
         } else {
             let (rhs_core, core_dst) = scratch.rhs_dst_mut();
-            block_plan.execute_storage_raw(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_context.backend().transpose_backend(),
-                ),
-                &mut super::fusion_block::BackendRank2Gemm {
-                    backend: contract_backend,
-                    workspace: contract_workspace,
-                },
-                fusion_block_workspace,
-                lhs.storage(),
-                rhs.storage(),
-                dst.storage(),
-                &core_dst_structure,
-                core_dst.buffer_mut().as_mut_slice(),
-                lhs.structure(),
-                lhs.data(),
-                rhs_core.space().structure(),
-                rhs_core.buffer().as_slice(),
-                alpha,
-                D::zero(),
+            execute(
+                CoreSource::borrowed(&lhs_space, lhs.data()),
+                rhs_core,
+                core_dst,
             )?;
         }
     }
@@ -1000,16 +1021,10 @@ where
         profile.fusion_block_plan_lookup += start.elapsed();
 
         let dst_structure = std::sync::Arc::clone(dst.structure());
-        let lhs_core = if lhs_borrowed {
-            CoreSourceView {
-                space: &lhs_space,
-                structure: lhs.structure(),
-                data: lhs.data(),
-            }
-        } else {
-            CoreSourceView::from_host_scratch(scratch.lhs())
-        };
-        let rhs_core = CoreSourceView::from_host_scratch(scratch.rhs());
+        let lhs_core = select_core_source(lhs_borrowed, &lhs_space, lhs.data(), || {
+            CoreSource::from_host_scratch(scratch.lhs())
+        });
+        let rhs_core = CoreSource::from_host_scratch(scratch.rhs());
         return block_plan.execute_raw_profiled(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
                 tree_context.backend().transpose_backend(),
@@ -1021,10 +1036,10 @@ where
             fusion_block_workspace,
             &dst_structure,
             dst.data_mut(),
-            lhs_core.structure,
-            lhs_core.data,
-            rhs_core.structure,
-            rhs_core.data,
+            lhs_core.structure(),
+            lhs_core.data(),
+            rhs_core.structure(),
+            rhs_core.data(),
             alpha,
             beta,
             profile,
@@ -1063,8 +1078,7 @@ where
     profile.dst_scratch_prepare += start.elapsed();
 
     {
-        let mut execute = |lhs_structure: &Arc<BlockStructure>,
-                           lhs_data: &[D],
+        let mut execute = |lhs: CoreSource<'_, D>,
                            rhs_core: &DynamicFusionScratch<D>,
                            core_dst: &mut DynamicFusionScratch<D>| {
             block_plan.execute_raw_profiled(
@@ -1078,8 +1092,8 @@ where
                 fusion_block_workspace,
                 &core_dst_structure,
                 core_dst.data_mut(),
-                lhs_structure,
-                lhs_data,
+                lhs.structure(),
+                lhs.data(),
                 rhs_core.space().structure(),
                 rhs_core.data(),
                 alpha,
@@ -1089,15 +1103,14 @@ where
         };
         if !lhs_borrowed {
             let (lhs_core, rhs_core, core_dst) = scratch.lhs_rhs_dst_mut();
+            execute(CoreSource::from_host_scratch(lhs_core), rhs_core, core_dst)?;
+        } else {
+            let (rhs_core, core_dst) = scratch.rhs_dst_mut();
             execute(
-                lhs_core.space().structure(),
-                lhs_core.data(),
+                CoreSource::borrowed(&lhs_space, lhs.data()),
                 rhs_core,
                 core_dst,
             )?;
-        } else {
-            let (rhs_core, core_dst) = scratch.rhs_dst_mut();
-            execute(lhs.structure(), lhs.data(), rhs_core, core_dst)?;
         }
     }
 
@@ -2067,8 +2080,8 @@ fn tensorcontract_dynamic_core_into_raw<B, R, D>(
     dst_space: &DynamicFusionMapSpace,
     dst_structure: &std::sync::Arc<BlockStructure>,
     dst_data: &mut [D],
-    lhs: CoreSourceView<'_, D>,
-    rhs: CoreSourceView<'_, D>,
+    lhs: CoreSource<'_, D>,
+    rhs: CoreSource<'_, D>,
     axes: TensorContractSpec<'_>,
     alpha: D,
     beta: D,
@@ -2086,10 +2099,10 @@ where
         rule,
         dst_space,
         dst_data,
-        lhs.space,
-        lhs.data,
-        rhs.space,
-        rhs.data,
+        lhs.space(),
+        lhs.data(),
+        rhs.space(),
+        rhs.data(),
         axes,
         alpha,
         beta,
@@ -2171,6 +2184,41 @@ mod tests {
             source_conjugate: false,
         };
         assert_eq!(first_transform, second_transform);
+    }
+
+    #[test]
+    fn borrowable_core_layout_accepts_equal_structure_across_intern_reset() {
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rule = Z2FusionRule;
+        let build = || {
+            FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+                FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
+                &rule,
+                [vec![1, 1]],
+            )
+            .unwrap()
+            .try_bind_rule(&rule)
+            .unwrap()
+        };
+        let source = DynamicFusionMapSpace::from_typed(&build());
+        let source_structure = Arc::clone(source.structure());
+
+        crate::cache::reset_global_operation_caches();
+        let core = DynamicFusionMapSpace::from_typed(&build());
+
+        // What: equal live layouts created on opposite sides of an intern reset
+        // remain borrowable even though their process-local content ids differ.
+        assert_ne!(source_structure.content_id(), core.structure().content_id());
+        assert!(source_is_borrowable_core_layout(
+            &source,
+            &source_structure,
+            &core,
+            &TreeTransformOperation::permute([0], [1]),
+            false,
+        ));
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
