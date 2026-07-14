@@ -6910,6 +6910,83 @@ mod tk_user_api_tests {
     }
 
     #[test]
+    fn identity_braid_shares_storage_for_multiplicity_free_rules() {
+        // What: exact-axis braids share owned storage for fermionic,
+        // non-Abelian, and nested-product tensors even with nonmonotone levels.
+        let rt = Runtime::builder().build().unwrap();
+        let spaces = [
+            Space::fz2([(0, 1), (1, 2)]),
+            Space::su2([(0, 1), (1, 2), (2, 1)]),
+            Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 2)]).unwrap(),
+        ];
+
+        for (case, space) in spaces.iter().enumerate() {
+            let source = Tensor::rand_with_seed(
+                &rt,
+                Dtype::F64,
+                [space, space],
+                [space],
+                200 + case as u64,
+            )
+            .unwrap();
+            let output = source.braid(&[0, 1], &[2], &[17, 3, 11]).unwrap();
+
+            assert!(Arc::ptr_eq(&output.space, &source.space), "case {case}");
+            assert!(Arc::ptr_eq(&output.data, &source.data), "case {case}");
+        }
+    }
+
+    #[test]
+    fn identity_braid_validates_levels_before_sharing() {
+        // What: malformed braid levels remain an error even when the axis map
+        // itself is the identity.
+        let rt = Runtime::builder().build().unwrap();
+        let space = Space::fz2([(0, 1), (1, 1)]);
+        let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&space, &space], [&space], 203)
+            .unwrap();
+
+        assert!(source.braid(&[0, 1], &[2], &[7, 5]).is_err());
+    }
+
+    #[test]
+    fn identity_braid_shares_rank_zero_storage() {
+        // What: the empty axis map is a zero-copy identity braid for a scalar.
+        let rt = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 1)]);
+        let vector =
+            Tensor::rand_with_seed(&rt, Dtype::F64, [&space], std::iter::empty::<&Space>(), 204)
+                .unwrap();
+        let scalar = vector
+            .contract(&vector.adjoint().unwrap(), &[0], &[0])
+            .unwrap();
+
+        let output = scalar.braid(&[], &[], &[]).unwrap();
+
+        assert!(Arc::ptr_eq(&output.space, &scalar.space));
+        assert!(Arc::ptr_eq(&output.data, &scalar.data));
+    }
+
+    #[test]
+    fn nonidentity_braid_keeps_fermionic_odd_swap_sign() {
+        // What: the identity shortcut does not absorb a real crossing of two
+        // odd fZ2 legs, whose reduced data acquires the fermionic minus sign.
+        let rt = Runtime::builder().build().unwrap();
+        let odd = Space::fz2([(1, 1)]);
+        let source = Tensor::from_block_fn(
+            &rt,
+            [&odd, &odd],
+            std::iter::empty::<&Space>(),
+            |_, _| 1.0,
+        )
+        .unwrap();
+
+        let output = source.braid(&[1, 0], &[], &[0, 1]).unwrap();
+
+        assert!(output.data().iter().all(|&value| value == -1.0));
+        assert!(!Arc::ptr_eq(&output.data, &source.data));
+    }
+
+    #[test]
     fn repartition_matches_tensorkit_for_fermion_odd_sectors() {
         // What: a planar boundary move preserves TensorKit's fZ2 odd-sector
         // signs from semantic oracle section 4, `fZ2 2|2 -> 3|1`.
