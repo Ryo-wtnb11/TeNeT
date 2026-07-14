@@ -661,10 +661,15 @@ macro_rules! with_data {
 /// 2-norm of everything discarded.
 #[derive(Clone, Debug)]
 pub struct SvdTrunc {
+    /// Left isometry `U` (codomain legs `<- bond`).
     pub u: Tensor,
+    /// Diagonal singular-value tensor `S` (`bond <- bond`).
     pub s: Tensor,
+    /// Right isometry `V†` (`bond <- domain legs`).
     pub vh: Tensor,
+    /// Kept singular values per coupled sector.
     pub singular_values: Vec<SectorSpectrum>,
+    /// Quantum-dimension-weighted 2-norm of the discarded singular values.
     pub error: f64,
 }
 
@@ -673,9 +678,13 @@ pub struct SvdTrunc {
 /// eigenvalues.
 #[derive(Clone, Debug)]
 pub struct EighTrunc {
+    /// Diagonal eigenvalue tensor `D` (`bond <- bond`), real for Hermitian input.
     pub d: Tensor,
+    /// Eigenvector isometry `V` (codomain legs `<- bond`).
     pub v: Tensor,
+    /// Kept eigenvalues per coupled sector.
     pub eigenvalues: Vec<SectorSpectrum>,
+    /// Quantum-dimension-weighted 2-norm of the discarded eigenvalues.
     pub error: f64,
 }
 
@@ -685,9 +694,13 @@ pub struct EighTrunc {
 /// quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
 #[derive(Clone, Debug)]
 pub struct EigTrunc {
+    /// Diagonal eigenvalue tensor `D` (`bond <- bond`), always c64.
     pub d: Tensor,
+    /// Eigenvector tensor `V` (codomain legs `<- bond`), always c64.
     pub v: Tensor,
+    /// Kept (complex) eigenvalues per coupled sector.
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
+    /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
     pub error: f64,
 }
 
@@ -1594,6 +1607,9 @@ macro_rules! with_bound_ctx {
     };
 }
 
+/// A block-sparse symmetric tensor map `codomain <- domain` with dynamic rank,
+/// carrying its [`Runtime`] and a rule-erased fusion space. This is the
+/// everyday user-layer type; see the crate-level docs for the execution model.
 #[derive(Debug)]
 pub struct Tensor {
     rt: Runtime,
@@ -2451,6 +2467,23 @@ impl Tensor {
         self.space.rank()
     }
 
+    /// Number of codomain (output) legs. TensorKit `numout`; alias of
+    /// [`Self::codomain_rank`].
+    pub fn numout(&self) -> usize {
+        self.codomain_rank()
+    }
+
+    /// Number of domain (input) legs. TensorKit `numin`; alias of
+    /// [`Self::domain_rank`].
+    pub fn numin(&self) -> usize {
+        self.domain_rank()
+    }
+
+    /// Total number of legs. TensorKit `numind`; alias of [`Self::rank`].
+    pub fn numind(&self) -> usize {
+        self.rank()
+    }
+
     /// Number of tensors currently sharing this tensor's storage allocation.
     #[doc(hidden)]
     pub fn storage_strong_count(&self) -> usize {
@@ -2529,6 +2562,13 @@ impl Tensor {
             adjoint_source: None,
             materialized: OnceLock::new(),
         }
+    }
+
+    /// A zero tensor on the same spaces and dtype as `self` (TensorKit
+    /// `zerovector` / `zero`). Cheapest same-shape constructor: scales the
+    /// storage by zero rather than re-deriving the block structure.
+    pub fn zeros_like(&self) -> Result<Self, Error> {
+        self.scale(0.0)
     }
 
     /// Quantum-dimension-weighted total dimension of every leg, in flat
@@ -3383,6 +3423,24 @@ impl Tensor {
         self.transformed(&codomain_axes, &domain_axes, TransformKind::Transpose)
     }
 
+    /// TensorKit `repartition(t, N₁, N₂)`: re-split the legs so the codomain
+    /// holds the first `num_codomain` indices and the domain the rest, keeping
+    /// the linear index order (`allind` = codomain then domain) unchanged. The
+    /// domain rank is fixed by `rank() - num_codomain`, so only the split point
+    /// is a parameter. Thin wrapper over [`Self::permute`] with identity axes;
+    /// for a fermionic rule the bent legs pick up the fusion twist exactly as
+    /// `permute` does.
+    pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
+        if num_codomain > self.rank() {
+            return Err(Error::InvalidArgument(format!(
+                "repartition: num_codomain {num_codomain} exceeds rank {}",
+                self.rank()
+            )));
+        }
+        let all: Vec<usize> = (0..self.rank()).collect();
+        self.permute(&all[..num_codomain], &all[num_codomain..])
+    }
+
     fn transformed(
         &self,
         codomain_axes: &[usize],
@@ -3886,6 +3944,74 @@ impl Tensor {
     /// ```
     pub fn normalize(&self) -> Result<Self, Error> {
         self.scale(1.0 / self.norm()?)
+    }
+
+    /// Tests whether the tensor equals its own adjoint within `tol`, relative
+    /// to its norm (TensorKit `ishermitian`). Non-endomorphisms (codomain and
+    /// domain spaces differ) are never Hermitian and return `false` without
+    /// error, unlike TensorKit which throws — the predicate form is friendlier.
+    pub fn is_hermitian(&self, tol: f64) -> Result<bool, Error> {
+        if self.codomain_spaces() != self.domain_spaces() {
+            return Ok(false);
+        }
+        let diff = self.add(&self.adjoint()?, 1.0, -1.0)?.norm()?;
+        Ok(diff <= tol * self.norm()?.max(1.0))
+    }
+
+    /// Tests whether `adjoint(t) ∘ t` is the identity on the domain within
+    /// `tol` (TensorKit `isisometric`): the columns are orthonormal. Works for
+    /// any rectangular shape with `codomain_dim >= domain_dim`.
+    pub fn is_isometric(&self, tol: f64) -> Result<bool, Error> {
+        let gram = self.adjoint()?.compose(self)?;
+        let identity = Self::id(&self.rt, self.dtype(), &self.domain_spaces())?;
+        Ok(gram.add(&identity, 1.0, -1.0)?.norm()? <= tol * gram.norm()?.max(1.0))
+    }
+
+    /// Tests whether the tensor is unitary within `tol` (TensorKit
+    /// `isunitary`): isometric in both directions, i.e. `adjoint(t) ∘ t` and
+    /// `t ∘ adjoint(t)` are both identities.
+    pub fn is_unitary(&self, tol: f64) -> Result<bool, Error> {
+        Ok(self.is_isometric(tol)? && self.adjoint()?.is_isometric(tol)?)
+    }
+
+    /// Tests whether the tensor is Hermitian and positive definite (TensorKit
+    /// `isposdef`, which is Cholesky-based and strict): every Hermitian
+    /// eigenvalue must exceed `tol * max(norm, 1)`. Positive *semi*definite
+    /// spectra (an eigenvalue at zero) return `false`; with `tol = 0.0` the
+    /// check is exact strict positivity up to floating point.
+    pub fn is_posdef(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_hermitian(tol)? {
+            return Ok(false);
+        }
+        let threshold = tol * self.norm()?.max(1.0);
+        Ok(self
+            .eigh_vals()?
+            .iter()
+            .flat_map(|spectrum| spectrum.values.iter())
+            .all(|&lambda| lambda > threshold))
+    }
+
+    /// Tests whether the tensor equals minus its own adjoint within `tol`,
+    /// relative to its norm (TensorKit `isantihermitian`). Non-endomorphisms
+    /// return `false` without error (cf. [`Self::is_hermitian`]).
+    pub fn is_antihermitian(&self, tol: f64) -> Result<bool, Error> {
+        if self.codomain_spaces() != self.domain_spaces() {
+            return Ok(false);
+        }
+        let sum = self.add(&self.adjoint()?, 1.0, 1.0)?.norm()?;
+        Ok(sum <= tol * self.norm()?.max(1.0))
+    }
+
+    /// The Hermitian part `(t + t†)/2` (TensorKit `project_hermitian`), the
+    /// nearest Hermitian tensor. Requires an endomorphism.
+    pub fn project_hermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, 0.5, 0.5)
+    }
+
+    /// The anti-Hermitian part `(t - t†)/2` (TensorKit `project_antihermitian`).
+    /// Requires an endomorphism.
+    pub fn project_antihermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, 0.5, -0.5)
     }
 
     fn check_same_space(&self, other: &Self) -> Result<(), Error> {
@@ -6633,5 +6759,110 @@ mod bound_provider_tests {
         assert!(dst
             .space
             .provider_matches_context_allocation(&destination_provider));
+    }
+}
+
+#[cfg(test)]
+mod tk_user_api_tests {
+    use super::*;
+
+    #[test]
+    fn index_count_aliases_match_rank_accessors() {
+        // What: numout/numin/numind are exact TK-named aliases of the rank accessors.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+        assert_eq!(t.numout(), t.codomain_rank());
+        assert_eq!(t.numin(), t.domain_rank());
+        assert_eq!(t.numind(), t.rank());
+        assert_eq!((t.numout(), t.numin(), t.numind()), (2, 1, 3));
+    }
+
+    #[test]
+    fn repartition_moves_the_split_and_round_trips() {
+        // What: repartition re-splits legs at the given codomain count, invertibly.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+        let r = t.repartition(1).unwrap();
+        assert_eq!((r.codomain_rank(), r.domain_rank()), (1, 2));
+        // Back to the original split recovers the original data (planar move).
+        let back = r.repartition(2).unwrap();
+        assert_eq!(back.data(), t.data());
+        assert!(t.repartition(4).is_err());
+    }
+
+    #[test]
+    fn zeros_like_is_a_same_shape_zero() {
+        // What: zeros_like keeps spaces/dtype and zeroes every entry.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let t = Tensor::rand(&rt, Dtype::C64, [&v], [&v]).unwrap();
+        let z = t.zeros_like().unwrap();
+        assert_eq!(z.dtype(), Dtype::C64);
+        assert_eq!(z.codomain_spaces(), t.codomain_spaces());
+        assert_eq!(z.norm().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn identity_is_hermitian_isometric_unitary_posdef() {
+        // What: the identity endomorphism satisfies every structural predicate.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let id = Tensor::id(&rt, Dtype::F64, [&v, &v]).unwrap();
+        assert!(id.is_hermitian(1e-12).unwrap());
+        assert!(id.is_isometric(1e-12).unwrap());
+        assert!(id.is_unitary(1e-12).unwrap());
+        assert!(id.is_posdef(1e-12).unwrap());
+    }
+
+    #[test]
+    fn non_endomorphism_is_not_hermitian() {
+        // What: a rectangular map returns false rather than erroring.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let w = Space::u1([(0, 3), (1, 2)]);
+        let t = Tensor::rand(&rt, Dtype::F64, [&v], [&w]).unwrap();
+        assert!(!t.is_hermitian(1e-12).unwrap());
+    }
+
+    #[test]
+    fn negative_identity_is_hermitian_but_not_posdef() {
+        // What: is_posdef rejects a Hermitian tensor with a negative eigenvalue.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let minus_id = Tensor::id(&rt, Dtype::F64, [&v])
+            .unwrap()
+            .scale(-1.0)
+            .unwrap();
+        assert!(minus_id.is_hermitian(1e-12).unwrap());
+        assert!(!minus_id.is_posdef(1e-12).unwrap());
+    }
+
+    #[test]
+    fn zero_tensor_is_not_posdef() {
+        // What: a zero spectrum is positive SEMIdefinite, so strict posdef
+        // (TK isposdef = Cholesky) must reject it.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+        assert!(zero.is_hermitian(1e-12).unwrap());
+        assert!(!zero.is_posdef(1e-12).unwrap());
+    }
+
+    #[test]
+    fn hermitian_projectors_split_a_general_endomorphism() {
+        // What: t = project_hermitian(t) + project_antihermitian(t), and each
+        // part satisfies its predicate.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let t = Tensor::rand(&rt, Dtype::C64, [&v], [&v]).unwrap();
+        let herm = t.project_hermitian().unwrap();
+        let anti = t.project_antihermitian().unwrap();
+        assert!(herm.is_hermitian(1e-10).unwrap());
+        assert!(anti.is_antihermitian(1e-10).unwrap());
+        // Reassembled parts recover the original tensor.
+        let recomposed = herm.add(&anti, 1.0, 1.0).unwrap();
+        assert!(recomposed.add(&t, 1.0, -1.0).unwrap().norm().unwrap() < 1e-10);
     }
 }

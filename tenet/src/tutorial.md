@@ -305,7 +305,124 @@ assert_eq!((h.codomain_rank(), h.domain_rank()), (2, 2));
 # Ok::<(), Error>(())
 ```
 
-## 3. Decompositions
+## 3. Tensor algebra: vector interface, index ops, and sectors
+
+### Vector interface
+
+The VectorInterface / LinearAlgebra surface mirrors TensorKit:
+[`prelude::Tensor::norm`], [`prelude::Tensor::normalize`],
+[`prelude::Tensor::inner`] / [`prelude::Tensor::dot`],
+[`prelude::Tensor::scale`], [`prelude::Tensor::add`] (the `α·self + β·other`
+combination, covering TensorKit's `axpy!`/`axpby!`),
+[`prelude::Tensor::tr`], and [`prelude::Tensor::zeros_like`] (TensorKit
+`zerovector`). Structural predicates match TensorKit's
+`ishermitian`/`isantihermitian`/`isisometric`/`isunitary`/`isposdef`, with the
+`(t ± t†)/2` projectors [`prelude::Tensor::project_hermitian`] /
+[`prelude::Tensor::project_antihermitian`].
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+
+// α·a + β·b (TensorKit axpby), scaling, and unit normalization.
+let _diff = a.add(&b, 1.0, -1.0)?;    // a - b
+let _scaled = a.scale(2.0)?;
+let unit = a.normalize()?;
+assert!((unit.norm()? - 1.0).abs() <= 1e-12);
+
+// inner / dot agree, and norm² == <a, a>.
+let ip = a.inner(&a)?.try_f64()?;
+assert!((ip - a.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + ip));
+
+// A same-shape zero (zerovector) and the trace of an endomorphism.
+let zero = a.zeros_like()?;
+assert_eq!(zero.norm()?, 0.0);
+let _trace = a.tr()?;
+
+// Structural predicates: the identity is Hermitian, unitary, positive definite.
+let id = Tensor::id(&rt, Dtype::F64, [&v])?;
+assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)? && id.is_posdef(1e-12)?);
+# Ok::<(), Error>(())
+```
+
+### Index operations
+
+Leg rearrangements follow TensorKit's names. Axis lists are flat and
+zero-based (codomain axes first). [`prelude::Tensor::permute`] chooses new
+codomain/domain axis lists; [`prelude::Tensor::repartition`] re-splits the
+legs at a codomain count while keeping their order (TensorKit `repartition`);
+[`prelude::Tensor::transpose`] is the planar transpose,
+[`prelude::Tensor::adjoint`] the dagger, and
+[`prelude::Tensor::twist`] / [`prelude::Tensor::flip`] act on chosen legs.
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+
+// permute: new codomain axes | new domain axes.
+let p = a.permute(&[0, 2], &[1, 3])?;
+assert_eq!((p.codomain_rank(), p.domain_rank()), (2, 2));
+
+// repartition: move the codomain/domain split, order preserved; invertible.
+let r = a.repartition(1)?;
+assert_eq!((r.codomain_rank(), r.domain_rank()), (1, 3));
+assert_eq!(r.repartition(2)?.data(), a.data());
+
+// transpose (planar), adjoint (dagger), twist and flip on chosen legs.
+let _t = a.transpose()?;
+let h = a.adjoint()?;
+assert_eq!((h.codomain_rank(), h.domain_rank()), (2, 2));
+let _twisted = a.twist(&[0])?;
+let _flipped = a.flip(&[0])?;
+# Ok::<(), Error>(())
+```
+
+### Sectors and space algebra
+
+A [`prelude::Space`] carries `(sector, degeneracy)` content queried through
+[`prelude::Tensor`]-free space methods: [`prelude::Space::sectors`],
+[`prelude::Space::degeneracy`] (TensorKit `dim(V, c)`),
+[`prelude::Space::has_sector`] (TensorKit `hassector`),
+[`prelude::Space::fuse`] (`⊗`), and [`prelude::Space::oplus`] (`⊕`). SU(3)
+irreps do not fit the [`prelude::SectorLabel`] enum, so they read back through
+[`prelude::Space::su3_sectors`] / `su3_degeneracy` as `(p, q)` Dynkin labels.
+
+```rust
+use tenet::prelude::*;
+
+let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+
+// Enumerate sectors and query membership / degeneracy.
+assert_eq!(v.sectors().len(), 3);
+assert_eq!(v.degeneracy(SectorLabel::U1(0)), Some(3));
+assert!(v.has_sector(SectorLabel::U1(1)));
+assert!(!v.has_sector(SectorLabel::U1(9)));
+
+// fuse (⊗) collapses two legs; oplus (⊕) sums per-sector degeneracies.
+let w = Space::u1([(0, 1), (1, 1)]);
+assert_eq!(v.fuse(&w)?.dim(), v.dim() * w.dim());
+assert_eq!(v.oplus(&w)?.degeneracy(SectorLabel::U1(0)), Some(3 + 1));
+
+// SU(2) dims are quantum-dimension weighted; SU(3) reads back (p, q) irreps.
+let s = Space::su2([(0, 1), (1, 1)]);          // spin 0 ⊕ spin 1/2
+assert_eq!(s.dim(), 1 + 2);
+let fundamental = Space::su3([((1, 0), 1)])?;  // the 3
+assert_eq!(fundamental.su3_sectors()?, vec![((1, 0), 1)]);
+# Ok::<(), Error>(())
+```
+
+For the complete TensorKit-name lookup — every user-facing 0.17 export, its
+TeNeT name, and the rationale for anything spelled or gated differently — see
+`docs/tk_api_parity.md`.
+
+## 4. Decompositions
 
 All decomposition names follow TensorKit 0.17 / MatrixAlgebraKit, applied
 per coupled sector across the codomain | domain split:
@@ -431,7 +548,7 @@ For the QR path, the compact factor obeys the usual isometry relation:
 </math>
 </div>
 
-## 4. Worked Example: a U(1) Two-Site Imaginary-Time Step
+## 5. Worked Example: a U(1) Two-Site Imaginary-Time Step
 
 The simple-update kernel: apply the two-site imaginary-time gate to a
 two-site wavefunction, regroup the legs around the bond, and truncate the
@@ -523,7 +640,7 @@ println!("truncation error: {:.3e}", svd.error);
 In a real simple-update loop this step runs once per bond per sweep, with
 the stored bond weights absorbed and re-extracted around each gate.
 
-## 5. Under the Hood: the Expert Layers
+## 6. Under the Hood: the Expert Layers
 
 The user layer is a thin, rule-erased face over four expert modules:
 
@@ -610,12 +727,60 @@ Two details when translating Julia examples: Julia is one-based, TeNeT
 axis lists are zero-based; and TensorKit hides flat block storage behind
 array syntax, while [`prelude::Tensor::data`] shows it directly.
 
-For the full mapping (including storage invariants and per-function
-correspondences), see `docs/tensorkit_compatibility_table.md`; for the
-user-layer design decisions (why `Runtime`, why no einsum strings, why no
-index objects), see `docs/user_api_design.md`.
+For the per-export lookup table (every user-facing TensorKit 0.17 function,
+its TeNeT name, and why anything differs), see `docs/tk_api_parity.md`. For the
+internal naming correspondences and storage invariants, see
+`docs/tensorkit_compatibility_table.md`; for the user-layer design decisions
+(why `Runtime`, why no einsum strings, why no index objects), see
+`docs/user_api_design.md`.
 
-## 6. Current Limitations
+## 7. Runtime, backends, and performance
+
+A [`prelude::Runtime`] is built once with [`prelude::RuntimeBuilder`] and then
+carried implicitly by every tensor made from it. The builder is where you pick
+execution policy — none of it appears in everyday op code:
+
+- **Device.** `Runtime::builder().cuda(device)` selects CUDA storage (phase 1;
+  see the limitations below). The default is the host CPU backend.
+- **Dense backends.** [`prelude::RuntimeBuilder::linalg_backend`] /
+  `gemm_backend` ([`prelude::LinalgBackend`]) and `transpose_backend`
+  ([`prelude::TransposeBackend`]) choose the dense GEMM / transpose kernels.
+  Backends are first-class and selectable, never hardcoded — see
+  `docs/backend_policy.md`.
+- **Threads.** `dense_threads` sizes the dense executor pool and
+  `recoupling_threads` the tree-transform recoupling. Ops on a shared
+  `Runtime` scale with outer threads: each standalone op leases a per-rule
+  context (and a dense executor for factorizations) and runs lock-free, so a
+  `Runtime` is cheap to `clone` across threads.
+- **Plan cache.** The `tensor!` frontend caches contraction plans keyed by
+  network topology ([`prelude::PlanCacheConfig`] / [`prelude::Optimizer`] /
+  [`prelude::ReplanPolicy`], set via `plan_cache` / `optimizer`). Reusing the
+  same runtime across repeated contractions of the same shape (an iTEBD/CTMRG
+  sweep) reuses the cached order and the warm per-rule structural caches.
+
+```rust
+use tenet::prelude::*;
+
+// A runtime with an explicit dense-thread budget and a plan-cache policy.
+let rt = Runtime::builder()
+    .dense_threads(4)
+    .plan_cache(PlanCacheConfig::default())
+    .build()?;
+let v = Space::u1([(0, 2), (1, 1)]);
+let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+assert!(a.runtime().shares_state_with(&rt));
+# Ok::<(), Error>(())
+```
+
+**Performance notes.** The hot loop wants a shared, reused `Runtime`: the plan
+cache amortizes order search, and the per-rule recoupling/structure caches warm
+up on first use and stay warm. Prefer `compose` / the `tensor!` macro over
+hand-spelling `contract` axis lists when the categorical composition is what you
+mean (it can skip the fermionic twist). Truncated factorizations are
+quantum-dimension weighted, so a `Rank(n)` budget bounds the *weighted* bond
+dimension — size budgets against `Space::dim`, not raw sector counts.
+
+## 8. Current Limitations
 
 Honest list, as of this writing:
 

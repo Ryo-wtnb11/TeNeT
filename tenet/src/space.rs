@@ -23,14 +23,25 @@ pub enum SectorLabel {
     /// Fermion parity (`0` even, `1` odd), as passed to [`Space::fz2`].
     FZ2(u8),
     /// SU(2) spin as `twice_spin = 2j`, as passed to [`Space::su2`].
-    SU2 { twice_spin: usize },
+    SU2 {
+        /// Twice the spin, `2j` (integer).
+        twice_spin: usize,
+    },
     /// U(1) x fermion-parity product sector, as passed to [`Space::product`].
-    U1FZ2 { charge: i32, parity: u8 },
+    U1FZ2 {
+        /// U(1) charge.
+        charge: i32,
+        /// Fermion parity (`0` even, `1` odd).
+        parity: u8,
+    },
     /// fZ2 x U(1) x SU(2) triple-product sector, as passed to
     /// [`Space::fz2_u1_su2`].
     FZ2U1SU2 {
+        /// Fermion parity (`0` even, `1` odd).
         parity: u8,
+        /// U(1) charge.
         charge: i32,
+        /// Twice the spin, `2j` (integer).
         twice_spin: usize,
     },
     // NOTE: no SU(3) variant. Adding one would break every downstream
@@ -643,6 +654,14 @@ impl Space {
             .map(|&(_, deg)| deg)
     }
 
+    /// Whether this space carries the given (external) sector label with
+    /// nonzero degeneracy (TensorKit `hassector`). For SU(3), probe with
+    /// [`Self::su3_degeneracy`] instead (its `(p, q)` irreps do not fit
+    /// [`SectorLabel`]).
+    pub fn has_sector(&self, label: SectorLabel) -> bool {
+        self.degeneracy(label).is_some()
+    }
+
     /// SU(3) sector read-back: the `((p, q), degeneracy)` content of an SU(3)
     /// space in the same `(p, q)` Dynkin-label form [`Self::su3`] accepts,
     /// sorted by internal sector id (external sectors, as [`Self::sectors`]).
@@ -770,6 +789,39 @@ impl Space {
         Ok(fused)
     }
 
+    /// The direct sum `V ⊕ W` (TensorKit `oplus`): the degeneracy of each
+    /// sector is the sum of its degeneracies in the two summands, with sectors
+    /// present in only one summand carried over unchanged. Both spaces must
+    /// share the same fusion rule and duality — a direct sum of oppositely
+    /// oriented spaces is ill-defined, so dualize one first.
+    ///
+    /// Errors with [`Error::RuleMismatch`] on differing rules and
+    /// [`Error::InvalidArgument`] on differing duality.
+    pub fn oplus(&self, other: &Space) -> Result<Space, Error> {
+        if !self.same_rule(other) {
+            return Err(Error::RuleMismatch);
+        }
+        if self.dual != other.dual {
+            return Err(Error::InvalidArgument(
+                "oplus: cannot direct-sum spaces of opposite duality (dualize one first)".into(),
+            ));
+        }
+        let mut sectors = self.sectors.clone();
+        for &(sector, deg) in &other.sectors {
+            match sectors.iter_mut().find(|(s, _)| *s == sector) {
+                Some(entry) => entry.1 += deg,
+                None => sectors.push((sector, deg)),
+            }
+        }
+        sectors.retain(|&(_, deg)| deg > 0);
+        sectors.sort_by_key(|(sector, _)| *sector);
+        Ok(Space {
+            context: Arc::clone(&self.context),
+            sectors,
+            dual: self.dual,
+        })
+    }
+
     /// Lowers this space to the expert-layer [`SectorLeg`] (sector,
     /// degeneracy and dual content carried verbatim).
     pub(crate) fn sector_leg(&self) -> SectorLeg {
@@ -824,5 +876,43 @@ mod provider_context_tests {
         assert!(Arc::ptr_eq(&source.context, &dual.context));
         assert!(Arc::ptr_eq(&source.context, &rebuilt.context));
         assert!(Arc::ptr_eq(&source.context, &fused.context));
+    }
+}
+
+#[cfg(test)]
+mod tk_space_api_tests {
+    use super::*;
+
+    #[test]
+    fn has_sector_tracks_membership() {
+        // What: has_sector agrees with degeneracy presence, including absent labels.
+        let v = Space::u1([(-1, 2), (0, 3)]);
+        assert!(v.has_sector(SectorLabel::U1(0)));
+        assert!(!v.has_sector(SectorLabel::U1(5)));
+        // A label from a different rule never matches.
+        assert!(!v.has_sector(SectorLabel::Z2(0)));
+    }
+
+    #[test]
+    fn oplus_sums_degeneracies_per_sector() {
+        // What: V ⊕ W adds shared-sector degeneracies and unions the rest.
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let w = Space::u1([(1, 3), (2, 4)]);
+        let sum = v.oplus(&w).unwrap();
+        assert_eq!(sum.degeneracy(SectorLabel::U1(0)), Some(2));
+        assert_eq!(sum.degeneracy(SectorLabel::U1(1)), Some(4));
+        assert_eq!(sum.degeneracy(SectorLabel::U1(2)), Some(4));
+        assert_eq!(sum.dim(), v.dim() + w.dim());
+    }
+
+    #[test]
+    fn oplus_rejects_rule_and_duality_mismatch() {
+        // What: direct sum is undefined across rules or opposite orientation.
+        let v = Space::u1([(0, 1)]);
+        assert!(matches!(
+            v.oplus(&Space::z2([(0, 1)])),
+            Err(Error::RuleMismatch)
+        ));
+        assert!(matches!(v.oplus(&v.dual()), Err(Error::InvalidArgument(_))));
     }
 }
