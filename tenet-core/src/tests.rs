@@ -1,3 +1,23 @@
+/// Test-only synchronization for tenet-core's process-global intern tables
+/// (block-structure content/arc tables, the hom-space intern table).
+///
+/// Why-not (the alternatives this replaces): a per-test-file `#[serial]`
+/// dependency would serialize this whole (large) test module for the sake of
+/// a handful of tests; making the tables test-scoped (thread-local, or wiped
+/// between tests) would stop exercising the process-global design these
+/// tables actually ship with, and would hide the exact "concurrent
+/// reset/flood lands between two reads" bugs this suite exists to catch
+/// (see tenet-tensors #169, #172 for the shape of the bug).
+///
+/// So: one process-wide `Mutex`, taken by every test that either mutates
+/// shared intern-table state (`reset_core_intern_tables`, LRU-cap floods) or
+/// asserts on it (`Arc::ptr_eq` of interned values, table lengths, content
+/// ids). Poison-tolerant: a panicking test must not cascade spurious
+/// failures onto every other test sharing the lock.
+pub(crate) mod test_support {
+    pub(crate) static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 mod tests {
     use super::*;
     use smallvec::smallvec;
@@ -7485,6 +7505,12 @@ mod tests {
 
     #[test]
     fn hom_space_id_remains_semantic_after_intern_eviction() {
+        // What: floods the shared hom-space intern table past its cap, which
+        // races `concurrent_equal_hom_spaces_share_semantic_identity` (asserts
+        // ptr_eq on entries of that same table) if both run concurrently.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let build = || {
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([u1_leg(17, 2, false)]),
@@ -7512,6 +7538,13 @@ mod tests {
 
     #[test]
     fn concurrent_equal_hom_spaces_share_semantic_identity() {
+        // What: asserts ptr_eq across concurrently-built identical hom spaces
+        // in the shared intern table; a concurrent flood from
+        // `hom_space_id_remains_semantic_after_intern_eviction` could evict an
+        // entry mid-build and hand a later thread a fresh (non-aliased) Arc.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ids = std::thread::scope(|scope| {
             (0..8)
                 .map(|_| {
@@ -7544,6 +7577,14 @@ mod tests {
 
     #[test]
     fn block_structure_intern_tables_plateau_under_distinct_growth() {
+        // What: floods the shared block-structure intern/arc tables. Bounded
+        // (`<=`) rather than exact-cap assertion below, so this no longer
+        // needs the lock to pass — but it takes it anyway (uniform with the
+        // other resetters/flooders below) since it's still a large flood of
+        // shared state that could otherwise perturb a stricter sibling test.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Interning far more distinct structures than the cap must leave the
         // capped tables pinned at the cap. Before the LRU cap they grew linearly.
         let overflow = BLOCK_STRUCTURE_INTERN_CAP + 256;
@@ -7564,6 +7605,12 @@ mod tests {
 
     #[test]
     fn evicted_block_structure_content_reinterns_with_fresh_id() {
+        // What: floods the shared block-structure intern table to force an
+        // eviction. Takes the lock alongside the table's other flooder/resetter
+        // for the same reason as the plateau test above.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Pinned invariant: an id is NEVER reused. An evicted content that is
         // re-interned gets a strictly greater id (monotonic counter), so a
         // downstream cache keyed by the old id can never be aliased by it.
@@ -7584,6 +7631,12 @@ mod tests {
 
     #[test]
     fn reset_core_intern_tables_clears_without_reusing_ids() {
+        // What: calls `reset_core_intern_tables` directly — the resetter half
+        // of this species. Takes the shared lock so it can't wipe the table
+        // out from under the flood/plateau tests above mid-run.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Reset coherence: content ids issued after a reset must exceed any
         // issued before it (the counter is not reset), so a tensors-layer key
         // still holding a pre-reset id can never alias post-reset content.
