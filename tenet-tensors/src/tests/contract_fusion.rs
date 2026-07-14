@@ -3732,6 +3732,76 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     }
 }
 
+#[test]
+fn tensorcontract_fusion_product_no_twist_identity_rhs_is_borrowed() {
+    let left_rule = FpU1Rule::default();
+    let rule = FpU1Su2Rule::default();
+    let odd_charge = left_rule.encode_sector(SectorId::new(1), U1Irrep::new(0).sector_id());
+    let odd = rule.encode_sector(odd_charge, SU2Irrep::from_twice_spin(0).sector_id());
+    let matrix_hom = || {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]),
+        )
+    };
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        matrix_hom(),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        matrix_hom(),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(odd, 1)], false),
+                SectorLeg::new([(odd, 1)], true),
+            ]),
+            FusionProductSpace::new([]),
+        ),
+        &rule,
+        [vec![1, 1]],
+    )
+    .unwrap();
+    let lhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![2.0], lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![3.0], rhs_space).unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::from_vec_with_fusion_space(vec![5.0], dst_space).unwrap();
+    let lhs_before = lhs.data().to_vec();
+    let rhs_before = rhs.data().to_vec();
+    let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
+    let mut profile = TensorContractFusionProfile::default();
+
+    context
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            2.0,
+            3.0,
+            &mut profile,
+        )
+        .unwrap();
+
+    // What: only the output repartitions; the canonical nondual product RHS
+    // is read directly while alpha and beta remain on their original writes.
+    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    assert_eq!(profile.rhs_transform_calls, 0);
+    assert_eq!(profile.output_transform_calls, 1);
+    assert_eq!(dst.data(), &[27.0]);
+    assert_eq!(lhs.data(), lhs_before);
+    assert_eq!(rhs.data(), rhs_before);
+}
+
 fn copy_blocks_between_layouts(dst: &mut TensorMap<f64, 2, 2>, src: &TensorMap<f64, 2, 2>) {
     let dst_structure = std::sync::Arc::clone(dst.structure());
     let src_structure = std::sync::Arc::clone(src.structure());
