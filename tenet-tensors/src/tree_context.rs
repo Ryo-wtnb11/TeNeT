@@ -347,29 +347,21 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
-            rule,
-            operation,
-            dst_structure,
-            src_structure,
-            false,
-        )?;
-        replay_structure_overwrite(
-            backend,
-            workspace,
-            &structure,
+        self.compile_and_replay_overwrite(
+            |cache| {
+                cache.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+                    rule,
+                    operation,
+                    dst_structure,
+                    src_structure,
+                    false,
+                )
+            },
             dst_structure,
             src_structure,
             dst_data,
             src_data,
             alpha,
-            None,
         )
     }
 
@@ -501,29 +493,21 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
     {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
-            rule,
-            operation,
-            dst_structure,
-            src_structure,
-            storage_conjugate,
-        )?;
-        replay_structure_overwrite(
-            backend,
-            workspace,
-            &structure,
+        self.compile_and_replay_overwrite(
+            |cache| {
+                cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
+                    rule,
+                    operation,
+                    dst_structure,
+                    src_structure,
+                    storage_conjugate,
+                )
+            },
             dst_structure,
             src_structure,
             dst_data,
             src_data,
             alpha,
-            None,
         )
     }
 
@@ -587,18 +571,45 @@ where
         R: GenericRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
         C: GenericBraidScalar,
     {
+        self.compile_and_replay_overwrite(
+            |cache| {
+                cache.get_or_compile_tree_pair_structures_generic(
+                    rule,
+                    operation,
+                    dst_structure,
+                    src_structure,
+                )
+            },
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_and_replay_overwrite<F>(
+        &mut self,
+        compile: F,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        F: FnOnce(
+            &mut TreeTransformCache<C, RuleKey>,
+        ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>,
+    {
         let Self {
             backend,
             workspace,
             cache,
         } = self;
         cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair_structures_generic(
-            rule,
-            operation,
-            dst_structure,
-            src_structure,
-        )?;
+        let structure = compile(cache)?;
         replay_structure_overwrite(
             backend,
             workspace,

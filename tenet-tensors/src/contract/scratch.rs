@@ -479,6 +479,7 @@ mod tests {
 
     #[test]
     fn dynamic_fusion_scratch_same_shape_reuse_keeps_initialized_contents() {
+        // What: overwrite-only source scratch preserves initialized warm storage.
         let space = scratch_space(3);
         let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
         {
@@ -493,6 +494,7 @@ mod tests {
 
     #[test]
     fn dynamic_fusion_scratch_growth_initializes_only_the_new_tail() {
+        // What: growing overwrite scratch preserves its prefix and initializes its new tail.
         let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
         workspace
             .prepare_lhs(scratch_space(3))
@@ -507,6 +509,7 @@ mod tests {
 
     #[test]
     fn dynamic_fusion_destination_scratch_reuse_clears_dirty_contents() {
+        // What: accumulation destination scratch still clears every reused element.
         let space = scratch_space(3);
         let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
         workspace
@@ -586,6 +589,7 @@ mod tests {
 
     #[test]
     fn storage_source_scratch_same_shape_reuse_keeps_initialized_contents() {
+        // What: storage-backed overwrite scratch skips same-shape reset writes.
         let counts = Rc::new(RefCell::new(FillCounts::default()));
         let storage = TrackingStorage {
             counts: Rc::clone(&counts),
@@ -621,6 +625,7 @@ mod tests {
 
     #[test]
     fn storage_destination_scratch_same_shape_reuse_clears_dirty_contents() {
+        // What: storage-backed accumulation scratch retains its full reset contract.
         let counts = Rc::new(RefCell::new(FillCounts::default()));
         let storage = TrackingStorage {
             counts: Rc::clone(&counts),

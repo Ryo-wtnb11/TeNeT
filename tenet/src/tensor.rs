@@ -44,6 +44,21 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 
+#[cfg(test)]
+thread_local! {
+    static PERMUTE_PRE_REPLAY_POISON: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_permute_pre_replay_poison(is_poisoned: bool) {
+    PERMUTE_PRE_REPLAY_POISON.with(|observation| {
+        if observation.get().is_some() {
+            observation.set(Some(is_poisoned));
+        }
+    });
+}
+
 /// The scalar type a [`Tensor`] stores, fixed at construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Dtype {
@@ -5057,6 +5072,8 @@ impl TensorExecutionContext {
         // writes active and structurally inactive logical blocks itself.
         match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
             (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
+                #[cfg(test)]
+                observe_permute_pre_replay_poison(dst_data.iter().all(|value| value.is_nan()));
                 dispatch_prepared_permute_into(
                     self,
                     dst.space.as_ref(),
@@ -5069,6 +5086,12 @@ impl TensorExecutionContext {
                 )
             }
             (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
+                #[cfg(test)]
+                observe_permute_pre_replay_poison(
+                    dst_data
+                        .iter()
+                        .all(|value| value.re.is_nan() && value.im.is_nan()),
+                );
                 dispatch_prepared_permute_into(
                     self,
                     dst.space.as_ref(),
@@ -6620,6 +6643,28 @@ mod bound_provider_tests {
             .unwrap();
 
         assert!(dst.space.provider_matches_context_allocation(&before));
+    }
+
+    #[test]
+    fn permute_overwrite_forwards_poisoned_destination_to_replay() {
+        // What: the top-level destination boundary does not clear logical data
+        // before handing it to the explicit overwrite replay.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 17).unwrap();
+        let expected = source.permute(&[1], &[2, 0]).unwrap();
+        let mut destination = expected.scale(f64::NAN).unwrap();
+        let mut execution = TensorExecutionContext::for_runtime(&runtime).unwrap();
+
+        PERMUTE_PRE_REPLAY_POISON.with(|observation| observation.set(Some(false)));
+        execution
+            .permute_overwrite_into(&mut destination, &source, &[1], &[2, 0], Scalar::F64(1.0))
+            .unwrap();
+        let observed = PERMUTE_PRE_REPLAY_POISON.with(|observation| observation.replace(None));
+
+        assert_eq!(observed, Some(true));
+        assert_eq!(destination.data(), expected.data());
     }
 
     #[test]
