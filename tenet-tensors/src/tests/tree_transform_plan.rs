@@ -1920,6 +1920,25 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
     }
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
+
+    // What: the borrowed-operation accumulating entry point matches the typed
+    // facade without adding another compiled plan or structure.
+    cached.data_mut().fill(0.0);
+    context
+        .tree_transform_dyn_into_ref(
+            &rule,
+            &operation,
+            &dst_structure,
+            &src_structure,
+            cached.data_mut(),
+            src.data(),
+            2.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(cached.data(), expected.data());
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
 }
 
 #[test]
