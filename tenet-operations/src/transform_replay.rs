@@ -554,6 +554,87 @@ mod inactive_destination_tests {
     }
 
     #[test]
+    fn zero_extent_multi_profile_counts_match_serial_replay() {
+        let structure =
+            Arc::new(BlockStructure::packed_column_major(1, [vec![0], vec![0]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )],
+        )
+        .unwrap();
+        let mut serial = TreeTransformReplayProfile::default();
+        let mut threaded = TreeTransformReplayProfile::default();
+        for (profile, threads) in [(&mut serial, 1), (&mut threaded, 4)] {
+            tree_transform_structure_with_structural_recoupling_raw_profiled(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &structure,
+                &structure,
+                &mut [],
+                &[],
+                1.0,
+                0.0,
+                threads,
+                profile,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(threaded.multi_blocks, serial.multi_blocks);
+        assert_eq!(threaded.packed_columns, serial.packed_columns);
+        assert_eq!(threaded.scattered_columns, serial.scattered_columns);
+        assert_eq!(threaded.packed_columns, 2);
+        assert_eq!(threaded.scattered_columns, 2);
+    }
+
+    #[test]
+    fn threaded_multi_scatter_falls_back_for_interleaved_destinations() {
+        let src_structure =
+            Arc::new(BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap());
+        let dst_structure = Arc::new(custom_structure(vec![block(0, 2, 2, 0), block(1, 2, 2, 1)]));
+        let transform = TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )],
+        )
+        .unwrap();
+        assert!(!transform.parallel_schedule().scatter_slice_disjoint);
+        let src = [1.0, 2.0, 3.0, 4.0];
+        let mut serial = [10.0, 20.0, 30.0, 40.0];
+        let mut threaded = serial;
+        for (dst, threads) in [(&mut serial[..], 1), (&mut threaded[..], 4)] {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &dst_structure,
+                &src_structure,
+                dst,
+                &src,
+                1.0,
+                0.5,
+                threads,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(threaded, serial);
+        assert_eq!(threaded, [6.0, 13.0, 17.0, 24.0]);
+    }
+
+    #[test]
     fn many_range_connected_interleaved_destinations_are_valid() {
         let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
         let dst_structure =

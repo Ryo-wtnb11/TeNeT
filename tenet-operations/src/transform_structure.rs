@@ -1232,15 +1232,18 @@ mod tests {
         };
         let dst = BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 2)]).unwrap();
         let src = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
-        let specs = [
-            TreeTransformBlockSpec::single(0, 0, 1.0),
-            TreeTransformBlockSpec::single(1, 1, -1.0),
-        ];
+        let specs = [TreeTransformBlockSpec::multi(
+            vec![0, 1],
+            vec![0, 1],
+            vec![1.0, 0.0, 0.0, 1.0],
+        )];
 
         let first = TreeTransformStructure::compile_structures(&dst, &src, &specs).unwrap();
         let second = TreeTransformStructure::compile_structures(&dst, &src, &specs).unwrap();
 
         assert_eq!(first.parallel_schedule(), second.parallel_schedule());
+        assert_eq!(first.parallel_schedule().pack_columns.len(), 2);
+        assert_eq!(first.parallel_schedule().scatter_columns.len(), 2);
         assert_eq!(first.blocks(), second.blocks());
         assert_eq!(first.layouts(), second.layouts());
         assert_eq!(
