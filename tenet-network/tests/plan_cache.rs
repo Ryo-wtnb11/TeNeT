@@ -265,6 +265,46 @@ fn persisted_orders_round_trip_and_reject_stale() {
     assert_eq!(load_plan_cache(&rt3, &stale), 0);
 }
 
+/// `save_plan_cache` iterates a `HashMap` internally; without sorting by
+/// topology key at save time, two runtimes holding the same persisted
+/// entries but built in a different insertion order could serialize to
+/// different byte strings (breaks reproducible builds / content-addressed
+/// cache blobs, issue #151). Populate the same three topologies in reverse
+/// order across two runtimes and assert the saved blobs are byte-identical.
+#[test]
+fn save_plan_cache_output_is_order_independent() {
+    use tenet_network::{load_plan_cache, save_plan_cache};
+
+    fn populate(rt: &Runtime, order: [u8; 3]) {
+        assert_eq!(load_plan_cache(rt, ""), 0); // opt into persistence
+        let (a, b) = chain(rt, 3, 601);
+        for topo_id in order {
+            match topo_id {
+                0 => {
+                    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+                }
+                1 => {
+                    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+                }
+                2 => {
+                    let _ = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l]).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    let rt1 = Runtime::builder().build().unwrap();
+    populate(&rt1, [0, 1, 2]);
+    let rt2 = Runtime::builder().build().unwrap();
+    populate(&rt2, [2, 0, 1]);
+
+    let blob1 = save_plan_cache(&rt1);
+    let blob2 = save_plan_cache(&rt2);
+    assert_eq!(blob1.matches("TOPO ").count(), 3);
+    assert_eq!(blob1, blob2);
+}
+
 #[test]
 fn different_topologies_get_separate_entries() {
     let rt = Runtime::builder().build().unwrap();
