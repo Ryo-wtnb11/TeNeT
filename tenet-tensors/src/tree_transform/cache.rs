@@ -15,8 +15,8 @@ use tenet_core::{
 };
 
 use crate::cache::{
-    operation_global_registry, rebuild_lru_order_from_keys, touch_lru_key, typed_global_map,
-    OperationCachePolicy, TreeTransformStructureCacheKey,
+    rebuild_lru_order_from_keys, touch_lru_key, typed_global_map, OperationCachePolicy,
+    TreeTransformStructureCacheKey,
 };
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
@@ -276,7 +276,7 @@ where
     T: 'static + Send + Sync,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    typed_global_map(operation_global_registry())
+    typed_global_map()
 }
 
 fn global_tree_transform_structures<T, RuleKey>() -> Arc<GlobalTreeTransformStructureMap<T, RuleKey>>
@@ -284,7 +284,7 @@ where
     T: 'static + Send + Sync,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    typed_global_map(operation_global_registry())
+    typed_global_map()
 }
 
 fn global_tree_pair_rows<T, RuleKey>() -> Arc<GlobalTreePairRowMemo<T, RuleKey>>
@@ -292,7 +292,7 @@ where
     T: 'static + Send + Sync,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    typed_global_map(operation_global_registry())
+    typed_global_map()
 }
 
 fn global_all_codomain_rows<T, RuleKey>() -> Arc<GlobalAllCodomainRowMemo<T, RuleKey>>
@@ -300,7 +300,7 @@ where
     T: 'static + Send + Sync,
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    typed_global_map(operation_global_registry())
+    typed_global_map()
 }
 
 const TREE_PLAN_CACHE_MAGIC: &[u8] = b"TENET_TREE_PLAN_CACHE";

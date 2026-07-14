@@ -1,4 +1,3 @@
-use std::any::{Any, TypeId};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -10,7 +9,7 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, RuleIdentity,
 };
 
-use crate::cache::operation_global_registry;
+use crate::cache::registered_operation_cache;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::TensorContractSpec;
 
@@ -120,25 +119,7 @@ const SCRATCH_STRUCTURE_CACHE_CAP: usize = 8192;
 /// because the map and its LRU order must share one lock, mirroring the adjoint
 /// cache accessor.
 fn scratch_structure_cache() -> Arc<RwLock<ScratchStructureCache>> {
-    let registry = operation_global_registry();
-    let type_id = TypeId::of::<ScratchStructureCache>();
-    if let Some(cache) = registry
-        .read()
-        .expect("global cache registry poisoned")
-        .get(&type_id)
-    {
-        return Arc::downcast::<RwLock<ScratchStructureCache>>(Arc::clone(cache))
-            .expect("scratch structure cache type id collision");
-    }
-    let mut caches = registry.write().expect("global cache registry poisoned");
-    if let Some(cache) = caches.get(&type_id) {
-        return Arc::downcast::<RwLock<ScratchStructureCache>>(Arc::clone(cache))
-            .expect("scratch structure cache type id collision");
-    }
-    let cache: Arc<RwLock<ScratchStructureCache>> =
-        Arc::new(RwLock::new(ScratchStructureCache::default()));
-    caches.insert(type_id, Arc::clone(&cache) as Arc<dyn Any + Send + Sync>);
-    cache
+    registered_operation_cache::<RwLock<ScratchStructureCache>>().1
 }
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch

@@ -9,8 +9,8 @@ use tenet_core::{
 };
 
 use crate::cache::{
-    operation_global_registry, typed_global_map, OperationCachePolicy,
-    TensorContractStructureCache, TensorContractStructureCacheKey,
+    typed_global_map, OperationCachePolicy, TensorContractStructureCache,
+    TensorContractStructureCacheKey,
 };
 use crate::lowering::adjoint_fusion_space_view;
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -46,7 +46,7 @@ fn global_tensor_contract_structures<PlanKey>() -> Arc<GlobalTensorContractStruc
 where
     PlanKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    typed_global_map(operation_global_registry())
+    typed_global_map()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
