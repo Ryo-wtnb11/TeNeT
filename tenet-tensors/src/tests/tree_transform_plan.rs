@@ -1050,6 +1050,69 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
 }
 
 #[test]
+fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
+    // What: a SU(2) 2|2 -> 3|1 split-only braid compiles to the direct
+    // repartition row identically through serial, parallel, and warm-memo plan
+    // construction.
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+    };
+
+    let source = FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 2],
+        [2, 1],
+        Some(1),
+        [false, true],
+        [true, false],
+        [],
+        [],
+        [1],
+        [1],
+    );
+    let source_key = BlockKey::from(source.clone());
+    let source_structure = packed_fixture_structure(4, [(source_key, vec![1usize; 4])]).unwrap();
+    let operation = TreeTransformOperation::braid([0, 1, 3], [2], [0, 1], [2, 3]);
+    let expected = multiplicity_free_repartition_tree_pair(&SU2FusionRule, &source, 3).unwrap();
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+
+    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+            &SU2FusionRule,
+            &rule_key,
+            operation.clone(),
+            &source_structure,
+            memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        )
+        .unwrap();
+        (plan, hits, misses)
+    };
+
+    let mut serial_memo = TreePairRowMemo::default();
+    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
+    let mut parallel_memo = TreePairRowMemo::default();
+    let (parallel, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
+    assert_eq!(parallel, serial);
+    assert_eq!(
+        (parallel_hits, parallel_misses),
+        (serial_hits, serial_misses)
+    );
+    assert_eq!((serial_hits, serial_misses), (0, 1));
+
+    let spec = &serial.specs()[0];
+    assert_eq!(spec.dst_keys(), &[BlockKey::from(expected[0].0.clone())]);
+    assert!((spec.recoupling_coefficients_dst_src()[0] - expected[0].1).abs() < 1.0e-12);
+
+    let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
+    assert_eq!(warm, serial);
+    assert_eq!((warm_hits, warm_misses), (1, 0));
+}
+
+#[test]
 fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     // What: an identity operation over a multi-tree SU2 fusion group compiles
     // to independent direct copies, not one identity-matrix recoupling job.

@@ -1726,6 +1726,50 @@ mod tests {
     }
 
     #[test]
+    fn split_only_tree_pair_braid_handles_empty_split_boundaries() {
+        // What: the two extreme repartitions 0|2 -> 2|0 and 2|0 -> 0|2
+        // preserve the same keys, dual flags, and coefficients as the direct
+        // primitive, including an empty codomain or domain tree.
+        let all_domain = FusionTreeBlockKey::pair_from_sector_ids(
+            [],
+            [1, 1],
+            Some(0),
+            [],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        );
+        let to_codomain = multiplicity_free_braid_tree_pair(
+            &SU2FusionRule,
+            &all_domain,
+            &[1, 0],
+            &[],
+            &[],
+            &[0, 1],
+        )
+        .unwrap();
+        let expected_codomain =
+            multiplicity_free_repartition_tree_pair(&SU2FusionRule, &all_domain, 2).unwrap();
+        assert_eq!(to_codomain, expected_codomain);
+
+        let all_codomain = &to_codomain[0].0;
+        let to_domain = multiplicity_free_braid_tree_pair(
+            &SU2FusionRule,
+            all_codomain,
+            &[],
+            &[1, 0],
+            &[0, 1],
+            &[],
+        )
+        .unwrap();
+        let expected_domain =
+            multiplicity_free_repartition_tree_pair(&SU2FusionRule, all_codomain, 0).unwrap();
+        assert_eq!(to_domain, expected_domain);
+    }
+
+    #[test]
     fn split_only_nested_product_braid_matches_direct_repartition() {
         // What: a non-Abelian fZ2 x U(1) x SU(2) tree preserves the product
         // bend phase and duality bookkeeping when only its 1|2 split changes.
