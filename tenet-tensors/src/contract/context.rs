@@ -1950,7 +1950,6 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        dst.data_mut().fill(D::zero());
         let src_fusion = src
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
@@ -1969,15 +1968,15 @@ where
                 &src_replay_structure,
                 source_conjugate,
             )?;
-        self.tree_context.tree_transform_structure_into_raw(
-            structure.as_ref(),
-            &dst_structure,
-            &src_replay_structure,
-            dst.data_mut(),
-            src.data(),
-            D::one(),
-            D::zero(),
-        )
+        self.tree_context
+            .tree_transform_structure_overwrite_into_raw(
+                structure.as_ref(),
+                &dst_structure,
+                &src_replay_structure,
+                dst.data_mut(),
+                src.data(),
+                D::one(),
+            )
     }
 }
 

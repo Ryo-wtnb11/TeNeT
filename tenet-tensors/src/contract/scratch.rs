@@ -33,14 +33,19 @@ where
         self.data.fill(T::zero());
     }
 
-    /// Re-points this scratch at a different space, reusing the existing
-    /// buffer's capacity instead of allocating a fresh one. `resize_filled`
-    /// only reallocates when the new length exceeds the current capacity, so a
-    /// slot cycled through many contraction shapes grows once to the largest
-    /// size seen and is then reused — collapsing the per-eval realloc / page
-    /// churn (madvise/bzero) that a fresh allocation on every space change
-    /// caused. The whole buffer is zeroed since `resize_filled` only fills the
-    /// grown tail.
+    /// Re-points an overwrite-only source scratch at a different space while
+    /// preserving initialized storage and filling only a newly grown tail.
+    pub(crate) fn reset_for_overwrite(
+        &mut self,
+        space: Arc<DynamicFusionMapSpace>,
+    ) -> Result<(), OperationError> {
+        let len = space.required_len()?;
+        self.space = space;
+        self.data.resize_filled(len, T::zero());
+        Ok(())
+    }
+
+    /// Re-points accumulation scratch and restores a logical zero destination.
     pub(crate) fn reset(
         &mut self,
         space: Arc<DynamicFusionMapSpace>,
@@ -107,21 +112,21 @@ where
         &mut self,
         space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
-        prepare_scratch_slot(&mut self.lhs, space)
+        prepare_overwrite_scratch_slot(&mut self.lhs, space)
     }
 
     pub(crate) fn prepare_rhs(
         &mut self,
         space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
-        prepare_scratch_slot(&mut self.rhs, space)
+        prepare_overwrite_scratch_slot(&mut self.rhs, space)
     }
 
     pub(crate) fn prepare_dst(
         &mut self,
         space: Arc<DynamicFusionMapSpace>,
     ) -> Result<&mut DynamicFusionScratch<T>, OperationError> {
-        prepare_scratch_slot(&mut self.dst, space)
+        prepare_zeroed_scratch_slot(&mut self.dst, space)
     }
 
     pub(crate) fn lhs(&self) -> &DynamicFusionScratch<T> {
@@ -274,24 +279,7 @@ impl<LhsScratch, RhsScratch, DstScratch>
         S: SimilarStorage<T, Similar = LhsScratch>,
         LhsScratch: ScratchStorage<T>,
     {
-        match &mut self.lhs {
-            Some(scratch)
-                if scratch.buffer().placement() == storage.placement()
-                    && (Arc::ptr_eq(&scratch.space, &space)
-                        || scratch.space.as_ref() == space.as_ref()) =>
-            {
-                scratch.reset_from_storage(space, storage, zero)?;
-            }
-            _ => {
-                self.lhs = Some(StorageDynamicFusionScratch::from_storage(
-                    space, storage, zero,
-                )?);
-            }
-        }
-        Ok(self
-            .lhs
-            .as_mut()
-            .expect("lhs storage dynamic scratch prepared before return"))
+        prepare_overwrite_storage_scratch_slot(&mut self.lhs, space, storage, zero)
     }
 
     pub(crate) fn prepare_rhs_from_storage<T, S>(
@@ -305,24 +293,7 @@ impl<LhsScratch, RhsScratch, DstScratch>
         S: SimilarStorage<T, Similar = RhsScratch>,
         RhsScratch: ScratchStorage<T>,
     {
-        match &mut self.rhs {
-            Some(scratch)
-                if scratch.buffer().placement() == storage.placement()
-                    && (Arc::ptr_eq(&scratch.space, &space)
-                        || scratch.space.as_ref() == space.as_ref()) =>
-            {
-                scratch.reset_from_storage(space, storage, zero)?;
-            }
-            _ => {
-                self.rhs = Some(StorageDynamicFusionScratch::from_storage(
-                    space, storage, zero,
-                )?);
-            }
-        }
-        Ok(self
-            .rhs
-            .as_mut()
-            .expect("rhs storage dynamic scratch prepared before return"))
+        prepare_overwrite_storage_scratch_slot(&mut self.rhs, space, storage, zero)
     }
 
     pub(crate) fn prepare_dst_from_storage<T, S>(
@@ -397,21 +368,50 @@ impl<LhsScratch, RhsScratch, DstScratch>
     }
 }
 
-fn prepare_scratch_slot<T>(
+fn prepare_overwrite_storage_scratch_slot<'a, T, S, Buf>(
+    slot: &'a mut Option<StorageDynamicFusionScratch<Buf>>,
+    space: Arc<DynamicFusionMapSpace>,
+    storage: &S,
+    zero: T,
+) -> Result<&'a mut StorageDynamicFusionScratch<Buf>, OperationError>
+where
+    T: Clone,
+    S: SimilarStorage<T, Similar = Buf>,
+    Buf: ScratchStorage<T>,
+{
+    // Why not reset an equivalent slot: explicit overwrite replay owns every
+    // logical destination, while a replacement is still required for placement
+    // or structural-space changes.
+    match slot {
+        Some(scratch)
+            if scratch.buffer().placement() == storage.placement()
+                && (Arc::ptr_eq(&scratch.space, &space)
+                    || scratch.space.as_ref() == space.as_ref()) => {}
+        _ => {
+            *slot = Some(StorageDynamicFusionScratch::from_storage(
+                space, storage, zero,
+            )?)
+        }
+    }
+    Ok(slot
+        .as_mut()
+        .expect("storage dynamic scratch prepared before return"))
+}
+
+fn prepare_overwrite_scratch_slot<T>(
     slot: &mut Option<DynamicFusionScratch<T>>,
     space: Arc<DynamicFusionMapSpace>,
 ) -> Result<&mut DynamicFusionScratch<T>, OperationError>
 where
     T: Clone + Zero,
 {
+    // Why not clear reused storage: every caller immediately runs the explicit
+    // overwrite replay, which writes every logical destination itself.
     match slot {
         Some(scratch)
-            if Arc::ptr_eq(&scratch.space, &space) || scratch.space.as_ref() == space.as_ref() =>
-        {
-            scratch.fill_zero();
-        }
+            if Arc::ptr_eq(&scratch.space, &space) || scratch.space.as_ref() == space.as_ref() => {}
         Some(scratch) => {
-            scratch.reset(space)?;
+            scratch.reset_for_overwrite(space)?;
         }
         None => {
             *slot = Some(DynamicFusionScratch::zeroed(space)?);
@@ -422,11 +422,37 @@ where
         .expect("dynamic scratch slot prepared before return"))
 }
 
+fn prepare_zeroed_scratch_slot<T>(
+    slot: &mut Option<DynamicFusionScratch<T>>,
+    space: Arc<DynamicFusionMapSpace>,
+) -> Result<&mut DynamicFusionScratch<T>, OperationError>
+where
+    T: Clone + Zero,
+{
+    // Why not share the source helper: contraction accumulates into this slot,
+    // so stale initialized values are part of the arithmetic unless cleared.
+    match slot {
+        Some(scratch)
+            if Arc::ptr_eq(&scratch.space, &space) || scratch.space.as_ref() == space.as_ref() =>
+        {
+            scratch.fill_zero();
+        }
+        Some(scratch) => scratch.reset(space)?,
+        None => *slot = Some(DynamicFusionScratch::zeroed(space)?),
+    }
+    Ok(slot
+        .as_mut()
+        .expect("dynamic scratch slot prepared before return"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use tenet_core::{
         BlockStructure, FusionTensorMapSpace, FusionTreeHomSpace, SectorId, TensorMapSpace,
+        TensorStorage,
     };
 
     fn scratch_space(len: usize) -> Arc<DynamicFusionMapSpace> {
@@ -452,7 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_fusion_scratch_reuse_zeros_existing_buffer() {
+    fn dynamic_fusion_scratch_same_shape_reuse_keeps_initialized_contents() {
+        // What: overwrite-only source scratch preserves initialized warm storage.
         let space = scratch_space(3);
         let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
         {
@@ -462,6 +489,173 @@ mod tests {
 
         let scratch = workspace.prepare_lhs(space).unwrap();
 
+        assert_eq!(scratch.data(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn dynamic_fusion_scratch_growth_initializes_only_the_new_tail() {
+        // What: growing overwrite scratch preserves its prefix and initializes its new tail.
+        let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
+        workspace
+            .prepare_lhs(scratch_space(3))
+            .unwrap()
+            .data_mut()
+            .copy_from_slice(&[1.0, 2.0, 3.0]);
+
+        let scratch = workspace.prepare_lhs(scratch_space(5)).unwrap();
+
+        assert_eq!(scratch.data(), &[1.0, 2.0, 3.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn dynamic_fusion_destination_scratch_reuse_clears_dirty_contents() {
+        // What: accumulation destination scratch still clears every reused element.
+        let space = scratch_space(3);
+        let mut workspace = HostDynamicFusionScratchWorkspace::<f64>::default();
+        workspace
+            .prepare_dst(space.clone())
+            .unwrap()
+            .data_mut()
+            .fill(f64::NAN);
+
+        let scratch = workspace.prepare_dst(space).unwrap();
+
         assert_eq!(scratch.data(), &[0.0, 0.0, 0.0]);
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct FillCounts {
+        allocation_calls: usize,
+        allocation_elements: usize,
+        reset_calls: usize,
+        reset_elements: usize,
+    }
+
+    #[derive(Clone)]
+    struct TrackingStorage {
+        counts: Rc<RefCell<FillCounts>>,
+    }
+
+    struct TrackingScratch {
+        data: Vec<f64>,
+        counts: Rc<RefCell<FillCounts>>,
+    }
+
+    impl TensorStorage<f64> for TrackingStorage {
+        fn len(&self) -> usize {
+            0
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl SimilarStorage<f64> for TrackingStorage {
+        type Similar = TrackingScratch;
+
+        fn similar_filled(&self, len: usize, value: f64) -> Self::Similar {
+            let mut counts = self.counts.borrow_mut();
+            counts.allocation_calls += 1;
+            counts.allocation_elements += len;
+            drop(counts);
+            TrackingScratch {
+                data: vec![value; len],
+                counts: Rc::clone(&self.counts),
+            }
+        }
+    }
+
+    impl TensorStorage<f64> for TrackingScratch {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl ScratchStorage<f64> for TrackingScratch {
+        fn reset_filled(&mut self, len: usize, value: f64) {
+            let mut counts = self.counts.borrow_mut();
+            counts.reset_calls += 1;
+            counts.reset_elements += len;
+            drop(counts);
+            self.data.clear();
+            self.data.resize(len, value);
+        }
+    }
+
+    #[test]
+    fn storage_source_scratch_same_shape_reuse_keeps_initialized_contents() {
+        // What: storage-backed overwrite scratch skips same-shape reset writes.
+        let counts = Rc::new(RefCell::new(FillCounts::default()));
+        let storage = TrackingStorage {
+            counts: Rc::clone(&counts),
+        };
+        let space = scratch_space(3);
+        let mut workspace = StorageDynamicFusionScratchWorkspace::<
+            TrackingScratch,
+            TrackingScratch,
+            TrackingScratch,
+        >::default();
+        workspace
+            .prepare_lhs_from_storage(space.clone(), &storage, 0.0)
+            .unwrap()
+            .buffer_mut()
+            .data
+            .copy_from_slice(&[1.0, 2.0, 3.0]);
+
+        let scratch = workspace
+            .prepare_lhs_from_storage(space, &storage, 0.0)
+            .unwrap();
+
+        assert_eq!(scratch.buffer().data, [1.0, 2.0, 3.0]);
+        assert_eq!(
+            *counts.borrow(),
+            FillCounts {
+                allocation_calls: 1,
+                allocation_elements: 3,
+                reset_calls: 0,
+                reset_elements: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn storage_destination_scratch_same_shape_reuse_clears_dirty_contents() {
+        // What: storage-backed accumulation scratch retains its full reset contract.
+        let counts = Rc::new(RefCell::new(FillCounts::default()));
+        let storage = TrackingStorage {
+            counts: Rc::clone(&counts),
+        };
+        let space = scratch_space(3);
+        let mut workspace = StorageDynamicFusionScratchWorkspace::<
+            TrackingScratch,
+            TrackingScratch,
+            TrackingScratch,
+        >::default();
+        workspace
+            .prepare_dst_from_storage(space.clone(), &storage, 0.0)
+            .unwrap()
+            .buffer_mut()
+            .data
+            .fill(f64::NAN);
+
+        let scratch = workspace
+            .prepare_dst_from_storage(space, &storage, 0.0)
+            .unwrap();
+
+        assert_eq!(scratch.buffer().data, [0.0, 0.0, 0.0]);
+        assert_eq!(
+            *counts.borrow(),
+            FillCounts {
+                allocation_calls: 1,
+                allocation_elements: 3,
+                reset_calls: 1,
+                reset_elements: 3,
+            }
+        );
     }
 }

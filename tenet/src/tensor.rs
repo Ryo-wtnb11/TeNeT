@@ -44,6 +44,21 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 
+#[cfg(test)]
+thread_local! {
+    static PERMUTE_PRE_REPLAY_POISON: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_permute_pre_replay_poison(is_poisoned: bool) {
+    PERMUTE_PRE_REPLAY_POISON.with(|observation| {
+        if observation.get().is_some() {
+            observation.set(Some(is_poisoned));
+        }
+    });
+}
+
 /// The scalar type a [`Tensor`] stores, fixed at construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Dtype {
@@ -5053,11 +5068,12 @@ impl TensorExecutionContext {
         operation: PreparedPermuteOperation<'_>,
         expected: &DynamicFusionMapSpace,
     ) -> Result<(), Error> {
+        // Why not clear the destination here: the explicit overwrite replay
+        // writes active and structurally inactive logical blocks itself.
         match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
             (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
-                // Tree transforms can omit structural-zero destinations, so
-                // beta=0 cannot clear stale arena data by itself.
-                dst_data.fill(0.0);
+                #[cfg(test)]
+                observe_permute_pre_replay_poison(dst_data.iter().all(|value| value.is_nan()));
                 dispatch_prepared_permute_into(
                     self,
                     dst.space.as_ref(),
@@ -5067,11 +5083,15 @@ impl TensorExecutionContext {
                     src,
                     src_data,
                     alpha,
-                    0.0,
                 )
             }
             (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
-                dst_data.fill(Complex64::new(0.0, 0.0));
+                #[cfg(test)]
+                observe_permute_pre_replay_poison(
+                    dst_data
+                        .iter()
+                        .all(|value| value.re.is_nan() && value.im.is_nan()),
+                );
                 dispatch_prepared_permute_into(
                     self,
                     dst.space.as_ref(),
@@ -5081,7 +5101,6 @@ impl TensorExecutionContext {
                     src,
                     src_data,
                     alpha,
-                    Complex64::new(0.0, 0.0),
                 )
             }
             (None, _, _) => Err(Error::InvalidArgument(
@@ -5566,7 +5585,6 @@ fn permute_into_with_rule<R, D, Key>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = Key>,
@@ -5575,7 +5593,7 @@ where
 {
     D::ctx_of(contexts)
         .tree_context_mut()
-        .tree_transform_dyn_into_ref(
+        .tree_transform_dyn_overwrite_into_ref(
             rule,
             operation,
             dst_space.structure(),
@@ -5583,7 +5601,6 @@ where
             dst_data,
             src_data,
             alpha,
-            beta,
         )
         .map_err(Into::into)
 }
@@ -5598,14 +5615,13 @@ fn dispatch_prepared_permute_into<D: UserScalar>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error> {
     match operation {
         PreparedPermuteOperation::Owned(operation) => dispatch_permute_into(
-            context, authority, operation, dst_space, dst_data, src, src_data, alpha, beta,
+            context, authority, operation, dst_space, dst_data, src, src_data, alpha,
         ),
         PreparedPermuteOperation::Borrowed(operation) => dispatch_permute_into_ref(
-            context, authority, operation, dst_space, dst_data, src, src_data, alpha, beta,
+            context, authority, operation, dst_space, dst_data, src, src_data, alpha,
         ),
     }
 }
@@ -5620,12 +5636,11 @@ fn dispatch_permute_into<D: UserScalar>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error> {
     if let UserBoundSpace::Su3(space) = authority {
         return D::ctx_of(&mut context.su3)
             .tree_context_mut()
-            .tree_transform_dyn_into_generic(
+            .tree_transform_dyn_overwrite_into_generic(
                 space.provider(),
                 operation,
                 dst_space.structure(),
@@ -5633,12 +5648,11 @@ fn dispatch_permute_into<D: UserScalar>(
                 dst_data,
                 src_data,
                 alpha,
-                beta,
             )
             .map_err(Into::into);
     }
     dispatch_permute_into_ref(
-        context, authority, &operation, dst_space, dst_data, src, src_data, alpha, beta,
+        context, authority, &operation, dst_space, dst_data, src, src_data, alpha,
     )
 }
 
@@ -5652,12 +5666,11 @@ fn dispatch_permute_into_ref<D: UserScalar>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error> {
     macro_rules! apply {
         ($contexts:expr, $rule:expr) => {
             permute_into_with_rule(
-                $contexts, $rule, operation, dst_space, dst_data, src, src_data, alpha, beta,
+                $contexts, $rule, operation, dst_space, dst_data, src, src_data, alpha,
             )
         };
     }
@@ -5672,7 +5685,7 @@ fn dispatch_permute_into_ref<D: UserScalar>(
         }
         UserBoundSpace::Su3(space) => D::ctx_of(&mut context.su3)
             .tree_context_mut()
-            .tree_transform_dyn_into_generic(
+            .tree_transform_dyn_overwrite_into_generic(
                 space.provider(),
                 operation.clone(),
                 dst_space.structure(),
@@ -5680,7 +5693,6 @@ fn dispatch_permute_into_ref<D: UserScalar>(
                 dst_data,
                 src_data,
                 alpha,
-                beta,
             )
             .map_err(Into::into),
     }
@@ -6631,6 +6643,28 @@ mod bound_provider_tests {
             .unwrap();
 
         assert!(dst.space.provider_matches_context_allocation(&before));
+    }
+
+    #[test]
+    fn permute_overwrite_forwards_poisoned_destination_to_replay() {
+        // What: the top-level destination boundary does not clear logical data
+        // before handing it to the explicit overwrite replay.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 17).unwrap();
+        let expected = source.permute(&[1], &[2, 0]).unwrap();
+        let mut destination = expected.scale(f64::NAN).unwrap();
+        let mut execution = TensorExecutionContext::for_runtime(&runtime).unwrap();
+
+        PERMUTE_PRE_REPLAY_POISON.with(|observation| observation.set(Some(false)));
+        execution
+            .permute_overwrite_into(&mut destination, &source, &[1], &[2, 0], Scalar::F64(1.0))
+            .unwrap();
+        let observed = PERMUTE_PRE_REPLAY_POISON.with(|observation| observation.replace(None));
+
+        assert_eq!(observed, Some(true));
+        assert_eq!(destination.data(), expected.data());
     }
 
     #[test]

@@ -190,7 +190,11 @@ fn destination_dispatch_matches_owned_for_every_rule() {
         let mut contract_cache = ContractOverwriteCache::default();
         let mut permute_cache = PermuteOverwriteCache::default();
 
-        for _ in 0..2 {
+        for replay in 0..2 {
+            if replay != 0 {
+                contract_destination = contracted.scale(f64::NAN).unwrap();
+                permute_destination = permuted.scale(f64::NAN).unwrap();
+            }
             assert_eq!(
                 context
                     .try_contract_overwrite_into(
@@ -509,7 +513,12 @@ fn checked_permutation_cache_prepares_once_for_su3_c64() {
     let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
     let mut cache = PermuteOverwriteCache::default();
 
-    for _ in 0..2 {
+    for replay in 0..2 {
+        if replay != 0 {
+            destination = expected
+                .scale_c64(Complex64::new(f64::NAN, f64::NAN))
+                .unwrap();
+        }
         assert_eq!(
             context
                 .try_permute_overwrite_into(

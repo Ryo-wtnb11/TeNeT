@@ -160,7 +160,6 @@ where
         &lhs_replay_structure,
         plan.lhs_source_conjugate(),
         D::one(),
-        D::zero(),
     )?;
     tree_pair_transform_typed_to_dynamic(
         tree_backend,
@@ -172,7 +171,6 @@ where
         &rhs_replay_structure,
         plan.rhs_source_conjugate(),
         D::one(),
-        D::zero(),
     )?;
     {
         let rhs_scratch_space = rhs_core.space().clone();
@@ -383,27 +381,25 @@ where
     {
         let lhs_dst_structure = std::sync::Arc::clone(lhs_core_space.structure());
         let lhs_scratch = scratch.prepare_lhs(lhs_core_space.clone())?;
-        tree_context.tree_transform_structure_into_raw(
+        tree_context.tree_transform_structure_overwrite_into_raw(
             lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
             &lhs_transform.replay_structure,
             lhs_scratch.data_mut(),
             lhs_data,
             D::one(),
-            D::zero(),
         )?;
     }
     {
         let rhs_dst_structure = std::sync::Arc::clone(rhs_core_space.structure());
         let rhs_scratch = scratch.prepare_rhs(rhs_core_space.clone())?;
-        tree_context.tree_transform_structure_into_raw(
+        tree_context.tree_transform_structure_overwrite_into_raw(
             rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
             &rhs_transform.replay_structure,
             rhs_scratch.data_mut(),
             rhs_data,
             D::one(),
-            D::zero(),
         )?;
         apply_rhs_contract_twist(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
@@ -587,28 +583,26 @@ where
         let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
         let lhs_scratch =
             scratch.prepare_lhs_from_storage(lhs_space.clone(), lhs.storage(), D::zero())?;
-        tree_context.tree_transform_structure_into_raw(
+        tree_context.tree_transform_structure_overwrite_into_raw(
             lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
             &lhs_transform.replay_structure,
             lhs_scratch.buffer_mut().as_mut_slice(),
             lhs.data(),
             D::one(),
-            D::zero(),
         )?;
     }
     {
         let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
         let rhs_scratch =
             scratch.prepare_rhs_from_storage(rhs_space.clone(), rhs.storage(), D::zero())?;
-        tree_context.tree_transform_structure_into_raw(
+        tree_context.tree_transform_structure_overwrite_into_raw(
             rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
             &rhs_transform.replay_structure,
             rhs_scratch.buffer_mut().as_mut_slice(),
             rhs.data(),
             D::one(),
-            D::zero(),
         )?;
         apply_rhs_contract_twist(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
@@ -795,14 +789,13 @@ where
         profile.lhs_scratch_prepare += start.elapsed();
 
         let start = std::time::Instant::now();
-        tree_context.tree_transform_structure_into_raw_profiled(
+        tree_context.tree_transform_structure_overwrite_into_raw_profiled(
             lhs_transform.transform_structure.as_ref(),
             &lhs_dst_structure,
             &lhs_transform.replay_structure,
             lhs_scratch.data_mut(),
             lhs.data(),
             D::one(),
-            D::zero(),
             &mut profile.tree_replay,
         )?;
         profile.lhs_transform += start.elapsed();
@@ -815,14 +808,13 @@ where
         profile.rhs_scratch_prepare += start.elapsed();
 
         let start = std::time::Instant::now();
-        tree_context.tree_transform_structure_into_raw_profiled(
+        tree_context.tree_transform_structure_overwrite_into_raw_profiled(
             rhs_transform.transform_structure.as_ref(),
             &rhs_dst_structure,
             &rhs_transform.replay_structure,
             rhs_scratch.data_mut(),
             rhs.data(),
             D::one(),
-            D::zero(),
             &mut profile.tree_replay,
         )?;
         apply_rhs_contract_twist(
@@ -1823,7 +1815,6 @@ fn tree_pair_transform_typed_to_dynamic<
     src_replay_structure: &std::sync::Arc<BlockStructure>,
     source_conjugate: bool,
     alpha: D,
-    beta: D,
 ) -> Result<(), OperationError>
 where
     BT: TreeTransformBackend<D, f64>,
@@ -1831,7 +1822,6 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     DSrc: HostReadableStorage<D>,
 {
-    dst.fill_zero();
     let plan = build_tree_pair_transform_group_plan(rule, operation, src_replay_structure)?;
     let structure = plan.compile_structures_with_storage_conjugation(
         dst.space().structure(),
@@ -1839,7 +1829,7 @@ where
         source_conjugate,
     )?;
     let dst_structure = std::sync::Arc::clone(dst.space().structure());
-    tree_backend.tree_transform_structure_into_raw(
+    tree_backend.tree_transform_structure_overwrite_into_raw(
         tree_workspace,
         &structure,
         &dst_structure,
@@ -1847,7 +1837,6 @@ where
         dst.data_mut(),
         src.data(),
         alpha,
-        beta,
     )
 }
 
@@ -2192,25 +2181,28 @@ mod tests {
             TrackingScratch<f64>,
         >::default();
 
-        tensorcontract_fusion_dynamic_plan_into_storage_context(
-            &mut tree_context,
-            &mut contract_backend,
-            &mut contract_workspace,
-            &mut dynamic_space_cache,
-            &mut fusion_block_cache,
-            &mut fusion_block_workspace,
-            &mut scratch,
-            &rule,
-            &plan,
-            &mut dst,
-            &lhs,
-            &rhs,
-            2.0,
-            3.0,
-        )
-        .unwrap();
+        for _ in 0..2 {
+            dst.data_mut().copy_from_slice(&[10.0, 20.0]);
+            tensorcontract_fusion_dynamic_plan_into_storage_context(
+                &mut tree_context,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &mut dynamic_space_cache,
+                &mut fusion_block_cache,
+                &mut fusion_block_workspace,
+                &mut scratch,
+                &rule,
+                &plan,
+                &mut dst,
+                &lhs,
+                &rhs,
+                2.0,
+                3.0,
+            )
+            .unwrap();
 
-        assert_eq!(dst.data(), expected_dst.data());
+            assert_eq!(dst.data(), expected_dst.data());
+        }
         let allocations = allocations.borrow();
         assert_eq!(
             allocations[..2],
@@ -2352,25 +2344,28 @@ mod tests {
             TrackingScratch<f64>,
         >::default();
 
-        tensorcontract_fusion_dynamic_plan_into_storage_context(
-            &mut tree_context,
-            &mut contract_backend,
-            &mut contract_workspace,
-            &mut dynamic_space_cache,
-            &mut fusion_block_cache,
-            &mut fusion_block_workspace,
-            &mut scratch,
-            &rule,
-            &plan,
-            &mut dst,
-            &lhs,
-            &rhs,
-            2.0,
-            3.0,
-        )
-        .unwrap();
+        for _ in 0..2 {
+            dst.data_mut().copy_from_slice(&[1.0, 2.0]);
+            tensorcontract_fusion_dynamic_plan_into_storage_context(
+                &mut tree_context,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &mut dynamic_space_cache,
+                &mut fusion_block_cache,
+                &mut fusion_block_workspace,
+                &mut scratch,
+                &rule,
+                &plan,
+                &mut dst,
+                &lhs,
+                &rhs,
+                2.0,
+                3.0,
+            )
+            .unwrap();
 
-        assert_eq!(dst.data(), expected_dst.data());
+            assert_eq!(dst.data(), expected_dst.data());
+        }
         let allocations = allocations.borrow();
         // Scratch spaces enumerate the full tree set of their hom spaces
         // (structural zeros materialized), so the transformed lhs and the
