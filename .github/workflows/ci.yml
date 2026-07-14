@@ -109,6 +109,43 @@ jobs:
       - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
 
+  # opt-path (wraps opt-einsum-path) and cotengra-python (shells out to an
+  # installed Python `cotengra`) have real code but, unlike the backend rows
+  # above, no matrix coverage anywhere in CI (#153). Both need a host
+  # execution backend to run anything, so cpu-faer rides along. Unlike
+  # backend-contract this runs the actual test suite, not just `cargo
+  # check`: the point is to start exercising optimizer_fallback.rs /
+  # plan_cache.rs's feature-gated tests, which today never run in CI.
+  # cotengra-python is build + unit tests only — its one test that shells
+  # out to Python (`runs_installed_cotengra_when_requested`) early-returns
+  # unless `TENET_RUN_COTENGRA_PYTHON_TEST` is set, so no Python env is
+  # needed here.
+  feature-contract:
+    name: feature contract (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: opt-path, features: "opt-path,cpu-faer" }
+          - { name: cotengra-python, features: "cotengra-python,cpu-faer" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: feature-${{ matrix.name }}
+      - run: cargo test --workspace --no-default-features --features "${{ matrix.features }}"
+        working-directory: tenet
+
   no-backend-contract:
     name: no backend is rejected explicitly
     runs-on: ubuntu-latest
@@ -277,4 +314,76 @@ jobs:
         working-directory: tenet
       - name: Check per-file thresholds
         run: python3 scripts/check-coverage.py coverage.json
+        working-directory: tenet
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: clippy
+      # Non-gating for now (#153). `-A clippy::result_large_err` silences
+      # the one deliberate, already-reviewed trade-off (public
+      # `tenet::Error` is boxed; the internal expert layer is intentionally
+      # unboxed). Past that allow, `cargo clippy --workspace --all-targets`
+      # still turns up ~130 pre-existing warnings spread across ~25 other
+      # lint categories (clippy::too_many_arguments, clippy::type_complexity,
+      # clippy::manual_contains, clippy::doc_lazy_continuation,
+      # clippy::needless_range_loop, clippy::useless_vec,
+      # clippy::large_enum_variant, clippy::wrong_self_convention, ...) —
+      # too broad and too shallow a spread per category to allowlist away
+      # without also hiding genuinely new signal. Ratchet plan: burn these
+      # down category by category in follow-up PRs (tackle the largest
+      # counts first), then flip this job to `-D warnings` once clippy is
+      # clean. `continue-on-error: true` keeps the job's output visible in
+      # the Actions UI without blocking merges in the meantime.
+      - run: cargo clippy --workspace --all-targets -- -A clippy::result_large_err
+        working-directory: tenet
+        continue-on-error: true
+
+  perf:
+    name: zero-cost regression canary
+    needs: changes
+    if: needs.changes.outputs.light_rust != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: perf
+      # No timing-based failure: shared CI runners are too noisy for a
+      # pass/fail latency threshold to mean anything (see the module doc on
+      # benches/fusion_tree_key.rs). The actual regression gate is the
+      # `size_of` canary test below — it fails if `FusionTreeKey` silently
+      # grows a field, which is the thing that would quietly reintroduce
+      # cost on the multiplicity-free hot path. This job additionally runs
+      # the criterion bench so it stays compiling and executable, without
+      # asserting on its numbers.
+      - name: size_of canary for FusionTreeKey
+        run: cargo test -p tenet-core fusion_tree_key_size_has_not_silently_grown
+        working-directory: tenet
+      - name: FusionTreeKey hash/eq microbench (informational, not a gate)
+        run: cargo bench -p tenet-core --bench fusion_tree_key
         working-directory: tenet

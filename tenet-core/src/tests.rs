@@ -7531,4 +7531,14 @@ mod tests {
             .windows(2)
             .all(|pair| Arc::ptr_eq(&pair[0].key, &pair[1].key)));
     }
+
+    // Canary (#153) against silent growth of the hottest recoupling-plan key:
+    // pins today's `size_of::<FusionTreeKey>()`. If this fails, a field was
+    // added or a `SmallVec` inline capacity changed — re-check the zero-cost
+    // mult-free Hash/Eq/Ord contract documented on `FusionTreeKey` before
+    // bumping the constant.
+    #[test]
+    fn fusion_tree_key_size_has_not_silently_grown() {
+        assert_eq!(std::mem::size_of::<FusionTreeKey>(), 264);
+    }
 }
