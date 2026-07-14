@@ -950,6 +950,7 @@ thread_local! {
     static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
     static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
     static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
+    static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
 }
 
@@ -1020,6 +1021,31 @@ pub(crate) fn reset_compact_qr_copy_probe() {
 #[cfg(test)]
 pub(crate) fn compact_qr_copy_probe() -> CompactQrCopyProbe {
     COMPACT_QR_COPY_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CompactLqCopyProbe {
+    pub input_pack_calls: usize,
+    pub input_pack_bytes: usize,
+    pub output_scatter_calls: usize,
+    pub output_scatter_bytes: usize,
+    pub scratch_buffer_count: usize,
+    pub scratch_capacity_bytes: usize,
+    pub adjoint_scratch_fill_calls: usize,
+    pub adjoint_scratch_fill_bytes: usize,
+    pub final_adjoint_copy_calls: usize,
+    pub final_adjoint_copy_bytes: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn reset_compact_lq_copy_probe() {
+    COMPACT_LQ_COPY_PROBE.with(|probe| probe.set(CompactLqCopyProbe::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn compact_lq_copy_probe() -> CompactLqCopyProbe {
+    COMPACT_LQ_COPY_PROBE.with(Cell::get)
 }
 
 #[cfg(test)]
