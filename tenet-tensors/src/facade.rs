@@ -1,5 +1,6 @@
 use core::ops::{Add, Mul};
 use std::hash::Hash;
+use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
@@ -729,6 +730,53 @@ where
     backend.tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
 }
 
+pub fn tree_transform_overwrite_execute_with<
+    B,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, C>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+    C: Copy,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    backend.tree_transform_structure_overwrite_into_raw(
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+    )
+}
+
 /// Build a replay-ready tree-pair transform structure.
 ///
 /// This builds the replay-ready descriptor used by hot paths. It performs the
@@ -809,6 +857,44 @@ where
     )
 }
 
+pub fn tree_transform_overwrite_into<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_overwrite_into_with(
+        &mut backend,
+        &mut workspace,
+        rule,
+        operation,
+        dst,
+        src,
+        alpha,
+    )
+}
+
 /// Compile and execute a tree-pair transform with caller-owned backend/workspace.
 ///
 /// The backend and workspace are reused, but the transform structure is still
@@ -852,6 +938,39 @@ where
     tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
 }
 
+pub fn tree_transform_overwrite_into_with<
+    B,
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let structure = tree_transform_structure(rule, operation, dst, src)?;
+    tree_transform_overwrite_execute_with(backend, workspace, &structure, dst, src, alpha)
+}
+
 pub fn tree_transform_into_with_context<
     B,
     R,
@@ -891,6 +1010,46 @@ where
     DSrc: HostReadableStorage<D>,
 {
     context.tree_transform_into(rule, operation, dst, src, alpha, beta)
+}
+
+pub fn tree_transform_overwrite_into_with_context<
+    B,
+    R,
+    D,
+    RuleKey,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    context: &mut TreeTransformExecutionContext<D, RuleKey, R::Scalar, B>,
+    rule: &R,
+    operation: TreeTransformOperation,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    B: TreeTransformBackend<D, R::Scalar>,
+    R: MultiplicityFreeRigidSymbols + TreeTransformRuleCacheKey<Key = RuleKey>,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+    R::Scalar: 'static
+        + Copy
+        + Clone
+        + Add<Output = R::Scalar>
+        + Mul<Output = R::Scalar>
+        + Zero
+        + Send
+        + Sync,
+    D: TreeTransformScalar,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    context.tree_transform_overwrite_into(rule, operation, dst, src, alpha)
 }
 
 /// TensorKit `permute!`: symmetric-braiding permutation of tensor legs, written into `dst`.

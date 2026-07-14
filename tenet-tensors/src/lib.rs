@@ -75,7 +75,9 @@ pub use facade::{
     tensorcopy_into_with, tensortrace_execute_with, tensortrace_fusion_execute_with,
     tensortrace_fusion_into, tensortrace_fusion_into_with, tensortrace_into, tensortrace_into_with,
     tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
-    tree_transform_into_with_context, tree_transform_structure,
+    tree_transform_into_with_context, tree_transform_overwrite_execute_with,
+    tree_transform_overwrite_into, tree_transform_overwrite_into_with,
+    tree_transform_overwrite_into_with_context, tree_transform_structure,
 };
 /// CUDA storage and GEMM seams (flat device buffers, never host-readable).
 #[cfg(feature = "cuda")]

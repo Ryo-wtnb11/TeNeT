@@ -23,6 +23,14 @@ use crate::{
     TreeTransformStructure,
 };
 
+#[derive(Clone, Copy)]
+enum DestinationMode<D> {
+    Axpby(D),
+    // Why not use Axpby(D::zero()): IEEE arithmetic still reads NaN destination
+    // values, whereas assignment APIs promise destination-independent output.
+    Overwrite,
+}
+
 /// Host scratch/replay workspace backed by `Vec<T>`.
 ///
 /// Raw replay methods using this workspace operate on host slices. Device
@@ -182,29 +190,53 @@ fn recoupling_multi_block<C: Copy>(
 
 fn scale_inactive_destinations<A, D, C>(
     kernels: &mut A,
+    zero_strides: &mut Vec<isize>,
     structure: &TreeTransformStructure<C>,
     dst_data: &mut [D],
-    beta: D,
+    mode: DestinationMode<D>,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
-    D: Copy + PartialEq + One,
+    D: Copy + PartialEq + Zero + One,
     C: Copy,
 {
-    if beta == D::one() {
-        return Ok(());
-    }
-    // Scaling the complete storage would also mutate padding not owned by any
-    // block, so compile only the destination layouts with no active replay.
-    for &layout_index in structure.inactive_destination_layouts() {
-        let layout = structure.layouts().entry(layout_index);
-        kernels.scale_strided(
-            dst_data,
-            structure.layouts().shape(layout),
-            structure.layouts().strides(layout),
-            layout.offset,
-            beta,
-        )?;
+    match mode {
+        DestinationMode::Axpby(beta) => {
+            if beta == D::one() {
+                return Ok(());
+            }
+            // Scaling the complete storage would also mutate padding not owned by any
+            // block, so compile only the destination layouts with no active replay.
+            for &layout_index in structure.inactive_destination_layouts() {
+                let layout = structure.layouts().entry(layout_index);
+                kernels.scale_strided(
+                    dst_data,
+                    structure.layouts().shape(layout),
+                    structure.layouts().strides(layout),
+                    layout.offset,
+                    beta,
+                )?;
+            }
+        }
+        DestinationMode::Overwrite => {
+            let zero = [D::zero()];
+            for &layout_index in structure.inactive_destination_layouts() {
+                let layout = structure.layouts().entry(layout_index);
+                zero_strides.clear();
+                zero_strides.resize(structure.layouts().shape(layout).len(), 0);
+                kernels.copy_scale_strided(
+                    dst_data,
+                    &zero,
+                    structure.layouts().shape(layout),
+                    structure.layouts().strides(layout),
+                    zero_strides,
+                    layout.offset,
+                    0,
+                    false,
+                    D::one(),
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -851,6 +883,38 @@ mod inactive_destination_tests {
         );
     }
 
+    #[test]
+    fn profiled_overwrite_zeros_inactive_layout_without_touching_padding() {
+        let src_structure = Arc::new(BlockStructure::packed_column_major(1, [vec![1]]).unwrap());
+        let dst_structure = Arc::new(custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 2)]));
+        let structure = TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[TreeTransformBlockSpec::single(0, 0, 2.0)],
+        )
+        .unwrap();
+        let mut dst = [f64::NAN, 99.0, f64::NAN];
+        let mut profile = TreeTransformReplayProfile::default();
+
+        tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &dst_structure,
+            &src_structure,
+            &mut dst,
+            &[3.0],
+            1.0,
+            2,
+            &mut profile,
+        )
+        .unwrap();
+
+        assert_eq!(dst, [6.0, 99.0, 0.0]);
+        assert_eq!(profile.single_blocks, 1);
+    }
+
     #[derive(Clone, Default)]
     struct SlowScaleAdapter(StridedHostKernelAdapter);
 
@@ -1232,13 +1296,116 @@ where
     DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
     DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
 {
+    tree_transform_structure_with_storage_workspace_strided_kernel_mode(
+        kernels,
+        workspace,
+        structure,
+        dst,
+        src,
+        alpha,
+        DestinationMode::Axpby(beta),
+    )
+}
+
+pub fn tree_transform_structure_overwrite_with_storage_workspace_strided_kernel<
+    A,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+{
+    tree_transform_structure_with_storage_workspace_strided_kernel_mode(
+        kernels,
+        workspace,
+        structure,
+        dst,
+        src,
+        alpha,
+        DestinationMode::Overwrite,
+    )
+}
+
+fn tree_transform_structure_with_storage_workspace_strided_kernel_mode<
+    A,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    workspace: &mut StorageTreeTransformWorkspace<DSrc::Similar, DDst::Similar>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    mode: DestinationMode<D>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+    DDst: HostWritableStorage<D> + SimilarStorage<D>,
+    DSrc: HostReadableStorage<D> + SimilarStorage<D>,
+    DDst::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+    DSrc::Similar: HostWritableStorage<D> + ScratchStorage<D>,
+{
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
     structure.validate_replay_structures(&dst_structure, &src_structure)?;
     validate_replay_storage_len(&dst_structure, dst.storage().len())?;
     validate_replay_storage_len(&src_structure, src.storage().len())?;
 
-    scale_inactive_destinations(kernels, structure, dst.data_mut(), beta)?;
+    scale_inactive_destinations(
+        kernels,
+        workspace.zero_strides_mut(),
+        structure,
+        dst.data_mut(),
+        mode,
+    )?;
 
     let src_data = src.data();
     for block in structure.blocks() {
@@ -1258,7 +1425,7 @@ where
                 dst.data_mut(),
                 src_data,
                 alpha,
-                beta,
+                mode,
             )?,
             TreeTransformBlock::Multi {
                 dst_layout_start,
@@ -1298,7 +1465,7 @@ where
                     dst.data_mut(),
                     src_data,
                     alpha,
-                    beta,
+                    mode,
                 )?;
             }
         }
@@ -1331,10 +1498,89 @@ where
         + RecouplingCoefficientAction<C>,
     C: Copy,
 {
+    tree_transform_structure_with_strided_kernel_raw_mode(
+        kernels,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Axpby(beta),
+    )
+}
+
+pub fn tree_transform_structure_overwrite_with_strided_kernel_raw<A, D, C>(
+    kernels: &mut A,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
+    tree_transform_structure_with_strided_kernel_raw_mode(
+        kernels,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Overwrite,
+    )
+}
+
+fn tree_transform_structure_with_strided_kernel_raw_mode<A, D, C>(
+    kernels: &mut A,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    mode: DestinationMode<D>,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync
+        + RecouplingCoefficientAction<C>,
+    C: Copy,
+{
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
-    scale_inactive_destinations(kernels, structure, dst_data, beta)?;
+    scale_inactive_destinations(
+        kernels,
+        &mut workspace.zero_strides,
+        structure,
+        dst_data,
+        mode,
+    )?;
     for block in structure.blocks() {
         match *block {
             TreeTransformBlock::Single {
@@ -1352,7 +1598,7 @@ where
                 dst_data,
                 src_data,
                 alpha,
-                beta,
+                mode,
             )?,
             TreeTransformBlock::Multi {
                 dst_layout_start,
@@ -1376,7 +1622,7 @@ where
                 dst_data,
                 src_data,
                 alpha,
-                beta,
+                mode,
             )?,
         }
     }
@@ -1433,6 +1679,54 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_overwrite_with_structural_recoupling<
+    A,
+    E,
+    D,
+    C,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const SRC_NOUT: usize,
+    const SRC_NIN: usize,
+    SDst,
+    SSrc,
+    DDst,
+    DSrc,
+>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+    src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+    alpha: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+    DDst: HostWritableStorage<D>,
+    DSrc: HostReadableStorage<D>,
+{
+    let dst_structure = Arc::clone(dst.structure());
+    let src_structure = Arc::clone(src.structure());
+    tree_transform_structure_overwrite_with_structural_recoupling_raw(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        &dst_structure,
+        &src_structure,
+        dst.data_mut(),
+        src.data(),
+        alpha,
+        threads,
+    )
+}
+
 /// Replays a prepared structural-recoupling tree transform on host slices.
 ///
 /// `threads` selects the replay parallelism (a property of the executing
@@ -1461,17 +1755,92 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
+    tree_transform_structure_with_structural_recoupling_raw_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Axpby(beta),
+        threads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    tree_transform_structure_with_structural_recoupling_raw_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Overwrite,
+        threads,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_structure_with_structural_recoupling_raw_mode<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    mode: DestinationMode<D>,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
-    scale_inactive_destinations(kernels, structure, dst_data, beta)?;
+    scale_inactive_destinations(
+        kernels,
+        &mut workspace.zero_strides,
+        structure,
+        dst_data,
+        mode,
+    )?;
     if threads > 1 {
         return tree_transform_blocks_with_batched_recoupling_parallel(
-            kernels, dense, workspace, structure, dst_data, src_data, alpha, beta, threads, None,
+            kernels, dense, workspace, structure, dst_data, src_data, alpha, mode, threads, None,
         );
     }
     tree_transform_blocks_with_batched_recoupling(
-        kernels, dense, workspace, structure, dst_data, src_data, alpha, beta, None,
+        kernels, dense, workspace, structure, dst_data, src_data, alpha, mode, None,
     )
 }
 
@@ -1496,6 +1865,79 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
+    tree_transform_structure_with_structural_recoupling_raw_profiled_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Axpby(beta),
+        threads,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    threads: usize,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    tree_transform_structure_with_structural_recoupling_raw_profiled_mode(
+        kernels,
+        dense,
+        workspace,
+        structure,
+        dst_structure,
+        src_structure,
+        dst_data,
+        src_data,
+        alpha,
+        DestinationMode::Overwrite,
+        threads,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_transform_structure_with_structural_recoupling_raw_profiled_mode<A, E, D, C>(
+    kernels: &mut A,
+    dense: &mut E,
+    workspace: &mut TreeTransformWorkspace<D>,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    mode: DestinationMode<D>,
+    threads: usize,
+    profile: &mut TreeTransformReplayProfile,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    E: DenseExecutor,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
     let total_start = std::time::Instant::now();
 
     let start = std::time::Instant::now();
@@ -1505,7 +1947,13 @@ where
     profile.validate += start.elapsed();
 
     let start = std::time::Instant::now();
-    scale_inactive_destinations(kernels, structure, dst_data, beta)?;
+    scale_inactive_destinations(
+        kernels,
+        &mut workspace.zero_strides,
+        structure,
+        dst_data,
+        mode,
+    )?;
     profile.strided_kernel += start.elapsed();
 
     if threads > 1 {
@@ -1517,7 +1965,7 @@ where
             dst_data,
             src_data,
             alpha,
-            beta,
+            mode,
             threads,
             Some(profile),
         )?;
@@ -1530,7 +1978,7 @@ where
             dst_data,
             src_data,
             alpha,
-            beta,
+            mode,
             Some(profile),
         )?;
     }
@@ -1558,7 +2006,7 @@ fn tree_transform_blocks_with_batched_recoupling<A, E, D, C>(
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
     mut profile: Option<&mut TreeTransformReplayProfile>,
 ) -> Result<(), OperationError>
 where
@@ -1594,7 +2042,7 @@ where
                 dst_data,
                 src_data,
                 alpha,
-                beta,
+                mode,
             )?;
             if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
                 let elapsed = start.elapsed();
@@ -1651,7 +2099,7 @@ where
             dst_data,
             src_data,
             alpha,
-            beta,
+            mode,
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
@@ -1737,7 +2185,7 @@ where
                     job.dst_offset + dst_index * element_count,
                     dst_data,
                     alpha,
-                    beta,
+                    mode,
                 )?;
             }
             scattered_columns += dst_count;
@@ -1837,7 +2285,7 @@ fn replay_single_blocks<A, D, C>(
     dst_start: isize,
     src_data: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
     threads: usize,
 ) -> Result<(), OperationError>
 where
@@ -1854,19 +2302,32 @@ where
             let dst_layout = structure.layouts().entry(item.dst_layout);
             let src_layout = structure.layouts().entry(item.src_layout);
             let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
-            kernels.add_strided(
-                &mut zero_strides,
-                dst_data,
-                src_data,
-                structure.layouts().shape(dst_layout),
-                structure.layouts().strides(dst_layout),
-                structure.layouts().strides(src_layout),
-                dst_layout.offset - dst_start,
-                src_layout.offset,
-                structure.storage_conjugate(),
-                scale,
-                beta,
-            )?;
+            match mode {
+                DestinationMode::Axpby(beta) => kernels.add_strided(
+                    &mut zero_strides,
+                    dst_data,
+                    src_data,
+                    structure.layouts().shape(dst_layout),
+                    structure.layouts().strides(dst_layout),
+                    structure.layouts().strides(src_layout),
+                    dst_layout.offset - dst_start,
+                    src_layout.offset,
+                    structure.storage_conjugate(),
+                    scale,
+                    beta,
+                )?,
+                DestinationMode::Overwrite => kernels.copy_scale_strided(
+                    dst_data,
+                    src_data,
+                    structure.layouts().shape(dst_layout),
+                    structure.layouts().strides(dst_layout),
+                    structure.layouts().strides(src_layout),
+                    dst_layout.offset - dst_start,
+                    src_layout.offset,
+                    structure.storage_conjugate(),
+                    scale,
+                )?,
+            }
         }
         return Ok(());
     }
@@ -1890,7 +2351,7 @@ where
                 dst_start,
                 src_data,
                 alpha,
-                beta,
+                mode,
                 left_threads,
             )
         },
@@ -1903,7 +2364,7 @@ where
                 boundary,
                 src_data,
                 alpha,
-                beta,
+                mode,
                 right_threads,
             )
         },
@@ -1921,7 +2382,7 @@ fn replay_scatter_columns<A, D>(
     dst_start: isize,
     packed_destination: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
     threads: usize,
 ) -> Result<(), OperationError>
 where
@@ -1934,17 +2395,30 @@ where
     if threads <= 1 || items.len() == 1 {
         for item in items {
             let layout = layouts.entry(item.dst_layout);
-            kernels.axpby_strided(
-                dst_data,
-                packed_destination,
-                layouts.shape(layout),
-                layouts.strides(layout),
-                layouts.packed_strides(layout),
-                layout.offset - dst_start,
-                offset_to_isize(item.packed_offset)?,
-                alpha,
-                beta,
-            )?;
+            match mode {
+                DestinationMode::Axpby(beta) => kernels.axpby_strided(
+                    dst_data,
+                    packed_destination,
+                    layouts.shape(layout),
+                    layouts.strides(layout),
+                    layouts.packed_strides(layout),
+                    layout.offset - dst_start,
+                    offset_to_isize(item.packed_offset)?,
+                    alpha,
+                    beta,
+                )?,
+                DestinationMode::Overwrite => kernels.copy_scale_strided(
+                    dst_data,
+                    packed_destination,
+                    layouts.shape(layout),
+                    layouts.strides(layout),
+                    layouts.packed_strides(layout),
+                    layout.offset - dst_start,
+                    offset_to_isize(item.packed_offset)?,
+                    false,
+                    alpha,
+                )?,
+            }
         }
         return Ok(());
     }
@@ -1968,7 +2442,7 @@ where
                 dst_start,
                 packed_destination,
                 alpha,
-                beta,
+                mode,
                 left_threads,
             )
         },
@@ -1981,7 +2455,7 @@ where
                 boundary,
                 packed_destination,
                 alpha,
-                beta,
+                mode,
                 right_threads,
             )
         },
@@ -2033,7 +2507,7 @@ fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>(
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
     threads: usize,
     mut profile: Option<&mut TreeTransformReplayProfile>,
 ) -> Result<(), OperationError>
@@ -2099,7 +2573,7 @@ where
                 0,
                 src_data,
                 alpha,
-                beta,
+                mode,
                 threads,
             )?;
         } else {
@@ -2116,7 +2590,7 @@ where
                     dst_data,
                     src_data,
                     alpha,
-                    beta,
+                    mode,
                 )?;
             }
         }
@@ -2161,7 +2635,7 @@ where
                 0,
                 packed_destination,
                 alpha,
-                beta,
+                mode,
                 threads,
             )?;
         } else {
@@ -2176,7 +2650,7 @@ where
                     item.packed_offset,
                     dst_data,
                     alpha,
-                    beta,
+                    mode,
                 )?;
             }
         }
@@ -2270,7 +2744,7 @@ where
     )
 }
 
-fn validate_replay_storage_len(
+pub(crate) fn validate_replay_storage_len(
     structure: &BlockStructure,
     actual_len: usize,
 ) -> Result<(), OperationError> {
@@ -2282,6 +2756,43 @@ fn validate_replay_storage_len(
             expected,
             actual: actual_len,
         });
+    }
+    Ok(())
+}
+
+pub(crate) fn zero_tree_transform_destination<A, D>(
+    kernels: &mut A,
+    zero_strides: &mut Vec<isize>,
+    dst_structure: &BlockStructure,
+    dst_data: &mut [D],
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    D: Copy + Zero + One,
+{
+    validate_replay_storage_len(dst_structure, dst_data.len())?;
+    let zero = [D::zero()];
+    let mut dst_strides = Vec::new();
+    for block_index in 0..dst_structure.block_count() {
+        let block = dst_structure.block(block_index)?;
+        zero_strides.clear();
+        zero_strides.resize(block.shape().len(), 0);
+        dst_strides.clear();
+        for &stride in block.strides() {
+            dst_strides
+                .push(isize::try_from(stride).map_err(|_| OperationError::ElementCountOverflow)?);
+        }
+        kernels.copy_scale_strided(
+            dst_data,
+            &zero,
+            block.shape(),
+            &dst_strides,
+            zero_strides,
+            offset_to_isize(block.offset())?,
+            0,
+            false,
+            D::one(),
+        )?;
     }
     Ok(())
 }
@@ -2298,7 +2809,7 @@ fn tree_transform_single_with_strided_kernel<A, D, C>(
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
@@ -2307,19 +2818,32 @@ where
 {
     let shape = layouts.shape(dst_layout);
     let scale = alpha.scale_by_coefficient(coefficient);
-    kernels.add_strided(
-        zero_strides,
-        dst_data,
-        src_data,
-        shape,
-        layouts.strides(dst_layout),
-        layouts.strides(src_layout),
-        dst_layout.offset,
-        src_layout.offset,
-        source_conjugate,
-        scale,
-        beta,
-    )
+    match mode {
+        DestinationMode::Axpby(beta) => kernels.add_strided(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            layouts.strides(dst_layout),
+            layouts.strides(src_layout),
+            dst_layout.offset,
+            src_layout.offset,
+            source_conjugate,
+            scale,
+            beta,
+        ),
+        DestinationMode::Overwrite => kernels.copy_scale_strided(
+            dst_data,
+            src_data,
+            shape,
+            layouts.strides(dst_layout),
+            layouts.strides(src_layout),
+            dst_layout.offset,
+            src_layout.offset,
+            source_conjugate,
+            scale,
+        ),
+    }
 }
 
 /// Applies every Multi block's recoupling matrix in one batched GEMM over
@@ -2395,7 +2919,7 @@ fn tree_transform_multi_with_pack_gemm_scatter<A, D, C>(
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
@@ -2425,7 +2949,7 @@ where
         dst_data,
         src_data,
         alpha,
-        beta,
+        mode,
     )
 }
 
@@ -2446,7 +2970,7 @@ fn tree_transform_multi_with_scratch_buffers<A, D, C, SourceScratch, Destination
     dst_data: &mut [D],
     src_data: &[D],
     alpha: D,
-    beta: D,
+    mode: DestinationMode<D>,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<D>,
@@ -2492,7 +3016,7 @@ where
             dst_index * element_count,
             dst_data,
             alpha,
-            beta,
+            mode,
         )?;
     }
     Ok(())
@@ -2536,23 +3060,38 @@ fn scatter_column_into_layout<A, T>(
     packed_offset: usize,
     dst_data: &mut [T],
     alpha: T,
-    beta: T,
+    mode: DestinationMode<T>,
 ) -> Result<(), OperationError>
 where
     A: HostKernelAdapter<T>,
     T: Copy,
 {
     let shape = layouts.shape(layout);
-    zero_strides.clear();
-    kernels.axpby_strided(
-        dst_data,
-        packed,
-        shape,
-        layouts.strides(layout),
-        layouts.packed_strides(layout),
-        layout.offset,
-        offset_to_isize(packed_offset)?,
-        alpha,
-        beta,
-    )
+    match mode {
+        DestinationMode::Axpby(beta) => {
+            zero_strides.clear();
+            kernels.axpby_strided(
+                dst_data,
+                packed,
+                shape,
+                layouts.strides(layout),
+                layouts.packed_strides(layout),
+                layout.offset,
+                offset_to_isize(packed_offset)?,
+                alpha,
+                beta,
+            )
+        }
+        DestinationMode::Overwrite => kernels.copy_scale_strided(
+            dst_data,
+            packed,
+            shape,
+            layouts.strides(layout),
+            layouts.packed_strides(layout),
+            layout.offset,
+            offset_to_isize(packed_offset)?,
+            false,
+            alpha,
+        ),
+    }
 }
