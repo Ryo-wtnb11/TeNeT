@@ -823,6 +823,7 @@ fn realloc_moved_transition_preserves_concurrently_reused_old_address() {
 #[test]
 fn realloc_failed_transition_restores_origin_without_duplicate_metrics() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
     PAYLOAD_SIZE.store(8, Ordering::Relaxed);
     reset_live_registry();
@@ -852,6 +853,7 @@ fn realloc_failed_transition_restores_origin_without_duplicate_metrics() {
 #[test]
 fn realloc_in_place_transition_replaces_only_its_detached_origin() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
     PAYLOAD_SIZE.store(0, Ordering::Relaxed);
     reset_live_registry();
@@ -871,6 +873,7 @@ fn realloc_in_place_transition_replaces_only_its_detached_origin() {
 #[test]
 fn realloc_transition_never_exposes_a_zero_live_metrics_window() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
     PAYLOAD_SIZE.store(0, Ordering::Relaxed);
     reset_live_registry();
