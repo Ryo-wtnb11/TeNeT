@@ -1485,8 +1485,6 @@ fn validate_tree_pair_block_group(
             && domain.uncoupled() == reference_domain.uncoupled()
             && codomain.is_dual() == reference_codomain.is_dual()
             && domain.is_dual() == reference_domain.is_dual()
-            && codomain.coupled() == reference_codomain.coupled()
-            && domain.coupled() == reference_domain.coupled()
             && codomain.has_multiplicity() == reference_codomain.has_multiplicity()
             && domain.has_multiplicity() == reference_domain.has_multiplicity()
     };
@@ -1494,8 +1492,10 @@ fn validate_tree_pair_block_group(
         reference_codomain.uncoupled().len() == reference_codomain.is_dual().len()
             && reference_domain.uncoupled().len() == reference_domain.is_dual().len();
     // Why not infer a block from matching ranks or tree shape: coefficients
-    // share a basis only when every external sector, orientation, and coupled
-    // group invariant agrees before any symbol is evaluated.
+    // share a basis only when every external sector, orientation, and
+    // multiplicity invariant agrees before any symbol is evaluated. Why not
+    // compare `coupled`: distinct coupled labels are basis states within one
+    // `FusionTreeGroupKey`, notably for non-Abelian SU(2) blocks.
     if !reference_is_well_formed || !src_keys.iter().all(same_group) {
         return Err(CoreError::MalformedFusionTree {
             message: TREE_PAIR_BLOCK_GROUP_ERROR,
@@ -1518,8 +1518,8 @@ fn validate_tree_pair_block_group(
 /// results agree with the per-source version to double-precision rounding, not
 /// necessarily bit-for-bit.
 ///
-/// `src_keys` must be empty or share one external-sector, duality, coupled,
-/// and multiplicity group. Empty input returns an empty transform; mixed groups
+/// `src_keys` must be empty or share one external-sector, duality, and
+/// multiplicity group. Empty input returns an empty transform; mixed groups
 /// return [`CoreError::MalformedFusionTree`] before any symbol evaluation.
 pub fn multiplicity_free_braid_tree_pair_block<R>(
     rule: &R,

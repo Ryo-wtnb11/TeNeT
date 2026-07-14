@@ -1442,7 +1442,6 @@ mod tests {
             tree_pair_group_fixture(&[1, 2], &[4], 7, &[false, false], &[false]),
             tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, true], &[false]),
             tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[true]),
-            tree_pair_group_fixture(&[1, 2], &[3], 8, &[false, false], &[false]),
         ];
 
         for other in mixed {
@@ -1491,15 +1490,16 @@ mod tests {
 
         let keys = vec![
             tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[false]),
-            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3], 8, &[false, false], &[false]),
         ];
         let expected = keys
             .iter()
             .cloned()
             .map(|key| vec![(key, 1.0)])
             .collect::<Vec<_>>();
-        // What: valid group source ordering, destination keys, and coefficients
-        // remain unchanged on the symbol-free identity path.
+        // What: distinct coupled labels remain valid basis states in one
+        // external-sector group, preserving source order, destinations, and
+        // coefficients on the symbol-free identity path.
         assert_eq!(
             multiplicity_free_braid_tree_pair_block(
                 &rule,
