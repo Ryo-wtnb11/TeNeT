@@ -155,6 +155,16 @@ struct CoupledBlockStructureCacheKey {
     shapes: Arc<[DimVec]>,
 }
 
+/// Layout cache for fusion-tree hom spaces.
+///
+/// MUST remain insert-only — do NOT add an LRU cap here. `coupled_block_structure_cache`
+/// keys its entries by `layout_ptr = Arc::as_ptr(layout)` (below), so evicting a
+/// layout would let its `Arc` be freed and its address recycled by a later layout,
+/// aliasing two distinct layouts under one pointer key. Keeping every layout `Arc`
+/// resident forever is what makes that pointer key sound (the insert-only safety
+/// condition). The table is bounded in practice by the finite set of hom-space
+/// shapes a workload constructs; reclaiming it would first require moving the
+/// coupled-cache key off the raw pointer onto a content id.
 fn fusion_tree_layout_cache(
 ) -> &'static RwLock<FxHashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>> {
     static CACHE: OnceLock<
@@ -163,11 +173,26 @@ fn fusion_tree_layout_cache(
     CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
 }
 
-fn coupled_block_structure_cache(
-) -> &'static RwLock<FxHashMap<CoupledBlockStructureCacheKey, Weak<BlockStructure>>> {
-    static CACHE: OnceLock<RwLock<FxHashMap<CoupledBlockStructureCacheKey, Weak<BlockStructure>>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+type CoupledBlockStructureCache =
+    lru::LruCache<CoupledBlockStructureCacheKey, Weak<BlockStructure>, rustc_hash::FxBuildHasher>;
+
+fn coupled_block_structure_cache() -> &'static RwLock<CoupledBlockStructureCache> {
+    static CACHE: OnceLock<RwLock<CoupledBlockStructureCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        RwLock::new(lru::LruCache::with_hasher(
+            std::num::NonZeroUsize::new(BLOCK_STRUCTURE_INTERN_CAP).unwrap(),
+            rustc_hash::FxBuildHasher,
+        ))
+    })
+}
+
+/// Clears the coupled subblock-structure cache. Part of `reset_core_intern_tables`.
+/// Safe to cap/clear (unlike `fusion_tree_layout_cache`): its entries are `Weak`
+/// values keyed by data, not by a live pointer anything else depends on.
+fn reset_coupled_block_structure_cache() {
+    if let Ok(mut cache) = coupled_block_structure_cache().write() {
+        cache.clear();
+    }
 }
 
 /// Process-global intern id for a fusion hom space. [`FusionTreeHomSpace::id`]
@@ -608,8 +633,9 @@ impl FusionTreeHomSpace {
             shapes: Arc::<[DimVec]>::from(shapes),
         };
         let cache = coupled_block_structure_cache();
+        // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
         if let Ok(read) = cache.read() {
-            if let Some(structure) = read.get(&cache_key).and_then(Weak::upgrade) {
+            if let Some(structure) = read.peek(&cache_key).and_then(Weak::upgrade) {
                 return Ok(structure);
             }
         }
@@ -628,7 +654,7 @@ impl FusionTreeHomSpace {
         if let Some(existing) = write.get(&cache_key).and_then(Weak::upgrade) {
             return Ok(existing);
         }
-        write.insert(cache_key, Arc::downgrade(&structure));
+        write.put(cache_key, Arc::downgrade(&structure));
         Ok(structure)
     }
 

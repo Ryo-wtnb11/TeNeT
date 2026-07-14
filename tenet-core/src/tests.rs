@@ -7541,4 +7541,59 @@ mod tests {
     fn fusion_tree_key_size_has_not_silently_grown() {
         assert_eq!(std::mem::size_of::<FusionTreeKey>(), 264);
     }
+
+    #[test]
+    fn block_structure_intern_tables_plateau_under_distinct_growth() {
+        // Interning far more distinct structures than the cap must leave the
+        // capped tables pinned at the cap. Before the LRU cap they grew linearly.
+        let overflow = BLOCK_STRUCTURE_INTERN_CAP + 256;
+        for i in 0..overflow {
+            // Distinct shape per iteration => distinct interned content and a
+            // distinct arc-dedup entry (shape dims are metadata, not allocated).
+            let _ = BlockStructure::trivial(&[i + 1]).unwrap().into_shared();
+        }
+        let intern_len = block_structure_intern_table().read().unwrap().len();
+        let arc_len = block_structure_arc_table().read().unwrap().len();
+        // Other tests share these global tables, but the LRU bound holds for all.
+        assert!(intern_len <= BLOCK_STRUCTURE_INTERN_CAP);
+        assert!(arc_len <= BLOCK_STRUCTURE_INTERN_CAP);
+        // Having inserted well over the cap, the tables are saturated at it.
+        assert_eq!(intern_len, BLOCK_STRUCTURE_INTERN_CAP);
+        assert_eq!(arc_len, BLOCK_STRUCTURE_INTERN_CAP);
+    }
+
+    #[test]
+    fn evicted_block_structure_content_reinterns_with_fresh_id() {
+        // Pinned invariant: an id is NEVER reused. An evicted content that is
+        // re-interned gets a strictly greater id (monotonic counter), so a
+        // downstream cache keyed by the old id can never be aliased by it.
+        let base = 900_000_000usize; // Outside the range other tests intern.
+        let id_before = BlockStructure::trivial(&[base]).unwrap().content_id();
+        // Flood past the cap with distinct contents to evict the probe entry
+        // (never touched again, so it ages to the LRU tail and is dropped).
+        for i in 0..(BLOCK_STRUCTURE_INTERN_CAP + 64) {
+            let _ = BlockStructure::trivial(&[base + 1 + i]).unwrap();
+        }
+        let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
+        assert!(
+            id_after > id_before,
+            "evicted content must re-intern with a strictly greater id, \
+             got before={id_before} after={id_after}"
+        );
+    }
+
+    #[test]
+    fn reset_core_intern_tables_clears_without_reusing_ids() {
+        // Reset coherence: content ids issued after a reset must exceed any
+        // issued before it (the counter is not reset), so a tensors-layer key
+        // still holding a pre-reset id can never alias post-reset content.
+        let base = 800_000_000usize;
+        let id_before = BlockStructure::trivial(&[base]).unwrap().content_id();
+        reset_core_intern_tables();
+        let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
+        assert!(
+            id_after > id_before,
+            "reset must not reuse content ids, got before={id_before} after={id_after}"
+        );
+    }
 }

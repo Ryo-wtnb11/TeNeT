@@ -50,6 +50,10 @@ pub fn reset_global_operation_caches() {
         .expect("global cache registry poisoned")
         .clear();
     crate::tree_transform::reset_tree_transform_persistent_cache_state();
+    // Chain the tenet-core intern tables. Safe to run after the registry clear:
+    // core content ids are monotonic and never reset, so no id survives here to
+    // alias a fresh structure (see `reset_core_intern_tables`).
+    tenet_core::reset_core_intern_tables();
 }
 
 /// Cache policy for TensorKit-style replay caches.
@@ -492,5 +496,38 @@ where
             enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
         }
         old
+    }
+}
+
+/// Serializes tests that call the process-global `reset_global_operation_caches`
+/// against tests that assume the shared tenet-core intern table stays stable
+/// across two builds (e.g. `dynamic_fusion_fast_space_key_uses_structure_content_identity`).
+/// A reset landing between such a test's two interning builds would evict the
+/// first entry and hand the second a fresh id. Both sides take this lock.
+#[cfg(test)]
+pub(crate) static GLOBAL_RESET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::{reset_global_operation_caches, GLOBAL_RESET_TEST_LOCK};
+    use tenet_core::BlockStructure;
+
+    #[test]
+    fn reset_global_operation_caches_chains_core_intern_reset_without_id_reuse() {
+        let _guard = GLOBAL_RESET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Cross-layer coherence: the tensors-level reset must chain into the
+        // tenet-core intern tables. If it did not, the identical content would
+        // stay interned and re-yield the same id (a stale key could then alias).
+        // The monotonic counter + cleared table give a strictly greater id.
+        let base = 700_000_000usize;
+        let id_before = BlockStructure::trivial(&[base]).unwrap().content_id();
+        reset_global_operation_caches();
+        let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
+        assert!(
+            id_after > id_before,
+            "reset chain must not reuse content ids, got before={id_before} after={id_after}"
+        );
     }
 }

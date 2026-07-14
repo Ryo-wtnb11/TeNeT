@@ -874,12 +874,44 @@ struct BlockStructureInternKey {
     blocks: Arc<[BlockStructureContentBlock]>,
 }
 
-fn block_structure_intern_table(
-) -> &'static RwLock<FxHashMap<BlockStructureInternKey, Arc<BlockStructureContent>>> {
-    static TABLE: OnceLock<RwLock<FxHashMap<BlockStructureInternKey, Arc<BlockStructureContent>>>> =
-        OnceLock::new();
-    TABLE.get_or_init(|| RwLock::new(FxHashMap::default()))
+type BlockStructureInternTable =
+    lru::LruCache<BlockStructureInternKey, Arc<BlockStructureContent>, rustc_hash::FxBuildHasher>;
+
+/// LRU cap for the block-structure content intern table (and, reusing the same
+/// bound, the arc dedup and coupled-subblock caches). Mirrors
+/// `HOM_SPACE_INTERN_CAP`: a long-lived / multi-tenant process can otherwise
+/// grow these tables without bound over a χ sweep. See
+/// `BLOCK_STRUCTURE_CONTENT_ID` for why capping this particular table is
+/// aliasing-safe despite its ids being consumed as cache keys downstream.
+const BLOCK_STRUCTURE_INTERN_CAP: usize = 8192;
+
+fn block_structure_intern_table() -> &'static RwLock<BlockStructureInternTable> {
+    static TABLE: OnceLock<RwLock<BlockStructureInternTable>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        RwLock::new(lru::LruCache::with_hasher(
+            std::num::NonZeroUsize::new(BLOCK_STRUCTURE_INTERN_CAP).unwrap(),
+            rustc_hash::FxBuildHasher,
+        ))
+    })
 }
+
+/// Process-global, strictly-monotonic id source for interned block-structure
+/// content.
+///
+/// Why-not (`id = table.len() + 1`): the intern table is now LRU-capped (above),
+/// so its size is no longer monotonic — `len() + 1` would re-issue an id to
+/// DIFFERENT content after an eviction. `BlockStructureCacheKey` (tenet-tensors)
+/// keys the tree-transform and contract structure caches *purely* by this id
+/// (both `Hash` and `Eq` read only `content.id()`), so a recycled id would
+/// silently alias two distinct structures and hand back the wrong cached kernel
+/// — an aliasing-class correctness bug. A monotonic counter never reuses an id:
+/// not across LRU eviction, and not across `reset_core_intern_tables` (the
+/// counter is deliberately NOT reset there). Consequence — a stale tensors-layer
+/// entry keyed by an old id can only ever be re-hit by the *same* content `Arc`
+/// that minted that id; content re-interned after eviction/reset receives a
+/// fresh, higher id and simply misses (recompute), never aliases. A 64-bit
+/// counter cannot realistically overflow.
+static BLOCK_STRUCTURE_CONTENT_ID: AtomicUsize = AtomicUsize::new(1);
 
 fn intern_block_structure_content(
     sector: &SectorStructure,
@@ -907,8 +939,9 @@ fn intern_block_structure_content(
         blocks: Arc::clone(&blocks),
     };
     let table = block_structure_intern_table();
+    // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
     if let Ok(read) = table.read() {
-        if let Some(content) = read.get(&key) {
+        if let Some(content) = read.peek(&key) {
             return Arc::clone(content);
         }
     }
@@ -920,24 +953,32 @@ fn intern_block_structure_content(
         return Arc::clone(content);
     }
     let content = Arc::new(BlockStructureContent {
-        id: write.len() + 1,
+        id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
         rank: sector.rank(),
         blocks,
     });
-    write.insert(key, Arc::clone(&content));
+    write.put(key, Arc::clone(&content));
     content
 }
 
-fn block_structure_arc_table() -> &'static RwLock<FxHashMap<usize, Weak<BlockStructure>>> {
-    static TABLE: OnceLock<RwLock<FxHashMap<usize, Weak<BlockStructure>>>> = OnceLock::new();
-    TABLE.get_or_init(|| RwLock::new(FxHashMap::default()))
+type BlockStructureArcTable = lru::LruCache<usize, Weak<BlockStructure>, rustc_hash::FxBuildHasher>;
+
+fn block_structure_arc_table() -> &'static RwLock<BlockStructureArcTable> {
+    static TABLE: OnceLock<RwLock<BlockStructureArcTable>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        RwLock::new(lru::LruCache::with_hasher(
+            std::num::NonZeroUsize::new(BLOCK_STRUCTURE_INTERN_CAP).unwrap(),
+            rustc_hash::FxBuildHasher,
+        ))
+    })
 }
 
 fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<BlockStructure> {
     let id = structure.content_id();
     let table = block_structure_arc_table();
+    // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
     if let Ok(read) = table.read() {
-        if let Some(existing) = read.get(&id).and_then(Weak::upgrade) {
+        if let Some(existing) = read.peek(&id).and_then(Weak::upgrade) {
             return existing;
         }
     }
@@ -946,8 +987,31 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
     if let Some(existing) = write.get(&id).and_then(Weak::upgrade) {
         return existing;
     }
-    write.insert(id, Arc::downgrade(&structure));
+    write.put(id, Arc::downgrade(&structure));
     structure
+}
+
+/// Clears the LRU-capped tenet-core intern tables — block-structure content,
+/// block-structure `Arc` dedup, and coupled subblock structures. Chained from
+/// tenet-tensors' `reset_global_operation_caches` so a long-lived / multi-tenant
+/// process can release the tables between workloads.
+///
+/// Why-safe (id coherence): block-structure content ids come from
+/// `BLOCK_STRUCTURE_CONTENT_ID`, a monotonic counter deliberately NOT reset here.
+/// Ids are therefore never reused after a reset, so a tensors-layer cache entry
+/// keyed by an old content id can only be re-hit by the same content `Arc` that
+/// minted it; content re-interned after this reset gets a fresh id and misses
+/// cleanly. Reset is thus safe to call on its own — no "all layers at once" API
+/// constraint is required. `fusion_tree_layout_cache` is intentionally left
+/// untouched (insert-only; see its guard comment).
+pub fn reset_core_intern_tables() {
+    if let Ok(mut table) = block_structure_intern_table().write() {
+        table.clear();
+    }
+    if let Ok(mut table) = block_structure_arc_table().write() {
+        table.clear();
+    }
+    reset_coupled_block_structure_cache();
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
