@@ -26,13 +26,16 @@ is not separately listed unless its semantics differ.
 
 ## Summary counts
 
-| Status | Count |
+Counts are table rows; a few rows bundle several closely-related exports
+(e.g. `eigh_full` / `eigh_trunc` / `eigh_vals`).
+
+| Status | Rows |
 |---|---|
-| has | 41 |
-| has-different-name | 27 |
+| has | 40 |
+| has-different-name | 22 |
 | added (this sweep) | 11 |
-| design-gated | 24 |
-| N/A | 22 |
+| design-gated | 18 |
+| N/A | 7 |
 
 Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 `Tensor::zeros_like`, `Tensor::is_hermitian` / `is_antihermitian` /
