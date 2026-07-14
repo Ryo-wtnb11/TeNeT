@@ -699,35 +699,75 @@ fn origin_registry_attributes_output_lifetime() {
 }
 
 #[test]
-fn realloc_tracks_only_successful_probe_origin_transitions() {
+fn realloc_moved_transition_preserves_concurrently_reused_old_address() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     reset_event_counters();
     reset_live_registry();
     ENABLED.store(false, Ordering::SeqCst);
-    let first = 0x1000usize as *mut u8;
+    let old = 0x1000usize as *mut u8;
     let moved = 0x2000usize as *mut u8;
-    let untracked = 0x3000usize as *mut u8;
+    assert!(register_live(old, 8));
 
-    assert!(register_live(first, 8));
-    assert!(!record_realloc_result(
-        first,
+    let origin = detach_realloc_origin(old).expect("old origin must be tracked");
+    let old_address = old as usize;
+    // What: another allocator thread may reuse the freed address before the moved
+    // realloc result is committed to the registry.
+    assert!(std::thread::spawn(move || register_live(old_address as *mut u8, 32))
+        .join()
+        .unwrap());
+    assert!(finish_realloc_result(origin, moved, 16, true));
+
+    assert_eq!(registered_size(old), Some(32));
+    assert_eq!(registered_size(moved), Some(16));
+    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 16);
+    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 8);
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 48);
+}
+
+#[test]
+fn realloc_failed_transition_restores_origin_without_duplicate_metrics() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    reset_event_counters();
+    PAYLOAD_SIZE.store(8, Ordering::Relaxed);
+    reset_live_registry();
+    let old = 0x1000usize as *mut u8;
+    assert!(register_live(old, 8));
+    let origin = detach_realloc_origin(old).expect("old origin must be tracked");
+
+    // What: a failed realloc restores the exact old origin without reporting a
+    // second allocation or a successful realloc event.
+    assert!(!finish_realloc_result(
+        origin,
         std::ptr::null_mut(),
         16,
         true
     ));
-    assert_eq!(registered_size(first), Some(8));
-    assert!(record_realloc_result(first, moved, 16, true));
-    assert_eq!(registered_size(first), None);
-    assert_eq!(registered_size(moved), Some(16));
-    assert!(record_realloc_result(moved, moved, 4, true));
-    assert_eq!(registered_size(moved), Some(4));
-    assert!(!record_realloc_result(untracked, first, 32, true));
-    assert_eq!(registered_size(first), None);
-    ENABLED.store(false, Ordering::SeqCst);
+    assert_eq!(registered_size(old), Some(8));
+    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 8);
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed), 8);
+}
 
-    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 2);
-    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 20);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 24);
+#[test]
+fn realloc_in_place_transition_replaces_only_its_detached_origin() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    reset_event_counters();
+    PAYLOAD_SIZE.store(0, Ordering::Relaxed);
+    reset_live_registry();
+    let pointer = 0x1000usize as *mut u8;
+    assert!(register_live(pointer, 8));
+    let origin = detach_realloc_origin(pointer).expect("old origin must be tracked");
+
+    // What: an in-place realloc replaces its own generation with the new size.
+    assert!(finish_realloc_result(origin, pointer, 4, true));
+    assert_eq!(registered_size(pointer), Some(4));
+    assert_eq!(REALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(ALLOCATED_BYTES.load(Ordering::Relaxed), 4);
+    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 8);
     assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 4);
 }
 
