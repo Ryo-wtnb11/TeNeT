@@ -774,14 +774,17 @@ where
 /// builder because the two are disjoint at the type level:
 /// `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never both
 /// implemented by a real rule, so a mult-free rule can never name this
-/// function's bound, let alone reach its body. The mult-free builders and their
-/// eight `UnsupportedFusionStyle` guards are therefore left byte-for-byte
-/// untouched (the structural zero-cost guarantee). The runtime
-/// `has_multiplicity` gate below is the symmetric sibling of those guards,
-/// defending against a `GenericRigidSymbols` rule that reports a
-/// multiplicity-free style at runtime. A `has_multiplicity()` dispatch over a
-/// dyn-style entry is a Stage B3 concern (the SU(3) provider / generic-capable
-/// facade), where a caller can hold a rule of unknown style.
+/// function's bound, let alone reach its row-generation body. Both paths do
+/// intentionally share group-spec assembly, including structural monomial
+/// lowering, while retaining separate fusion-style guards and symbol APIs.
+/// Why not call this a byte-for-byte or blanket zero-cost guarantee: changes to
+/// the shared assembler are expected to affect both paths; the guarantee is
+/// that multiplicity-free rules never execute generic F/R-symbol logic. The
+/// runtime `has_multiplicity` gate below defends against a
+/// `GenericRigidSymbols` rule that reports a multiplicity-free style. A
+/// `has_multiplicity()` dispatch over a dyn-style entry is a Stage B3 concern
+/// (the SU(3) provider / generic-capable facade), where a caller can hold a rule
+/// of unknown style.
 pub fn build_generic_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,

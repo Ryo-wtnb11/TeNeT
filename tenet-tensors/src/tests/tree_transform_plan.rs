@@ -356,13 +356,51 @@ fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order()
     assert_eq!(plan.specs()[0].src_keys(), std::slice::from_ref(&src_key0));
     assert_eq!(plan.specs()[0].dst_keys(), std::slice::from_ref(&src_key1));
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-2.0]);
-    assert_eq!(plan.specs()[1].src_keys(), &[src_key1]);
-    assert_eq!(plan.specs()[1].dst_keys(), &[src_key0]);
+    assert_eq!(plan.specs()[1].src_keys(), std::slice::from_ref(&src_key1));
+    assert_eq!(plan.specs()[1].dst_keys(), std::slice::from_ref(&src_key0));
     assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);
     assert!(plan
         .specs()
         .iter()
         .all(|spec| spec.source_axes() == Some([1, 0, 2, 3].as_slice())));
+
+    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![5.0, 7.0],
+        space.clone(),
+        src_structure.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![11.0, 13.0],
+        space,
+        src_structure.clone(),
+    )
+    .unwrap();
+    let compiled = plan
+        .compile_structures(&src_structure, &src_structure)
+        .unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    // dst0 receives 3*src1 and dst1 receives -2*src0.
+    assert_eq!(dst.data(), &[75.0, 19.0]);
+    assert_eq!(
+        (workspace.source_len(), workspace.destination_len()),
+        (0, 0)
+    );
 }
 
 #[test]
@@ -4094,9 +4132,13 @@ impl GenericFusionSymbols for ToyGenericRule {
         &self,
         _a: SectorId,
         _b: SectorId,
-        _c: SectorId,
+        c: SectorId,
     ) -> GenericRMatrix<Self::Scalar> {
-        GenericRMatrix::new(vec![1.0], 1, 1)
+        if c == SectorId::new(1) {
+            GenericRMatrix::new(vec![0.0, 2.0, 3.0, 0.0], 2, 2)
+        } else {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
     }
 }
 
@@ -4199,6 +4241,84 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
     )
     .unwrap_err();
     assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
+}
+
+#[test]
+fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
+    // What: a GenericFusion R matrix whose core rows are structurally
+    // singleton and destination-injective uses the same direct replay contract.
+    let rule = ToyGenericRule {
+        style: FusionStyleKind::Generic,
+    };
+    let pairs = [SectorId::new(1), SectorId::new(2)].map(|vertex| {
+        FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [SectorId::new(1), SectorId::new(1)],
+                Some(SectorId::new(1)),
+                [false, false],
+                [],
+                [vertex],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [SectorId::new(1)],
+                Some(SectorId::new(1)),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+        )
+    });
+    let keys = pairs.clone().map(BlockKey::from);
+    let structure =
+        packed_fixture_structure(3, keys.iter().cloned().map(|key| (key, vec![1usize; 3])))
+            .unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let core_rows = pairs
+        .iter()
+        .map(|pair| generic_braid_tree_pair(&rule, pair, &[1, 0], &[2], &[0, 1], &[2]).unwrap())
+        .collect::<Vec<_>>();
+    assert!(core_rows.iter().all(|row| row.len() == 1));
+    assert_ne!(core_rows[0][0].0, core_rows[1][0].0);
+
+    let plan = build_generic_tree_pair_transform_group_plan(&rule, operation, &structure).unwrap();
+    assert_eq!(plan.specs().len(), 2);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[2.0]);
+    assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);
+    let compiled = plan.compile_structures(&structure, &structure).unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+
+    let space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+    let src = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+        vec![5.0, 7.0],
+        space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![11.0, 13.0], space, structure)
+            .unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[75.0, 59.0]);
+    assert_eq!(
+        (workspace.source_len(), workspace.destination_len()),
+        (0, 0)
+    );
 }
 
 // ======================================================================
