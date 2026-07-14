@@ -79,6 +79,7 @@ fn insert_live_with_capacity(
     pointer: *mut u8,
     size: usize,
     capacity: usize,
+    account_live: bool,
     count_payload_origin: bool,
 ) -> bool {
     if pointer.is_null()
@@ -107,8 +108,10 @@ fn insert_live_with_capacity(
             let index = first_available.unwrap_or(index);
             LIVE_POINTERS[index].store(pointer, Ordering::Relaxed);
             LIVE_SIZES[index].store(size, Ordering::Relaxed);
-            add_live(size as u64);
-            if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
+            if account_live {
+                add_live(size as u64);
+            }
+            if account_live && size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
                 if count_payload_origin {
                     PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
                 }
@@ -122,8 +125,10 @@ fn insert_live_with_capacity(
     if let Some(index) = first_available {
         LIVE_POINTERS[index].store(pointer, Ordering::Relaxed);
         LIVE_SIZES[index].store(size, Ordering::Relaxed);
-        add_live(size as u64);
-        if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
+        if account_live {
+            add_live(size as u64);
+        }
+        if account_live && size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
             if count_payload_origin {
                 PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
             }
@@ -137,7 +142,7 @@ fn insert_live_with_capacity(
 }
 
 fn register_live_with_capacity(pointer: *mut u8, size: usize, capacity: usize) -> bool {
-    insert_live_with_capacity(pointer, size, capacity, true)
+    insert_live_with_capacity(pointer, size, capacity, true, true)
 }
 
 fn register_live(pointer: *mut u8, size: usize) -> bool {
@@ -147,10 +152,10 @@ fn register_live(pointer: *mut u8, size: usize) -> bool {
 fn restore_live(pointer: *mut u8, size: usize) -> bool {
     // Why not call register_live: restoring a failed realloc revives the same
     // allocation origin and must not report a second payload allocation.
-    insert_live_with_capacity(pointer, size, REGISTRY_CAPACITY, false)
+    insert_live_with_capacity(pointer, size, REGISTRY_CAPACITY, false, false)
 }
 
-fn unregister_live_with_capacity(pointer: *mut u8, capacity: usize) -> Option<usize> {
+fn take_live_with_capacity(pointer: *mut u8, capacity: usize, release_live: bool) -> Option<usize> {
     if pointer.is_null()
         || pointer as usize == TOMBSTONE
         || capacity == 0
@@ -173,14 +178,20 @@ fn unregister_live_with_capacity(pointer: *mut u8, capacity: usize) -> Option<us
                 .is_ok()
         {
             let size = LIVE_SIZES[index].swap(0, Ordering::Relaxed);
-            LIVE_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
-            if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
-                PAYLOAD_LIVE_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
+            if release_live {
+                LIVE_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
+                if size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
+                    PAYLOAD_LIVE_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
+                }
             }
             return Some(size);
         }
     }
     None
+}
+
+fn unregister_live_with_capacity(pointer: *mut u8, capacity: usize) -> Option<usize> {
+    take_live_with_capacity(pointer, capacity, true)
 }
 
 fn unregister_live(pointer: *mut u8) -> Option<usize> {
@@ -239,7 +250,10 @@ struct DetachedReallocOrigin {
 }
 
 fn detach_realloc_origin(pointer: *mut u8) -> Option<DetachedReallocOrigin> {
-    unregister_live(pointer).map(|size| DetachedReallocOrigin { pointer, size })
+    // Address identity is removed before System.realloc, but its live metrics
+    // remain reserved until the allocator reports success or failure.
+    take_live_with_capacity(pointer, REGISTRY_CAPACITY, false)
+        .map(|size| DetachedReallocOrigin { pointer, size })
 }
 
 fn finish_realloc_result(
@@ -251,6 +265,10 @@ fn finish_realloc_result(
     if new_ptr.is_null() {
         restore_live(origin.pointer, origin.size);
         return false;
+    }
+    LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
+    if origin.size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
+        PAYLOAD_LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
     }
     if count_event {
         REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
