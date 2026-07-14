@@ -374,7 +374,17 @@ pub fn save_plan_cache(runtime: &Runtime) -> String {
         let cache = cache_mut(slot);
         let mut text = String::from(PLAN_CACHE_FILE_VERSION);
         text.push('\n');
-        for (topo, plan) in &cache.disk {
+        // Sort at save rather than switching `disk` to a BTreeMap: saving is
+        // cold (once per process, at shutdown/checkpoint) while `disk` is
+        // read on every cache miss, so paying the sort here keeps the hot
+        // lookup path's HashMap unchanged. Without this, iterating the
+        // HashMap's std RandomState order made the saved bytes vary run to
+        // run for identical content, breaking reproducible builds and
+        // content-addressed/git-diffed cache blobs (issue #151).
+        let mut entries: Vec<(&String, &crate::plan::ContractionPlan)> =
+            cache.disk.iter().collect();
+        entries.sort_by_key(|(topo, _)| topo.as_str());
+        for (topo, plan) in entries {
             let plan_text = plan.to_text();
             text.push_str("TOPO ");
             text.push_str(topo);
