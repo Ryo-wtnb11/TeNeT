@@ -86,6 +86,11 @@ pub struct DefaultDenseExecutor {
     strided_batch_matmul_config: DotGeneralConfig,
     grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache,
     grouped_jobs: Vec<GroupedGemmJob>,
+    // The runtime-shared context this executor was built on, if any (see
+    // `with_shared_context`). Kept here rather than read back off the backend:
+    // tenferro's `CpuBackend::linalg_context` accessor is `cpu-faer`-gated, so
+    // a hook based on it does not compile on BLAS-provider builds.
+    shared_ctx: Option<SharedCpuContext>,
     // Test-only count of low-level seam dispatches (one per grouped-gemm call,
     // one per strided-batch call). A structural proxy that stays flat as a
     // batch fragments into more runs — see the dispatch-count test for #103.
@@ -99,9 +104,13 @@ impl DefaultDenseExecutor {
     }
 
     pub fn with_threads(threads: usize) -> Result<Self, DenseError> {
+        // `.into()`: since tenferro #1376 the BLAS-provider builds of these
+        // constructors return `CpuBackendError`, while faer builds return the
+        // crate `Error`; `Into` is identity on the latter, so one spelling
+        // compiles under every provider feature.
         CpuBackend::with_threads(threads)
             .map(Self::from_backend)
-            .map_err(|err| tenferro_error("CpuBackend::with_threads", err))
+            .map_err(|err| tenferro_error("CpuBackend::with_threads", err.into()))
     }
 
     /// Builds an executor on a specific CPU linear-algebra provider
@@ -111,14 +120,14 @@ impl DefaultDenseExecutor {
     pub fn with_kind(kind: CpuBackendKind) -> Result<Self, DenseError> {
         CpuBackend::with_kind(kind)
             .map(Self::from_backend)
-            .map_err(|err| tenferro_error("CpuBackend::with_kind", err))
+            .map_err(|err| tenferro_error("CpuBackend::with_kind", err.into()))
     }
 
     /// [`Self::with_kind`] plus an explicit thread count for the provider.
     pub fn with_threads_and_kind(threads: usize, kind: CpuBackendKind) -> Result<Self, DenseError> {
         CpuBackend::with_threads_and_kind(threads, kind)
             .map(Self::from_backend)
-            .map_err(|err| tenferro_error("CpuBackend::with_threads_and_kind", err))
+            .map_err(|err| tenferro_error("CpuBackend::with_threads_and_kind", err.into()))
     }
 
     /// Builds an executor on a runtime's shared [`SharedCpuContext`] (own
@@ -130,27 +139,29 @@ impl DefaultDenseExecutor {
         kind: Option<CpuBackendKind>,
     ) -> Result<Self, DenseError> {
         match kind {
-            // `from_context` fixes the kind at `default_compiled`, so it also
-            // covers an explicit request FOR that default.
-            None => Ok(Self::from_backend(CpuBackend::from_context(Arc::clone(
-                &ctx.ctx,
-            )))),
-            Some(kind) if kind == CpuBackendKind::default_compiled() => Ok(Self::from_backend(
-                CpuBackend::from_context(Arc::clone(&ctx.ctx)),
-            )),
             // ponytail: tenferro has no pub context+kind constructor, so the
             // one non-default-kind combination (explicit Faer while a BLAS
             // provider is compiled in) keeps a private context/pool exactly as
-            // before this seam existed. Lift when tenferro exposes
-            // `from_context` with a kind.
-            Some(kind) => Self::with_threads_and_kind(ctx.num_threads(), kind),
+            // before this seam existed (`shared_ctx` stays `None`). Lift when
+            // tenferro exposes `from_context` with a kind.
+            Some(kind) if kind != CpuBackendKind::default_compiled() => {
+                Self::with_threads_and_kind(ctx.num_threads(), kind)
+            }
+            // `from_context` fixes the kind at `default_compiled`, so it also
+            // covers an explicit request FOR that default.
+            _ => {
+                let mut executor =
+                    Self::from_backend(CpuBackend::from_context(Arc::clone(&ctx.ctx)));
+                executor.shared_ctx = Some(ctx.clone());
+                Ok(executor)
+            }
         }
     }
 
     /// Regression-test hook: does this executor run on `ctx`'s rayon pool?
     #[doc(hidden)]
     pub fn shares_cpu_context(&self, ctx: &SharedCpuContext) -> bool {
-        Arc::ptr_eq(&self.backend.linalg_context(), &ctx.ctx)
+        self.shared_ctx.as_ref().is_some_and(|own| own.ptr_eq(ctx))
     }
 
     fn from_backend(backend: CpuBackend) -> Self {
@@ -170,6 +181,7 @@ impl DefaultDenseExecutor {
             },
             grouped_cache: <CpuBackend as BackendRuntimeCache>::RuntimeCache::default(),
             grouped_jobs: Vec::new(),
+            shared_ctx: None,
             #[cfg(test)]
             seam_dispatches: 0,
         }
