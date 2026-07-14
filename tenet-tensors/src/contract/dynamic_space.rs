@@ -1,5 +1,5 @@
-use std::any::{Any, TypeId};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
@@ -9,7 +9,7 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, RuleIdentity,
 };
 
-use crate::cache::operation_global_registry;
+use crate::cache::registered_operation_cache;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::TensorContractSpec;
 
@@ -119,25 +119,7 @@ const SCRATCH_STRUCTURE_CACHE_CAP: usize = 8192;
 /// because the map and its LRU order must share one lock, mirroring the adjoint
 /// cache accessor.
 fn scratch_structure_cache() -> Arc<RwLock<ScratchStructureCache>> {
-    let registry = operation_global_registry();
-    let type_id = TypeId::of::<ScratchStructureCache>();
-    if let Some(cache) = registry
-        .read()
-        .expect("global cache registry poisoned")
-        .get(&type_id)
-    {
-        return Arc::downcast::<RwLock<ScratchStructureCache>>(Arc::clone(cache))
-            .expect("scratch structure cache type id collision");
-    }
-    let mut caches = registry.write().expect("global cache registry poisoned");
-    if let Some(cache) = caches.get(&type_id) {
-        return Arc::downcast::<RwLock<ScratchStructureCache>>(Arc::clone(cache))
-            .expect("scratch structure cache type id collision");
-    }
-    let cache: Arc<RwLock<ScratchStructureCache>> =
-        Arc::new(RwLock::new(ScratchStructureCache::default()));
-    caches.insert(type_id, Arc::clone(&cache) as Arc<dyn Any + Send + Sync>);
-    cache
+    registered_operation_cache::<RwLock<ScratchStructureCache>>().1
 }
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
@@ -190,6 +172,31 @@ pub struct DynamicFusionMapSpace {
     rule_identity: Option<tenet_core::RuleIdentity>,
 }
 
+fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {
+    let expected_nout = space.homspace().codomain().len();
+    let expected_nin = space.homspace().domain().len();
+    if space.nout() != expected_nout || space.nin() != expected_nin {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::FusionSpaceSplitMismatch {
+                expected_nout,
+                expected_nin,
+                actual_nout: space.nout(),
+                actual_nin: space.nin(),
+            },
+        ));
+    }
+    let expected_rank = expected_nout + expected_nin;
+    if space.structure().rank() != expected_rank {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::StructureRankMismatch {
+                expected: expected_rank,
+                actual: space.structure().rank(),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// A complete dynamic fusion space bound to the provider that defines it.
 ///
 /// Construct this with [`Self::bind_multiplicity_free`] for a
@@ -201,6 +208,46 @@ pub struct DynamicFusionMapSpace {
 pub struct BoundDynamicFusionMapSpace<R> {
     space: DynamicFusionMapSpace,
     provider: Arc<R>,
+}
+
+#[derive(Clone, Debug)]
+/// Provider-neutral dynamic layout that has passed a bound space's full validation.
+///
+/// Why not expose the raw space, its metadata fields, or the first provider:
+/// cached consumers must preserve one validation proof without reconstructing
+/// identity or retaining an arbitrary provider allocation.
+pub struct ValidatedDynamicFusionLayout(DynamicFusionMapSpace);
+
+impl ValidatedDynamicFusionLayout {
+    /// Flat storage length required by this validated layout.
+    ///
+    /// Why not expose the raw space: executors only need allocation length;
+    /// structural access would let consumers rebuild a second authority.
+    pub fn required_len(&self) -> Result<usize, CoreError> {
+        self.0.required_len()
+    }
+}
+
+impl PartialEq for ValidatedDynamicFusionLayout {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.rule_identity == other.0.rule_identity
+            && self.0.homspace().id() == other.0.homspace().id()
+            && self.0.structure().content_id() == other.0.structure().content_id()
+            && self.0.nout() == other.0.nout()
+            && self.0.nin() == other.0.nin()
+    }
+}
+
+impl Eq for ValidatedDynamicFusionLayout {}
+
+impl Hash for ValidatedDynamicFusionLayout {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.rule_identity.hash(state);
+        self.0.homspace().id().hash(state);
+        self.0.structure().content_id().hash(state);
+        self.0.nout().hash(state);
+        self.0.nin().hash(state);
+    }
 }
 
 impl<R> Clone for BoundDynamicFusionMapSpace<R> {
@@ -233,6 +280,7 @@ where
         // `space` through checked structural operations from an already-bound
         // source. Re-enumeration would duplicate that work without adding a
         // new trust boundary; the rule identity remains cheap to verify.
+        validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
         Ok(Self { space, provider })
     }
@@ -250,7 +298,7 @@ where
     {
         let space =
             DynamicFusionMapSpace::from_degeneracy_shapes(provider.as_ref(), homspace, shapes)?;
-        Ok(Self { space, provider })
+        Self::from_derived(provider, space)
     }
 
     /// Builds and binds a multiplicity-aware space in one checked pass.
@@ -268,7 +316,7 @@ where
             homspace,
             shapes,
         )?;
-        Ok(Self { space, provider })
+        Self::from_derived(provider, space)
     }
 
     fn bind_with_keys(
@@ -276,6 +324,7 @@ where
         provider: Arc<R>,
         keys: Vec<FusionTreeBlockKey>,
     ) -> Result<Self, OperationError> {
+        validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
         space.validate_complete_tree_grid(&keys)?;
         Ok(Self { space, provider })
@@ -411,6 +460,37 @@ where
     #[inline]
     pub fn provider_arc(&self) -> &Arc<R> {
         &self.provider
+    }
+
+    /// Erases only the provider allocation after preserving the checked layout proof.
+    ///
+    /// Why not return [`DynamicFusionMapSpace`]: a raw value does not carry the
+    /// complete-tree-grid proof established by the bound constructor.
+    pub fn validated_layout(&self) -> ValidatedDynamicFusionLayout {
+        ValidatedDynamicFusionLayout(self.space.clone())
+    }
+
+    /// Rebinds a validated cached layout to this space's exact provider allocation.
+    ///
+    /// Why not retain the provider that first populated a process-global cache:
+    /// semantically equal callers may carry distinct provider allocations.
+    pub fn rebind_validated(
+        &self,
+        layout: &ValidatedDynamicFusionLayout,
+    ) -> Result<Self, OperationError> {
+        let expected = self.provider.rule_identity();
+        let actual = layout.0.rule_identity.clone().ok_or_else(|| {
+            OperationError::from_core_preserving_context(CoreError::MissingFusionRuleIdentity)
+        })?;
+        if expected != actual {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::FusionRuleMismatch { expected, actual },
+            ));
+        }
+        Ok(Self {
+            space: layout.0.clone(),
+            provider: Arc::clone(&self.provider),
+        })
     }
 }
 
@@ -1071,6 +1151,84 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
 }
 
 #[cfg(test)]
+mod bound_invariant_tests {
+    use super::*;
+    use tenet_core::{BlockSpec, Z2FusionRule};
+
+    fn matrix_space() -> DynamicFusionMapSpace {
+        let rule = Z2FusionRule;
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![1, 1]]).unwrap()
+    }
+
+    #[test]
+    fn bound_space_rejects_incoherent_axis_split() {
+        // What: a bound space cannot disagree with its hom-space codomain/domain split.
+        let raw = DynamicFusionMapSpace {
+            nout: 0,
+            nin: 2,
+            ..matrix_space()
+        };
+
+        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::new(Z2FusionRule))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionSpaceSplitMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn bound_space_rejects_incoherent_structure_rank() {
+        // What: a bound space cannot attach storage with a rank different from its hom space.
+        let raw = matrix_space();
+        let block = raw.structure().block(0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(
+            1,
+            vec![BlockSpec::with_key(block.key().clone(), vec![1], vec![1], 0).unwrap()],
+        )
+        .unwrap();
+        let raw = DynamicFusionMapSpace {
+            subblock_structure: Arc::new(structure),
+            ..raw
+        };
+
+        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::new(Z2FusionRule))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::StructureRankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn direct_bound_builders_keep_coherent_split_and_rank() {
+        // What: both multiplicity-free and generic direct builders satisfy bound invariants.
+        let provider = Arc::new(Z2FusionRule);
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        let multiplicity_free = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            homspace.clone(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let generic = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            provider,
+            homspace,
+            [vec![1, 1]],
+        )
+        .unwrap();
+
+        assert_eq!(multiplicity_free.space().nout(), 1);
+        assert_eq!(generic.space().nin(), 1);
+        assert_eq!(multiplicity_free.space().structure().rank(), 2);
+        assert_eq!(generic.space().structure().rank(), 2);
+    }
+}
+
+#[cfg(test)]
 mod scratch_cache_tests {
     use super::*;
     use crate::test_support::CACHE_TEST_LOCK;
@@ -1193,6 +1351,148 @@ mod scratch_cache_tests {
         let count = hom.fusion_tree_keys(&rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count])
             .unwrap()
+    }
+
+    #[test]
+    fn layout_authority_distinguishes_rules_and_reuses_semantic_spaces() {
+        // What: opaque layout identity aliases equal bound layouts but never distinct rules.
+        let first_provider = Arc::new(Z2FusionRule);
+        let second_provider = Arc::new(Z2FusionRule);
+        let raw = z2_matrix_space();
+        let first = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            raw.clone(),
+            Arc::clone(&first_provider),
+        )
+        .unwrap();
+        let second =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::clone(&second_provider))
+                .unwrap();
+        assert_eq!(first.validated_layout(), second.validated_layout());
+
+        let wrong = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            u1_space(0, 1),
+            Arc::new(U1FusionRule),
+        )
+        .unwrap();
+        assert_ne!(first.validated_layout(), wrong.validated_layout());
+        let error = first
+            .rebind_validated(&wrong.validated_layout())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+        assert!(Arc::ptr_eq(first.provider_arc(), &first_provider));
+    }
+
+    #[test]
+    fn layout_authority_rebinds_derived_space_to_exact_provider_arc() {
+        // What: a cached raw derived layout inherits the current caller's provider allocation.
+        let first_provider = Arc::new(Z2FusionRule);
+        let second_provider = Arc::new(Z2FusionRule);
+        let raw = z2_matrix_space();
+        let first = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            raw.clone(),
+            Arc::clone(&first_provider),
+        )
+        .unwrap();
+        let second =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::clone(&second_provider))
+                .unwrap();
+        let validated = first.validated_layout();
+
+        let rebound = second.rebind_validated(&validated).unwrap();
+
+        assert!(Arc::ptr_eq(rebound.provider_arc(), &second_provider));
+        assert!(!Arc::ptr_eq(rebound.provider_arc(), &first_provider));
+    }
+
+    #[test]
+    fn layout_authority_separates_zero_legs_and_storage_geometry() {
+        // What: structural-zero legs and storage geometry remain distinct authorities.
+        let provider = Arc::new(Z2FusionRule);
+        let even = Z2Irrep::EVEN.sector_id();
+        let odd = Z2Irrep::ODD.sector_id();
+        let leg = |include_zero| {
+            let sectors = if include_zero {
+                vec![(even, 1), (odd, 0)]
+            } else {
+                vec![(even, 1)]
+            };
+            FusionProductSpace::new([SectorLeg::new(sectors, false)])
+        };
+        let without_zero_hom = FusionTreeHomSpace::new(leg(false), leg(false));
+        let with_zero_hom = FusionTreeHomSpace::new(leg(true), leg(true));
+        let without_zero = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            without_zero_hom,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let zero_shapes = with_zero_hom
+            .fusion_tree_keys(provider.as_ref())
+            .iter()
+            .map(|key| {
+                vec![
+                    usize::from(key.codomain_tree().coupled() == Some(even)),
+                    usize::from(key.domain_tree().coupled() == Some(even)),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let with_zero = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            with_zero_hom,
+            zero_shapes,
+        )
+        .unwrap();
+        assert_ne!(
+            without_zero.validated_layout(),
+            with_zero.validated_layout()
+        );
+
+        let raw = z2_matrix_space();
+        let shifted_blocks = (0..raw.structure().block_count())
+            .map(|index| {
+                let block = raw.structure().block(index).unwrap();
+                BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    block.strides().to_vec(),
+                    block.offset() + 1,
+                )
+                .unwrap()
+            })
+            .collect();
+        let shifted_raw = DynamicFusionMapSpace {
+            subblock_structure: Arc::new(BlockStructure::from_blocks(shifted_blocks).unwrap()),
+            ..raw.clone()
+        };
+        let canonical =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(raw.clone(), Arc::clone(&provider))
+                .unwrap();
+        let shifted =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(shifted_raw, Arc::clone(&provider))
+                .unwrap();
+        assert_ne!(canonical.validated_layout(), shifted.validated_layout());
+    }
+
+    #[test]
+    fn validated_layout_does_not_retain_provider_allocation() {
+        // What: erasing a bound layout drops the provider allocation while preserving layout data.
+        let provider = Arc::new(Z2FusionRule);
+        let weak = Arc::downgrade(&provider);
+        let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            z2_matrix_space(),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let validated = bound.validated_layout();
+
+        drop(bound);
+        drop(provider);
+
+        assert!(weak.upgrade().is_none());
+        assert_eq!(validated.required_len().unwrap(), 2);
     }
 
     fn z2_matrix_space() -> DynamicFusionMapSpace {

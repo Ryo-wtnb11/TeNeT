@@ -20,9 +20,7 @@ use std::sync::{Arc, RwLock};
 use tenet_core::{BlockStructure, FusionTreeHomSpace, HomSpaceId, MultiplicityFreeRigidSymbols};
 
 use super::structure::TensorContractStructure;
-use crate::cache::{
-    operation_global_registry, typed_global_map, BlockStructureCacheKey, OperationCachePolicy,
-};
+use crate::cache::{typed_global_map, BlockStructureCacheKey, OperationCachePolicy};
 use crate::OperationError;
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
@@ -41,7 +39,7 @@ fn global_contraction_resolutions<RuleKey>() -> Arc<GlobalContractionResolutionM
 where
     RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
 {
-    typed_global_map(operation_global_registry())
+    typed_global_map()
 }
 
 /// Resolved execution artifact for one contraction key: the route decision

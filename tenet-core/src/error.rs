@@ -8,6 +8,12 @@ pub enum CoreError {
         expected: usize,
         actual: usize,
     },
+    FusionSpaceSplitMismatch {
+        expected_nout: usize,
+        expected_nin: usize,
+        actual_nout: usize,
+        actual_nin: usize,
+    },
     DimensionMismatch {
         expected: usize,
         actual: usize,
@@ -106,6 +112,17 @@ impl fmt::Display for CoreError {
                 write!(
                     f,
                     "block structure rank mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::FusionSpaceSplitMismatch {
+                expected_nout,
+                expected_nin,
+                actual_nout,
+                actual_nin,
+            } => {
+                write!(
+                    f,
+                    "fusion-space split mismatch: hom space is {expected_nout} <- {expected_nin}, dynamic split is {actual_nout} <- {actual_nin}"
                 )
             }
             Self::DimensionMismatch { expected, actual } => {

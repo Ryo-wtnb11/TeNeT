@@ -5,7 +5,6 @@
 //! transposes of `t`'s blocks (`block(t^H, c) = block(t, c)^H`). Codomain and
 //! domain swap as spaces; leg duality flags are unchanged.
 
-use std::any::{Any, TypeId};
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
@@ -14,7 +13,7 @@ use tenet_core::{
     HomSpaceId, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
-use crate::cache::operation_global_registry;
+use crate::cache::registered_operation_cache;
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
@@ -79,25 +78,7 @@ fn adjoint_space_cache<RuleKey>() -> Arc<RwLock<AdjointSpaceCache<RuleKey>>>
 where
     RuleKey: 'static + Eq + Hash + Send + Sync,
 {
-    let registry = operation_global_registry();
-    let type_id = TypeId::of::<AdjointSpaceCache<RuleKey>>();
-    if let Some(cache) = registry
-        .read()
-        .expect("global cache registry poisoned")
-        .get(&type_id)
-    {
-        return Arc::downcast::<RwLock<AdjointSpaceCache<RuleKey>>>(Arc::clone(cache))
-            .expect("adjoint space cache type id collision");
-    }
-    let mut caches = registry.write().expect("global cache registry poisoned");
-    if let Some(cache) = caches.get(&type_id) {
-        return Arc::downcast::<RwLock<AdjointSpaceCache<RuleKey>>>(Arc::clone(cache))
-            .expect("adjoint space cache type id collision");
-    }
-    let cache: Arc<RwLock<AdjointSpaceCache<RuleKey>>> =
-        Arc::new(RwLock::new(AdjointSpaceCache::default()));
-    caches.insert(type_id, Arc::clone(&cache) as Arc<dyn Any + Send + Sync>);
-    cache
+    registered_operation_cache::<RwLock<AdjointSpaceCache<RuleKey>>>().1
 }
 
 /// Dynamic-rank adjoint space (dagger of the homspace): codomain and domain

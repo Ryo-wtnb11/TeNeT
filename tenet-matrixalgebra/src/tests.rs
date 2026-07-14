@@ -13,10 +13,13 @@ use tenet_tensors::{
 
 use crate::factorize::{dyn_space_of, truncate_svd, BoundTensorMap};
 use crate::*;
-use std::sync::Arc;
+use num_complex::Complex32;
+use std::sync::{Arc, Mutex};
 use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
 };
+
+static COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct RejectExecutorCalls;
 
@@ -426,6 +429,155 @@ fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
 }
 
 #[test]
+fn compact_svd_plan_reuses_clone_before_init_and_concurrent_first_use() {
+    // What: one semantic compact-SVD plan serves clones made before and during first use.
+    let _guard = COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tensor = rectangular_svd_tensor(23, 17);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let before_init = bound.space().clone();
+    let spaces = (0..8).map(|_| before_init.clone()).collect::<Vec<_>>();
+    let plans = std::thread::scope(|scope| {
+        spaces
+            .iter()
+            .map(|space| {
+                scope.spawn(|| {
+                    crate::factorize::compact_svd_plan_for_test(space)
+                        .unwrap()
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let after_init = bound.space().clone();
+    let after = crate::factorize::compact_svd_plan_for_test(&after_init)
+        .unwrap()
+        .unwrap();
+
+    assert!(plans.iter().all(|plan| Arc::ptr_eq(plan, &plans[0])));
+    assert!(Arc::ptr_eq(&after, &plans[0]));
+}
+
+#[test]
+fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
+    // What: one semantic plan serves distinct provider Arcs while U/S/Vh inherit each caller.
+    let _guard = COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tensor = rectangular_svd_tensor(7, 5);
+    let first_provider = Arc::new(Z2FusionRule);
+    let second_provider = Arc::new(Z2FusionRule);
+    let first = bound_tensor(Arc::clone(&first_provider), &tensor);
+    let second = bound_tensor(Arc::clone(&second_provider), &tensor);
+    let first_plan = crate::factorize::compact_svd_plan_for_test(first.space())
+        .unwrap()
+        .unwrap();
+    let second_plan = crate::factorize::compact_svd_plan_for_test(second.space())
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(&first_plan, &second_plan));
+
+    let first_input = BoundDynamicTensorRef::try_new(first.space(), tensor.data()).unwrap();
+    let second_input = BoundDynamicTensorRef::try_new(second.space(), tensor.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let first_svd = svd_compact_dyn(&mut dense, &first_input).unwrap();
+    let second_svd = svd_compact_dyn(&mut dense, &second_input).unwrap();
+
+    for factor in [first_svd.u(), first_svd.s(), first_svd.vh()] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &first_provider));
+    }
+    for factor in [second_svd.u(), second_svd.s(), second_svd.vh()] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &second_provider));
+    }
+}
+
+#[test]
+fn global_operation_reset_replaces_compact_svd_plan_generation() {
+    // What: a completed global reset invalidates both the shared plan and this thread's front.
+    let _guard = COMPACT_SVD_PLAN_IDENTITY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tensor = rectangular_svd_tensor(29, 23);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let before = crate::factorize::compact_svd_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+
+    tenet_tensors::reset_global_operation_caches();
+
+    let after = crate::factorize::compact_svd_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    assert!(!Arc::ptr_eq(&before, &after));
+}
+
+#[test]
+fn compact_svd_cached_plan_does_not_retain_first_provider() {
+    // What: a cached semantic plan never owns the provider that first built it.
+    let tensor = rectangular_svd_tensor(19, 11);
+    let provider = Arc::new(Z2FusionRule);
+    let weak = Arc::downgrade(&provider);
+    let bound = bound_tensor(Arc::clone(&provider), &tensor);
+    let plan = crate::factorize::compact_svd_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+
+    drop(bound);
+    drop(provider);
+
+    assert!(weak.upgrade().is_none());
+    assert!(Arc::strong_count(&plan) >= 1);
+}
+
+#[test]
+fn compact_svd_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
+    // What: every nonzero source sector has exactly one shape-correct U/Vh route and no extras.
+    let rule = Z2FusionRule;
+    let tensor = rectangular_svd_tensor(17, 13);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let plan = crate::factorize::compact_svd_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    let (source, u, vh) = crate::factorize::compact_svd_plan_regions_for_test(&plan);
+
+    let mut duplicate = u.to_vec();
+    duplicate.push(u[0].clone());
+    assert!(crate::factorize::validate_compact_svd_routes_for_test(
+        &rule, &source, &duplicate, &vh,
+    )
+    .is_err());
+    assert!(
+        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &[], &vh,).is_err()
+    );
+    assert!(
+        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &vh, &vh,).is_err()
+    );
+
+    let multi = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let multi_bound = bound_tensor(Arc::new(rule), &multi);
+    let multi_plan = crate::factorize::compact_svd_plan_for_test(multi_bound.space())
+        .unwrap()
+        .unwrap();
+    let (_, multi_u, _) = crate::factorize::compact_svd_plan_regions_for_test(&multi_plan);
+    let mut extra = u.to_vec();
+    extra.push(
+        multi_u
+            .iter()
+            .find(|region| region.coupled() == Some(SectorId::new(1)))
+            .unwrap()
+            .clone(),
+    );
+    assert!(
+        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &extra, &vh,)
+            .is_err()
+    );
+}
+
+#[test]
 fn tsvd_fusion_reconstructs_su2_tensor() {
     run_tsvd_reconstruction_case(
         &SU2FusionRule,
@@ -525,6 +677,13 @@ fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
     // What: exact final-factor spans work for both compact rectangular shapes.
     assert_rectangular_direct_svd(5, 3);
     assert_rectangular_direct_svd(3, 5);
+}
+
+#[test]
+fn compact_svd_direct_plan_accepts_zero_rank_sectors() {
+    // What: empty row or column sectors publish an empty spectrum without factor routes.
+    assert_rectangular_direct_svd(0, 3);
+    assert_rectangular_direct_svd(3, 0);
 }
 
 #[test]
@@ -660,6 +819,274 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
             }
         }
     }
+}
+
+fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(even, 5), (odd, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 3), (odd, 4)], false)]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| match key.codomain_tree().coupled().unwrap() {
+            sector if sector == even => vec![5, 3],
+            sector if sector == odd => vec![2, 4],
+            sector => panic!("unexpected Z2 sector {sector:?}"),
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([7], [7]).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| {
+                Complex32::new(
+                    ((index * 7 + 2) % 17) as f32 - 6.0,
+                    ((index * 5 + 3) % 13) as f32 * 0.25 - 1.0,
+                )
+            })
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+#[test]
+fn compact_svd_c32_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
+    // What: single-precision complex direct spans reconstruct both rectangular orientations.
+    let rule = Z2FusionRule;
+    let tensor = mixed_rectangular_c32_tensor();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
+
+    let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let u_regions = svd
+        .u
+        .tensor()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let vh_regions = svd
+        .vh
+        .tensor()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled().unwrap();
+        let u_region = u_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let vh_region = vh_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let singular = &svd
+            .singular_values
+            .iter()
+            .find(|values| values.sector == sector)
+            .unwrap()
+            .values;
+        let rows = input_region.rows();
+        let cols = input_region.cols();
+        let rank = rows.min(cols);
+        for col in 0..cols {
+            for row in 0..rows {
+                let reconstructed = (0..rank)
+                    .map(|bond| {
+                        svd.u.data()[u_region.range().start + row + rows * bond]
+                            * singular[bond] as f32
+                            * svd.vh.data()[vh_region.range().start + bond + rank * col]
+                    })
+                    .sum::<Complex32>();
+                let expected = tensor.data()[input_region.range().start + row + rows * col];
+                assert!((reconstructed - expected).norm() < 2e-4);
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_svd_c32_direct_and_fallback_apply_the_same_gauge() {
+    // What: the single-precision direct path preserves the fallback's canonical complex phase.
+    let rule = Z2FusionRule;
+    let real = rectangular_svd_tensor(3, 3);
+    let data = real
+        .data()
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| Complex32::new(value as f32, (index as f32 - 3.0) * 0.25))
+        .collect::<Vec<_>>();
+    let tensor =
+        TensorMap::from_vec_with_fusion_space(data, real.fusion_space().unwrap().as_ref().clone())
+            .unwrap();
+    let mut transposed_data = vec![Complex32::new(0.0, 0.0); 9];
+    for col in 0..3 {
+        for row in 0..3 {
+            transposed_data[row + 3 * col] = tensor.data()[col + 3 * row];
+        }
+    }
+    let transposed = TensorMap::from_vec_with_fusion_space(
+        transposed_data,
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let direct = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &transposed)).unwrap();
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let fallback_input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let fallback = svd_compact_dyn(&mut dense, &fallback_input).unwrap();
+    let fallback_probe = crate::factorize::compact_svd_copy_probe();
+    assert!(fallback_probe.input_pack_calls > 0);
+    assert!(fallback_probe.output_scatter_calls > 0);
+    for entry in &direct.singular_values {
+        assert!(entry.values.last().is_some_and(|value| *value > 1e-3));
+        assert!(entry
+            .values
+            .windows(2)
+            .all(|pair| (pair[0] - pair[1]).abs() > 1e-3));
+    }
+
+    assert_eq!(direct.u.data().len(), fallback.u().data().len());
+    for (left, right) in direct.u.data().iter().zip(fallback.u().data()) {
+        assert!((*left - *right).norm() < 2e-5);
+    }
+    assert_eq!(direct.vh.data().len(), fallback.vh().data().len());
+    for (left, right) in direct.vh.data().iter().zip(fallback.vh().data()) {
+        assert!((*left - *right).norm() < 2e-5);
+    }
+    assert_eq!(
+        direct.singular_values.len(),
+        fallback.singular_values().len()
+    );
+    for (left_entry, right_entry) in direct
+        .singular_values
+        .iter()
+        .zip(fallback.singular_values())
+    {
+        assert_eq!(left_entry.sector, right_entry.sector);
+        assert_eq!(left_entry.values.len(), right_entry.values.len());
+        for (left, right) in left_entry.values.iter().zip(&right_entry.values) {
+            assert!((left - right).abs() < 1e-5);
+        }
+    }
+}
+
+#[test]
+fn svd_trunc_c32_reports_the_discarded_reconstruction_error() {
+    // What: Complex32 spectrum buffering and truncation preserve the reported discarded norm.
+    let rule = Z2FusionRule;
+    let tensor = mixed_rectangular_c32_tensor();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
+
+    let svd = svd_trunc(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        &Truncation::rank(4),
+    )
+    .unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+    assert_eq!(
+        svd.singular_values
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum::<usize>(),
+        4
+    );
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let u_regions = svd
+        .u
+        .tensor()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let vh_regions = svd
+        .vh
+        .tensor()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let mut distance_squared = 0.0f64;
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled().unwrap();
+        let singular = &svd
+            .singular_values
+            .iter()
+            .find(|values| values.sector == sector)
+            .unwrap()
+            .values;
+        let u_region = u_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector));
+        let vh_region = vh_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector));
+        let rows = input_region.rows();
+        let cols = input_region.cols();
+        for col in 0..cols {
+            for row in 0..rows {
+                let reconstructed = match (u_region, vh_region) {
+                    (Some(u_region), Some(vh_region)) => (0..singular.len())
+                        .map(|bond| {
+                            svd.u.data()[u_region.range().start + row + rows * bond]
+                                * singular[bond] as f32
+                                * svd.vh.data()
+                                    [vh_region.range().start + bond + singular.len() * col]
+                        })
+                        .sum::<Complex32>(),
+                    _ => Complex32::new(0.0, 0.0),
+                };
+                let expected = tensor.data()[input_region.range().start + row + rows * col];
+                distance_squared += (reconstructed - expected).norm_sqr() as f64;
+            }
+        }
+    }
+    let distance = distance_squared.sqrt();
+    assert!(svd.error > 0.0);
+    assert!(
+        (distance - svd.error).abs() < 2e-3,
+        "Complex32 distance {distance} != error {}",
+        svd.error
+    );
 }
 
 fn weighted_norm_squared_of_difference<R>(

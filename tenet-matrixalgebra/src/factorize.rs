@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -16,6 +18,7 @@ use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMu
 
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace,
+    ValidatedDynamicFusionLayout,
 };
 
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
@@ -41,6 +44,18 @@ pub trait FactorScalar: DenseRecouplingScalar {
     fn from_complex64(value: Complex64) -> Self;
     fn adjoint(self) -> Self;
     fn epsilon() -> f64;
+    fn compute_f64_spectrum<E, F>(
+        rank: usize,
+        scratch: &mut Vec<Self::Real>,
+        compute: F,
+    ) -> Result<Vec<f64>, E>
+    where
+        F: FnOnce(&mut [Self::Real]) -> Result<(), E>,
+    {
+        scratch.resize(rank, Self::Real::zero());
+        compute(&mut scratch[..rank])?;
+        Ok(scratch[..rank].iter().copied().map(Into::into).collect())
+    }
 }
 
 impl FactorScalar for f32 {
@@ -111,6 +126,19 @@ impl FactorScalar for f64 {
     fn epsilon() -> f64 {
         f64::EPSILON
     }
+
+    fn compute_f64_spectrum<E, F>(
+        rank: usize,
+        _scratch: &mut Vec<Self::Real>,
+        compute: F,
+    ) -> Result<Vec<f64>, E>
+    where
+        F: FnOnce(&mut [Self::Real]) -> Result<(), E>,
+    {
+        let mut values = vec![0.0; rank];
+        compute(&mut values)?;
+        Ok(values)
+    }
 }
 
 impl FactorScalar for num_complex::Complex32 {
@@ -180,6 +208,19 @@ impl FactorScalar for Complex64 {
 
     fn epsilon() -> f64 {
         f64::EPSILON
+    }
+
+    fn compute_f64_spectrum<E, F>(
+        rank: usize,
+        _scratch: &mut Vec<Self::Real>,
+        compute: F,
+    ) -> Result<Vec<f64>, E>
+    where
+        F: FnOnce(&mut [Self::Real]) -> Result<(), E>,
+    {
+        let mut values = vec![0.0; rank];
+        compute(&mut values)?;
+        Ok(values)
     }
 }
 
@@ -1106,8 +1147,8 @@ where
 {
     let rule = input.space().provider();
     let space = input.space().space();
-    if let Some(regions) = checked_sector_regions(space.structure(), space.nout())? {
-        return svd_compact_direct_regions(dense, input, &regions);
+    if let Some(plan) = compact_svd_factor_plan(input.space())? {
+        return svd_compact_direct_regions(dense, input, &plan);
     }
     let matricizations =
         sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
@@ -1222,28 +1263,146 @@ where
     Ok((u, vh, singular_values))
 }
 
-fn svd_compact_direct_regions<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-    regions: &[CoupledSectorRegion],
-) -> Result<SvdFactorsDyn<R, D>, OperationError>
+#[derive(Debug)]
+struct MatricizationPlan {
+    layout: ValidatedDynamicFusionLayout,
+    regions: Arc<[CoupledSectorRegion]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompactSvdRoute {
+    source_region: usize,
+    u_region: Option<usize>,
+    vh_region: Option<usize>,
+    sector: SectorId,
+    rank: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct CompactSvdFactorPlan {
+    source: Arc<MatricizationPlan>,
+    u_layout: ValidatedDynamicFusionLayout,
+    vh_layout: ValidatedDynamicFusionLayout,
+    u_regions: Arc<[CoupledSectorRegion]>,
+    vh_regions: Arc<[CoupledSectorRegion]>,
+    routes: Arc<[CompactSvdRoute]>,
+}
+
+const COMPACT_SVD_PLAN_CACHE_CAP: usize = 1024;
+
+// Why not take the global LRU mutex on every warm factorization: concurrent
+// sector factorizations would serialize on metadata lookup. Why not a
+// per-thread map: one strong front entry bounds residency per worker.
+thread_local! {
+    static COMPACT_SVD_PLAN_FRONT: RefCell<Option<(
+        u64,
+        ValidatedDynamicFusionLayout,
+        Arc<CompactSvdFactorPlan>,
+    )>> = const { RefCell::new(None) };
+}
+
+struct CompactSvdPlanCache {
+    entries: Mutex<lru::LruCache<ValidatedDynamicFusionLayout, Arc<CompactSvdFactorPlan>>>,
+}
+
+impl Default for CompactSvdPlanCache {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(COMPACT_SVD_PLAN_CACHE_CAP).unwrap(),
+            )),
+        }
+    }
+}
+
+fn compact_svd_plan_cache() -> (u64, Arc<CompactSvdPlanCache>) {
+    tenet_tensors::registered_operation_cache::<CompactSvdPlanCache>()
+}
+
+fn compact_svd_factor_plan<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Option<Arc<CompactSvdFactorPlan>>, OperationError>
 where
-    E: DenseExecutor + ?Sized,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
 {
-    let space = input.space().space();
-    let ranks = regions
+    let source_layout = input.validated_layout();
+    let current_epoch = tenet_tensors::operation_cache_reset_epoch();
+    if let Some(plan) = COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+        if front
+            .as_ref()
+            .is_some_and(|(epoch, _, _)| *epoch != current_epoch)
+        {
+            *front = None;
+        }
+        front.as_ref().and_then(|(epoch, layout, plan)| {
+            (*epoch == current_epoch && layout == &source_layout).then(|| Arc::clone(plan))
+        })
+    }) {
+        return Ok(Some(plan));
+    }
+    let (cache_epoch, cache) = compact_svd_plan_cache();
+    if let Ok(mut entries) = cache.entries.lock() {
+        if let Some(plan) = entries.get(&source_layout) {
+            let plan = Arc::clone(plan);
+            COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+                *front = Some((cache_epoch, source_layout, Arc::clone(&plan)));
+            });
+            return Ok(Some(plan));
+        }
+    }
+
+    let Some(built) = build_compact_svd_factor_plan(input, source_layout.clone())? else {
+        return Ok(None);
+    };
+    if let Ok(mut entries) = cache.entries.lock() {
+        if let Some(plan) = entries.get(&source_layout) {
+            let plan = Arc::clone(plan);
+            COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+                *front = Some((cache_epoch, source_layout, Arc::clone(&plan)));
+            });
+            return Ok(Some(plan));
+        }
+        entries.put(source_layout.clone(), Arc::clone(&built));
+    }
+    // Why not make reset a quiescence barrier: a call already holding this
+    // immutable plan may finish safely. Its epoch makes the next call discard
+    // the front entry and resolve the reset generation instead.
+    COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+        *front = Some((cache_epoch, source_layout, Arc::clone(&built)));
+    });
+    Ok(Some(built))
+}
+
+fn build_compact_svd_factor_plan<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    source_layout: ValidatedDynamicFusionLayout,
+) -> Result<Option<Arc<CompactSvdFactorPlan>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let space = input.space();
+    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
+        return Ok(None);
+    };
+    let source = Arc::new(MatricizationPlan {
+        layout: source_layout,
+        regions,
+    });
+    let ranks = source
+        .regions
         .iter()
         .map(|region| SectorRank {
-            sector: region_sector(input.space().provider(), region),
+            sector: region_sector(input.provider(), region),
             kept: region.rows().min(region.cols()),
         })
         .collect::<Vec<_>>();
-    let layouts = region_matricization_skeletons::<R, D>(input.space().provider(), regions);
-    let provider = input.space().provider_arc();
-    let (u_space, vh_space) =
-        build_left_right_bound_spaces(provider, space.homspace(), &layouts, &ranks)?;
+    let layouts = region_matricization_skeletons::<R, f64>(input.provider(), &source.regions);
+    let (u_space, vh_space) = build_left_right_bound_spaces::<R, f64>(
+        input.provider_arc(),
+        space.homspace(),
+        &layouts,
+        &ranks,
+    )?;
     let u_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact SVD left factor is not a coupled-sector matrix layout",
@@ -1252,29 +1411,128 @@ where
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact SVD right factor is not a coupled-sector matrix layout",
         })?;
-    let u_by_sector = sector_region_map(provider.as_ref(), &u_regions)?;
-    let vh_by_sector = sector_region_map(provider.as_ref(), &vh_regions)?;
+    let routes =
+        compile_compact_svd_routes(input.provider(), &source.regions, &u_regions, &vh_regions)?;
+    Ok(Some(Arc::new(CompactSvdFactorPlan {
+        source,
+        u_layout: u_space.validated_layout(),
+        vh_layout: vh_space.validated_layout(),
+        u_regions,
+        vh_regions,
+        routes,
+    })))
+}
 
-    let mut u_data = vec![D::zero(); u_space.space().required_len()?];
-    let mut vh_data = vec![D::zero(); vh_space.space().required_len()?];
-    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
-    let mut singular_workspace = vec![D::Real::zero(); max_rank];
-    let mut singular_values = Vec::with_capacity(regions.len());
-
-    for region in regions {
-        let sector = region_sector(provider.as_ref(), region);
+fn compile_compact_svd_routes<R>(
+    rule: &R,
+    source_regions: &[CoupledSectorRegion],
+    u_regions: &[CoupledSectorRegion],
+    vh_regions: &[CoupledSectorRegion],
+) -> Result<Arc<[CompactSvdRoute]>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let u_by_sector = sector_region_index_map(rule, u_regions)?;
+    let vh_by_sector = sector_region_index_map(rule, vh_regions)?;
+    let mut routes = Vec::with_capacity(source_regions.len());
+    let mut used_u = vec![false; u_regions.len()];
+    let mut used_vh = vec![false; vh_regions.len()];
+    for (source_region, region) in source_regions.iter().enumerate() {
+        let sector = region_sector(rule, region);
         let rank = region.rows().min(region.cols());
+        let (u_region, vh_region) = if rank == 0 {
+            (None, None)
+        } else {
+            let u_region = sector_region_index_of(&u_by_sector, sector, "left")?;
+            let vh_region = sector_region_index_of(&vh_by_sector, sector, "right")?;
+            validate_factor_region(&u_regions[u_region], region.rows(), rank, "left")?;
+            validate_factor_region(&vh_regions[vh_region], rank, region.cols(), "right")?;
+            used_u[u_region] = true;
+            used_vh[vh_region] = true;
+            (Some(u_region), Some(vh_region))
+        };
+        routes.push(CompactSvdRoute {
+            source_region,
+            u_region,
+            vh_region,
+            sector,
+            rank,
+        });
+    }
+    validate_no_unused_factor_regions(u_regions, &used_u, "left")?;
+    validate_no_unused_factor_regions(vh_regions, &used_vh, "right")?;
+    Ok(routes.into())
+}
+
+#[cfg(test)]
+pub(crate) fn compact_svd_plan_for_test<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Option<Arc<CompactSvdFactorPlan>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    compact_svd_factor_plan(input)
+}
+
+#[cfg(test)]
+pub(crate) fn compact_svd_plan_regions_for_test(
+    plan: &CompactSvdFactorPlan,
+) -> (
+    Arc<[CoupledSectorRegion]>,
+    Arc<[CoupledSectorRegion]>,
+    Arc<[CoupledSectorRegion]>,
+) {
+    (
+        Arc::clone(&plan.source.regions),
+        Arc::clone(&plan.u_regions),
+        Arc::clone(&plan.vh_regions),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn validate_compact_svd_routes_for_test<R>(
+    rule: &R,
+    source: &[CoupledSectorRegion],
+    u: &[CoupledSectorRegion],
+    vh: &[CoupledSectorRegion],
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    compile_compact_svd_routes(rule, source, u, vh).map(|_| ())
+}
+
+fn svd_compact_direct_regions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    plan: &CompactSvdFactorPlan,
+) -> Result<SvdFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    let u_space = input.space().rebind_validated(&plan.u_layout)?;
+    let vh_space = input.space().rebind_validated(&plan.vh_layout)?;
+    let mut u_data = vec![D::zero(); plan.u_layout.required_len()?];
+    let mut vh_data = vec![D::zero(); plan.vh_layout.required_len()?];
+    let mut singular_values = Vec::with_capacity(plan.routes.len());
+    let mut spectrum_scratch = Vec::<D::Real>::new();
+
+    for route in plan.routes.iter().copied() {
+        let region = &plan.source.regions[route.source_region];
+        let rank = route.rank;
         if rank == 0 {
             singular_values.push(SectorSpectrum {
-                sector,
+                sector: route.sector,
                 values: Vec::new(),
             });
             continue;
         }
-        let u_region = sector_region_of(&u_by_sector, sector, "left")?;
-        let vh_region = sector_region_of(&vh_by_sector, sector, "right")?;
-        validate_factor_region(u_region, region.rows(), rank, "left")?;
-        validate_factor_region(vh_region, rank, region.cols(), "right")?;
+        let u_region = &plan.u_regions[route.u_region.expect("nonzero route has left region")];
+        let vh_region = &plan.vh_regions[route.vh_region.expect("nonzero route has right region")];
 
         let input_shape = [region.rows(), region.cols()];
         let input_strides = [1usize, region.rows()];
@@ -1293,18 +1551,21 @@ where
         .map_err(OperationError::Dense)?;
         let u_view = DenseViewMut::new(&mut u_data[u_region.range()], &u_shape, &u_strides, 0)
             .map_err(OperationError::Dense)?;
-        let s_view = DenseViewMut::new(&mut singular_workspace[..rank], &s_shape, &s_strides, 0)
-            .map_err(OperationError::Dense)?;
-        let vh_view = DenseViewMut::new(&mut vh_data[vh_region.range()], &vh_shape, &vh_strides, 0)
-            .map_err(OperationError::Dense)?;
-        dense
-            .svd_into(
-                D::dense_read(input_view),
-                D::dense_write(u_view),
-                D::Real::dense_write(s_view),
-                D::dense_write(vh_view),
-            )
-            .map_err(OperationError::Dense)?;
+        let spectrum = D::compute_f64_spectrum(rank, &mut spectrum_scratch, |spectrum| {
+            let s_view = DenseViewMut::new(spectrum, &s_shape, &s_strides, 0)
+                .map_err(OperationError::Dense)?;
+            let vh_view =
+                DenseViewMut::new(&mut vh_data[vh_region.range()], &vh_shape, &vh_strides, 0)
+                    .map_err(OperationError::Dense)?;
+            dense
+                .svd_into(
+                    D::dense_read(input_view),
+                    D::dense_write(u_view),
+                    D::Real::dense_write(s_view),
+                    D::dense_write(vh_view),
+                )
+                .map_err(OperationError::Dense)
+        })?;
         svd_compact_gauge(
             &mut u_data[u_region.range()],
             region.rows(),
@@ -1315,12 +1576,8 @@ where
             rank,
         );
         singular_values.push(SectorSpectrum {
-            sector,
-            values: singular_workspace[..rank]
-                .iter()
-                .copied()
-                .map(Into::into)
-                .collect(),
+            sector: route.sector,
+            values: spectrum,
         });
     }
 
@@ -1364,17 +1621,17 @@ where
     region.coupled().unwrap_or_else(|| rule.vacuum())
 }
 
-fn sector_region_map<'a, R>(
+fn sector_region_index_map<R>(
     rule: &R,
-    regions: &'a [CoupledSectorRegion],
-) -> Result<HashMap<SectorId, &'a CoupledSectorRegion>, OperationError>
+    regions: &[CoupledSectorRegion],
+) -> Result<HashMap<SectorId, usize>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let mut by_sector = HashMap::with_capacity(regions.len());
-    for region in regions {
+    for (index, region) in regions.iter().enumerate() {
         if by_sector
-            .insert(region_sector(rule, region), region)
+            .insert(region_sector(rule, region), index)
             .is_some()
         {
             return Err(OperationError::UnsupportedTensorContractScope {
@@ -1385,11 +1642,11 @@ where
     Ok(by_sector)
 }
 
-fn sector_region_of<'a>(
-    regions: &'a HashMap<SectorId, &'a CoupledSectorRegion>,
+fn sector_region_index_of(
+    regions: &HashMap<SectorId, usize>,
     sector: SectorId,
     side: &'static str,
-) -> Result<&'a CoupledSectorRegion, OperationError> {
+) -> Result<usize, OperationError> {
     regions
         .get(&sector)
         .copied()
@@ -1412,6 +1669,26 @@ fn validate_factor_region(
             message: match side {
                 "left" => "compact SVD left sector region has an unexpected shape",
                 _ => "compact SVD right sector region has an unexpected shape",
+            },
+        });
+    }
+    Ok(())
+}
+
+fn validate_no_unused_factor_regions(
+    regions: &[CoupledSectorRegion],
+    used: &[bool],
+    side: &'static str,
+) -> Result<(), OperationError> {
+    if regions
+        .iter()
+        .zip(used)
+        .any(|(region, used)| !used && region.rows() != 0 && region.cols() != 0)
+    {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: match side {
+                "left" => "compact SVD left factor contains an unused nonzero sector",
+                _ => "compact SVD right factor contains an unused nonzero sector",
             },
         });
     }

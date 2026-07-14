@@ -29,7 +29,9 @@ pub use context::{
     TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractPlanKey,
 };
-pub use dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+pub use dynamic_space::{
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, ValidatedDynamicFusionLayout,
+};
 #[cfg(test)]
 pub(crate) use fusion::{
     contracted_fusion_tree_basis_matches, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
