@@ -7,6 +7,14 @@ fusion-tree/block structure handling, TensorOperations-style lowering, dense
 kernel dispatch, matrix decompositions, contraction planning, and plan caching
 live in separate crates.
 
+The user layer tracks the TensorKit 0.17 function surface: constructors,
+the vector interface (norm/dot/inner/normalize/scale/add/tr), index ops
+(permute/braid/transpose/twist/flip/repartition), factorizations
+(svd_trunc/left_orth/eigh/… under their 0.17 names), structural predicates
+(is_hermitian/is_isometric/is_unitary/is_posdef), and sector/space queries.
+See [`docs/tk_api_parity.md`](docs/tk_api_parity.md) for the per-export lookup
+table and the rationale for anything spelled or gated differently.
+
 The implementation is currently an active rebuild. Public APIs are intended to
 stay Rust-native while matching the TensorKit ecosystem's semantics closely:
 TensorKit, TensorKitSectors, TensorOperations, MatrixAlgebraKit, Strided.jl, and
@@ -167,10 +175,16 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   compiling examples.
 - [`tenet/src/mathematics.md`](tenet/src/mathematics.md): tensor-map
   convention, duality, and categorical semantics.
+- [`docs/tk_api_parity.md`](docs/tk_api_parity.md): TensorKit 0.17 user-API
+  parity table — every user-facing export, its TeNeT name, and the rationale
+  for anything spelled or gated differently. The lookup surface for a
+  TensorKit user.
 - [`docs/user_api_design.md`](docs/user_api_design.md): API design notes and
   TensorKit vocabulary alignment.
 - [`docs/tensorkit_compatibility_table.md`](docs/tensorkit_compatibility_table.md):
-  TensorKit naming and compatibility table.
+  internal naming and compatibility table.
+- [`docs/backend_policy.md`](docs/backend_policy.md): selectable dense
+  transpose/GEMM backend design and measured thread scaling.
 - [`docs/cotengra_backend.md`](docs/cotengra_backend.md): cotengra Python
   backend setup, latency, and limitations.
 - [`benchmarks/README.md`](benchmarks/README.md): benchmark notes and measured
