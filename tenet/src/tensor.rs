@@ -3472,17 +3472,25 @@ impl Tensor {
     ) -> Result<Self, Error> {
         let rank = self.rank();
         let nout = self.codomain_rank();
-        // Identity permute (new arrangement == current codomain/domain, natural
-        // order) is a no-op: return the tensor unchanged, sharing its buffer,
-        // instead of allocating and running a copy. Matches TensorKit's
-        // `has_shared_permute(t, ...) && return t` (indexmanipulations.jl:91).
-        // Only `Permute` (not `Braid`/`Transpose`) — a braid may carry a
-        // nontrivial crossing even with identity axes, and transpose swaps
-        // sides. Measured ~27% of itebd's permutes.
-        if matches!(kind, TransformKind::Permute)
-            && codomain_axes.iter().copied().eq(0..nout)
-            && domain_axes.iter().copied().eq(nout..rank)
-        {
+        if let TransformKind::Braid { levels } = &kind {
+            if levels.len() != rank {
+                return Err(Error::InvalidArgument(format!(
+                    "braid levels must list one level per source axis \
+                     (expected {rank}, got {})",
+                    levels.len()
+                )));
+            }
+        }
+        // Identity permutes and braids have no axis motion or adjacent braid
+        // swaps, so return the tensor unchanged and share its owned storage.
+        // Levels cannot contribute a phase when there is no crossing. Why not
+        // include Transpose: its planar boundary/cycle semantics stay on the
+        // general path; same-split repartition already has its own no-op.
+        let shares_identity_storage =
+            matches!(&kind, TransformKind::Permute | TransformKind::Braid { .. })
+                && codomain_axes.iter().copied().eq(0..nout)
+                && domain_axes.iter().copied().eq(nout..rank);
+        if shares_identity_storage {
             return Ok(self.clone());
         }
         let operation = match kind {
@@ -3490,21 +3498,12 @@ impl Tensor {
                 codomain_axes.iter().copied(),
                 domain_axes.iter().copied(),
             ),
-            TransformKind::Braid { levels } => {
-                if levels.len() != rank {
-                    return Err(Error::InvalidArgument(format!(
-                        "braid levels must list one level per source axis \
-                         (expected {rank}, got {})",
-                        levels.len()
-                    )));
-                }
-                TreeTransformOperation::braid(
-                    codomain_axes.iter().copied(),
-                    domain_axes.iter().copied(),
-                    levels[..nout].iter().copied(),
-                    levels[nout..].iter().copied(),
-                )
-            }
+            TransformKind::Braid { levels } => TreeTransformOperation::braid(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+                levels[..nout].iter().copied(),
+                levels[nout..].iter().copied(),
+            ),
             TransformKind::Transpose => TreeTransformOperation::transpose(
                 codomain_axes.iter().copied(),
                 domain_axes.iter().copied(),
@@ -6921,14 +6920,9 @@ mod tk_user_api_tests {
         ];
 
         for (case, space) in spaces.iter().enumerate() {
-            let source = Tensor::rand_with_seed(
-                &rt,
-                Dtype::F64,
-                [space, space],
-                [space],
-                200 + case as u64,
-            )
-            .unwrap();
+            let source =
+                Tensor::rand_with_seed(&rt, Dtype::F64, [space, space], [space], 200 + case as u64)
+                    .unwrap();
             let output = source.braid(&[0, 1], &[2], &[17, 3, 11]).unwrap();
 
             assert!(Arc::ptr_eq(&output.space, &source.space), "case {case}");
@@ -6942,8 +6936,8 @@ mod tk_user_api_tests {
         // itself is the identity.
         let rt = Runtime::builder().build().unwrap();
         let space = Space::fz2([(0, 1), (1, 1)]);
-        let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&space, &space], [&space], 203)
-            .unwrap();
+        let source =
+            Tensor::rand_with_seed(&rt, Dtype::F64, [&space, &space], [&space], 203).unwrap();
 
         assert!(source.braid(&[0, 1], &[2], &[7, 5]).is_err());
     }
@@ -6972,13 +6966,9 @@ mod tk_user_api_tests {
         // odd fZ2 legs, whose reduced data acquires the fermionic minus sign.
         let rt = Runtime::builder().build().unwrap();
         let odd = Space::fz2([(1, 1)]);
-        let source = Tensor::from_block_fn(
-            &rt,
-            [&odd, &odd],
-            std::iter::empty::<&Space>(),
-            |_, _| 1.0,
-        )
-        .unwrap();
+        let source =
+            Tensor::from_block_fn(&rt, [&odd, &odd], std::iter::empty::<&Space>(), |_, _| 1.0)
+                .unwrap();
 
         let output = source.braid(&[1, 0], &[], &[0, 1]).unwrap();
 
