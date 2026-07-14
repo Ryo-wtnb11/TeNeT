@@ -251,7 +251,8 @@ mod coefficient_cache_tests {
 mod inactive_destination_tests {
     use super::*;
     use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
-    use tenet_core::{TensorMapSpace, Trivial};
+    use std::time::Duration;
+    use tenet_core::{BlockKey, BlockSpec, TensorMapSpace, Trivial};
     use tenet_dense::DefaultDenseExecutor;
 
     type TestTensor = TensorMap<f64, 1, 0, Trivial, Vec<f64>>;
@@ -282,6 +283,286 @@ mod inactive_destination_tests {
 
     fn expected(beta: f64) -> [f64; 2] {
         [6.0 + beta * 10.0, beta * 20.0]
+    }
+
+    fn custom_structure(blocks: Vec<BlockSpec>) -> BlockStructure {
+        BlockStructure::from_blocks_with_rank(1, blocks).unwrap()
+    }
+
+    fn block(sector: usize, shape: usize, stride: usize, offset: usize) -> BlockSpec {
+        BlockSpec::with_key(
+            BlockKey::sector_ids([sector]),
+            vec![shape],
+            vec![stride],
+            offset,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn compile_rejects_inactive_destination_aliases() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 0)]);
+        assert!(TreeTransformStructure::<f64>::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn compile_rejects_active_inactive_destination_aliases() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 0)]);
+        assert!(TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn compile_rejects_active_destination_aliases() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 0)]);
+        assert!(TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 1.0),
+                TreeTransformBlockSpec::single(1, 1, 1.0),
+            ],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn compile_rejects_self_overlapping_destination_layout() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 2, 0, 0)]);
+        assert!(TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn interleaved_disjoint_destinations_with_overlapping_ranges_are_valid() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 2, 2, 0), block(1, 2, 2, 1)]);
+        let structure =
+            TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[])
+                .unwrap();
+        let mut dst = vec![10.0, 20.0, 30.0, 40.0];
+        tree_transform_structure_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::new(dst_structure),
+            &Arc::new(src_structure),
+            &mut dst,
+            &[3.0],
+            1.0,
+            0.5,
+        )
+        .unwrap();
+        assert_eq!(dst, [5.0, 10.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn inactive_destination_scaling_preserves_storage_padding() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 2, 2, 0)]);
+        let structure =
+            TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[])
+                .unwrap();
+        let mut dst = vec![10.0, 99.0, 30.0];
+        tree_transform_structure_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::new(dst_structure),
+            &Arc::new(src_structure),
+            &mut dst,
+            &[3.0],
+            1.0,
+            0.5,
+        )
+        .unwrap();
+        assert_eq!(dst, [5.0, 99.0, 15.0]);
+    }
+
+    #[test]
+    fn nan_beta_reaches_active_and_inactive_destinations() {
+        let (mut dst, src, structure) = fixture();
+        tree_transform_structure_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            src.data(),
+            1.0,
+            f64::NAN,
+        )
+        .unwrap();
+        assert!(dst.data().iter().all(|value| value.is_nan()));
+    }
+
+    #[derive(Clone, Default)]
+    struct SlowScaleAdapter(StridedHostKernelAdapter);
+
+    impl HostKernelAdapter<f64> for SlowScaleAdapter {
+        fn add_strided(
+            &mut self,
+            zero_strides: &mut Vec<isize>,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            src_strides: &[isize],
+            dst_offset: isize,
+            src_offset: isize,
+            source_conjugate: bool,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            self.0.add_strided(
+                zero_strides,
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+                beta,
+            )
+        }
+
+        fn axpby_strided(
+            &mut self,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            src_strides: &[isize],
+            dst_offset: isize,
+            src_offset: isize,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            self.0.axpby_strided(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                alpha,
+                beta,
+            )
+        }
+
+        fn copy_scale_strided(
+            &mut self,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            src_strides: &[isize],
+            dst_offset: isize,
+            src_offset: isize,
+            source_conjugate: bool,
+            alpha: f64,
+        ) -> Result<(), OperationError> {
+            self.0.copy_scale_strided(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                source_conjugate,
+                alpha,
+            )
+        }
+
+        fn scale_strided(
+            &mut self,
+            dst_data: &mut [f64],
+            shape: &[usize],
+            dst_strides: &[isize],
+            dst_offset: isize,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            std::thread::sleep(Duration::from_millis(40));
+            self.0
+                .scale_strided(dst_data, shape, dst_strides, dst_offset, beta)
+        }
+
+        fn recoupling_src_times_u_transpose<C>(
+            &mut self,
+            destination: &mut [f64],
+            source: &[f64],
+            coefficients: &[C],
+            coefficient_start: usize,
+            element_count: usize,
+            src_count: usize,
+            dst_count: usize,
+        ) -> Result<(), OperationError>
+        where
+            C: Copy,
+            f64: RecouplingCoefficientAction<C>,
+        {
+            self.0.recoupling_src_times_u_transpose(
+                destination,
+                source,
+                coefficients,
+                coefficient_start,
+                element_count,
+                src_count,
+                dst_count,
+            )
+        }
+    }
+
+    #[test]
+    fn profiled_replay_attributes_inactive_destination_scaling() {
+        let (mut dst, src, structure) = fixture();
+        let mut profile = TreeTransformReplayProfile::default();
+        tree_transform_structure_with_structural_recoupling_raw_profiled(
+            &mut SlowScaleAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &structure,
+            &Arc::clone(dst.structure()),
+            &Arc::clone(src.structure()),
+            dst.data_mut(),
+            src.data(),
+            1.0,
+            0.5,
+            1,
+            &mut profile,
+        )
+        .unwrap();
+        let attributed = profile.validate
+            + profile.single_total
+            + profile.multi_workspace_prepare
+            + profile.multi_pack
+            + profile.multi_coefficient_prepare
+            + profile.multi_matmul_total
+            + profile.multi_scatter;
+        assert!(profile.total.saturating_sub(attributed) < Duration::from_millis(20));
     }
 
     #[test]
