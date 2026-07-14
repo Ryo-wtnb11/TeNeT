@@ -636,7 +636,7 @@ fn compact_lq_canonical_layout_uses_only_bounded_adjoint_copies() {
     assert!(probe.adjoint_scratch_fill_calls > 0);
     assert_eq!(
         probe.adjoint_scratch_fill_bytes,
-        tensor.data().len() * std::mem::size_of::<f64>()
+        std::mem::size_of_val(tensor.data())
     );
     assert!(probe.final_adjoint_copy_calls > 0);
     assert_eq!(

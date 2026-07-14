@@ -1113,6 +1113,59 @@ fn record_eigh_output_scatter<D>(elements: usize) {
     });
 }
 
+#[cfg(test)]
+fn record_compact_lq_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
+    COMPACT_LQ_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.input_pack_calls += matricizations.len();
+        current.input_pack_bytes += matricizations
+            .iter()
+            .map(|matrix| matrix.data.len() * std::mem::size_of::<D>())
+            .sum::<usize>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_lq_output_scatter<D>(elements: usize) {
+    COMPACT_LQ_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.output_scatter_calls += 1;
+        current.output_scatter_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_lq_scratch<D>(elements: usize) {
+    COMPACT_LQ_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.scratch_buffer_count += 3;
+        current.scratch_capacity_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_lq_adjoint_fill<D>(elements: usize) {
+    COMPACT_LQ_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.adjoint_scratch_fill_calls += 1;
+        current.adjoint_scratch_fill_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_lq_final_adjoint_copy<D>(elements: usize) {
+    COMPACT_LQ_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.final_adjoint_copy_calls += 1;
+        current.final_adjoint_copy_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4449,11 +4502,16 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    if let Some(plan) = compact_factor_plan(input.space())? {
+        return lq_compact_direct_regions(dense, input, &plan);
+    }
     let provider = input.space().provider_arc();
     let rule = provider.as_ref();
     let space = input.space().space();
     let matricizations =
         sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_lq_input_pack(&matricizations);
     let mut pairs = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
@@ -4484,6 +4542,11 @@ where
             rank,
             matrix.rows,
         );
+        #[cfg(test)]
+        {
+            record_compact_lq_output_scatter::<D>(r_prime.len());
+            record_compact_lq_output_scatter::<D>(q_prime.len());
+        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
@@ -4494,6 +4557,120 @@ where
         });
     }
     build_left_right_bound_pair(provider, space.homspace(), &matricizations, &pairs)
+}
+
+fn lq_compact_direct_regions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    plan: &CompactFactorPlan,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    let left_space = input.space().rebind_validated(&plan.left_layout)?;
+    let right_space = input.space().rebind_validated(&plan.right_layout)?;
+    let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
+    let mut right_data = vec![D::zero(); plan.right_layout.required_len()?];
+
+    let max_adjoint_len = plan
+        .routes
+        .iter()
+        .map(|route| plan.source.regions[route.source_region].range().len())
+        .max()
+        .unwrap_or(0);
+    let max_q_prime_len = plan
+        .routes
+        .iter()
+        .filter_map(|route| {
+            route
+                .right_region
+                .map(|index| plan.right_regions[index].range().len())
+        })
+        .max()
+        .unwrap_or(0);
+    let max_r_prime_len = plan
+        .routes
+        .iter()
+        .filter_map(|route| {
+            route
+                .left_region
+                .map(|index| plan.left_regions[index].range().len())
+        })
+        .max()
+        .unwrap_or(0);
+    let mut adjoint_scratch = vec![D::zero(); max_adjoint_len];
+    let mut q_prime_scratch = vec![D::zero(); max_q_prime_len];
+    let mut r_prime_scratch = vec![D::zero(); max_r_prime_len];
+    #[cfg(test)]
+    record_compact_lq_scratch::<D>(max_adjoint_len + max_q_prime_len + max_r_prime_len);
+
+    for route in plan.routes.iter().copied() {
+        if route.rank == 0 {
+            continue;
+        }
+        let source = &plan.source.regions[route.source_region];
+        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
+        let right =
+            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
+        let source_data = &input.data()[source.range()];
+        let adjoint = &mut adjoint_scratch[..source_data.len()];
+        adjoint_col_major_into(source_data, source.rows(), source.cols(), adjoint);
+        #[cfg(test)]
+        record_compact_lq_adjoint_fill::<D>(source_data.len());
+
+        let q_prime_len = source.cols() * route.rank;
+        let r_prime_len = route.rank * source.rows();
+        let q_prime = &mut q_prime_scratch[..q_prime_len];
+        let r_prime = &mut r_prime_scratch[..r_prime_len];
+        qr_into_workspace(
+            dense,
+            adjoint,
+            source.cols(),
+            source.rows(),
+            source.cols(),
+            q_prime,
+            source.cols(),
+            route.rank,
+            source.cols(),
+            r_prime,
+            route.rank,
+            source.rows(),
+            route.rank,
+        )?;
+        positive_diagonal_gauge_strided(
+            q_prime,
+            source.cols(),
+            source.cols(),
+            r_prime,
+            route.rank,
+            route.rank,
+            source.rows(),
+        );
+        adjoint_col_major_into(
+            r_prime,
+            route.rank,
+            source.rows(),
+            &mut left_data[left.range()],
+        );
+        #[cfg(test)]
+        record_compact_lq_final_adjoint_copy::<D>(r_prime.len());
+        adjoint_col_major_into(
+            q_prime,
+            source.cols(),
+            route.rank,
+            &mut right_data[right.range()],
+        );
+        #[cfg(test)]
+        record_compact_lq_final_adjoint_copy::<D>(q_prime.len());
+    }
+
+    let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
+    let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
+    Ok((left, right))
 }
 
 /// Left isometry factorization `t = V * C` (TensorKit 0.17 / MatrixAlgebraKit
@@ -4536,12 +4713,23 @@ where
 /// Adjoint (conjugate transpose) of a column-major `rows x cols` matrix.
 fn adjoint_col_major<D: FactorScalar>(data: &[D], rows: usize, cols: usize) -> Vec<D> {
     let mut adjoint = vec![D::zero(); data.len()];
+    adjoint_col_major_into(data, rows, cols, &mut adjoint);
+    adjoint
+}
+
+fn adjoint_col_major_into<D: FactorScalar>(
+    data: &[D],
+    rows: usize,
+    cols: usize,
+    adjoint: &mut [D],
+) {
+    debug_assert_eq!(data.len(), rows * cols);
+    debug_assert_eq!(adjoint.len(), data.len());
     for col in 0..cols {
         for row in 0..rows {
             adjoint[col + cols * row] = FactorScalar::adjoint(data[row + rows * col]);
         }
     }
-    adjoint
 }
 
 #[allow(clippy::too_many_arguments)]
