@@ -132,11 +132,11 @@ where
             .checked_add(coefficient_len)
             .ok_or(OperationError::ElementCountOverflow)?;
         let coefficients = structure
-            .recoupling_coefficients_dst_src
+            .recoupling_coefficients_dst_src()
             .get(coefficient_start..coefficient_end)
             .ok_or(OperationError::CoefficientCountMismatch {
                 expected: coefficient_end,
-                actual: structure.recoupling_coefficients_dst_src.len(),
+                actual: structure.recoupling_coefficients_dst_src().len(),
             })?;
         workspace.coefficient_scratch.extend(
             coefficients
@@ -154,7 +154,7 @@ where
     Ok(true)
 }
 
-fn recoupling_multi_block<C>(
+fn recoupling_multi_block<C: Copy>(
     structure: &TreeTransformStructure<C>,
     block_index: usize,
 ) -> Result<&TreeTransformBlock, OperationError> {
@@ -163,21 +163,19 @@ fn recoupling_multi_block<C>(
     // BlockIndexOutOfBounds struct on every success too, which the d=4 bisect
     // (see issue #103) attributed to the compose regression. .ok_or_else only
     // builds it on the never-taken out-of-bounds path.
-    let block =
-        structure
-            .blocks
-            .get(block_index)
-            .ok_or_else(|| OperationError::BlockIndexOutOfBounds {
-                tensor: "recoupling block",
-                index: block_index,
-                count: structure.blocks.len(),
-            })?;
+    let block = structure.blocks().get(block_index).ok_or_else(|| {
+        OperationError::BlockIndexOutOfBounds {
+            tensor: "recoupling block",
+            index: block_index,
+            count: structure.blocks().len(),
+        }
+    })?;
     match block {
         TreeTransformBlock::Multi { .. } => Ok(block),
         TreeTransformBlock::Single { .. } => Err(OperationError::BlockIndexOutOfBounds {
             tensor: "recoupling block",
             index: block_index,
-            count: structure.blocks.len(),
+            count: structure.blocks().len(),
         }),
     }
 }
@@ -199,11 +197,11 @@ where
     // Scaling the complete storage would also mutate padding not owned by any
     // block, so compile only the destination layouts with no active replay.
     for &layout_index in structure.inactive_destination_layouts() {
-        let layout = structure.layouts.entry(layout_index);
+        let layout = structure.layouts().entry(layout_index);
         kernels.scale_strided(
             dst_data,
-            structure.layouts.shape(layout),
-            structure.layouts.strides(layout),
+            structure.layouts().shape(layout),
+            structure.layouts().strides(layout),
             layout.offset,
             beta,
         )?;
@@ -999,7 +997,7 @@ where
     scale_inactive_destinations(kernels, structure, dst.data_mut(), beta)?;
 
     let src_data = src.data();
-    for block in &structure.blocks {
+    for block in structure.blocks() {
         match *block {
             TreeTransformBlock::Single {
                 dst_layout,
@@ -1008,9 +1006,9 @@ where
             } => tree_transform_single_with_strided_kernel(
                 kernels,
                 workspace.zero_strides_mut(),
-                &structure.layouts,
-                structure.layouts.entry(dst_layout),
-                structure.layouts.entry(src_layout),
+                structure.layouts(),
+                structure.layouts().entry(dst_layout),
+                structure.layouts().entry(src_layout),
                 structure.coefficient(coefficient),
                 structure.storage_conjugate(),
                 dst.data_mut(),
@@ -1044,14 +1042,14 @@ where
                     kernels,
                     zero_strides,
                     scratch,
-                    &structure.layouts,
+                    structure.layouts(),
                     dst_layout_start,
                     dst_count,
                     src_layout_start,
                     src_count,
                     coefficient_start,
                     element_count,
-                    &structure.recoupling_coefficients_dst_src,
+                    structure.recoupling_coefficients_dst_src(),
                     structure.storage_conjugate(),
                     dst.data_mut(),
                     src_data,
@@ -1093,7 +1091,7 @@ where
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
     scale_inactive_destinations(kernels, structure, dst_data, beta)?;
-    for block in &structure.blocks {
+    for block in structure.blocks() {
         match *block {
             TreeTransformBlock::Single {
                 dst_layout,
@@ -1102,9 +1100,9 @@ where
             } => tree_transform_single_with_strided_kernel(
                 kernels,
                 &mut workspace.zero_strides,
-                &structure.layouts,
-                structure.layouts.entry(dst_layout),
-                structure.layouts.entry(src_layout),
+                structure.layouts(),
+                structure.layouts().entry(dst_layout),
+                structure.layouts().entry(src_layout),
                 structure.coefficient(coefficient),
                 structure.storage_conjugate(),
                 dst_data,
@@ -1122,14 +1120,14 @@ where
             } => tree_transform_multi_with_pack_gemm_scatter(
                 kernels,
                 workspace,
-                &structure.layouts,
+                structure.layouts(),
                 dst_layout_start,
                 dst_count,
                 src_layout_start,
                 src_count,
                 coefficient_start,
                 element_count,
-                &structure.recoupling_coefficients_dst_src,
+                structure.recoupling_coefficients_dst_src(),
                 structure.storage_conjugate(),
                 dst_data,
                 src_data,
@@ -1325,13 +1323,13 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy,
 {
-    let layouts = &structure.layouts;
+    let layouts = structure.layouts();
     let recoupling_plan = structure.recoupling_plan();
 
     // All-Single structures (abelian recoupling is diagonal) skip the batch
     // machinery entirely: no pack scratch, no job list, no scatter pass.
     if recoupling_plan.is_empty() {
-        for block in &structure.blocks {
+        for block in structure.blocks() {
             let TreeTransformBlock::Single {
                 dst_layout,
                 src_layout,
@@ -1386,7 +1384,7 @@ where
     // Singles apply directly in replay order. Multi blocks are packed through
     // the compile-time recoupling entries, whose order is chosen to form
     // same-shape strided GEMM runs.
-    for block in &structure.blocks {
+    for block in structure.blocks() {
         let TreeTransformBlock::Single {
             dst_layout,
             src_layout,
@@ -1609,16 +1607,16 @@ where
     if threads <= 1 || items.len() == 1 {
         let mut zero_strides = Vec::new();
         for item in items {
-            let dst_layout = structure.layouts.entry(item.dst_layout);
-            let src_layout = structure.layouts.entry(item.src_layout);
+            let dst_layout = structure.layouts().entry(item.dst_layout);
+            let src_layout = structure.layouts().entry(item.src_layout);
             let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
             kernels.add_strided(
                 &mut zero_strides,
                 dst_data,
                 src_data,
-                structure.layouts.shape(dst_layout),
-                structure.layouts.strides(dst_layout),
-                structure.layouts.strides(src_layout),
+                structure.layouts().shape(dst_layout),
+                structure.layouts().strides(dst_layout),
+                structure.layouts().strides(src_layout),
                 dst_layout.offset - dst_start,
                 src_layout.offset,
                 structure.storage_conjugate(),
@@ -1801,7 +1799,7 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
-    let layouts = &structure.layouts;
+    let layouts = structure.layouts();
     let recoupling_plan = structure.recoupling_plan();
     let schedule = structure.parallel_schedule();
 

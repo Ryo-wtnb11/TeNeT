@@ -19,14 +19,24 @@ use crate::OperationError;
 /// against concrete source and destination structures. Hot paths should build
 /// this once and replay it with `tree_transform_execute_with` while reusing a
 /// backend and workspace.
+///
+/// Why not expose mutable compiled fields: the recoupling plan, converted
+/// coefficient cache, and threaded replay schedule all derive from the same
+/// descriptors. Read them through [`Self::blocks`], [`Self::layouts`], and
+/// [`Self::recoupling_coefficients_dst_src`] so those derived plans cannot go
+/// stale after compilation.
+///
+/// Migration: code that previously read the public `blocks`, `layouts`, or
+/// `recoupling_coefficients_dst_src` fields must use the same-named accessor
+/// methods. Post-compilation mutation is no longer supported.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
     storage_conjugate: bool,
     identity: Arc<()>,
-    pub blocks: Vec<TreeTransformBlock>,
-    pub layouts: TreeTransformLayoutTable,
-    pub recoupling_coefficients_dst_src: Vec<T>,
+    blocks: Vec<TreeTransformBlock>,
+    layouts: TreeTransformLayoutTable,
+    recoupling_coefficients_dst_src: Vec<T>,
     inactive_dst_layouts: Vec<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
     parallel_schedule: TreeTransformParallelSchedule,
@@ -486,6 +496,24 @@ impl<T: Copy> TreeTransformStructure<T> {
     #[inline]
     pub fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Immutable compiled block descriptors.
+    #[inline]
+    pub fn blocks(&self) -> &[TreeTransformBlock] {
+        &self.blocks
+    }
+
+    /// Immutable compiled layout table.
+    #[inline]
+    pub fn layouts(&self) -> &TreeTransformLayoutTable {
+        &self.layouts
+    }
+
+    /// Immutable destination-by-source recoupling coefficients.
+    #[inline]
+    pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
+        &self.recoupling_coefficients_dst_src
     }
 
     pub fn workspace_lens(&self) -> (usize, usize) {
@@ -1213,5 +1241,11 @@ mod tests {
         let second = TreeTransformStructure::compile_structures(&dst, &src, &specs).unwrap();
 
         assert_eq!(first.parallel_schedule(), second.parallel_schedule());
+        assert_eq!(first.blocks(), second.blocks());
+        assert_eq!(first.layouts(), second.layouts());
+        assert_eq!(
+            first.recoupling_coefficients_dst_src(),
+            second.recoupling_coefficients_dst_src()
+        );
     }
 }
