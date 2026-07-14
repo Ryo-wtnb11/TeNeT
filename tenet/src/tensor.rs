@@ -3633,7 +3633,7 @@ impl Tensor {
     /// conjugated here — the result shares the parent buffer and presents the
     /// adjoint coupled space (O(blocks) metadata). A contraction folds the
     /// conjugate-transpose into its GEMM; any other consumer (`data`, `svd`, …)
-    /// materializes it once, on demand, via [`Self::coupled_data`].
+    /// materializes it once, on demand, via the internal `coupled_data`.
     pub fn adjoint(&self) -> Result<Self, Error> {
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(_) = self.data.as_ref() {
@@ -3842,6 +3842,50 @@ impl Tensor {
             }
             _ => Err(Error::DtypeMismatch),
         }
+    }
+
+    /// Frobenius inner product `<self, other>` with `self` conjugated — an
+    /// alias for [`Self::inner`], matching `LinearAlgebra.dot` / TensorKit's
+    /// `dot(x, y)`. Provided for callers who reach for the `dot` name; the
+    /// semantics (conjugate-linear in the first argument, quantum-dimension
+    /// weighted) are identical.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::u1([(0, 2), (1, 1)]);
+    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+    /// assert_eq!(t.dot(&t)?.re(), t.inner(&t)?.re());
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn dot(&self, other: &Self) -> Result<Scalar, Error> {
+        self.inner(other)
+    }
+
+    /// Returns `self / norm(self)`, the unit-norm tensor pointing the same way
+    /// (TensorKit's `normalize`, LinearAlgebra's 2-norm normalization). The
+    /// norm is the quantum-dimension-weighted Frobenius norm from
+    /// [`Self::norm`]; the result satisfies `t.normalize()?.norm()? == 1`.
+    /// Works for both dtypes (a c64 tensor is scaled by the real reciprocal
+    /// norm).
+    ///
+    /// Like TensorKit, a zero-norm tensor is not special-cased: normalizing it
+    /// divides by zero and yields non-finite entries. Guard the caller if that
+    /// input is reachable.
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let rt = Runtime::builder().build()?;
+    /// let v = Space::u1([(0, 2), (1, 1)]);
+    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+    /// let unit = t.normalize()?;
+    /// assert!((unit.norm()? - 1.0).abs() < 1e-12);
+    /// # Ok::<(), tenet::prelude::Error>(())
+    /// ```
+    pub fn normalize(&self) -> Result<Self, Error> {
+        self.scale(1.0 / self.norm()?)
     }
 
     fn check_same_space(&self, other: &Self) -> Result<(), Error> {

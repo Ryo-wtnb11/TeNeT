@@ -150,23 +150,47 @@ reconsidering the default.
 
 ## Parallel execution (current state)
 
-Standalone `Tensor` ops (`contract`, `permute`, …) hold their owning
-`Runtime`'s single state mutex for the whole op — across *all* rules and
-dtypes, not just the one in flight. Two threads calling standalone ops on the
-same `Runtime` fully serialize, even on unrelated work.
+Ops on a shared `Runtime` scale with outer threads (#155, #176). Nothing holds
+the coarse state mutex for a whole computation any more; each op leases its
+execution machinery for its own duration and runs lock-free.
 
-Data-parallel callers today should use one of:
+- **Standalone ops** (`contract`, `permute`, factorizations) lease from two
+  pools on `RuntimeInner`:
+  - `ContextPool` — per-rule `TensorExecutionContext`s (the `Ctxs` the locked
+    state used to carry) for contract/permute/transpose and the polar/exp/inv/
+    pinv factorizations.
+  - `ExecutorPool` — `Box<dyn DenseExecutor + Send>` for SVD/QR/eigh/eig/null.
+  Both mirror the network `WorkspacePool`: mint-on-empty, idle cap = one warm
+  resource per core (`available_parallelism`), quarantine-on-panic (a resource
+  live during a panic is dropped, not returned). Single-threaded use reuses one
+  pooled resource and warms its caches exactly as the state did, so it stays
+  byte-identical to the pre-#176 locked path.
+- **Plan cache** lives behind its own mutex (`PlanCacheHome`), separate from the
+  state mutex, so the `tensor!` network path never contends with standalone ops.
+  A warm hit costs **one** plan-cache acquisition (config read + slot access
+  folded into `with_plan_cache`) and **one** topology hash (residency check +
+  LRU touch folded into a single `LruCache::get`).
+- Each `Runtime` owns **one** `SharedCpuContext` (a single rayon pool); every
+  minted context/executor and all transform backends bind to it, so `dense_
+  threads`/rayon width is one process-level knob, not per-lease.
+- **Escape hatch:** a custom executor injected via `with_dense_executor` is not
+  mintable, so those runtimes fall back to the `state` lock for factorizations
+  (context leasing still applies). This is the one path that still serializes.
 
-- **One `Runtime` per thread.** Global structure caches are process-shared
-  and read-mostly, so this parallelizes fully — no cross-thread contention.
-- **The network / `tensor!` cached-plan path.** Its per-call workspace clones
-  `TensorExecutionContext` and executes lock-free after a brief pool-mutex
-  lease; this path is already parallel-safe on a shared `Runtime`.
+Measured scaling (`examples/thread_scaling.rs`, warm rank-4 SU(2) `contract`,
+`dense_threads(1)` + `RAYON_NUM_THREADS=1` so outer threads are the only
+parallelism; speedup vs N=1):
 
-See #155 for the planned context-lease + executor-pool design that would
-bring standalone ops to the same level, and its measurement gate (evals/s
-across N threads on a shared `Runtime` must show real scaling before that
-work starts).
+| Arm | N=4 | N=8 |
+|---|---|---|
+| standalone shared `Runtime` | 3.84× | 7.58× |
+| network cached-plan path | 3.77× | — |
+| per-thread `Runtime` (ceiling) | ~3.9× | ~7.7× |
+
+Standalone now tracks the per-thread ceiling. The residual gap at d=16, N=8 is
+memory bandwidth (larger blocks), not lock contention. Data-parallel callers no
+longer need a `Runtime` per thread — a shared handle scales — though one per
+thread remains valid and contention-free.
 
 ## Adding a backend (checklist)
 

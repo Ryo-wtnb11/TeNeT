@@ -69,11 +69,6 @@ where
     }
 
     #[inline]
-    pub fn workspace_mut(&mut self) -> &mut B::Workspace {
-        &mut self.workspace
-    }
-
-    #[inline]
     pub fn cache(&self) -> &TreeTransformCache<C, RuleKey> {
         &self.cache
     }

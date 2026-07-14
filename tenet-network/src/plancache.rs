@@ -64,10 +64,6 @@ struct CacheEntry {
     workspaces: Arc<WorkspacePool>,
     /// Flat leg dims per operand at plan time (written leg order).
     dims_snapshot: Vec<Vec<usize>>,
-    /// Estimated total plan cost at plan time (kept for diagnostics and
-    /// future cost-aware policies).
-    #[allow(dead_code)]
-    cost: usize,
 }
 
 #[derive(Default)]
@@ -974,7 +970,6 @@ fn get_or_plan_internal(
             fresh
         }
     };
-    let cost = planned.plan().total_cost();
     let workspaces = Arc::new(WorkspacePool::default());
     let alias = StaticAlias {
         codomain_ranks: tensors
@@ -1008,7 +1003,6 @@ fn get_or_plan_internal(
                 planned: Arc::clone(&planned),
                 workspaces: Arc::clone(&workspaces),
                 dims_snapshot: dims,
-                cost,
             },
         );
         if let Some(dynamic_key) = dynamic_key {

@@ -183,22 +183,6 @@ impl<C> TensorTraceFusionStructure<C> {
         )
     }
 
-    /// Dynamic-rank [`Self::compile_fusion_spaces`] retaining the source
-    /// provider authority.
-    pub fn compile_fusion_dyn<R>(
-        dst: &BoundDynamicFusionMapSpace<R>,
-        src: &BoundDynamicFusionMapSpace<R>,
-        axes: TensorTraceAxisSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = C>,
-        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
-    {
-        // Why not accept a separate rule: trace coefficients are categorical
-        // semantics, so they must come from the provider that proved the source.
-        Self::compile_fusion_dyn_raw(src.provider(), dst.space(), src.space(), axes)
-    }
-
     pub(crate) fn compile_fusion_dyn_raw<R>(
         rule: &R,
         dst: &DynamicFusionMapSpace,
