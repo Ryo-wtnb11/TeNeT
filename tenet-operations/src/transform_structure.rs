@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
@@ -562,25 +562,20 @@ fn validate_destination_injective(dst_structure: &BlockStructure) -> Result<(), 
 
         // Range-connected layouts may be physically disjoint (coupled and
         // interleaved blocks), so enumerate each suspicious footprint once.
-        let mut owners = FxHashMap::<usize, usize>::default();
+        let mut offsets = FxHashSet::<usize>::default();
         for bounded_block in component {
             let block = dst_structure.block(bounded_block.dst_block)?;
-            let mut overlap = None;
+            let mut overlap = false;
             visit_layout_offsets(block.shape(), block.strides(), block.offset(), |offset| {
-                if let Some(&first_dst_block) = owners.get(&offset) {
-                    overlap = Some((first_dst_block, offset));
-                    true
-                } else {
-                    owners.insert(offset, bounded_block.dst_block);
-                    false
-                }
+                overlap = !offsets.insert(offset);
+                overlap
             })?;
-            if let Some((first_dst_block, offset)) = overlap {
-                let second_dst_block = bounded_block.dst_block;
-                return Err(OperationError::OverlappingTransformDestination {
-                    first_dst_block: first_dst_block.min(second_dst_block),
-                    second_dst_block: first_dst_block.max(second_dst_block),
-                    offset,
+            if overlap {
+                // Why not expose block/offset details in a new variant:
+                // OperationError is a public exhaustive enum, so that would
+                // break downstream matches for a validation-only diagnostic.
+                return Err(OperationError::InvalidArgument {
+                    message: "tree transform destination layouts overlap",
                 });
             }
         }

@@ -306,10 +306,8 @@ mod inactive_destination_tests {
         assert_eq!(
             TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[],)
                 .unwrap_err(),
-            OperationError::OverlappingTransformDestination {
-                first_dst_block: 0,
-                second_dst_block: 1,
-                offset: 0
+            OperationError::InvalidArgument {
+                message: "tree transform destination layouts overlap"
             }
         );
     }
@@ -325,10 +323,8 @@ mod inactive_destination_tests {
                 &[TreeTransformBlockSpec::single(0, 0, 1.0)],
             )
             .unwrap_err(),
-            OperationError::OverlappingTransformDestination {
-                first_dst_block: 0,
-                second_dst_block: 1,
-                offset: 0
+            OperationError::InvalidArgument {
+                message: "tree transform destination layouts overlap"
             }
         );
     }
@@ -347,10 +343,8 @@ mod inactive_destination_tests {
                 ],
             )
             .unwrap_err(),
-            OperationError::OverlappingTransformDestination {
-                first_dst_block: 0,
-                second_dst_block: 1,
-                offset: 0
+            OperationError::InvalidArgument {
+                message: "tree transform destination layouts overlap"
             }
         );
     }
@@ -366,10 +360,8 @@ mod inactive_destination_tests {
                 &[TreeTransformBlockSpec::single(0, 0, 1.0)],
             )
             .unwrap_err(),
-            OperationError::OverlappingTransformDestination {
-                first_dst_block: 0,
-                second_dst_block: 0,
-                offset: 0
+            OperationError::InvalidArgument {
+                message: "tree transform destination layouts overlap"
             }
         );
     }
@@ -391,10 +383,8 @@ mod inactive_destination_tests {
                 &[TreeTransformBlockSpec::single(0, 0, 1.0)],
             )
             .unwrap_err(),
-            OperationError::OverlappingTransformDestination {
-                first_dst_block: 0,
-                second_dst_block: 0,
-                offset: 1,
+            OperationError::InvalidArgument {
+                message: "tree transform destination layouts overlap",
             }
         );
     }
