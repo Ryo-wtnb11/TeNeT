@@ -698,18 +698,30 @@ fn realloc_tracks_only_successful_probe_origin_transitions() {
 }
 
 #[test]
-fn pre_probe_free_is_excluded_from_origin_counters() {
+fn dealloc_counts_only_enabled_probe_origin() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
-    ENABLED.store(false, Ordering::SeqCst);
-    let allocation = std::hint::black_box(Box::new([9u8; 256]));
     reset_event_counters();
     reset_live_registry();
-    ENABLED.store(true, Ordering::SeqCst);
-    drop(allocation);
-    ENABLED.store(false, Ordering::SeqCst);
+    let untracked = 0x1000usize as *mut u8;
+    let disabled_origin = 0x2000usize as *mut u8;
+    let enabled_origin = 0x3000usize as *mut u8;
+
+    // What: freeing memory allocated before a probe never enters its counters.
+    assert!(!record_dealloc_result(untracked, true));
+
+    // What: a probe-origin allocation is unregistered even when measurement has ended.
+    assert!(register_live(disabled_origin, 128));
+    assert!(record_dealloc_result(disabled_origin, false));
 
     assert_eq!(DEALLOC_CALLS.load(Ordering::Relaxed), 0);
     assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+
+    // What: freeing a probe-origin allocation during measurement records its exact size.
+    assert!(register_live(enabled_origin, 256));
+    assert!(record_dealloc_result(enabled_origin, true));
+    assert_eq!(DEALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 256);
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 0);
 }
 
 #[test]
