@@ -1,8 +1,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard};
 
 use tenet::prelude::*;
@@ -233,15 +233,33 @@ fn record_realloc_result(
     register_live(new_ptr, new_size)
 }
 
-fn record_dealloc_result(pointer: *mut u8, count_event: bool) -> bool {
+fn record_dealloc_result(pointer: *mut u8) -> bool {
     let Some(size) = unregister_live(pointer) else {
         return false;
     };
     // Why not gate unregistering: probe-origin storage can outlive the measurement
     // window, and leaving it registered corrupts retained-live accounting.
+    // Why not use infallible TLS access: the allocator also observes frees
+    // performed while a worker thread's TLS values are being destroyed.
+    let boundary_hook = DEALLOC_BOUNDARY_HOOK
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten();
+    if let Some(hook) = boundary_hook {
+        // Why not leave the hook installed: synchronization may enter the allocator,
+        // so the one-shot hook must be removed before crossing the test boundary.
+        hook.reached.send(()).unwrap();
+        hook.resume.recv().unwrap();
+    }
+    let count_event = ENABLED.load(Ordering::Relaxed);
     if count_event {
         DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+        if PROBE_THREAD_ENABLED.try_with(Cell::get).unwrap_or(false) {
+            let _ = PROBE_THREAD_DEALLOC_CALLS.try_with(|calls| calls.set(calls.get() + 1));
+            let _ = PROBE_THREAD_DEALLOCATED_BYTES
+                .try_with(|bytes| bytes.set(bytes.get() + size as u64));
+        }
     }
     true
 }
@@ -278,7 +296,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        record_dealloc_result(ptr, ENABLED.load(Ordering::Relaxed));
+        record_dealloc_result(ptr);
         unsafe { System.dealloc(ptr, layout) }
     }
 
