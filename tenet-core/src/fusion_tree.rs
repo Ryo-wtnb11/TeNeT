@@ -904,6 +904,9 @@ where
             actual: levels.len(),
         });
     }
+    if permutation.iter().copied().eq(0..rank) {
+        return Ok((tree.clone(), rule.scalar_one()));
+    }
     let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
     let mut current = tree.clone();
     let mut coefficient = rule.scalar_one();
@@ -961,6 +964,9 @@ where
             actual: levels.len(),
         });
     }
+    if permutation.iter().copied().eq(0..rank) {
+        return Ok(vec![(tree.clone(), rule.scalar_one())]);
+    }
     let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
     let mut current = vec![(tree.clone(), rule.scalar_one())];
     let mut current_levels = levels.to_vec();
@@ -994,6 +1000,16 @@ where
             expected: "symmetric braiding",
             actual: rule.braiding_style(),
         });
+    }
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    let rank = tree.uncoupled().len();
+    if permutation.iter().copied().eq(0..rank) {
+        return Ok(vec![(tree.clone(), rule.scalar_one())]);
     }
     let levels = (0..tree.uncoupled().len()).collect::<Vec<_>>();
     multiplicity_free_braid_tree(rule, tree, permutation, &levels)
@@ -1060,6 +1076,20 @@ where
             actual: domain_levels.len(),
         });
     }
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok(vec![(tree_pair.clone(), rule.scalar_one())]);
+    }
 
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
@@ -1109,6 +1139,20 @@ where
     }
     let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok(vec![(tree_pair.clone(), rule.scalar_one())]);
+    }
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
     multiplicity_free_braid_tree_pair(
@@ -1441,6 +1485,29 @@ where
             actual: domain_levels.len(),
         });
     }
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    let all_keys_match_rank = src_keys.iter().all(|key| {
+        key.codomain_tree().uncoupled().len() == codomain_rank
+            && key.domain_tree().uncoupled().len() == domain_rank
+    });
+    if all_keys_match_rank
+        && tree_pair_axis_map_is_identity(
+            codomain_permutation,
+            domain_permutation,
+            codomain_rank,
+            domain_rank,
+        )
+    {
+        return Ok(src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), rule.scalar_one())])
+            .collect());
+    }
 
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
@@ -1562,6 +1629,29 @@ where
     }
     let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
     let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    let all_keys_match_rank = src_keys.iter().all(|key| {
+        key.codomain_tree().uncoupled().len() == codomain_rank
+            && key.domain_tree().uncoupled().len() == domain_rank
+    });
+    if all_keys_match_rank
+        && tree_pair_axis_map_is_identity(
+            codomain_permutation,
+            domain_permutation,
+            codomain_rank,
+            domain_rank,
+        )
+    {
+        return Ok(src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), rule.scalar_one())])
+            .collect());
+    }
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
     multiplicity_free_braid_tree_pair_block(
@@ -1760,6 +1850,20 @@ where
             actual: domain_levels.len(),
         });
     }
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok((tree_pair.clone(), rule.scalar_one()));
+    }
 
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
@@ -1810,6 +1914,20 @@ where
     }
     let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok((tree_pair.clone(), rule.scalar_one()));
+    }
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
     unique_braid_tree_pair(
@@ -1942,6 +2060,19 @@ pub fn linearize_tree_pair_permutation(
     );
     validate_permutation(&linearized, total_rank)?;
     Ok(linearized)
+}
+
+fn tree_pair_axis_map_is_identity(
+    codomain_axes: &[usize],
+    domain_axes: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> bool {
+    codomain_axes.iter().copied().eq(0..codomain_rank)
+        && domain_axes
+            .iter()
+            .copied()
+            .eq(codomain_rank..codomain_rank + domain_rank)
 }
 
 fn unique_artin_braid_at_with_inverse<R>(
@@ -2522,6 +2653,9 @@ where
             expected: rank,
             actual: levels.len(),
         });
+    }
+    if permutation.iter().copied().eq(0..rank) {
+        return Ok(vec![(tree.clone(), R::Scalar::braid_one())]);
     }
     let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
     let mut current = vec![(tree.clone(), R::Scalar::braid_one())];
@@ -3557,6 +3691,20 @@ where
             actual: domain_levels.len(),
         });
     }
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok(vec![(tree_pair.clone(), R::Scalar::braid_one())]);
+    }
 
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
@@ -3607,6 +3755,20 @@ where
     }
     let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok(vec![(tree_pair.clone(), R::Scalar::braid_one())]);
+    }
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
     generic_braid_tree_pair(

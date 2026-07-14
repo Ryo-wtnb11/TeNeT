@@ -102,6 +102,40 @@ impl TreeTransformOperation {
     pub fn requires_symmetric_braiding(&self) -> bool {
         matches!(self, Self::Permute { .. })
     }
+
+    /// Whether this operation describes the exact current axis order and
+    /// codomain/domain split for a source with the given ranks.
+    ///
+    /// Braid levels must also describe every source leg. Their values do not
+    /// matter once the permutation has zero adjacent swaps. Why not classify
+    /// transpose here: a planar transpose/repartition can carry bend and dual
+    /// semantics even when a flattened order appears unchanged.
+    pub fn is_identity_for(&self, codomain_rank: usize, domain_rank: usize) -> bool {
+        let axes_are_identity = |codomain: &[usize], domain: &[usize]| {
+            codomain.iter().copied().eq(0..codomain_rank)
+                && domain
+                    .iter()
+                    .copied()
+                    .eq(codomain_rank..codomain_rank + domain_rank)
+        };
+        match self {
+            Self::Permute {
+                codomain_permutation,
+                domain_permutation,
+            } => axes_are_identity(codomain_permutation, domain_permutation),
+            Self::Braid {
+                codomain_permutation,
+                domain_permutation,
+                codomain_levels,
+                domain_levels,
+            } => {
+                codomain_levels.len() == codomain_rank
+                    && domain_levels.len() == domain_rank
+                    && axes_are_identity(codomain_permutation, domain_permutation)
+            }
+            Self::Transpose { .. } => false,
+        }
+    }
 }
 
 #[cfg(test)]
