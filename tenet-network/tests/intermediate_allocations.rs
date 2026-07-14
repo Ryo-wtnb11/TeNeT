@@ -1,6 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -36,6 +37,14 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
     static PROBE_THREAD_ENABLED: Cell<bool> = const { Cell::new(false) };
+    static PROBE_THREAD_DEALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
+    static PROBE_THREAD_DEALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static DEALLOC_BOUNDARY_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
+}
+
+struct DeallocBoundaryHook {
+    reached: SyncSender<()>,
+    resume: Receiver<()>,
 }
 
 struct RegistryGuard;
@@ -707,28 +716,68 @@ fn realloc_tracks_only_successful_probe_origin_transitions() {
 #[test]
 fn dealloc_counts_only_enabled_probe_origin() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(false, Ordering::SeqCst);
     reset_event_counters();
     reset_live_registry();
-    let untracked = 0x1000usize as *mut u8;
-    let disabled_origin = 0x2000usize as *mut u8;
-    let enabled_origin = 0x3000usize as *mut u8;
+    PROBE_THREAD_DEALLOC_CALLS.set(0);
+    PROBE_THREAD_DEALLOCATED_BYTES.set(0);
+
+    let untracked = std::hint::black_box(Box::new([9u8; 128]));
+    PROBE_THREAD_ENABLED.set(true);
+    ENABLED.store(true, Ordering::SeqCst);
 
     // What: freeing memory allocated before a probe never enters its counters.
-    assert!(!record_dealloc_result(untracked, true));
+    drop(untracked);
+    assert_eq!(PROBE_THREAD_DEALLOC_CALLS.get(), 0);
+    assert_eq!(PROBE_THREAD_DEALLOCATED_BYTES.get(), 0);
 
-    // What: a probe-origin allocation is unregistered even when measurement has ended.
-    assert!(register_live(disabled_origin, 128));
-    assert!(record_dealloc_result(disabled_origin, false));
+    let tracked = std::hint::black_box(Box::new([7u8; 256]));
+    PROBE_THREAD_DEALLOC_CALLS.set(0);
+    PROBE_THREAD_DEALLOCATED_BYTES.set(0);
 
-    assert_eq!(DEALLOC_CALLS.load(Ordering::Relaxed), 0);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 0);
+    // What: a real probe-origin free records its exact allocation size.
+    drop(tracked);
+    ENABLED.store(false, Ordering::SeqCst);
+    PROBE_THREAD_ENABLED.set(false);
+    assert_eq!(PROBE_THREAD_DEALLOC_CALLS.get(), 1);
+    assert_eq!(PROBE_THREAD_DEALLOCATED_BYTES.get(), 256);
+}
 
-    // What: freeing a probe-origin allocation during measurement records its exact size.
-    assert!(register_live(enabled_origin, 256));
-    assert!(record_dealloc_result(enabled_origin, true));
-    assert_eq!(DEALLOC_CALLS.load(Ordering::Relaxed), 1);
-    assert_eq!(DEALLOCATED_BYTES.load(Ordering::Relaxed), 256);
-    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 0);
+#[test]
+fn dealloc_snapshots_probe_state_after_unregistering_origin() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    ENABLED.store(true, Ordering::SeqCst);
+    reset_live_registry();
+    let tracked = std::hint::black_box(Box::new([5u8; 64]));
+    let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+
+    let worker = std::thread::spawn(move || {
+        PROBE_THREAD_DEALLOC_CALLS.set(0);
+        PROBE_THREAD_DEALLOCATED_BYTES.set(0);
+        PROBE_THREAD_ENABLED.set(true);
+        DEALLOC_BOUNDARY_HOOK.with_borrow_mut(|slot| {
+            *slot = Some(DeallocBoundaryHook {
+                reached: reached_tx,
+                resume: resume_rx,
+            });
+        });
+        drop(tracked);
+        DEALLOC_BOUNDARY_HOOK.with_borrow_mut(Option::take);
+        PROBE_THREAD_ENABLED.set(false);
+        (
+            PROBE_THREAD_DEALLOC_CALLS.get(),
+            PROBE_THREAD_DEALLOCATED_BYTES.get(),
+        )
+    });
+
+    // What: disabling the probe after unregister but before attribution excludes the free.
+    reached_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("deallocation did not expose its unregister boundary");
+    ENABLED.store(false, Ordering::SeqCst);
+    resume_tx.send(()).unwrap();
+    assert_eq!(worker.join().unwrap(), (0, 0));
 }
 
 #[test]
