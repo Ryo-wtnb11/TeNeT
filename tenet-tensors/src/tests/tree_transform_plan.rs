@@ -719,6 +719,78 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
 }
 
 #[test]
+fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
+    // What: an identity operation over a multi-tree SU2 fusion group compiles
+    // to independent direct copies, not one identity-matrix recoupling job.
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+    };
+
+    let key = |coupled: usize, inner: [usize; 2]| {
+        all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(coupled),
+            [false, false, false, false],
+            inner,
+            [1, 1, 1],
+        )
+    };
+    let keys = [
+        key(0, [0, 1]),
+        key(0, [2, 1]),
+        key(2, [2, 1]),
+        key(2, [2, 3]),
+    ];
+    let structure =
+        packed_fixture_structure(4, keys.iter().map(|key| (key.clone(), vec![1usize; 4]))).unwrap();
+    let operation = TreeTransformOperation::braid([0, 1, 2, 3], [], [17, 3, 11, 5], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+
+    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+            &SU2FusionRule,
+            &rule_key,
+            operation.clone(),
+            &structure,
+            memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        )
+        .unwrap();
+        (plan, hits, misses)
+    };
+
+    let mut serial_memo = TreePairRowMemo::default();
+    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
+    let mut parallel_memo = TreePairRowMemo::default();
+    let (parallel, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
+
+    assert_eq!(parallel, serial);
+    assert_eq!(
+        (parallel_hits, parallel_misses),
+        (serial_hits, serial_misses)
+    );
+    assert_eq!(serial_misses, keys.len());
+    assert_eq!(serial.specs().len(), keys.len());
+    for spec in serial.specs() {
+        assert_eq!(spec.src_keys().len(), 1);
+        assert_eq!(spec.dst_keys(), spec.src_keys());
+        assert_eq!(spec.recoupling_coefficients_dst_src(), &[1.0]);
+        assert_eq!(spec.source_axes(), Some([0, 1, 2, 3].as_slice()));
+    }
+
+    let compiled = serial.compile_structures(&structure, &structure).unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+
+    let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
+    assert_eq!(warm, serial);
+    assert_eq!((warm_hits, warm_misses), (keys.len(), 0));
+}
+
+#[test]
 fn tree_row_memo_survives_structure_change() {
     // TensorKit fstranspose/fsbraid cache parity: a truncation step changes the tree
     // subset of a structure, so the sector-keyed plan cache misses — but
