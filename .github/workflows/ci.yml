@@ -286,6 +286,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          key: workspace-test-debug0-v1
       - run: cargo test --workspace
         working-directory: tenet
         env:
