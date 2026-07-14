@@ -456,7 +456,24 @@ pub fn scale_axis_by_spectrum<D>(
 where
     D: FactorScalar,
 {
-    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
+    scale_axis_by_spectrum_mapped(space, data, axis, spectrum, D::from_real)
+}
+
+/// Value-generic sibling of [`scale_axis_by_spectrum`]. Why not convert the
+/// spectrum before this call: a complex spectrum cannot pass through the
+/// real-only `SectorSpectrum` alias without losing its imaginary component.
+pub fn scale_axis_by_spectrum_mapped<D, V>(
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    axis: Option<usize>,
+    spectrum: &[SectorSpectrum<V>],
+    to_scalar: impl Fn(V) -> D,
+) -> Result<(), OperationError>
+where
+    D: FactorScalar,
+    V: Copy,
+{
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum<V>> =
         spectrum.iter().map(|entry| (entry.sector, entry)).collect();
     let nout = space.nout();
     let structure = Arc::clone(space.structure());
@@ -508,7 +525,7 @@ where
                 base += coord[k] * strides[a];
             }
             for j in 0..bond {
-                let scale = D::from_real(entry.values[j]);
+                let scale = to_scalar(entry.values[j]);
                 let idx = base + j * bond_stride;
                 data[idx] = data[idx] * scale;
             }

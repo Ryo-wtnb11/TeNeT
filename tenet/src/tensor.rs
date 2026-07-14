@@ -149,6 +149,82 @@ impl DiagonalData {
         }
     }
 
+    fn elementwise_product(&self, rhs: &Self) -> Option<Self> {
+        fn multiply<V: Copy>(
+            lhs: &[SectorSpectrum<V>],
+            rhs: &[SectorSpectrum<V>],
+            mul: impl Fn(V, V) -> V,
+        ) -> Option<Vec<SectorSpectrum<V>>> {
+            if lhs.len() != rhs.len() {
+                return None;
+            }
+            lhs.iter()
+                .zip(rhs)
+                .map(|(lhs, rhs)| {
+                    if lhs.sector != rhs.sector || lhs.values.len() != rhs.values.len() {
+                        return None;
+                    }
+                    Some(SectorSpectrum {
+                        sector: lhs.sector,
+                        values: lhs
+                            .values
+                            .iter()
+                            .copied()
+                            .zip(rhs.values.iter().copied())
+                            .map(|(lhs, rhs)| mul(lhs, rhs))
+                            .collect(),
+                    })
+                })
+                .collect()
+        }
+
+        fn real_complex_product(
+            real: &[SectorSpectrum<f64>],
+            complex: &[SectorSpectrum<Complex64>],
+        ) -> Option<Vec<SectorSpectrum<Complex64>>> {
+            if real.len() != complex.len() {
+                return None;
+            }
+            real.iter()
+                .zip(complex)
+                .map(|(real, complex)| {
+                    if real.sector != complex.sector || real.values.len() != complex.values.len() {
+                        return None;
+                    }
+                    Some(SectorSpectrum {
+                        sector: real.sector,
+                        values: real
+                            .values
+                            .iter()
+                            .copied()
+                            .zip(complex.values.iter().copied())
+                            .map(|(real, complex)| real * complex)
+                            .collect(),
+                    })
+                })
+                .collect()
+        }
+
+        match (self, rhs) {
+            (Self::RealF64(lhs), Self::RealF64(rhs)) => {
+                multiply(lhs, rhs, |lhs, rhs| lhs * rhs).map(Self::RealF64)
+            }
+            (Self::RealC64(lhs), Self::RealC64(rhs)) => {
+                multiply(lhs, rhs, |lhs, rhs| lhs * rhs).map(Self::RealC64)
+            }
+            (Self::C64(lhs), Self::C64(rhs)) => {
+                multiply(lhs, rhs, |lhs, rhs| lhs * rhs).map(Self::C64)
+            }
+            (Self::RealC64(real), Self::C64(complex)) => {
+                real_complex_product(real, complex).map(Self::C64)
+            }
+            (Self::C64(complex), Self::RealC64(real)) => {
+                real_complex_product(real, complex).map(Self::C64)
+            }
+            _ => None,
+        }
+    }
+
     /// Multiplies every stored value by a real factor, preserving the variant —
     /// so scaling a diagonal factor (e.g. itebd's `λ / |λ|`) keeps O(rank)
     /// storage instead of densifying.
@@ -2332,23 +2408,31 @@ impl Tensor {
                 rhs.codomain_rank()
             )));
         }
-        // Diagonal fast-path (TensorKit `DiagonalTensorMap` `rmul!`/`lmul!`):
-        // composing a dense operand with a real diagonal is a pure per-block bond
-        // scaling — no GEMM, no braiding/twist (verified against TK
-        // `diagonal.jl`; diagonal mul! never recouples). Only one operand
-        // diagonal with a real spectrum; complex-spectrum (eig `d`) and
-        // diagonal∘diagonal fall through to the densifying contract path below.
-        match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
-            // `t * D`: scale `self`'s trailing bond axis (columns). `self.domain`
-            // is the single bond leg == `D.codomain`, so the space is `self`'s.
-            (None, Some(spectrum)) => return self.scaled_axis_copy(None, spectrum),
-            // `D * t`: scale `rhs`'s leading bond axis (rows). `rhs.codomain` is
-            // the single bond leg == `D.domain`, so the space is `rhs`'s.
-            (Some(spectrum), None) => return rhs.scaled_axis_copy(Some(0), spectrum),
-            _ => {}
-        }
+        self.check_same_world(rhs)?;
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..rhs.codomain_rank()).collect();
+        let diagonal_dst = if self.diagonal_data().is_some() || rhs.diagonal_data().is_some() {
+            Some(self.contraction_output_space(rhs, &lhs_axes, &rhs_axes)?)
+        } else {
+            None
+        };
+        // Why not send a proven diagonal composition through GEMM: TensorKit's
+        // `DiagonalTensorMap` `rmul!`/`lmul!` shows it is only per-block bond
+        // scaling. Two diagonals continue into `contract`, which first proves
+        // that their output still satisfies the rank-2 diagonal invariant.
+        match (self.diagonal_data(), rhs.diagonal_data()) {
+            // `t * D`: scale `self`'s trailing bond axis (columns). `self.domain`
+            // is the single bond leg == `D.codomain`, so the space is `self`'s.
+            (None, Some(diagonal)) if diagonal_dst.as_ref() == Some(self.space.as_ref()) => {
+                return self.scaled_axis_copy_diagonal(None, diagonal);
+            }
+            // `D * t`: scale `rhs`'s leading bond axis (rows). `rhs.codomain` is
+            // the single bond leg == `D.domain`, so the space is `rhs`'s.
+            (Some(diagonal), None) if diagonal_dst.as_ref() == Some(rhs.space.as_ref()) => {
+                return rhs.scaled_axis_copy_diagonal(Some(0), diagonal);
+            }
+            _ => {}
+        }
         // `contract` twists the dual contracted rhs legs (tensorcontract!
         // parity); the twist is involutive (θ = ±1), so pre-twisting those
         // legs cancels it exactly and yields mul! semantics. SU(N) (Generic)
@@ -2449,36 +2533,56 @@ impl Tensor {
             });
         if lhs_axes.len() == 1 && rhs_axes.len() == 1 {
             let twist_rhs_leg = fermionic && rhs.leg_is_dual(rhs_axes[0]);
-            match (self.real_diagonal_spectrum(), rhs.real_diagonal_spectrum()) {
+            let diagonal_dst = if self.diagonal_data().is_some() || rhs.diagonal_data().is_some() {
+                Some(self.contraction_output_space(rhs, lhs_axes, rhs_axes)?)
+            } else {
+                None
+            };
+            match (self.diagonal_data(), rhs.diagonal_data()) {
+                (Some(lhs), Some(rhs_diagonal)) if self.rule != RuleKind::Su3 => {
+                    let folded_rhs = self.twist_folded_diagonal(rhs_diagonal, twist_rhs_leg);
+                    let dst_space = diagonal_dst
+                        .expect("diagonal destination prepared when both operands are diagonal");
+                    if Self::is_diagonal_bond_space(&dst_space) {
+                        if let Some(product) = lhs.elementwise_product(&folded_rhs) {
+                            return Ok(self.with(dst_space, Data::Diagonal(product)));
+                        }
+                    }
+                }
                 // A * D: scale A's contracted leg by the (twist-folded) spectrum,
                 // then repartition to the output arrangement (A's open axes ->
                 // codomain, the scaled leg -> domain).
-                (None, Some(spectrum)) => {
+                (None, Some(diagonal)) => {
                     let leg = lhs_axes[0];
-                    let folded = self.twist_folded_spectrum(spectrum, twist_rhs_leg);
-                    let scaled = self.scaled_axis_copy(Some(leg), &folded)?;
+                    let folded = self.twist_folded_diagonal(diagonal, twist_rhs_leg);
+                    let scaled = self.scaled_axis_copy_diagonal(Some(leg), &folded)?;
                     let codomain: Vec<usize> = (0..self.rank()).filter(|&a| a != leg).collect();
-                    return scaled.permute(&codomain, &[leg]);
+                    let output = scaled.permute(&codomain, &[leg])?;
+                    debug_assert_eq!(Some(output.space.as_ref()), diagonal_dst.as_ref());
+                    return Ok(output);
                 }
                 // D * A: pre-twist A's dual contracted leg, scale it, then
                 // repartition (the scaled leg -> codomain 0, A's open -> domain).
-                (Some(spectrum), None) => {
+                (Some(diagonal), None) => {
                     let leg = rhs_axes[0];
                     let pretwisted = if twist_rhs_leg {
                         rhs.twist(&[leg])?
                     } else {
                         rhs.clone()
                     };
-                    let scaled = pretwisted.scaled_axis_copy(Some(leg), spectrum)?;
+                    let scaled = pretwisted.scaled_axis_copy_diagonal(Some(leg), diagonal)?;
                     let domain: Vec<usize> = (0..rhs.rank()).filter(|&a| a != leg).collect();
-                    return scaled.permute(&[leg], &domain);
+                    let output = scaled.permute(&[leg], &domain)?;
+                    debug_assert_eq!(Some(output.space.as_ref()), diagonal_dst.as_ref());
+                    return Ok(output);
                 }
                 _ => {}
             }
         }
-        // Fallback (complex-spectrum diagonal, diagonal∘diagonal, or a multi-axis
-        // contraction): materialize the diagonal to dense and run the ordinary
-        // contraction. Densify is a no-op clone for non-diagonal operands.
+        // Why not generalize compact storage to every diagonal contraction: a
+        // zero-axis outer product is rank 4 and a two-axis contraction is scalar,
+        // neither fits `DiagonalData`'s rank-2 bond invariant. Those shapes and
+        // any unproved rank-2 layout retain the ordinary dense fallback.
         if matches!(self.data.as_ref(), Data::Diagonal(_))
             || matches!(rhs.data.as_ref(), Data::Diagonal(_))
         {
@@ -3346,8 +3450,7 @@ impl Tensor {
 
     /// Wraps a complex per-sector spectrum (eig `D`) as diagonal storage. The
     /// general eigendecomposition is complex-valued even for real input, so `d`
-    /// is always c64; the spectrum stays O(rank) in `DiagonalData::C64`. Compose
-    /// densifies it (no real-spectrum scaling path), but storage is O(rank).
+    /// is always c64 and stays compact through block-local scaling/products.
     fn from_diagonal_complex_spectrum(
         &self,
         spectrum: Vec<SectorSpectrum<Complex64>>,
@@ -3392,13 +3495,38 @@ impl Tensor {
         }
     }
 
-    /// The per-sector real spectrum of a diagonal-storage operand, if it stores
-    /// one (svd `S`, eigh `D`). `None` for dense tensors and for complex-spectrum
-    /// diagonals (eig `D`), which take the densifying compose/contract path.
-    fn real_diagonal_spectrum(&self) -> Option<&[SectorSpectrum]> {
+    fn diagonal_data(&self) -> Option<&DiagonalData> {
         match self.data.as_ref() {
-            Data::Diagonal(DiagonalData::RealF64(s) | DiagonalData::RealC64(s)) => Some(s),
+            Data::Diagonal(diagonal) => Some(diagonal),
             _ => None,
+        }
+    }
+
+    fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
+        let homspace = space.homspace();
+        space.nout() == 1
+            && space.nin() == 1
+            && homspace.codomain().legs() == homspace.domain().legs()
+    }
+
+    fn contraction_output_space(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<DynamicFusionMapSpace, Error> {
+        if self.rule == RuleKind::Su3 {
+            Ok(DynamicFusionMapSpace::contracted_generic(
+                &Su3FusionRule::new(),
+                &self.space,
+                &rhs.space,
+                lhs_axes,
+                rhs_axes,
+            )?)
+        } else {
+            Ok(with_rule!(self.rule, rule, {
+                DynamicFusionMapSpace::contracted(rule, &self.space, &rhs.space, lhs_axes, rhs_axes)
+            })?)
         }
     }
 
@@ -3415,46 +3543,98 @@ impl Tensor {
         }
     }
 
-    /// The spectrum with each value multiplied by its sector's supertrace twist
-    /// `θ` (±1) when `apply` — folds `contract`'s fermionic twist of a diagonal
-    /// operand's dual contracted leg into the scaling instead of densifying it.
-    /// Identity (a plain copy) when `!apply` or for bosonic rules (`θ = 1`).
-    fn twist_folded_spectrum(
-        &self,
-        spectrum: &[SectorSpectrum],
-        apply: bool,
-    ) -> Vec<SectorSpectrum> {
+    /// Folds the supertrace twist into compact values. Why not call `twist` on
+    /// the diagonal tensor: that path materializes diagonal storage first.
+    fn twist_folded_diagonal(&self, diagonal: &DiagonalData, apply: bool) -> DiagonalData {
         if !apply {
-            return spectrum.to_vec();
+            return diagonal.clone();
         }
-        with_rule!(self.rule, rule, {
+        fn fold<V: Copy>(
+            spectrum: &[SectorSpectrum<V>],
+            factor: impl Fn(SectorId, V) -> V,
+        ) -> Vec<SectorSpectrum<V>> {
             spectrum
                 .iter()
-                .map(|entry| {
-                    let theta = rule.twist_scalar(entry.sector);
-                    SectorSpectrum {
-                        sector: entry.sector,
-                        values: entry.values.iter().map(|&value| value * theta).collect(),
-                    }
+                .map(|entry| SectorSpectrum {
+                    sector: entry.sector,
+                    values: entry
+                        .values
+                        .iter()
+                        .copied()
+                        .map(|value| factor(entry.sector, value))
+                        .collect(),
                 })
                 .collect()
+        }
+        with_rule!(self.rule, rule, {
+            match diagonal {
+                DiagonalData::RealF64(spectrum) => {
+                    DiagonalData::RealF64(fold(spectrum, |sector, value| {
+                        value * rule.twist_scalar(sector)
+                    }))
+                }
+                DiagonalData::RealC64(spectrum) => {
+                    DiagonalData::RealC64(fold(spectrum, |sector, value| {
+                        value * rule.twist_scalar(sector)
+                    }))
+                }
+                DiagonalData::C64(spectrum) => {
+                    DiagonalData::C64(fold(spectrum, |sector, value| {
+                        value * rule.twist_scalar(sector)
+                    }))
+                }
+            }
         })
     }
 
-    /// Scales this (dense) operand along one bond axis by `spectrum`, keeping the
-    /// same space — TensorKit's `DiagonalTensorMap` `rmul!` (`axis = None`,
-    /// trailing/columns) or `lmul!` (`axis = Some(0)`, leading/rows) as a
-    /// block-local scaling instead of a GEMM against a materialized diagonal.
-    fn scaled_axis_copy(
+    /// Why not materialize a diagonal matrix: TensorKit `lmul!`/`rmul!` only
+    /// scales the selected block-local axis for every compact scalar variant.
+    fn scaled_axis_copy_diagonal(
         &self,
         axis: Option<usize>,
-        spectrum: &[SectorSpectrum],
+        diagonal: &DiagonalData,
     ) -> Result<Self, Error> {
-        with_data!(self, data, {
-            let mut buf = data.to_vec();
-            tenet_matrixalgebra::scale_axis_by_spectrum(&self.space, &mut buf, axis, spectrum)?;
-            Ok(self.with_same_space(buf))
-        })
+        match (self.coupled_data(), diagonal) {
+            (Data::F64(data), DiagonalData::RealF64(spectrum)) => {
+                let mut buf = data.clone();
+                tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+                    &self.space,
+                    &mut buf,
+                    axis,
+                    spectrum,
+                    |value| value,
+                )?;
+                Ok(self.with_same_space(buf))
+            }
+            (Data::C64(data), DiagonalData::RealC64(spectrum)) => {
+                let mut buf = data.clone();
+                tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+                    &self.space,
+                    &mut buf,
+                    axis,
+                    spectrum,
+                    |value| Complex64::new(value, 0.0),
+                )?;
+                Ok(self.with_same_space(buf))
+            }
+            (Data::C64(data), DiagonalData::C64(spectrum)) => {
+                let mut buf = data.clone();
+                tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+                    &self.space,
+                    &mut buf,
+                    axis,
+                    spectrum,
+                    |value| value,
+                )?;
+                Ok(self.with_same_space(buf))
+            }
+            (Data::F64(_) | Data::C64(_), _) => Err(Error::DtypeMismatch),
+            (Data::Diagonal(_), _) => Err(Error::InvalidArgument(
+                "internal: diagonal scaling requires a non-diagonal operand".to_string(),
+            )),
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(_), _) => Err(device_unsupported("diagonal scaling")),
+        }
     }
 
     /// Compact SVD `t = u * s * vh` (MatrixAlgebraKit `svd_compact`):
@@ -5777,3 +5957,6 @@ where
 {
     Tensor::id(&crate::runtime::default_runtime()?, dtype, spaces)
 }
+
+#[cfg(test)]
+mod compact_diagonal_tests;
