@@ -19,16 +19,27 @@ use crate::OperationError;
 /// against concrete source and destination structures. Hot paths should build
 /// this once and replay it with `tree_transform_execute_with` while reusing a
 /// backend and workspace.
+///
+/// Why not expose mutable compiled fields: the recoupling plan, converted
+/// coefficient cache, and threaded replay schedule all derive from the same
+/// descriptors. Read them through [`Self::blocks`], [`Self::layouts`], and
+/// [`Self::recoupling_coefficients_dst_src`] so those derived plans cannot go
+/// stale after compilation.
+///
+/// Migration: code that previously read the public `blocks`, `layouts`, or
+/// `recoupling_coefficients_dst_src` fields must use the same-named accessor
+/// methods. Post-compilation mutation is no longer supported.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformStructure<T> {
     rank: usize,
     storage_conjugate: bool,
     identity: Arc<()>,
-    pub blocks: Vec<TreeTransformBlock>,
-    pub layouts: TreeTransformLayoutTable,
-    pub recoupling_coefficients_dst_src: Vec<T>,
+    blocks: Vec<TreeTransformBlock>,
+    layouts: TreeTransformLayoutTable,
+    recoupling_coefficients_dst_src: Vec<T>,
     inactive_dst_layouts: Vec<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
+    parallel_schedule: TreeTransformParallelSchedule,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
 }
@@ -43,6 +54,42 @@ pub struct TreeTransformRecouplingPlan {
     // Plan-time run partition of `jobs` (see issue #103): the dense backend
     // reads it to route each run without recomputing the partition per replay.
     runs: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TreeTransformSingleReplay {
+    pub dst_layout: usize,
+    pub src_layout: usize,
+    pub coefficient: usize,
+    pub dst_lo: isize,
+    pub dst_hi: isize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TreeTransformPackReplay {
+    pub src_layout: usize,
+    pub packed_offset: usize,
+    pub packed_hi: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TreeTransformScatterReplay {
+    pub dst_layout: usize,
+    pub packed_offset: usize,
+    pub dst_lo: isize,
+    pub dst_hi: isize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TreeTransformParallelSchedule {
+    pub singles: Vec<TreeTransformSingleReplay>,
+    pub pack_columns: Vec<TreeTransformPackReplay>,
+    pub scatter_columns: Vec<TreeTransformScatterReplay>,
+    pub single_block_count: usize,
+    pub packed_column_count: usize,
+    pub scattered_column_count: usize,
+    pub singles_slice_disjoint: bool,
+    pub scatter_slice_disjoint: bool,
 }
 
 impl TreeTransformRecouplingPlan {
@@ -424,6 +471,7 @@ impl<T: Copy> TreeTransformStructure<T> {
                 .cmp(&tree_transform_block_weight(lhs, &layouts))
         });
         let recoupling_plan = compile_recoupling_plan(&blocks)?;
+        let parallel_schedule = compile_parallel_schedule(&blocks, &layouts, &recoupling_plan)?;
 
         Ok(Self {
             rank,
@@ -434,6 +482,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             recoupling_coefficients_dst_src,
             inactive_dst_layouts,
             recoupling_plan,
+            parallel_schedule,
             dst_structure,
             src_structure,
         })
@@ -447,6 +496,24 @@ impl<T: Copy> TreeTransformStructure<T> {
     #[inline]
     pub fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Immutable compiled block descriptors.
+    #[inline]
+    pub fn blocks(&self) -> &[TreeTransformBlock] {
+        &self.blocks
+    }
+
+    /// Immutable compiled layout table.
+    #[inline]
+    pub fn layouts(&self) -> &TreeTransformLayoutTable {
+        &self.layouts
+    }
+
+    /// Immutable destination-by-source recoupling coefficients.
+    #[inline]
+    pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
+        &self.recoupling_coefficients_dst_src
     }
 
     pub fn workspace_lens(&self) -> (usize, usize) {
@@ -506,6 +573,11 @@ impl<T: Copy> TreeTransformStructure<T> {
     #[inline]
     pub(crate) fn inactive_destination_layouts(&self) -> &[usize] {
         &self.inactive_dst_layouts
+    }
+
+    #[inline]
+    pub(crate) fn parallel_schedule(&self) -> &TreeTransformParallelSchedule {
+        &self.parallel_schedule
     }
 
     pub fn validate_replay_structures(
@@ -676,6 +748,178 @@ where
             return Ok(None);
         }
     }
+}
+
+fn compile_parallel_schedule(
+    blocks: &[TreeTransformBlock],
+    layouts: &TreeTransformLayoutTable,
+    recoupling_plan: &TreeTransformRecouplingPlan,
+) -> Result<TreeTransformParallelSchedule, OperationError> {
+    let single_block_count = blocks
+        .iter()
+        .filter(|block| matches!(block, TreeTransformBlock::Single { .. }))
+        .count();
+    let mut packed_column_count = 0usize;
+    let mut scattered_column_count = 0usize;
+    let mut singles = Vec::new();
+    for block in blocks {
+        let TreeTransformBlock::Single {
+            dst_layout,
+            src_layout,
+            coefficient,
+        } = *block
+        else {
+            continue;
+        };
+        let Some((dst_lo, dst_hi)) = layout_index_range(layouts, dst_layout)? else {
+            continue;
+        };
+        singles.push(TreeTransformSingleReplay {
+            dst_layout,
+            src_layout,
+            coefficient,
+            dst_lo,
+            dst_hi,
+        });
+    }
+    singles.sort_unstable_by_key(|item| item.dst_lo);
+
+    let mut pack_columns = Vec::new();
+    let mut scatter_columns = Vec::new();
+    for (block_index, job) in recoupling_plan.entries() {
+        let TreeTransformBlock::Multi {
+            dst_layout_start,
+            dst_count,
+            src_layout_start,
+            src_count,
+            element_count,
+            ..
+        } = blocks[block_index]
+        else {
+            return Err(OperationError::InvalidArgument {
+                message: "tree transform recoupling plan references a single block",
+            });
+        };
+        packed_column_count = packed_column_count
+            .checked_add(src_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        scattered_column_count = scattered_column_count
+            .checked_add(dst_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if element_count == 0 {
+            continue;
+        }
+        for src_index in 0..src_count {
+            let packed_offset = job
+                .lhs_offset
+                .checked_add(
+                    src_index
+                        .checked_mul(element_count)
+                        .ok_or(OperationError::ElementCountOverflow)?,
+                )
+                .ok_or(OperationError::ElementCountOverflow)?;
+            let packed_hi = packed_offset
+                .checked_add(element_count - 1)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            pack_columns.push(TreeTransformPackReplay {
+                src_layout: src_layout_start + src_index,
+                packed_offset,
+                packed_hi,
+            });
+        }
+        for dst_index in 0..dst_count {
+            let dst_layout = dst_layout_start + dst_index;
+            let Some((dst_lo, dst_hi)) = layout_index_range(layouts, dst_layout)? else {
+                continue;
+            };
+            let packed_offset = job
+                .dst_offset
+                .checked_add(
+                    dst_index
+                        .checked_mul(element_count)
+                        .ok_or(OperationError::ElementCountOverflow)?,
+                )
+                .ok_or(OperationError::ElementCountOverflow)?;
+            scatter_columns.push(TreeTransformScatterReplay {
+                dst_layout,
+                packed_offset,
+                dst_lo,
+                dst_hi,
+            });
+        }
+    }
+    pack_columns.sort_unstable_by_key(|item| item.packed_offset);
+    scatter_columns.sort_unstable_by_key(|item| item.dst_lo);
+
+    let pack_disjoint = pack_columns
+        .windows(2)
+        .all(|pair| pair[0].packed_hi < pair[1].packed_offset);
+    if !pack_disjoint
+        || pack_columns
+            .last()
+            .is_some_and(|item| item.packed_hi >= recoupling_plan.source_len())
+    {
+        return Err(OperationError::InvalidArgument {
+            message: "tree transform packed source schedule is invalid",
+        });
+    }
+
+    Ok(TreeTransformParallelSchedule {
+        singles_slice_disjoint: destination_ranges_are_slice_disjoint(
+            singles.iter().map(|item| (item.dst_lo, item.dst_hi)),
+        ),
+        scatter_slice_disjoint: destination_ranges_are_slice_disjoint(
+            scatter_columns
+                .iter()
+                .map(|item| (item.dst_lo, item.dst_hi)),
+        ),
+        single_block_count,
+        packed_column_count,
+        scattered_column_count,
+        singles,
+        pack_columns,
+        scatter_columns,
+    })
+}
+
+fn destination_ranges_are_slice_disjoint(ranges: impl IntoIterator<Item = (isize, isize)>) -> bool {
+    let mut previous_hi = None;
+    for (lo, hi) in ranges {
+        if lo < 0 || hi < lo || previous_hi.is_some_and(|previous| previous >= lo) {
+            return false;
+        }
+        previous_hi = Some(hi);
+    }
+    true
+}
+
+fn layout_index_range(
+    layouts: &TreeTransformLayoutTable,
+    layout_index: usize,
+) -> Result<Option<(isize, isize)>, OperationError> {
+    let layout = layouts.entry(layout_index);
+    if layout.element_count == 0 {
+        return Ok(None);
+    }
+    let mut lo = layout.offset;
+    let mut hi = layout.offset;
+    for (&extent, &stride) in layouts.shape(layout).iter().zip(layouts.strides(layout)) {
+        let extent = isize::try_from(extent.saturating_sub(1))
+            .map_err(|_| OperationError::ElementCountOverflow)?;
+        let span = extent
+            .checked_mul(stride)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if span < 0 {
+            lo = lo
+                .checked_add(span)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        } else {
+            hi = hi
+                .checked_add(span)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+    }
+    Ok(Some((lo, hi)))
 }
 
 fn compile_recoupling_plan(
@@ -917,6 +1161,7 @@ pub struct TreeTransformLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenet_core::{BlockKey, BlockSpec};
 
     fn multi(element_count: usize, src_count: usize, dst_count: usize) -> TreeTransformBlock {
         TreeTransformBlock::Multi {
@@ -944,6 +1189,66 @@ mod tests {
             plan.runs().iter().sum::<usize>(),
             plan.jobs().len(),
             "run partition must cover all jobs"
+        );
+    }
+
+    #[test]
+    fn layout_range_covers_negative_stride_rank_zero_and_zero_extent() {
+        let layouts = TreeTransformLayoutTable {
+            entries: vec![
+                TreeTransformLayout {
+                    layout_start: 0,
+                    rank: 1,
+                    offset: 5,
+                    element_count: 3,
+                },
+                TreeTransformLayout {
+                    layout_start: 1,
+                    rank: 0,
+                    offset: 7,
+                    element_count: 1,
+                },
+                TreeTransformLayout {
+                    layout_start: 1,
+                    rank: 1,
+                    offset: 0,
+                    element_count: 0,
+                },
+            ],
+            shapes: vec![3],
+            strides: vec![-2],
+            packed_strides: vec![1],
+        };
+
+        assert_eq!(layout_index_range(&layouts, 0).unwrap(), Some((1, 5)));
+        assert_eq!(layout_index_range(&layouts, 1).unwrap(), Some((7, 7)));
+        assert_eq!(layout_index_range(&layouts, 2).unwrap(), None);
+    }
+
+    #[test]
+    fn compiled_parallel_schedule_is_stable_for_equivalent_structures() {
+        let block = |sector, offset| {
+            BlockSpec::with_key(BlockKey::sector_ids([sector]), vec![2], vec![1], offset).unwrap()
+        };
+        let dst = BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 2)]).unwrap();
+        let src = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
+        let specs = [TreeTransformBlockSpec::multi(
+            vec![0, 1],
+            vec![0, 1],
+            vec![1.0, 0.0, 0.0, 1.0],
+        )];
+
+        let first = TreeTransformStructure::compile_structures(&dst, &src, &specs).unwrap();
+        let second = TreeTransformStructure::compile_structures(&dst, &src, &specs).unwrap();
+
+        assert_eq!(first.parallel_schedule(), second.parallel_schedule());
+        assert_eq!(first.parallel_schedule().pack_columns.len(), 2);
+        assert_eq!(first.parallel_schedule().scatter_columns.len(), 2);
+        assert_eq!(first.blocks(), second.blocks());
+        assert_eq!(first.layouts(), second.layouts());
+        assert_eq!(
+            first.recoupling_coefficients_dst_src(),
+            second.recoupling_coefficients_dst_src()
         );
     }
 }

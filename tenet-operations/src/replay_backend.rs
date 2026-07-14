@@ -635,4 +635,14 @@ mod tests {
         assert_eq!(workspace.zero_strides.len(), 0);
         assert_eq!(alias.zero_strides.len(), workspace.zero_strides.len());
     }
+
+    #[test]
+    fn transform_parallel_gate_is_strictly_past_the_threshold() {
+        let mut backend = DenseTreeTransformOperations::default();
+        backend.set_recoupling_threads(4);
+        backend.set_transform_parallel_min_len(8);
+
+        assert_eq!(backend.effective_recoupling_threads(8), 1);
+        assert_eq!(backend.effective_recoupling_threads(9), 4);
+    }
 }
