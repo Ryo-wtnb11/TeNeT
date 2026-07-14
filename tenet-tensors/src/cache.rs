@@ -499,22 +499,21 @@ where
     }
 }
 
-/// Serializes tests that call the process-global `reset_global_operation_caches`
-/// against tests that assume the shared tenet-core intern table stays stable
-/// across two builds (e.g. `dynamic_fusion_fast_space_key_uses_structure_content_identity`).
-/// A reset landing between such a test's two interning builds would evict the
-/// first entry and hand the second a fresh id. Both sides take this lock.
-#[cfg(test)]
-pub(crate) static GLOBAL_RESET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(test)]
 mod tests {
-    use super::{reset_global_operation_caches, GLOBAL_RESET_TEST_LOCK};
+    use super::reset_global_operation_caches;
+    use crate::test_support::CACHE_TEST_LOCK;
     use tenet_core::BlockStructure;
 
     #[test]
     fn reset_global_operation_caches_chains_core_intern_reset_without_id_reuse() {
-        let _guard = GLOBAL_RESET_TEST_LOCK
+        // What: this resets the process-global caches, which races any test
+        // that assumes the shared tenet-core intern table stays stable across
+        // two builds (e.g. `dynamic_fusion_fast_space_key_uses_structure_content_identity`
+        // in `contract::dynamic`) — a reset landing between such a test's two
+        // interning builds would evict the first entry and hand the second a
+        // fresh id. See `test_support` for why this is a shared lock.
+        let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Cross-layer coherence: the tensors-level reset must chain into the
