@@ -903,6 +903,19 @@ impl FusionTreeHomSpace {
             dual_sector_leg(rule, &self.domain.legs()[axis - self.codomain.len()])
         }
     }
+
+    /// Returns the duality flag in the external-axis convention. Why not read
+    /// a domain leg verbatim: external domain axes are duals of their stored
+    /// hom-space legs, matching [`Self::external_axis_leg`].
+    pub fn external_axis_is_dual(&self, axis: usize) -> Option<bool> {
+        if axis < self.codomain.len() {
+            Some(self.codomain.legs()[axis].is_dual())
+        } else if axis < self.rank() {
+            Some(!self.domain.legs()[axis - self.codomain.len()].is_dual())
+        } else {
+            None
+        }
+    }
 }
 
 fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
