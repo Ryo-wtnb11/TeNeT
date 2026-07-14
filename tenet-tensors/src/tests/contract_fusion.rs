@@ -425,6 +425,8 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
@@ -513,18 +515,24 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let rhs_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace.clone(),
         packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
     let dst_space = FusionTensorMapSpace::new_unbound(
         TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
         homspace,
         packed_fixture_structure(2, [(even_key, vec![1, 1]), (odd_key, vec![1, 1])]).unwrap(),
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
 
     let lhs = TensorMap::<T, 1, 1>::from_vec_with_fusion_space(vec![lhs_value], lhs_space).unwrap();
@@ -1550,6 +1558,8 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
         dst_hom,
         dst_structure,
     )
+    .unwrap()
+    .try_bind_rule(&rule)
     .unwrap();
 
     let err = tensorcontract_fusion_block_specs(

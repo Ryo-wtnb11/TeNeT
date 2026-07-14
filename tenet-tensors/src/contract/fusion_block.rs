@@ -24,6 +24,26 @@ pub(crate) use tenet_operations::fusion_replay::{
     FusionBlockContractPlan, FusionBlockContractWorkspace, Rank2Gemm, StorageGemm,
 };
 
+/// Validate category identity before a contraction route reads sectors or
+/// symbols through the supplied rule.
+///
+/// Why-not validate during replay: a compiled plan is already tied to
+/// validated spaces, so replay checks would charge every warm execution for a
+/// compile-time invariant.
+pub(crate) fn validate_fusion_contract_rule<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+) -> Result<(), OperationError>
+where
+    R: FusionRule,
+{
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)
+}
+
 use super::backend::TensorContractBackend;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::reject_fusion_contract_conjugation;
@@ -114,6 +134,32 @@ where
     D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
 {
     let plan = compile_fusion_block_contract_plan(rule, dst_space, lhs_space, rhs_space, axes)?;
+    tensorcontract_core_fusion_blocks_with_plan_into_raw(
+        kernels, backend, workspace, &plan, dst_space, dst_data, lhs_space, lhs_data, rhs_space,
+        rhs_data, alpha, beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_core_fusion_blocks_with_plan_into_raw<A, B, D>(
+    kernels: &mut A,
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    plan: &FusionBlockContractPlan,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    lhs_space: &DynamicFusionMapSpace,
+    lhs_data: &[D],
+    rhs_space: &DynamicFusionMapSpace,
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D>,
+    B: TensorContractBackend<D, f64>,
+    D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
+{
     let mut fusion_workspace = FusionBlockContractWorkspace::<D>::default();
     plan.execute_raw(
         kernels,
@@ -679,6 +725,20 @@ pub(crate) fn compile_fusion_block_contract_plan<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    validate_fusion_contract_rule(rule, dst_space, lhs_space, rhs_space)?;
+    compile_fusion_block_contract_plan_validated(rule, dst_space, lhs_space, rhs_space, axes)
+}
+
+pub(crate) fn compile_fusion_block_contract_plan_validated<R>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_space: &DynamicFusionMapSpace,
+    rhs_space: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionBlockContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     reject_fusion_contract_conjugation(axes)?;
     // Axis validation happens inside validate_core_compose.
     validate_core_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
@@ -740,9 +800,7 @@ pub(crate) fn compile_fusion_block_contract_plan_generic<R>(
 where
     R: FusionRule,
 {
-    dst_space.validate_rule(rule)?;
-    lhs_space.validate_rule(rule)?;
-    rhs_space.validate_rule(rule)?;
+    validate_fusion_contract_rule(rule, dst_space, lhs_space, rhs_space)?;
     // Hardening guard (adversarial review, Stage B3c-1 refute pass): the
     // per-subblock `coefficient` computed below in `finish_generic` is
     // hardcoded to `1.0`, which assumes a bosonic rule (no supertrace twist).
