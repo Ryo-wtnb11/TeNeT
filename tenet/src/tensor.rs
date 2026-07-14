@@ -421,6 +421,11 @@ pub enum OverwriteOutcome {
     Incompatible,
 }
 
+// Usage: `TensorExecutionContext::try_contract_overwrite_into`, matching on
+// `OverwriteOutcome::Incompatible` to fall back to an owned allocation (see
+// that method's doc example). Stays `#[doc(hidden)]` alongside `try_*`
+// itself: un-hiding just the method would put a hidden cache type in its
+// public signature, so both move together or not at all (issue #150).
 #[doc(hidden)]
 #[derive(Default)]
 pub struct ContractOverwriteCache {
@@ -437,6 +442,8 @@ struct PreparedContractOverwrite {
     expected: Arc<DynamicFusionMapSpace>,
 }
 
+// Usage: `TensorExecutionContext::try_permute_overwrite_into`, same
+// Incompatible/Written pattern as `ContractOverwriteCache` above.
 #[doc(hidden)]
 #[derive(Default)]
 pub struct PermuteOverwriteCache {
@@ -4052,85 +4059,13 @@ impl Tensor {
 }
 
 impl TensorExecutionContext {
-    /// Whether `dst` has the exact host layout required by a contraction.
-    pub fn can_contract_overwrite_into(
-        &self,
-        dst: &Tensor,
-        lhs: &Tensor,
-        rhs: &Tensor,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<bool, Error> {
-        if !self.accepts_runtime(lhs)
-            || !self.accepts_runtime(rhs)
-            || !self.accepts_runtime(dst)
-            || lhs.check_same_world(rhs).is_err()
-            || dst.check_same_world(lhs).is_err()
-            || dst.check_same_world(rhs).is_err()
-            || dst.placement() != Placement::Host
-            || lhs.adjoint_source.is_some()
-            || rhs.adjoint_source.is_some()
-            || dst.adjoint_source.is_some()
-            || matches!(lhs.data.as_ref(), Data::Diagonal(_))
-            || matches!(rhs.data.as_ref(), Data::Diagonal(_))
-            || matches!(dst.data.as_ref(), Data::Diagonal(_))
-            || Arc::ptr_eq(&dst.data, &lhs.data)
-            || Arc::ptr_eq(&dst.data, &rhs.data)
-        {
-            return Ok(false);
-        }
-        open_axes(lhs_axes, lhs.rank())?;
-        open_axes(rhs_axes, rhs.rank())?;
-        let expected = if lhs.rule == RuleKind::Su3 {
-            DynamicFusionMapSpace::contracted_generic(
-                &Su3FusionRule::new(),
-                &lhs.space,
-                &rhs.space,
-                lhs_axes,
-                rhs_axes,
-            )?
-        } else {
-            with_rule!(lhs.rule, rule, {
-                DynamicFusionMapSpace::contracted(rule, &lhs.space, &rhs.space, lhs_axes, rhs_axes)
-            })?
-        };
-        Ok(dst.validate_exact_destination_space(&expected).is_ok()
-            && Arc::strong_count(&dst.data) == 1)
-    }
-
-    /// Whether `dst` has the exact host layout required by a permutation.
-    pub fn can_permute_overwrite_into(
-        &self,
-        dst: &Tensor,
-        src: &Tensor,
-        codomain_axes: &[usize],
-        domain_axes: &[usize],
-    ) -> Result<bool, Error> {
-        if !self.accepts_runtime(src)
-            || !self.accepts_runtime(dst)
-            || dst.check_same_world(src).is_err()
-            || dst.placement() != Placement::Host
-            || src.adjoint_source.is_some()
-            || dst.adjoint_source.is_some()
-            || matches!(src.data.as_ref(), Data::Diagonal(_))
-            || matches!(dst.data.as_ref(), Data::Diagonal(_))
-            || Arc::ptr_eq(&dst.data, &src.data)
-        {
-            return Ok(false);
-        }
-        let operation = TreeTransformOperation::permute(
-            codomain_axes.iter().copied(),
-            domain_axes.iter().copied(),
-        );
-        let expected = if src.rule == RuleKind::Su3 {
-            src.space
-                .transformed_generic(&Su3FusionRule::new(), &operation)?
-        } else {
-            with_rule!(src.rule, rule, src.space.transformed(rule, &operation))?
-        };
-        Ok(dst.validate_exact_destination_space(&expected).is_ok()
-            && Arc::strong_count(&dst.data) == 1)
-    }
+    // Why not keep `can_contract_overwrite_into`/`can_permute_overwrite_into`:
+    // #144 moved every real caller onto `try_contract_overwrite_into`/
+    // `try_permute_overwrite_into` (check-and-write-once), and a workspace +
+    // external-consumer grep found zero remaining callers of the two-call
+    // check-then-write predicates. Keeping the unused, non-hidden predicates
+    // around made rustdoc advertise a dead TOCTOU-shaped pattern as the
+    // correct one (issue #150).
 
     #[allow(clippy::too_many_arguments)]
     fn write_contract_prepared(
@@ -4234,6 +4169,33 @@ impl TensorExecutionContext {
         }
     }
 
+    /// Attempts to overwrite `dst` in place with `alpha * contract(lhs, rhs)`,
+    /// reusing the destination-space check cached in `cache` across repeated
+    /// calls with the same shapes. Returns `OverwriteOutcome::Incompatible`
+    /// (leaving `dst` unchanged) when `dst` cannot be reused in place — the
+    /// caller matches on the outcome and falls back to an owned allocation:
+    ///
+    /// ```
+    /// use tenet::prelude::*;
+    ///
+    /// let runtime = Runtime::builder().build().unwrap();
+    /// let space = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+    /// let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 1).unwrap();
+    /// let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 2).unwrap();
+    /// let owned = lhs.contract(&rhs, &[1], &[0]).unwrap();
+    /// let mut dst = owned.scale(f64::NAN).unwrap();
+    /// let mut context = TensorExecutionContext::default();
+    /// let mut cache = ContractOverwriteCache::default();
+    ///
+    /// let result = match context
+    ///     .try_contract_overwrite_into(&mut cache, &mut dst, &lhs, &rhs, &[1], &[0], Scalar::F64(1.0))
+    ///     .unwrap()
+    /// {
+    ///     OverwriteOutcome::Written => dst,
+    ///     OverwriteOutcome::Incompatible => lhs.contract(&rhs, &[1], &[0]).unwrap(),
+    /// };
+    /// assert_eq!(result.data().len(), owned.data().len());
+    /// ```
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn try_contract_overwrite_into(
