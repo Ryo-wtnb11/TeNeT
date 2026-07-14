@@ -614,8 +614,8 @@ mod inactive_destination_tests {
         )
         .unwrap();
         let attributed = profile.validate
-            + profile.inactive_scale
             + profile.single_total
+            + profile.strided_kernel.saturating_sub(profile.single_total)
             + profile.multi_workspace_prepare
             + profile.multi_pack
             + profile.multi_coefficient_prepare
@@ -1127,7 +1127,7 @@ where
 
     let start = std::time::Instant::now();
     scale_inactive_destinations(kernels, structure, dst_data, beta)?;
-    profile.inactive_scale += start.elapsed();
+    profile.strided_kernel += start.elapsed();
 
     if threads > 1 {
         tree_transform_blocks_with_batched_recoupling_parallel(

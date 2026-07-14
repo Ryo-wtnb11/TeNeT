@@ -5,7 +5,6 @@ pub struct TreeTransformReplayProfile {
     pub total: Duration,
     pub cache_lookup: Duration,
     pub validate: Duration,
-    pub inactive_scale: Duration,
     pub single_total: Duration,
     pub multi_workspace_prepare: Duration,
     pub multi_pack: Duration,
@@ -29,7 +28,6 @@ impl TreeTransformReplayProfile {
         self.total += other.total;
         self.cache_lookup += other.cache_lookup;
         self.validate += other.validate;
-        self.inactive_scale += other.inactive_scale;
         self.single_total += other.single_total;
         self.multi_workspace_prepare += other.multi_workspace_prepare;
         self.multi_pack += other.multi_pack;

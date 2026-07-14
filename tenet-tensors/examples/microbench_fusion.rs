@@ -278,12 +278,10 @@ where
             );
             let tree = &profile.tree_replay;
             println!(
-                "  tree_replay: total={total:.1} inactive_scale={inactive_scale:.1} \
-                 single={single:.1}({sb}) \
+                "  tree_replay: total={total:.1} single={single:.1}({sb}) \
                  pack={pack:.1}({pc}) recoupling={rec:.1} matmul={mm:.1} \
                  scatter={scatter:.1}({sc}) prepare={prep:.1} multi_blocks={mb}",
                 total = us(tree.total),
-                inactive_scale = us(tree.inactive_scale),
                 single = us(tree.single_total),
                 sb = tree.single_blocks / profile_iters as usize,
                 pack = us(tree.multi_pack),
