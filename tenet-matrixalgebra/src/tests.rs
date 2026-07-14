@@ -1,9 +1,9 @@
 use tenet_core::{
-    BlockKey, BraidingStyleKind, CoreError, FusionProductSpace, FusionRule, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
-    Z2FusionRule,
+    product_fusion_rule, BlockKey, BraidingStyleKind, CoreError, FermionParityFusionRule,
+    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, OperationError, OutputAxisOrder,
@@ -14,9 +14,16 @@ use tenet_tensors::{
 use crate::factorize::{dyn_space_of, truncate_svd, BoundTensorMap};
 use crate::*;
 use std::sync::Arc;
-use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite};
+use tenet_dense::{
+    DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
+};
 
 struct RejectExecutorCalls;
+
+#[derive(Default)]
+struct FailAfterObservingSvdInput {
+    observed: Vec<Vec<f64>>,
+}
 
 #[derive(Clone)]
 struct IdentityQdimRule {
@@ -139,6 +146,60 @@ impl DenseExecutor for RejectExecutorCalls {
     }
 }
 
+impl DenseExecutor for FailAfterObservingSvdInput {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("compact SVD must use the destination API")
+    }
+
+    fn svd_into(
+        &mut self,
+        input: DenseRead<'_>,
+        u: DenseWrite<'_>,
+        s: DenseWrite<'_>,
+        vt: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let DenseRead::F64(input) = input else {
+            panic!("test input must be f64")
+        };
+        self.observed.push(input.data().to_vec());
+        let DenseWrite::F64(u) = u else {
+            panic!("test U must be f64")
+        };
+        let DenseWrite::F64(s) = s else {
+            panic!("test singular values must be f64")
+        };
+        let DenseWrite::F64(vt) = vt else {
+            panic!("test Vh must be f64")
+        };
+        assert!(u.data().iter().all(|&value| value == 0.0));
+        assert!(s.data().iter().all(|&value| value == 0.0));
+        assert!(vt.data().iter().all(|&value| value == 0.0));
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "svd_into",
+            message: "injected failure".to_string(),
+        })
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises SVD")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises SVD")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises SVD")
+    }
+}
+
 fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
     lhs: &TensorMap<f64, NOUT, NIN>,
     rhs: &TensorMap<f64, NOUT, NIN>,
@@ -230,9 +291,7 @@ fn scale_vt_rows_by_singular_values<R, const NIN: usize>(
 
 fn run_tsvd_reconstruction_case<R>(rule: &R, sectors: &[SectorId], coupled_layout: bool)
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>
-        + Clone,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey + Clone,
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
@@ -285,8 +344,7 @@ where
         tensor.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
     context
         .tensorcontract_fusion_into(
             rule,
@@ -313,6 +371,61 @@ fn tsvd_fusion_reconstructs_z2_tensor_coupled_layout() {
 }
 
 #[test]
+fn compact_svd_canonical_layout_skips_input_pack_and_factor_scatter() {
+    // What: canonical coupled storage reaches final factor destinations without numerical copies.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+}
+
+#[test]
+fn compact_svd_noncanonical_layout_uses_copy_fallback() {
+    // What: an expert noncanonical view retains the general pack-and-scatter implementation.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    svd_compact_dyn(&mut dense, &input).unwrap();
+    let probe = crate::factorize::compact_svd_copy_probe();
+
+    assert!(probe.input_pack_calls > 0);
+    assert!(probe.input_pack_bytes > 0);
+    assert!(probe.output_scatter_calls > 0);
+    assert!(probe.output_scatter_bytes > 0);
+}
+
+#[test]
+fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
+    // What: a provider failure cannot mutate borrowed tensor storage or return partial factors.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let mut dense = FailAfterObservingSvdInput::default();
+
+    let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor));
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert!(!dense.observed.is_empty());
+    assert!(dense
+        .observed
+        .iter()
+        .all(|sector| before.windows(sector.len()).any(|window| window == sector)));
+}
+
+#[test]
 fn tsvd_fusion_reconstructs_su2_tensor() {
     run_tsvd_reconstruction_case(
         &SU2FusionRule,
@@ -335,6 +448,218 @@ fn tsvd_fusion_reconstructs_u1_tensor() {
         ],
         false,
     );
+}
+
+#[test]
+fn tsvd_fusion_reconstructs_fermion_parity_tensor() {
+    // What: the canonical direct SVD preserves both fermion-parity sectors.
+    run_tsvd_reconstruction_case(
+        &FermionParityFusionRule,
+        &[SectorId::new(0), SectorId::new(1)],
+        true,
+    );
+}
+
+#[test]
+fn tsvd_fusion_reconstructs_product_rule_tensor() {
+    // What: direct sector spans are keyed by the encoded product SectorId.
+    let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+    let sectors = [
+        rule.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        rule.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+    ];
+    run_tsvd_reconstruction_case(&rule, &sectors, true);
+}
+
+fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(even, rows)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, cols)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+        homspace,
+        &rule,
+        [vec![rows, cols]],
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..rows * cols)
+            .map(|index| ((index * 11 + 2) % 19) as f64 - 7.0)
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
+    let rule = Z2FusionRule;
+    let tensor = rectangular_svd_tensor(rows, cols);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
+    let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+    let rank = rows.min(cols);
+    let singular = &svd.singular_values[0].values;
+    for col in 0..cols {
+        for row in 0..rows {
+            let reconstructed = (0..rank)
+                .map(|bond| {
+                    svd.u.data()[row + rows * bond]
+                        * singular[bond]
+                        * svd.vh.data()[bond + rank * col]
+                })
+                .sum::<f64>();
+            assert!((reconstructed - tensor.data()[row + rows * col]).abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
+    // What: exact final-factor spans work for both compact rectangular shapes.
+    assert_rectangular_direct_svd(5, 3);
+    assert_rectangular_direct_svd(3, 5);
+}
+
+#[test]
+fn compact_svd_direct_and_fallback_apply_the_same_gauge() {
+    // What: direct writes do not change the canonical phase chosen by the fallback.
+    let rule = Z2FusionRule;
+    let tensor = rectangular_svd_tensor(3, 3);
+    let mut transposed_data = vec![0.0; 9];
+    for col in 0..3 {
+        for row in 0..3 {
+            transposed_data[row + 3 * col] = tensor.data()[col + 3 * row];
+        }
+    }
+    let transposed = TensorMap::from_vec_with_fusion_space(
+        transposed_data,
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let direct = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &transposed)).unwrap();
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let fallback_input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let fallback = svd_compact_dyn(&mut dense, &fallback_input).unwrap();
+
+    for (left, right) in direct.u.data().iter().zip(fallback.u().data()) {
+        assert!((left - right).abs() < 1e-12);
+    }
+    for (left, right) in direct.vh.data().iter().zip(fallback.vh().data()) {
+        assert!((left - right).abs() < 1e-12);
+    }
+    assert_eq!(direct.singular_values, fallback.singular_values());
+}
+
+#[test]
+fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
+    use num_complex::Complex64;
+
+    // What: one call reconstructs mixed rectangular complex sectors directly in final storage.
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(even, 5), (odd, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(even, 3), (odd, 4)], false)]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| match key.codomain_tree().coupled().unwrap() {
+            sector if sector == even => vec![5, 3],
+            sector if sector == odd => vec![2, 4],
+            sector => panic!("unexpected Z2 sector {sector:?}"),
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([7], [7]).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let tensor = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| {
+                Complex64::new(
+                    ((index * 7 + 2) % 17) as f64 - 6.0,
+                    ((index * 5 + 3) % 13) as f64 * 0.25 - 1.0,
+                )
+            })
+            .collect(),
+        space,
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
+
+    let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let u_regions = svd
+        .u
+        .tensor()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let vh_regions = svd
+        .vh
+        .tensor()
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled().unwrap();
+        let u_region = u_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let vh_region = vh_regions
+            .iter()
+            .find(|region| region.coupled() == Some(sector))
+            .unwrap();
+        let singular = &svd
+            .singular_values
+            .iter()
+            .find(|values| values.sector == sector)
+            .unwrap()
+            .values;
+        let rows = input_region.rows();
+        let cols = input_region.cols();
+        let rank = rows.min(cols);
+        for col in 0..cols {
+            for row in 0..rows {
+                let reconstructed = (0..rank)
+                    .map(|bond| {
+                        svd.u.data()[u_region.range().start + row + rows * bond]
+                            * singular[bond]
+                            * svd.vh.data()[vh_region.range().start + bond + rank * col]
+                    })
+                    .sum::<Complex64>();
+                let expected = tensor.data()[input_region.range().start + row + rows * col];
+                assert!((reconstructed - expected).norm() < 1e-10);
+            }
+        }
+    }
 }
 
 fn weighted_norm_squared_of_difference<R>(
@@ -1394,12 +1719,17 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    crate::factorize::reset_compact_svd_copy_probe();
     let svd = svd_trunc(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
         &Truncation::rank(8),
     )
     .unwrap();
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
     assert!(svd.error > 0.0);
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {

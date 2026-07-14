@@ -7576,6 +7576,111 @@ mod tests {
     }
 
     #[test]
+    fn coupled_sector_regions_describe_canonical_matrix_spans() {
+        // What: canonical coupled storage compiles to exact sector ranges and tree extents.
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([(z2_even(), 2), (z2_odd(), 2)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let keys = homspace.fusion_tree_keys(&rule);
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap(),
+            homspace,
+            &rule,
+            vec![vec![2; 4]; keys.len()],
+        )
+        .unwrap();
+
+        let structure = space.subblock_structure();
+        let cloned_before_query = structure.as_ref().clone();
+        assert!(!structure.coupled_region_cache_is_initialized());
+        let regions = cloned_before_query
+            .coupled_sector_regions(2)
+            .unwrap()
+            .unwrap();
+        assert!(structure.coupled_region_cache_is_initialized());
+        let original_regions = structure
+            .coupled_sector_regions(2)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&regions, &original_regions));
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].range().start, 0);
+        assert_eq!(regions[0].range().len(), regions[0].rows() * regions[0].cols());
+        assert_eq!(regions[1].range().start, regions[0].range().end);
+        assert_eq!(regions[1].range().end, space.required_len().unwrap());
+        assert!(regions.iter().all(|region| {
+            !region.row_trees().is_empty()
+                && !region.col_trees().is_empty()
+                && region
+                    .row_trees()
+                    .iter()
+                    .all(|tree| tree.extent().unwrap() > 0)
+        }));
+    }
+
+    #[test]
+    fn coupled_sector_regions_reject_noncanonical_and_incomplete_grids() {
+        // What: independently packed subblocks and a missing tree pair cannot claim direct spans.
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([(z2_even(), 1), (z2_odd(), 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let keys = homspace.fusion_tree_keys(&rule);
+        let mut offset = 0usize;
+        let independently_packed = keys
+            .iter()
+            .map(|key| {
+                let block = BlockSpec::column_major_with_key(
+                    BlockKey::FusionTree(key.clone()),
+                    vec![1; 4],
+                    offset,
+                )
+                .unwrap();
+                offset += 1;
+                block
+            })
+            .collect();
+        let independently_packed = BlockStructure::from_blocks(independently_packed).unwrap();
+        assert_eq!(
+            independently_packed.coupled_sector_regions(2).unwrap(),
+            None
+        );
+
+        let coupled = BlockStructure::coupled_sector_matrix_with_keys(
+            &rule,
+            2,
+            4,
+            keys.iter()
+                .cloned()
+                .map(|key| (key, vec![1; 4]))
+                .collect(),
+        )
+        .unwrap();
+        let incomplete = BlockStructure::from_blocks(
+            (0..coupled.block_count() - 1)
+                .map(|index| {
+                    let block = coupled.block(index).unwrap();
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(incomplete.coupled_sector_regions(2).unwrap(), None);
+    }
+
+    #[test]
     fn block_structure_intern_tables_plateau_under_distinct_growth() {
         // What: floods the shared block-structure intern/arc tables. Bounded
         // (`<=`) rather than exact-cap assertion below, so this no longer
