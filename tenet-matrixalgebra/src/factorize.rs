@@ -948,6 +948,7 @@ pub(crate) struct CompactSvdCopyProbe {
 #[cfg(test)]
 thread_local! {
     static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
+    static COMPACT_QR_COPY_PROBE: Cell<CompactQrCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
 }
 
@@ -994,6 +995,48 @@ fn record_compact_svd_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
 #[cfg(test)]
 fn record_compact_svd_output_scatter<D>(elements: usize) {
     COMPACT_SVD_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.output_scatter_calls += 1;
+        current.output_scatter_bytes += elements * std::mem::size_of::<D>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CompactQrCopyProbe {
+    pub input_pack_calls: usize,
+    pub input_pack_bytes: usize,
+    pub output_scatter_calls: usize,
+    pub output_scatter_bytes: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn reset_compact_qr_copy_probe() {
+    COMPACT_QR_COPY_PROBE.with(|probe| probe.set(CompactQrCopyProbe::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn compact_qr_copy_probe() -> CompactQrCopyProbe {
+    COMPACT_QR_COPY_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_compact_qr_input_pack<D>(matricizations: &[SectorMatricization<D>]) {
+    COMPACT_QR_COPY_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.input_pack_calls += matricizations.len();
+        current.input_pack_bytes += matricizations
+            .iter()
+            .map(|matrix| matrix.data.len() * std::mem::size_of::<D>())
+            .sum::<usize>();
+        probe.set(current);
+    });
+}
+
+#[cfg(test)]
+fn record_compact_qr_output_scatter<D>(elements: usize) {
+    COMPACT_QR_COPY_PROBE.with(|probe| {
         let mut current = probe.get();
         current.output_scatter_calls += 1;
         current.output_scatter_bytes += elements * std::mem::size_of::<D>();
@@ -1175,7 +1218,7 @@ where
 {
     let rule = input.space().provider();
     let space = input.space().space();
-    if let Some(plan) = compact_svd_factor_plan(input.space())? {
+    if let Some(plan) = compact_factor_plan(input.space())? {
         return svd_compact_direct_regions(dense, input, &plan);
     }
     let matricizations =
@@ -1298,64 +1341,64 @@ struct MatricizationPlan {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompactSvdRoute {
+struct CompactFactorRoute {
     source_region: usize,
-    u_region: Option<usize>,
-    vh_region: Option<usize>,
+    left_region: Option<usize>,
+    right_region: Option<usize>,
     sector: SectorId,
     rank: usize,
 }
 
 #[derive(Debug)]
-pub(crate) struct CompactSvdFactorPlan {
+pub(crate) struct CompactFactorPlan {
     source: Arc<MatricizationPlan>,
-    u_layout: ValidatedDynamicFusionLayout,
-    vh_layout: ValidatedDynamicFusionLayout,
-    u_regions: Arc<[CoupledSectorRegion]>,
-    vh_regions: Arc<[CoupledSectorRegion]>,
-    routes: Arc<[CompactSvdRoute]>,
+    left_layout: ValidatedDynamicFusionLayout,
+    right_layout: ValidatedDynamicFusionLayout,
+    left_regions: Arc<[CoupledSectorRegion]>,
+    right_regions: Arc<[CoupledSectorRegion]>,
+    routes: Arc<[CompactFactorRoute]>,
 }
 
-const COMPACT_SVD_PLAN_CACHE_CAP: usize = 1024;
+const COMPACT_FACTOR_PLAN_CACHE_CAP: usize = 1024;
 
 // Why not take the global LRU mutex on every warm factorization: concurrent
 // sector factorizations would serialize on metadata lookup. Why not a
 // per-thread map: one strong front entry bounds residency per worker.
 thread_local! {
-    static COMPACT_SVD_PLAN_FRONT: RefCell<Option<(
+    static COMPACT_FACTOR_PLAN_FRONT: RefCell<Option<(
         u64,
         ValidatedDynamicFusionLayout,
-        Arc<CompactSvdFactorPlan>,
+        Arc<CompactFactorPlan>,
     )>> = const { RefCell::new(None) };
 }
 
-struct CompactSvdPlanCache {
-    entries: Mutex<lru::LruCache<ValidatedDynamicFusionLayout, Arc<CompactSvdFactorPlan>>>,
+struct CompactFactorPlanCache {
+    entries: Mutex<lru::LruCache<ValidatedDynamicFusionLayout, Arc<CompactFactorPlan>>>,
 }
 
-impl Default for CompactSvdPlanCache {
+impl Default for CompactFactorPlanCache {
     fn default() -> Self {
         Self {
             entries: Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(COMPACT_SVD_PLAN_CACHE_CAP).unwrap(),
+                NonZeroUsize::new(COMPACT_FACTOR_PLAN_CACHE_CAP).unwrap(),
             )),
         }
     }
 }
 
-fn compact_svd_plan_cache() -> (u64, Arc<CompactSvdPlanCache>) {
-    tenet_tensors::registered_operation_cache::<CompactSvdPlanCache>()
+fn compact_factor_plan_cache() -> (u64, Arc<CompactFactorPlanCache>) {
+    tenet_tensors::registered_operation_cache::<CompactFactorPlanCache>()
 }
 
-fn compact_svd_factor_plan<R>(
+fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<Arc<CompactSvdFactorPlan>>, OperationError>
+) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let source_layout = input.validated_layout();
     let current_epoch = tenet_tensors::operation_cache_reset_epoch();
-    if let Some(plan) = COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+    if let Some(plan) = COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
         if front
             .as_ref()
             .is_some_and(|(epoch, _, _)| *epoch != current_epoch)
@@ -1368,24 +1411,24 @@ where
     }) {
         return Ok(Some(plan));
     }
-    let (cache_epoch, cache) = compact_svd_plan_cache();
+    let (cache_epoch, cache) = compact_factor_plan_cache();
     if let Ok(mut entries) = cache.entries.lock() {
         if let Some(plan) = entries.get(&source_layout) {
             let plan = Arc::clone(plan);
-            COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+            COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
                 *front = Some((cache_epoch, source_layout, Arc::clone(&plan)));
             });
             return Ok(Some(plan));
         }
     }
 
-    let Some(built) = build_compact_svd_factor_plan(input, source_layout.clone())? else {
+    let Some(built) = build_compact_factor_plan(input, source_layout.clone())? else {
         return Ok(None);
     };
     if let Ok(mut entries) = cache.entries.lock() {
         if let Some(plan) = entries.get(&source_layout) {
             let plan = Arc::clone(plan);
-            COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+            COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
                 *front = Some((cache_epoch, source_layout, Arc::clone(&plan)));
             });
             return Ok(Some(plan));
@@ -1395,16 +1438,16 @@ where
     // Why not make reset a quiescence barrier: a call already holding this
     // immutable plan may finish safely. Its epoch makes the next call discard
     // the front entry and resolve the reset generation instead.
-    COMPACT_SVD_PLAN_FRONT.with_borrow_mut(|front| {
+    COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
         *front = Some((cache_epoch, source_layout, Arc::clone(&built)));
     });
     Ok(Some(built))
 }
 
-fn build_compact_svd_factor_plan<R>(
+fn build_compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
     source_layout: ValidatedDynamicFusionLayout,
-) -> Result<Option<Arc<CompactSvdFactorPlan>>, OperationError>
+) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -1431,80 +1474,86 @@ where
         &layouts,
         &ranks,
     )?;
-    let u_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
+    let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
-            message: "compact SVD left factor is not a coupled-sector matrix layout",
+            message: "compact left factor is not a coupled-sector matrix layout",
         })?;
-    let vh_regions = checked_sector_regions(vh_space.space().structure(), vh_space.space().nout())?
-        .ok_or(OperationError::UnsupportedTensorContractScope {
-            message: "compact SVD right factor is not a coupled-sector matrix layout",
-        })?;
-    let routes =
-        compile_compact_svd_routes(input.provider(), &source.regions, &u_regions, &vh_regions)?;
-    Ok(Some(Arc::new(CompactSvdFactorPlan {
+    let right_regions =
+        checked_sector_regions(vh_space.space().structure(), vh_space.space().nout())?.ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: "compact right factor is not a coupled-sector matrix layout",
+            },
+        )?;
+    let routes = compile_compact_factor_routes(
+        input.provider(),
+        &source.regions,
+        &left_regions,
+        &right_regions,
+    )?;
+    Ok(Some(Arc::new(CompactFactorPlan {
         source,
-        u_layout: u_space.validated_layout(),
-        vh_layout: vh_space.validated_layout(),
-        u_regions,
-        vh_regions,
+        left_layout: u_space.validated_layout(),
+        right_layout: vh_space.validated_layout(),
+        left_regions,
+        right_regions,
         routes,
     })))
 }
 
-fn compile_compact_svd_routes<R>(
+fn compile_compact_factor_routes<R>(
     rule: &R,
     source_regions: &[CoupledSectorRegion],
-    u_regions: &[CoupledSectorRegion],
-    vh_regions: &[CoupledSectorRegion],
-) -> Result<Arc<[CompactSvdRoute]>, OperationError>
+    left_regions: &[CoupledSectorRegion],
+    right_regions: &[CoupledSectorRegion],
+) -> Result<Arc<[CompactFactorRoute]>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let u_by_sector = sector_region_index_map(rule, u_regions)?;
-    let vh_by_sector = sector_region_index_map(rule, vh_regions)?;
+    let left_by_sector = sector_region_index_map(rule, left_regions)?;
+    let right_by_sector = sector_region_index_map(rule, right_regions)?;
     let mut routes = Vec::with_capacity(source_regions.len());
-    let mut used_u = vec![false; u_regions.len()];
-    let mut used_vh = vec![false; vh_regions.len()];
+    let mut used_left = vec![false; left_regions.len()];
+    let mut used_right = vec![false; right_regions.len()];
     for (source_region, region) in source_regions.iter().enumerate() {
         let sector = region_sector(rule, region);
         let rank = region.rows().min(region.cols());
-        let (u_region, vh_region) = if rank == 0 {
+        let (left_region, right_region) = if rank == 0 {
             (None, None)
         } else {
-            let u_region = sector_region_index_of(&u_by_sector, sector, "left")?;
-            let vh_region = sector_region_index_of(&vh_by_sector, sector, "right")?;
-            validate_factor_region(&u_regions[u_region], region.rows(), rank, "left")?;
-            validate_factor_region(&vh_regions[vh_region], rank, region.cols(), "right")?;
-            used_u[u_region] = true;
-            used_vh[vh_region] = true;
-            (Some(u_region), Some(vh_region))
+            let left_region = sector_region_index_of(&left_by_sector, sector, "left")?;
+            let right_region = sector_region_index_of(&right_by_sector, sector, "right")?;
+            validate_factor_region(&left_regions[left_region], region.rows(), rank, "left")?;
+            validate_factor_region(&right_regions[right_region], rank, region.cols(), "right")?;
+            used_left[left_region] = true;
+            used_right[right_region] = true;
+            (Some(left_region), Some(right_region))
         };
-        routes.push(CompactSvdRoute {
+        routes.push(CompactFactorRoute {
             source_region,
-            u_region,
-            vh_region,
+            left_region,
+            right_region,
             sector,
             rank,
         });
     }
-    validate_no_unused_factor_regions(u_regions, &used_u, "left")?;
-    validate_no_unused_factor_regions(vh_regions, &used_vh, "right")?;
+    validate_no_unused_factor_regions(left_regions, &used_left, "left")?;
+    validate_no_unused_factor_regions(right_regions, &used_right, "right")?;
     Ok(routes.into())
 }
 
 #[cfg(test)]
-pub(crate) fn compact_svd_plan_for_test<R>(
+pub(crate) fn compact_factor_plan_for_test<R>(
     input: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Option<Arc<CompactSvdFactorPlan>>, OperationError>
+) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    compact_svd_factor_plan(input)
+    compact_factor_plan(input)
 }
 
 #[cfg(test)]
-pub(crate) fn compact_svd_plan_regions_for_test(
-    plan: &CompactSvdFactorPlan,
+pub(crate) fn compact_factor_plan_regions_for_test(
+    plan: &CompactFactorPlan,
 ) -> (
     Arc<[CoupledSectorRegion]>,
     Arc<[CoupledSectorRegion]>,
@@ -1512,13 +1561,13 @@ pub(crate) fn compact_svd_plan_regions_for_test(
 ) {
     (
         Arc::clone(&plan.source.regions),
-        Arc::clone(&plan.u_regions),
-        Arc::clone(&plan.vh_regions),
+        Arc::clone(&plan.left_regions),
+        Arc::clone(&plan.right_regions),
     )
 }
 
 #[cfg(test)]
-pub(crate) fn validate_compact_svd_routes_for_test<R>(
+pub(crate) fn validate_compact_factor_routes_for_test<R>(
     rule: &R,
     source: &[CoupledSectorRegion],
     u: &[CoupledSectorRegion],
@@ -1527,13 +1576,13 @@ pub(crate) fn validate_compact_svd_routes_for_test<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    compile_compact_svd_routes(rule, source, u, vh).map(|_| ())
+    compile_compact_factor_routes(rule, source, u, vh).map(|_| ())
 }
 
 fn svd_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
-    plan: &CompactSvdFactorPlan,
+    plan: &CompactFactorPlan,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -1542,10 +1591,10 @@ where
 {
     let space = input.space().space();
     debug_assert_eq!(plan.source.layout, input.space().validated_layout());
-    let u_space = input.space().rebind_validated(&plan.u_layout)?;
-    let vh_space = input.space().rebind_validated(&plan.vh_layout)?;
-    let mut u_data = vec![D::zero(); plan.u_layout.required_len()?];
-    let mut vh_data = vec![D::zero(); plan.vh_layout.required_len()?];
+    let u_space = input.space().rebind_validated(&plan.left_layout)?;
+    let vh_space = input.space().rebind_validated(&plan.right_layout)?;
+    let mut u_data = vec![D::zero(); plan.left_layout.required_len()?];
+    let mut vh_data = vec![D::zero(); plan.right_layout.required_len()?];
     let mut singular_values = Vec::with_capacity(plan.routes.len());
     let mut spectrum_scratch = Vec::<D::Real>::new();
 
@@ -1559,8 +1608,10 @@ where
             });
             continue;
         }
-        let u_region = &plan.u_regions[route.u_region.expect("nonzero route has left region")];
-        let vh_region = &plan.vh_regions[route.vh_region.expect("nonzero route has right region")];
+        let u_region =
+            &plan.left_regions[route.left_region.expect("nonzero route has left region")];
+        let vh_region =
+            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
 
         let input_shape = [region.rows(), region.cols()];
         let input_strides = [1usize, region.rows()];
@@ -1680,8 +1731,8 @@ fn sector_region_index_of(
         .copied()
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: match side {
-                "left" => "compact SVD left factor is missing a nonzero-rank sector",
-                _ => "compact SVD right factor is missing a nonzero-rank sector",
+                "left" => "compact left factor is missing a nonzero-rank sector",
+                _ => "compact right factor is missing a nonzero-rank sector",
             },
         })
 }
@@ -1695,8 +1746,8 @@ fn validate_factor_region(
     if region.rows() != rows || region.cols() != cols {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: match side {
-                "left" => "compact SVD left sector region has an unexpected shape",
-                _ => "compact SVD right sector region has an unexpected shape",
+                "left" => "compact left sector region has an unexpected shape",
+                _ => "compact right sector region has an unexpected shape",
             },
         });
     }
@@ -1715,8 +1766,8 @@ fn validate_no_unused_factor_regions(
     {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: match side {
-                "left" => "compact SVD left factor contains an unused nonzero sector",
-                _ => "compact SVD right factor contains an unused nonzero sector",
+                "left" => "compact left factor contains an unused nonzero sector",
+                _ => "compact right factor contains an unused nonzero sector",
             },
         });
     }
@@ -4034,11 +4085,16 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    if let Some(plan) = compact_factor_plan(input.space())? {
+        return qr_compact_direct_regions(dense, input, &plan);
+    }
     let provider = input.space().provider_arc();
     let rule = provider.as_ref();
     let space = input.space().space();
     let matricizations =
         sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_qr_input_pack(&matricizations);
     let mut pairs = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
@@ -4068,6 +4124,11 @@ where
             rank,
             matrix.cols,
         );
+        #[cfg(test)]
+        {
+            record_compact_qr_output_scatter::<D>(q.len());
+            record_compact_qr_output_scatter::<D>(r.len());
+        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
@@ -4078,6 +4139,62 @@ where
         });
     }
     build_left_right_bound_pair(provider, space.homspace(), &matricizations, &pairs)
+}
+
+fn qr_compact_direct_regions<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    plan: &CompactFactorPlan,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    debug_assert_eq!(plan.source.layout, input.space().validated_layout());
+    let left_space = input.space().rebind_validated(&plan.left_layout)?;
+    let right_space = input.space().rebind_validated(&plan.right_layout)?;
+    let mut left_data = vec![D::zero(); plan.left_layout.required_len()?];
+    let mut right_data = vec![D::zero(); plan.right_layout.required_len()?];
+
+    for route in plan.routes.iter().copied() {
+        if route.rank == 0 {
+            continue;
+        }
+        let source = &plan.source.regions[route.source_region];
+        let left = &plan.left_regions[route.left_region.expect("nonzero route has left region")];
+        let right =
+            &plan.right_regions[route.right_region.expect("nonzero route has right region")];
+        qr_into_workspace(
+            dense,
+            &input.data()[source.range()],
+            source.rows(),
+            source.cols(),
+            source.rows(),
+            &mut left_data[left.range()],
+            source.rows(),
+            route.rank,
+            source.rows(),
+            &mut right_data[right.range()],
+            route.rank,
+            source.cols(),
+            route.rank,
+        )?;
+        positive_diagonal_gauge_strided(
+            &mut left_data[left.range()],
+            source.rows(),
+            source.rows(),
+            &mut right_data[right.range()],
+            route.rank,
+            route.rank,
+            source.cols(),
+        );
+    }
+
+    let left = BoundDynFactor::from_bound(left_space, left_data, space.nout(), 1)?;
+    let right = BoundDynFactor::from_bound(right_space, right_data, 1, space.nin())?;
+    Ok((left, right))
 }
 
 /// Compact LQ `t = L * Q` (MatrixAlgebraKit `lq_compact`, via the QR of the
