@@ -8,7 +8,8 @@
 //! TensorKit-equivalent reduced blocks indexed by fusion trees (one coupled
 //! sector per block, column-major dense storage inside). Every op is dispatched
 //! through a symmetry **rule provider** inherited from the tensor's
-//! [`prelude::Space`]s (U(1), Z2, fZ2, SU(2), and their products), so the user
+//! [`prelude::Space`]s (U(1), Z2, fZ2, SU(2), SU(3), and their products —
+//! the core layer additionally supports anyonic rules such as Fibonacci), so the user
 //! layer is rule-erased while the machinery stays fusion-tree-aware.
 //!
 //! A [`prelude::Runtime`] owns the shared execution state: the per-rule
