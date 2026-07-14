@@ -785,6 +785,62 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     let compiled = serial.compile_structures(&structure, &structure).unwrap();
     assert!(!compiled.has_pack_gemm_scatter_blocks());
 
+    let all_codomain =
+        build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
+            .unwrap();
+    assert_eq!(all_codomain.specs().len(), keys.len());
+    for spec in all_codomain.specs() {
+        assert_eq!(spec.src_keys().len(), 1);
+        assert_eq!(spec.dst_keys(), spec.src_keys());
+        assert_eq!(spec.recoupling_coefficients_dst_src(), &[1.0]);
+    }
+    assert!(!all_codomain
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    let tensor_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![1.0, 2.0, 3.0, 4.0],
+        tensor_space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![5.0, 6.0, 7.0, 8.0],
+        tensor_space,
+        structure.clone(),
+    )
+    .unwrap();
+    let compiled = serial.compile(&dst, &src).unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+    assert_eq!(dst.data(), &[17.0, 22.0, 27.0, 32.0]);
+
+    dst.data_mut().fill(f64::NAN);
+    backend.set_recoupling_threads(4);
+    backend.set_transform_parallel_min_len(0);
+    tree_transform_overwrite_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        -2.0,
+    )
+    .unwrap();
+    assert_eq!(dst.data(), &[-2.0, -4.0, -6.0, -8.0]);
+
     let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
     assert_eq!(warm, serial);
     assert_eq!((warm_hits, warm_misses), (keys.len(), 0));
@@ -3687,6 +3743,10 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
     assert_plan_matches(
         TreeTransformOperation::braid([1, 0], [], [0, 1], []),
         generic_braid_tree_pair(&rule, &src_pair, &[1, 0], &[], &[0, 1], &[]).unwrap(),
+    );
+    assert_plan_matches(
+        TreeTransformOperation::braid([0, 1], [], [29, 7], []),
+        vec![(src_pair.clone(), 1.0)],
     );
     assert_plan_matches(
         TreeTransformOperation::transpose([1, 0], []),
