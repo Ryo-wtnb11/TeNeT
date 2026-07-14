@@ -1515,6 +1515,37 @@ mod tests {
     }
 
     #[test]
+    fn empty_block_permute_preserves_braiding_style_error_precedence() {
+        // What: an empty source block does not bypass the public permutation
+        // API's symmetric-braiding capability check.
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(
+                &FibonacciFusionRule,
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap_err(),
+            CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: BraidingStyleKind::Anyonic,
+            }
+        );
+    }
+
+    #[test]
+    fn tree_pair_block_apis_reject_mixed_multiplicity_flags() {
+        let codomain = FusionTreeKey::from_sector_ids([1, 2], Some(7), [false, false], [], []);
+        let domain = FusionTreeKey::from_sector_ids([3], Some(7), [false], [], []);
+        let base = FusionTreeBlockKey::pair(codomain.clone(), domain.clone());
+        let generic = FusionTreeBlockKey::pair(codomain.with_has_multiplicity(true), domain);
+
+        // What: equal external labels do not form one block group when their
+        // outer-multiplicity semantics differ.
+        assert_mixed_tree_pair_block_group_is_rejected(&[base, generic]);
+    }
+
+    #[test]
     fn identity_braid_tree_pair_validates_levels_before_symbol_free_return() {
         // What: malformed levels remain errors even when the axis map is the
         // exact current split.
