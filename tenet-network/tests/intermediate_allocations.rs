@@ -163,7 +163,7 @@ fn register_live(pointer: *mut u8, size: usize) -> bool {
     register_live_with_capacity(pointer, size, REGISTRY_CAPACITY)
 }
 
-fn restore_live(pointer: *mut u8, size: usize) -> bool {
+fn insert_live_without_accounting(pointer: *mut u8, size: usize) -> bool {
     // Why not call register_live: restoring a failed realloc revives the same
     // allocation origin and must not report a second payload allocation.
     insert_live_with_capacity(pointer, size, REGISTRY_CAPACITY, false, false)
@@ -277,21 +277,44 @@ fn finish_realloc_result(
     count_event: bool,
 ) -> bool {
     if new_ptr.is_null() {
-        restore_live(origin.pointer, origin.size);
+        insert_live_without_accounting(origin.pointer, origin.size);
         return false;
     }
-    LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
-    if origin.size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
-        PAYLOAD_LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
+    if !insert_live_without_accounting(new_ptr, new_size) {
+        LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
+        if origin.size == PAYLOAD_SIZE.load(Ordering::Relaxed) {
+            PAYLOAD_LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
+        }
+        return false;
     }
+
+    // Why not subtract then register: a concurrent allocation can complete in
+    // that zero-live gap and permanently understate the peak. Publish the new
+    // generation first, then replace the reserved old metrics by their delta.
     #[cfg(test)]
     cross_realloc_transition_hook();
+    if new_size >= origin.size {
+        add_live((new_size - origin.size) as u64);
+    } else {
+        LIVE_BYTES.fetch_sub((origin.size - new_size) as u64, Ordering::Relaxed);
+    }
+    let payload_size = PAYLOAD_SIZE.load(Ordering::Relaxed);
+    if origin.size == payload_size && new_size != payload_size {
+        PAYLOAD_LIVE_BYTES.fetch_sub(origin.size as u64, Ordering::Relaxed);
+    } else if origin.size != payload_size && new_size == payload_size {
+        PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+        let live =
+            PAYLOAD_LIVE_BYTES.fetch_add(new_size as u64, Ordering::Relaxed) + new_size as u64;
+        PAYLOAD_PEAK_LIVE_BYTES.fetch_max(live, Ordering::Relaxed);
+    } else if new_size == payload_size {
+        PAYLOAD_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
     if count_event {
         REALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
         DEALLOCATED_BYTES.fetch_add(origin.size as u64, Ordering::Relaxed);
     }
-    register_live(new_ptr, new_size)
+    true
 }
 
 fn record_dealloc_result(pointer: *mut u8) -> bool {
