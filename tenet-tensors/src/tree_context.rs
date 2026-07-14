@@ -23,6 +23,47 @@ use tenet_operations::OperationError;
 use tenet_operations::TreeTransformScalar;
 use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
 
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn replay_structure_overwrite<D, C, B>(
+    backend: &mut B,
+    workspace: &mut B::Workspace,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    src_data: &[D],
+    alpha: D,
+    profile: Option<&mut TreeTransformReplayProfile>,
+) -> Result<(), OperationError>
+where
+    D: TreeTransformScalar,
+    C: Copy,
+    B: TreeTransformBackend<D, C>,
+{
+    match profile {
+        Some(profile) => backend.tree_transform_structure_overwrite_into_raw_profiled(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            profile,
+        ),
+        None => backend.tree_transform_structure_overwrite_into_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+        ),
+    }
+}
+
 #[derive(Debug)]
 pub struct TreeTransformExecutionContext<D, RuleKey, C = D, B = DenseTreeTransformOperations>
 where
@@ -204,22 +245,16 @@ where
         DDst: HostWritableStorage<D>,
         DSrc: HostReadableStorage<D>,
     {
-        let Self {
-            backend,
-            workspace,
-            cache,
-        } = self;
-        cache.set_recoupling_threads(backend.recoupling_threads());
-        let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
         let dst_structure = Arc::clone(dst.structure());
         let src_structure = Arc::clone(src.structure());
-        backend.tree_transform_structure_overwrite_into_raw(
-            workspace,
-            &structure,
+        self.tree_transform_overwrite_into_raw_with_storage_conjugation(
+            rule,
+            operation,
             &dst_structure,
             &src_structure,
             dst.data_mut(),
             src.data(),
+            false,
             alpha,
         )
     }
@@ -294,6 +329,47 @@ where
             src_data,
             alpha,
             beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn tree_transform_dyn_overwrite_into_ref<R>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        cache.set_recoupling_threads(backend.recoupling_threads());
+        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
+            false,
+        )?;
+        replay_structure_overwrite(
+            backend,
+            workspace,
+            &structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            None,
         )
     }
 
@@ -410,6 +486,47 @@ where
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_transform_overwrite_into_raw_with_storage_conjugation<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst_structure: &std::sync::Arc<BlockStructure>,
+        src_structure: &std::sync::Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        storage_conjugate: bool,
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        cache.set_recoupling_threads(backend.recoupling_threads());
+        let structure = cache.get_or_compile_tree_pair_structures_with_storage_conjugation(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
+            storage_conjugate,
+        )?;
+        replay_structure_overwrite(
+            backend,
+            workspace,
+            &structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            None,
+        )
+    }
+
     /// Generic-fusion (SU(3)) dynamic-rank tree transform: the raw-slice
     /// analogue of [`Self::tree_transform_dyn_into`], routed through the
     /// non-memoized generic cache sibling. This is the path the top-level
@@ -455,6 +572,47 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn tree_transform_dyn_overwrite_into_generic<R>(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        R: GenericRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        C: GenericBraidScalar,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        cache.set_recoupling_threads(backend.recoupling_threads());
+        let structure = cache.get_or_compile_tree_pair_structures_generic(
+            rule,
+            operation,
+            dst_structure,
+            src_structure,
+        )?;
+        replay_structure_overwrite(
+            backend,
+            workspace,
+            &structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn tree_transform_structure_into_raw(
         &mut self,
         structure: &TreeTransformStructure<C>,
@@ -479,6 +637,34 @@ where
             src_data,
             alpha,
             beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_transform_structure_overwrite_into_raw(
+        &mut self,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError> {
+        let Self {
+            backend,
+            workspace,
+            cache: _,
+        } = self;
+        replay_structure_overwrite(
+            backend,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            None,
         )
     }
 
@@ -509,6 +695,35 @@ where
             alpha,
             beta,
             profile,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tree_transform_structure_overwrite_into_raw_profiled(
+        &mut self,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        profile: &mut TreeTransformReplayProfile,
+    ) -> Result<(), OperationError> {
+        let Self {
+            backend,
+            workspace,
+            cache: _,
+        } = self;
+        replay_structure_overwrite(
+            backend,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            Some(profile),
         )
     }
 

@@ -5,9 +5,10 @@ use tenet_core::{
 
 use crate::lowering::adjoint_fusion_space_view;
 use crate::{
-    build_tree_pair_transform_group_plan, tree_transform_into_with, DenseBlockScalar,
-    DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
-    RecouplingCoefficientAction, TreeTransformBackend, TreeTransformWorkspace,
+    build_tree_pair_transform_group_plan, tree_transform_into_with,
+    tree_transform_overwrite_into_with, DenseBlockScalar, DenseRecouplingScalar,
+    DenseTreeTransformOperations, OperationError, RecouplingCoefficientAction,
+    TreeTransformBackend, TreeTransformWorkspace,
 };
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
@@ -609,9 +610,7 @@ where
         });
     }
 
-    lhs_core.data_mut().fill(D::zero());
-    rhs_core.data_mut().fill(D::zero());
-    tree_transform_into_with_optional_storage_conjugation(
+    tree_transform_overwrite_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -620,9 +619,8 @@ where
         lhs,
         plan.lhs_source_conjugate(),
         D::one(),
-        D::zero(),
     )?;
-    tree_transform_into_with_optional_storage_conjugation(
+    tree_transform_overwrite_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -631,7 +629,6 @@ where
         rhs,
         plan.rhs_source_conjugate(),
         D::one(),
-        D::zero(),
     )?;
 
     tensorcontract_fusion_into_with(
@@ -724,10 +721,8 @@ where
         });
     }
 
-    lhs_core.data_mut().fill(D::zero());
-    rhs_core.data_mut().fill(D::zero());
     core_dst.data_mut().fill(D::zero());
-    tree_transform_into_with_optional_storage_conjugation(
+    tree_transform_overwrite_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -736,9 +731,8 @@ where
         lhs,
         plan.lhs_source_conjugate(),
         D::one(),
-        D::zero(),
     )?;
-    tree_transform_into_with_optional_storage_conjugation(
+    tree_transform_overwrite_with_optional_storage_conjugation(
         tree_backend,
         tree_workspace,
         rule,
@@ -747,7 +741,6 @@ where
         rhs,
         plan.rhs_source_conjugate(),
         D::one(),
-        D::zero(),
     )?;
 
     tensorcontract_fusion_into_with(
@@ -775,7 +768,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_transform_into_with_optional_storage_conjugation<
+fn tree_transform_overwrite_with_optional_storage_conjugation<
     B,
     R,
     D,
@@ -796,7 +789,6 @@ fn tree_transform_into_with_optional_storage_conjugation<
     src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     source_conjugate: bool,
     alpha: D,
-    beta: D,
 ) -> Result<(), OperationError>
 where
     B: TreeTransformBackend<D, f64>,
@@ -805,9 +797,11 @@ where
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
 {
+    // Why not use the generic beta=0 route: this destination is private core
+    // scratch and the explicit overwrite replay already owns every logical element.
     if !source_conjugate {
-        return tree_transform_into_with(
-            backend, workspace, rule, operation, dst, src, alpha, beta,
+        return tree_transform_overwrite_into_with(
+            backend, workspace, rule, operation, dst, src, alpha,
         );
     }
 
@@ -823,7 +817,7 @@ where
         &src_replay_structure,
         true,
     )?;
-    backend.tree_transform_structure_into_raw(
+    backend.tree_transform_structure_overwrite_into_raw(
         workspace,
         &structure,
         &dst_structure,
@@ -831,7 +825,6 @@ where
         dst.data_mut(),
         src.data(),
         alpha,
-        beta,
     )
 }
 

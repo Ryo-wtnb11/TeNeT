@@ -5053,11 +5053,10 @@ impl TensorExecutionContext {
         operation: PreparedPermuteOperation<'_>,
         expected: &DynamicFusionMapSpace,
     ) -> Result<(), Error> {
+        // Why not clear the destination here: the explicit overwrite replay
+        // writes active and structurally inactive logical blocks itself.
         match (Arc::get_mut(&mut dst.data), src.data.as_ref(), alpha) {
             (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
-                // Tree transforms can omit structural-zero destinations, so
-                // beta=0 cannot clear stale arena data by itself.
-                dst_data.fill(0.0);
                 dispatch_prepared_permute_into(
                     self,
                     dst.space.as_ref(),
@@ -5067,11 +5066,9 @@ impl TensorExecutionContext {
                     src,
                     src_data,
                     alpha,
-                    0.0,
                 )
             }
             (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
-                dst_data.fill(Complex64::new(0.0, 0.0));
                 dispatch_prepared_permute_into(
                     self,
                     dst.space.as_ref(),
@@ -5081,7 +5078,6 @@ impl TensorExecutionContext {
                     src,
                     src_data,
                     alpha,
-                    Complex64::new(0.0, 0.0),
                 )
             }
             (None, _, _) => Err(Error::InvalidArgument(
@@ -5566,7 +5562,6 @@ fn permute_into_with_rule<R, D, Key>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = Key>,
@@ -5575,7 +5570,7 @@ where
 {
     D::ctx_of(contexts)
         .tree_context_mut()
-        .tree_transform_dyn_into_ref(
+        .tree_transform_dyn_overwrite_into_ref(
             rule,
             operation,
             dst_space.structure(),
@@ -5583,7 +5578,6 @@ where
             dst_data,
             src_data,
             alpha,
-            beta,
         )
         .map_err(Into::into)
 }
@@ -5598,14 +5592,13 @@ fn dispatch_prepared_permute_into<D: UserScalar>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error> {
     match operation {
         PreparedPermuteOperation::Owned(operation) => dispatch_permute_into(
-            context, authority, operation, dst_space, dst_data, src, src_data, alpha, beta,
+            context, authority, operation, dst_space, dst_data, src, src_data, alpha,
         ),
         PreparedPermuteOperation::Borrowed(operation) => dispatch_permute_into_ref(
-            context, authority, operation, dst_space, dst_data, src, src_data, alpha, beta,
+            context, authority, operation, dst_space, dst_data, src, src_data, alpha,
         ),
     }
 }
@@ -5620,12 +5613,11 @@ fn dispatch_permute_into<D: UserScalar>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error> {
     if let UserBoundSpace::Su3(space) = authority {
         return D::ctx_of(&mut context.su3)
             .tree_context_mut()
-            .tree_transform_dyn_into_generic(
+            .tree_transform_dyn_overwrite_into_generic(
                 space.provider(),
                 operation,
                 dst_space.structure(),
@@ -5633,12 +5625,11 @@ fn dispatch_permute_into<D: UserScalar>(
                 dst_data,
                 src_data,
                 alpha,
-                beta,
             )
             .map_err(Into::into);
     }
     dispatch_permute_into_ref(
-        context, authority, &operation, dst_space, dst_data, src, src_data, alpha, beta,
+        context, authority, &operation, dst_space, dst_data, src, src_data, alpha,
     )
 }
 
@@ -5652,12 +5643,11 @@ fn dispatch_permute_into_ref<D: UserScalar>(
     src: &Tensor,
     src_data: &[D],
     alpha: D,
-    beta: D,
 ) -> Result<(), Error> {
     macro_rules! apply {
         ($contexts:expr, $rule:expr) => {
             permute_into_with_rule(
-                $contexts, $rule, operation, dst_space, dst_data, src, src_data, alpha, beta,
+                $contexts, $rule, operation, dst_space, dst_data, src, src_data, alpha,
             )
         };
     }
@@ -5672,7 +5662,7 @@ fn dispatch_permute_into_ref<D: UserScalar>(
         }
         UserBoundSpace::Su3(space) => D::ctx_of(&mut context.su3)
             .tree_context_mut()
-            .tree_transform_dyn_into_generic(
+            .tree_transform_dyn_overwrite_into_generic(
                 space.provider(),
                 operation.clone(),
                 dst_space.structure(),
@@ -5680,7 +5670,6 @@ fn dispatch_permute_into_ref<D: UserScalar>(
                 dst_data,
                 src_data,
                 alpha,
-                beta,
             )
             .map_err(Into::into),
     }
