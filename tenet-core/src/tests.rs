@@ -1390,6 +1390,108 @@ mod tests {
             &[],
         )
         .is_err());
+        assert!(unique_braid_tree_pair(
+            &IdentitySymbolPanicRule,
+            &source,
+            &[0],
+            &[0],
+            &[19],
+            &[3],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn identity_braid_rows_are_exact_for_supported_symmetry_families_and_rank_zero() {
+        // What: identity rows preserve their exact source key and unit
+        // coefficient for fermionic, non-abelian, product, and scalar spaces.
+        let pair = |sector: SectorId| {
+            FusionTreeBlockKey::pair_from_sector_ids(
+                [sector.id()],
+                [sector.id()],
+                Some(sector.id()),
+                [false],
+                [false],
+                [],
+                [],
+                [],
+                [],
+            )
+        };
+
+        let fz2_source = pair(z2_odd());
+        assert_eq!(
+            unique_braid_tree_pair(
+                &FermionParityFusionRule,
+                &fz2_source,
+                &[0],
+                &[1],
+                &[41],
+                &[2],
+            )
+            .unwrap(),
+            (fz2_source, 1.0)
+        );
+
+        let su2_source = pair(su2(1));
+        assert_eq!(
+            multiplicity_free_braid_tree_pair(
+                &SU2FusionRule,
+                &su2_source,
+                &[0],
+                &[1],
+                &[13],
+                &[5],
+            )
+            .unwrap(),
+            vec![(su2_source, 1.0)]
+        );
+
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let product_rule = FpU1Su2Rule::default();
+        let product_sector = product_rule.encode_sector(
+            left_rule.encode_sector(z2_odd(), u1(2)),
+            su2(1),
+        );
+        let product_source = pair(product_sector);
+        assert_eq!(
+            multiplicity_free_braid_tree_pair(
+                &product_rule,
+                &product_source,
+                &[0],
+                &[1],
+                &[8],
+                &[3],
+            )
+            .unwrap(),
+            vec![(product_source, 1.0)]
+        );
+
+        let scalar_source = FusionTreeBlockKey::pair_from_sector_ids(
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+            Some(z2_even().id()),
+            Vec::<bool>::new(),
+            Vec::<bool>::new(),
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+            Vec::<usize>::new(),
+        );
+        assert_eq!(
+            unique_braid_tree_pair(
+                &Z2FusionRule,
+                &scalar_source,
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap(),
+            (scalar_source, 1.0)
+        );
     }
 
     #[test]
