@@ -1606,7 +1606,7 @@ where
         codomain_rank,
         domain_rank,
     )?;
-    if all_keys_match_rank && permutation.iter().copied().eq(0..permutation.len()) {
+    if permutation.iter().copied().eq(0..permutation.len()) {
         return src_keys
             .iter()
             .map(|key| {
