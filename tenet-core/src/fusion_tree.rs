@@ -897,6 +897,12 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: rule.fusion_style(),
+        });
+    }
     let rank = tree.uncoupled().len();
     if levels.len() != rank {
         return Err(CoreError::DimensionMismatch {
@@ -937,7 +943,17 @@ where
             actual: rule.braiding_style(),
         });
     }
-    let levels = (0..tree.uncoupled().len()).collect::<Vec<_>>();
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: rule.fusion_style(),
+        });
+    }
+    let rank = tree.uncoupled().len();
+    if permutation.iter().copied().eq(0..rank) {
+        return Ok((tree.clone(), rule.scalar_one()));
+    }
+    let levels = (0..rank).collect::<Vec<_>>();
     unique_braid_tree(rule, tree, permutation, &levels)
 }
 
