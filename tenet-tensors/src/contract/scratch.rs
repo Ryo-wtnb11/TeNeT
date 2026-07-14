@@ -147,31 +147,19 @@ where
             .expect("dst dynamic scratch prepared before replay")
     }
 
-    pub(crate) fn lhs_rhs_dst_mut(
+    pub(crate) fn optional_sources_dst_mut(
         &mut self,
     ) -> (
-        &DynamicFusionScratch<T>,
-        &DynamicFusionScratch<T>,
+        Option<&DynamicFusionScratch<T>>,
+        Option<&DynamicFusionScratch<T>>,
         &mut DynamicFusionScratch<T>,
     ) {
+        // Why not branch over four borrow combinations: optional immutable
+        // source slots let the caller select both views around one mutable dst.
         let Self { lhs, rhs, dst } = self;
         (
-            lhs.as_ref()
-                .expect("lhs dynamic scratch prepared before replay"),
-            rhs.as_ref()
-                .expect("rhs dynamic scratch prepared before replay"),
-            dst.as_mut()
-                .expect("dst dynamic scratch prepared before replay"),
-        )
-    }
-
-    pub(crate) fn rhs_dst_mut(
-        &mut self,
-    ) -> (&DynamicFusionScratch<T>, &mut DynamicFusionScratch<T>) {
-        let Self { rhs, dst, .. } = self;
-        (
-            rhs.as_ref()
-                .expect("rhs dynamic scratch prepared before replay"),
+            lhs.as_ref(),
+            rhs.as_ref(),
             dst.as_mut()
                 .expect("dst dynamic scratch prepared before replay"),
         )
@@ -353,35 +341,21 @@ impl<LhsScratch, RhsScratch, DstScratch>
             .expect("rhs storage dynamic scratch prepared before replay")
     }
 
-    pub(crate) fn lhs_rhs_dst_mut(
+    pub(crate) fn optional_sources_dst_mut(
         &mut self,
     ) -> (
-        &StorageDynamicFusionScratch<LhsScratch>,
-        &StorageDynamicFusionScratch<RhsScratch>,
+        Option<&StorageDynamicFusionScratch<LhsScratch>>,
+        Option<&StorageDynamicFusionScratch<RhsScratch>>,
         &mut StorageDynamicFusionScratch<DstScratch>,
     ) {
+        // Why not branch over four borrow combinations: optional immutable
+        // source slots let the caller select both views around one mutable dst.
         let Self { lhs, rhs, dst } = self;
         (
-            lhs.as_ref()
-                .expect("lhs storage dynamic scratch prepared before replay"),
-            rhs.as_ref()
-                .expect("rhs storage dynamic scratch prepared before replay"),
+            lhs.as_ref(),
+            rhs.as_ref(),
             dst.as_mut()
                 .expect("dst storage dynamic scratch prepared before replay"),
-        )
-    }
-    pub(crate) fn rhs_dst_mut(
-        &mut self,
-    ) -> (
-        &StorageDynamicFusionScratch<RhsScratch>,
-        &mut StorageDynamicFusionScratch<DstScratch>,
-    ) {
-        let Self { rhs, dst, .. } = self;
-        (
-            rhs.as_ref()
-                .expect("rhs dynamic scratch prepared before replay"),
-            dst.as_mut()
-                .expect("dst dynamic scratch prepared before replay"),
         )
     }
 }
