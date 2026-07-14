@@ -126,15 +126,22 @@ pub(crate) struct RuntimeState {
     /// [`RuntimeBuilder::cuda`]; `None` on CPU-only runtimes.
     #[cfg(feature = "cuda")]
     pub(crate) cuda: Option<tenet_dense::CudaDenseContext>,
+}
+
+/// Contraction-plan cache home, behind its own mutex in [`RuntimeInner`] rather
+/// than the coarse `state` mutex (#155): the network hot path locks only this,
+/// never contending with standalone ops, and reads config + accesses the slot
+/// in one acquisition (see [`Runtime::with_plan_cache`]).
+struct PlanCacheHome {
     /// Contraction-plan cache configuration (the cache state itself lives
-    /// in `extension_slot`).
-    pub(crate) plan_cache_config: PlanCacheConfig,
+    /// in `slot`).
+    config: PlanCacheConfig,
     /// Type-erased downstream extension slot. Currently holds the
     /// contraction-plan cache: the cache and plan types live in
     /// `tenet-network`, which depends on this crate, so the runtime can only
     /// hold them behind `dyn Any`; `tenet-network` claims and downcasts the
     /// slot on first use.
-    pub(crate) extension_slot: Option<Box<dyn Any + Send>>,
+    slot: Option<Box<dyn Any + Send>>,
 }
 
 impl RuntimeState {
@@ -150,8 +157,6 @@ impl RuntimeState {
             dense,
             #[cfg(feature = "cuda")]
             cuda: None,
-            plan_cache_config: PlanCacheConfig::default(),
-            extension_slot: None,
         }
     }
 
@@ -171,8 +176,6 @@ impl RuntimeState {
             dense,
             #[cfg(feature = "cuda")]
             cuda: None,
-            plan_cache_config: PlanCacheConfig::default(),
-            extension_slot: None,
         })
     }
 
@@ -311,14 +314,143 @@ macro_rules! with_rule_ctx {
 pub(crate) use with_rule_ctx;
 
 struct RuntimeInner {
-    // ponytail: standalone ops hold this for the whole op (all rules/dtypes
-    // serialize together). Use per-thread Runtimes or the network/tensor!
-    // cached-plan path for data parallelism today; see #155 and
-    // docs/backend_policy.md#parallel-execution-current-state for the
-    // planned context-lease fix.
+    // The coarse state mutex is now cold on the CPU hot paths: standalone ops
+    // lease from `context_pool`/`executor_pool` (below) and the network path
+    // uses per-plan workspace pools, so this is held only for CUDA device state,
+    // plan-cache config, and the non-mintable injected-executor fallback (#155).
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
+    /// Standalone-op parallelism (#155): rather than hold the coarse `state`
+    /// mutex for a whole `contract`/`permute`/factorization, each op leases a
+    /// per-rule execution context (and, for factorizations, a dense executor)
+    /// for its duration and returns it, so ops on a shared `Runtime` run
+    /// concurrently. Both pools mirror the network `WorkspacePool`: mint on
+    /// empty, bounded idle count, quarantine-on-panic.
+    ///
+    /// Why not one shared `Sync` executor instead of a pool: `DenseExecutor`
+    /// takes `&mut self` (per-call scratch), and a future CUDA per-stream
+    /// executor would carry non-`Sync` device state — a pool of owned
+    /// executors is the share strategy that survives that, a `&`-shared one is
+    /// not.
+    context_pool: Mutex<Vec<crate::tensor::TensorExecutionContext>>,
+    executor_pool: Mutex<Vec<Box<dyn tenet_dense::DenseExecutor + Send>>>,
+    /// `false` when a caller injected a custom (non-mintable) executor via
+    /// `with_dense_executor`: the pool cannot reproduce it, so factorizations
+    /// fall back to the `state` lock and its single executor.
+    executor_mintable: bool,
+    /// Idle-pool cap: keep up to one warm context/executor per core so a
+    /// data-parallel driver (one thread per core) reuses them instead of
+    /// re-minting each call. ponytail: cores, not a tunable; raise only if a
+    /// workload oversubscribes cores and re-mint churn shows up in a profile.
+    max_idle: usize,
+    /// Contraction-plan cache, behind its own mutex so the network hot path
+    /// never contends with standalone ops on the `state` mutex (#155).
+    plan_cache: Mutex<PlanCacheHome>,
+}
+
+/// Mints a dense executor identical to the one `RuntimeBuilder::build` created
+/// from the same config. Only called when no custom executor was injected
+/// (`executor_mintable`), and that config already built successfully once, so a
+/// re-mint cannot fail. ponytail: CPU executors are cheap to construct; the pool
+/// exists to skip per-call construction, not because minting is expensive.
+fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExecutor + Send> {
+    let make = || -> Result<Box<dyn tenet_dense::DenseExecutor + Send>, Error> {
+        Ok(match (config.linalg_kind, config.dense_threads) {
+            (Some(kind), Some(threads)) => Box::new(
+                tenet_dense::DefaultDenseExecutor::with_threads_and_kind(threads, kind)
+                    .map_err(tenet_tensors::OperationError::Dense)?,
+            ),
+            (Some(kind), None) => Box::new(
+                tenet_dense::DefaultDenseExecutor::with_kind(kind)
+                    .map_err(tenet_tensors::OperationError::Dense)?,
+            ),
+            (None, Some(threads)) => Box::new(
+                tenet_dense::DefaultDenseExecutor::with_threads(threads)
+                    .map_err(tenet_tensors::OperationError::Dense)?,
+            ),
+            (None, None) => Box::new(tenet_dense::DefaultDenseExecutor::default()),
+        })
+    };
+    make().expect("dense executor config validated at Runtime build time")
+}
+
+/// RAII lease of a pooled per-rule execution context (#155). Returns it to the
+/// pool on drop; on panic it is dropped instead of returned (quarantine —
+/// mirrors `tenet_network`'s `WorkspaceLease`).
+pub(crate) struct ContextLease<'a> {
+    pool: &'a Mutex<Vec<crate::tensor::TensorExecutionContext>>,
+    max_idle: usize,
+    context: Option<crate::tensor::TensorExecutionContext>,
+}
+
+impl ContextLease<'_> {
+    pub(crate) fn context(&mut self) -> &mut crate::tensor::TensorExecutionContext {
+        self.context
+            .as_mut()
+            .expect("context lease always owns a context")
+    }
+}
+
+impl Drop for ContextLease<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // A panic mid-op may have left the context's caches half-written;
+            // do not return it to the pool.
+            self.context.take();
+            return;
+        }
+        if let Some(context) = self.context.take() {
+            let mut available = self.pool.lock().expect("context pool poisoned");
+            if available.len() < self.max_idle {
+                available.push(context);
+            }
+        }
+    }
+}
+
+/// RAII lease of a dense executor (#155): a pooled executor for mintable
+/// configs, or the `state` lock for a non-mintable injected executor.
+pub(crate) enum DenseLease<'a> {
+    Pooled {
+        pool: &'a Mutex<Vec<Box<dyn tenet_dense::DenseExecutor + Send>>>,
+        max_idle: usize,
+        executor: Option<Box<dyn tenet_dense::DenseExecutor + Send>>,
+    },
+    Locked(MutexGuard<'a, RuntimeState>),
+}
+
+impl DenseLease<'_> {
+    pub(crate) fn dense(&mut self) -> &mut (dyn tenet_dense::DenseExecutor + Send) {
+        match self {
+            DenseLease::Pooled { executor, .. } => &mut **executor
+                .as_mut()
+                .expect("dense lease always owns an executor"),
+            DenseLease::Locked(guard) => &mut *guard.dense,
+        }
+    }
+}
+
+impl Drop for DenseLease<'_> {
+    fn drop(&mut self) {
+        if let DenseLease::Pooled {
+            pool,
+            max_idle,
+            executor,
+        } = self
+        {
+            if std::thread::panicking() {
+                executor.take();
+                return;
+            }
+            if let Some(executor) = executor.take() {
+                let mut available = pool.lock().expect("executor pool poisoned");
+                if available.len() < *max_idle {
+                    available.push(executor);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -327,6 +459,10 @@ pub(crate) struct RuntimeExecutionConfig {
     pub(crate) gemm_kind: Option<tenet_dense::CpuBackendKind>,
     pub(crate) recoupling_threads: Option<usize>,
     pub(crate) transpose_backend: Option<TransposeBackend>,
+    /// CPU provider for dense factorizations (SVD/QR/eigh). Kept here so the
+    /// standalone-op executor pool can re-mint an executor identical to the one
+    /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
+    pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
 }
 
 /// Execution runtime for the user-layer [`crate::prelude::Tensor`] API.
@@ -388,27 +524,92 @@ impl Runtime {
         self.inner.execution_config
     }
 
+    /// Leases a per-rule execution context for one standalone op (#155): pop a
+    /// warm one or mint a fresh config-bound one. The op runs on the leased
+    /// context, not under the coarse `state` lock, so ops on a shared runtime
+    /// run concurrently. Byte-identical to the old locked path: the per-rule
+    /// machinery is the same `Ctxs`, and single-threaded use reuses one pooled
+    /// context (its caches warm exactly as the runtime state's did).
+    pub(crate) fn lease_context(&self) -> Result<ContextLease<'_>, Error> {
+        let pooled = self
+            .inner
+            .context_pool
+            .lock()
+            .expect("context pool poisoned")
+            .pop();
+        let context = match pooled {
+            Some(context) => context,
+            None => crate::tensor::TensorExecutionContext::for_config(self.inner.execution_config)?,
+        };
+        Ok(ContextLease {
+            pool: &self.inner.context_pool,
+            max_idle: self.inner.max_idle,
+            context: Some(context),
+        })
+    }
+
+    /// Leases a dense executor for one factorization (#155). Pooled for a
+    /// mintable config; otherwise falls back to the `state` lock and its single
+    /// injected executor (which cannot be reproduced for a pool).
+    pub(crate) fn lease_dense(&self) -> DenseLease<'_> {
+        if !self.inner.executor_mintable {
+            return DenseLease::Locked(self.lock());
+        }
+        let executor = self
+            .inner
+            .executor_pool
+            .lock()
+            .expect("executor pool poisoned")
+            .pop()
+            .unwrap_or_else(|| mint_dense(&self.inner.execution_config));
+        DenseLease::Pooled {
+            pool: &self.inner.executor_pool,
+            max_idle: self.inner.max_idle,
+            executor: Some(executor),
+        }
+    }
+
+    fn lock_plan_cache(&self) -> MutexGuard<'_, PlanCacheHome> {
+        self.inner
+            .plan_cache
+            .lock()
+            .expect("tenet plan-cache poisoned")
+    }
+
     /// Snapshot of this runtime's contraction-plan-cache configuration.
     pub fn plan_cache_config(&self) -> PlanCacheConfig {
-        self.lock().plan_cache_config.clone()
+        self.lock_plan_cache().config.clone()
     }
 
     /// Replaces the contraction-plan-cache configuration.
     pub fn set_plan_cache_config(&self, config: PlanCacheConfig) {
-        self.lock().plan_cache_config = config;
+        self.lock_plan_cache().config = config;
     }
 
     /// Locked access to the type-erased downstream extension slot
     /// (currently the contraction-plan cache: the cache type lives in
     /// `tenet-network`, which claims and downcasts the slot on first use).
     /// Expert seam for `tenet-network`; do not hold tensors' operations
-    /// inside `f` (the runtime state mutex is held for its duration).
+    /// inside `f` (the plan-cache mutex is held for its duration).
     #[doc(hidden)]
     pub fn with_extension_slot<R>(
         &self,
         f: impl FnOnce(&mut Option<Box<dyn Any + Send>>) -> R,
     ) -> R {
-        f(&mut self.lock().extension_slot)
+        f(&mut self.lock_plan_cache().slot)
+    }
+
+    /// Reads the plan-cache config AND accesses the slot under ONE plan-cache
+    /// lock (#155): the network hot path resolves enable/replan policy and the
+    /// cache lookup in a single acquisition instead of two.
+    #[doc(hidden)]
+    pub fn with_plan_cache<R>(
+        &self,
+        f: impl FnOnce(&PlanCacheConfig, &mut Option<Box<dyn Any + Send>>) -> R,
+    ) -> R {
+        let mut home = self.lock_plan_cache();
+        let home = &mut *home;
+        f(&home.config, &mut home.slot)
     }
 
     /// Deterministic per-runtime stream position for [`crate::prelude::Tensor::rand`].
@@ -666,12 +867,16 @@ impl RuntimeBuilder {
                 .num_threads(threads.max(1))
                 .build_global();
         }
+        // A custom injected executor cannot be re-minted for the pool; those
+        // runtimes fall back to the state lock for factorizations (#155).
+        let executor_mintable = self.dense_executor.is_none();
+        let linalg_kind = self.linalg_backend.map(LinalgBackend::to_kind);
         // Injected backend wins; otherwise build the selected provider (faer by
         // default), honoring the dense-thread count when set.
         let dense: Box<dyn tenet_dense::DenseExecutor + Send> = match self.dense_executor {
             Some(executor) => executor,
             None => {
-                let kind = self.linalg_backend.map(LinalgBackend::to_kind);
+                let kind = linalg_kind;
                 match (kind, dense_threads) {
                     (Some(kind), Some(threads)) => Box::new(
                         tenet_dense::DefaultDenseExecutor::with_threads_and_kind(threads, kind)
@@ -695,7 +900,10 @@ impl RuntimeBuilder {
         } else {
             RuntimeState::new(dense)
         };
-        state.plan_cache_config = self.plan_cache;
+        let plan_cache = PlanCacheHome {
+            config: self.plan_cache,
+            slot: None,
+        };
         if let Some(threads) = self.recoupling_threads {
             state.set_recoupling_threads(threads);
         }
@@ -709,6 +917,12 @@ impl RuntimeBuilder {
                     .map_err(tenet_tensors::OperationError::Dense)?,
             );
         }
+        // One warm context/executor per core covers a thread-per-core driver;
+        // fall back to a small count if the core count is unavailable.
+        let max_idle = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(2);
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 state: Mutex::new(state),
@@ -718,7 +932,13 @@ impl RuntimeBuilder {
                     gemm_kind,
                     recoupling_threads: self.recoupling_threads,
                     transpose_backend: self.transpose_backend,
+                    linalg_kind,
                 },
+                context_pool: Mutex::new(Vec::new()),
+                executor_pool: Mutex::new(Vec::new()),
+                executor_mintable,
+                max_idle,
+                plan_cache: Mutex::new(plan_cache),
             }),
         })
     }
