@@ -601,8 +601,8 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let composed = {
-        let full = svd_compact(&mut dense_executor, &rule, &tensor).unwrap();
-        truncate_svd(&rule, full, &truncation).unwrap()
+        let compact = svd_compact(&mut dense_executor, &rule, &tensor).unwrap();
+        truncate_svd(&rule, compact, &truncation).unwrap()
     };
     let direct = svd_trunc(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
 
@@ -1364,9 +1364,9 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
 }
 
 #[test]
-fn values_only_entry_points_match_the_full_decomposition_spectra() {
+fn values_only_entry_points_match_untruncated_decomposition_spectra() {
     // The `_vals` paths call LAPACK `job='N'` (no vectors) and must reproduce
-    // the full decomposition's spectrum. This is a numerical-agreement check,
+    // the untruncated decomposition's spectrum. This is a numerical-agreement check,
     // not bit-for-bit: LAPACK backends may route the vectors-vs-no-vectors
     // cases through different routines (e.g. `gesdd` divide-and-conquer for the
     // full SVD vs `gesvd` QR for values-only), which differ in the last ULPs.
@@ -1388,10 +1388,10 @@ fn values_only_entry_points_match_the_full_decomposition_spectra() {
     };
 
     let svd_vals_spectra = svd_vals(&mut dense_executor, &rule, &general).unwrap();
-    let svd_full_spectra = svd_compact(&mut dense_executor, &rule, &general)
+    let svd_compact_spectra = svd_compact(&mut dense_executor, &rule, &general)
         .unwrap()
         .singular_values;
-    assert_real_close(&svd_vals_spectra, &svd_full_spectra);
+    assert_real_close(&svd_vals_spectra, &svd_compact_spectra);
 
     let eigh_vals_spectra = eigh_vals(&mut dense_executor, &rule, &hermitian).unwrap();
     let eigh_full_spectra = eigh_full(&mut dense_executor, &rule, &hermitian)

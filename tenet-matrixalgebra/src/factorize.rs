@@ -689,8 +689,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let full = svd_compact_dyn(dense, rule, space, data)?;
-    truncate_svd_dyn(rule, full, truncation)
+    let compact = svd_compact_dyn(dense, rule, space, data)?;
+    truncate_svd_dyn(rule, compact, truncation)
 }
 
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
@@ -898,8 +898,8 @@ where
     select_truncation(&weighted, truncation)
 }
 
-/// Applies a truncation policy to a full factorization (the host half of
-/// [`svd_trunc`]).
+/// Applies a truncation policy to an untruncated compact factorization (the host
+/// half of [`svd_trunc`]).
 ///
 /// The decision is host-side scalar work over the spectra; the application
 /// keeps the leading bond states per coupled sector, which in the coupled
@@ -907,20 +907,20 @@ where
 #[cfg_attr(not(test), allow(dead_code))] // exercised by the typed test suite
 pub(crate) fn truncate_svd<R, D, const NOUT: usize, const NIN: usize>(
     rule: &R,
-    full: SvdCompact<D, NOUT, NIN>,
+    compact: SvdCompact<D, NOUT, NIN>,
     truncation: &Truncation,
 ) -> Result<SvdTrunc<D, NOUT, NIN>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let full_dyn = SvdCompactDyn {
-        u: (dyn_space_of(&full.u)?, full.u.data().to_vec()),
-        s: (dyn_space_of(&full.s)?, full.s.data().to_vec()),
-        vh: (dyn_space_of(&full.vh)?, full.vh.data().to_vec()),
-        singular_values: full.singular_values,
+    let compact_dyn = SvdCompactDyn {
+        u: (dyn_space_of(&compact.u)?, compact.u.data().to_vec()),
+        s: (dyn_space_of(&compact.s)?, compact.s.data().to_vec()),
+        vh: (dyn_space_of(&compact.vh)?, compact.vh.data().to_vec()),
+        singular_values: compact.singular_values,
     };
-    let out = truncate_svd_dyn(rule, full_dyn, truncation)?;
+    let out = truncate_svd_dyn(rule, compact_dyn, truncation)?;
     Ok(SvdTrunc {
         u: typed_from_dyn(rule, out.u)?,
         s: typed_from_dyn(rule, out.s)?,
@@ -933,30 +933,30 @@ where
 /// Dynamic-rank [`truncate_svd`].
 pub(crate) fn truncate_svd_dyn<R, D>(
     rule: &R,
-    full: SvdCompactDyn<D>,
+    compact: SvdCompactDyn<D>,
     truncation: &Truncation,
 ) -> Result<SvdTruncDyn<D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let decision = decide_bond_truncation(rule, &full.singular_values, truncation, true);
-    if full
+    let decision = decide_bond_truncation(rule, &compact.singular_values, truncation, true);
+    if compact
         .singular_values
         .iter()
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
         return Ok(SvdTruncDyn {
-            u: full.u,
-            s: full.s,
-            vh: full.vh,
-            singular_values: full.singular_values,
+            u: compact.u,
+            s: compact.s,
+            vh: compact.vh,
+            singular_values: compact.singular_values,
             error: 0.0,
         });
     }
 
-    let mut singular_values = full.singular_values;
+    let mut singular_values = compact.singular_values;
     for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
         entry.values.truncate(count);
     }
@@ -968,9 +968,9 @@ where
 
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
 
-    let bond_axis = full.u.0.nout();
-    let u_factor = sliced_bond_tensor(rule, &full.u.0, &full.u.1, bond_axis, &kept_of)?;
-    let vh_factor = sliced_bond_tensor(rule, &full.vh.0, &full.vh.1, 0, &kept_of)?;
+    let bond_axis = compact.u.0.nout();
+    let u_factor = sliced_bond_tensor(rule, &compact.u.0, &compact.u.1, bond_axis, &kept_of)?;
+    let vh_factor = sliced_bond_tensor(rule, &compact.vh.0, &compact.vh.1, 0, &kept_of)?;
     let s_factor = diagonal_bond_tensor_dyn(rule, &singular_values, &D::from_real)?;
     Ok(SvdTruncDyn {
         u: u_factor,
@@ -4362,30 +4362,30 @@ where
 /// Generic sibling of [`truncate_svd_dyn`].
 pub(crate) fn truncate_svd_dyn_generic<R, D>(
     rule: &R,
-    full: SvdCompactDyn<D>,
+    compact: SvdCompactDyn<D>,
     truncation: &Truncation,
 ) -> Result<SvdTruncDyn<D>, OperationError>
 where
     R: GenericRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let decision = decide_bond_truncation_generic(rule, &full.singular_values, truncation, true);
-    if full
+    let decision = decide_bond_truncation_generic(rule, &compact.singular_values, truncation, true);
+    if compact
         .singular_values
         .iter()
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
         return Ok(SvdTruncDyn {
-            u: full.u,
-            s: full.s,
-            vh: full.vh,
-            singular_values: full.singular_values,
+            u: compact.u,
+            s: compact.s,
+            vh: compact.vh,
+            singular_values: compact.singular_values,
             error: 0.0,
         });
     }
 
-    let mut singular_values = full.singular_values;
+    let mut singular_values = compact.singular_values;
     for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
         entry.values.truncate(count);
     }
@@ -4397,9 +4397,10 @@ where
 
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
 
-    let bond_axis = full.u.0.nout();
-    let u_factor = sliced_bond_tensor_generic(rule, &full.u.0, &full.u.1, bond_axis, &kept_of)?;
-    let vh_factor = sliced_bond_tensor_generic(rule, &full.vh.0, &full.vh.1, 0, &kept_of)?;
+    let bond_axis = compact.u.0.nout();
+    let u_factor =
+        sliced_bond_tensor_generic(rule, &compact.u.0, &compact.u.1, bond_axis, &kept_of)?;
+    let vh_factor = sliced_bond_tensor_generic(rule, &compact.vh.0, &compact.vh.1, 0, &kept_of)?;
     let s_factor = diagonal_bond_tensor_dyn_generic(rule, &singular_values, &D::from_real)?;
     Ok(SvdTruncDyn {
         u: u_factor,
@@ -4423,8 +4424,8 @@ where
     R: GenericRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let full = svd_compact_dyn_generic(dense, rule, space, data)?;
-    truncate_svd_dyn_generic(rule, full, truncation)
+    let compact = svd_compact_dyn_generic(dense, rule, space, data)?;
+    truncate_svd_dyn_generic(rule, compact, truncation)
 }
 
 /// Generic sibling of [`qr_compact_dyn`].
