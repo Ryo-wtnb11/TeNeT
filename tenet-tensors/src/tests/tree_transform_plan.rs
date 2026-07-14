@@ -3723,7 +3723,10 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
 mod b3c1_su4_smoke {
     use super::*;
     use crate::permute_into_generic;
-    use crate::{DynamicFusionMapSpace, HostTreeFusionExecutionContext};
+    use crate::{
+        BoundDynamicFusionMapSpace, DynamicFusionMapSpace, HostTreeFusionExecutionContext,
+    };
+    use std::sync::Arc;
     use tenet_core::{
         FusionProductSpace, FusionTreeHomSpace, FusionTreeKey, SectorLeg, TabulatedFusionRule,
     };
@@ -3797,10 +3800,15 @@ mod b3c1_su4_smoke {
         // A domain leg 0 with B codomain leg 0 (compose): [4]<-[4].
         let dst = DynamicFusionMapSpace::contracted_generic(&rule, &a_space, &b_space, &[1], &[0])
             .unwrap();
-        let mut dst_data = vec![0.0f64; dst.required_len().unwrap()];
+        let provider = Arc::new(rule);
+        let dst = BoundDynamicFusionMapSpace::bind_generic(dst, Arc::clone(&provider)).unwrap();
+        let a_space =
+            BoundDynamicFusionMapSpace::bind_generic(a_space, Arc::clone(&provider)).unwrap();
+        let b_space =
+            BoundDynamicFusionMapSpace::bind_generic(b_space, Arc::clone(&provider)).unwrap();
+        let mut dst_data = vec![0.0f64; dst.space().required_len().unwrap()];
         let mut ctx = HostTreeFusionExecutionContext::<f64, u64>::default();
         ctx.tensorcontract_fusion_dyn_into_generic(
-            &rule,
             &dst,
             &mut dst_data,
             &a_space,

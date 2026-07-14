@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 #[test]
 fn tensor_contract_fusion_execution_context_reports_host_placement() {
@@ -4239,20 +4240,34 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     let rhs_data = mk(2.0);
 
     // Oracle: eager conjugate-transpose, then a plain (no-conjugate) contraction.
-    let (adj_space, adj_data) = crate::adjoint_dyn(&rule, &lhs_space, &lhs_data).unwrap();
+    let (adj_space, adj_data) = crate::adjoint::adjoint_dyn(&rule, &lhs_space, &lhs_data).unwrap();
     // compose(a†, b): contract a†'s domain axis (1) with b's codomain axis (0).
     let dst_space =
         crate::DynamicFusionMapSpace::contracted(&rule, &adj_space, &rhs_space, &[1], &[0])
             .unwrap();
+    let provider = Arc::new(rule);
+    let dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dst_space.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let adj_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(adj_space, Arc::clone(&provider))
+            .unwrap();
+    let lhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(lhs_space, Arc::clone(&provider))
+            .unwrap();
+    let rhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(rhs_space, Arc::clone(&provider))
+            .unwrap();
     let mut oracle = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
     let mut ctx = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
     ctx.tensorcontract_fusion_dyn_into(
-        &rule,
-        &dst_space,
+        &dst_bound,
         &mut oracle,
-        &adj_space,
+        &adj_bound,
         &adj_data,
-        &rhs_space,
+        &rhs_bound,
         &rhs_data,
         TensorContractSpec::with_default_output_order(&[1], &[0]),
         Complex64::new(1.0, 0.0),
@@ -4264,12 +4279,11 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     // parent axis 0 (adjointtensorindex inverse for a 1<-1 map: 1 -> 0).
     let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
     ctx.tensorcontract_fusion_dyn_into(
-        &rule,
-        &dst_space,
+        &dst_bound,
         &mut fold,
-        &lhs_space,
+        &lhs_bound,
         &lhs_data,
-        &rhs_space,
+        &rhs_bound,
         &rhs_data,
         TensorContractSpec::new_with_conjugation(
             &[0],

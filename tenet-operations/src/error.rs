@@ -55,6 +55,9 @@ pub enum OperationError {
         axes: Vec<usize>,
         rank: usize,
     },
+    InvalidArgument {
+        message: &'static str,
+    },
     FusionTreeGroupMismatch {
         tensor: &'static str,
         index: usize,
@@ -164,6 +167,7 @@ impl fmt::Display for OperationError {
             Self::InvalidAxisSet { tensor, axes, rank } => {
                 write!(f, "invalid {tensor} axis set {axes:?} for rank {rank}")
             }
+            Self::InvalidArgument { message } => f.write_str(message),
             Self::FusionTreeGroupMismatch { tensor, index } => {
                 write!(
                     f,

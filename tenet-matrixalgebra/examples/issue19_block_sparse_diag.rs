@@ -1,6 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use tenet_core::{
@@ -9,8 +10,9 @@ use tenet_core::{
 };
 use tenet_matrixalgebra::{
     eigh_full_dyn, qr_compact_dyn, sector_matricization_diagnostic, svd_compact_dyn,
+    BoundDynamicTensorRef,
 };
-use tenet_tensors::DynamicFusionMapSpace;
+use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
 struct CountingAllocator;
 
@@ -49,8 +51,12 @@ fn main() {
     let tensor = synthetic_su2_tensor();
     let dyn_space =
         DynamicFusionMapSpace::from_typed(tensor.fusion_space().expect("fusion tensor"));
+    let bound_space =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(dyn_space.clone(), Arc::new(rule))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&bound_space, tensor.data()).unwrap();
 
-    let mut summaries = sector_matricization_diagnostic(&rule, &tensor).unwrap();
+    let mut summaries = sector_matricization_diagnostic(&input).unwrap();
     summaries.sort_by_key(|summary| summary.sector.id());
     println!(
         "synthetic_su2 storage_len={} block_count={}",
@@ -68,11 +74,11 @@ fn main() {
     }
 
     for _ in 0..10 {
-        black_box(sector_matricization_diagnostic(&rule, &tensor).unwrap());
+        black_box(sector_matricization_diagnostic(&input).unwrap());
     }
     let start = Instant::now();
     for _ in 0..mat_iters {
-        black_box(sector_matricization_diagnostic(&rule, &tensor).unwrap());
+        black_box(sector_matricization_diagnostic(&input).unwrap());
     }
     let elapsed = start.elapsed();
     println!(
@@ -83,11 +89,11 @@ fn main() {
     );
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    black_box(svd_compact_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    black_box(svd_compact_dyn(&mut dense, &input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..svd_iters {
-        black_box(svd_compact_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+        black_box(svd_compact_dyn(&mut dense, &input).unwrap());
     }
     let elapsed = start.elapsed();
     let allocations = ALLOCATIONS.load(Ordering::Relaxed);
@@ -100,11 +106,11 @@ fn main() {
         allocations as f64 / svd_iters as f64
     );
 
-    black_box(qr_compact_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    black_box(qr_compact_dyn(&mut dense, &input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..qr_iters {
-        black_box(qr_compact_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+        black_box(qr_compact_dyn(&mut dense, &input).unwrap());
     }
     let elapsed = start.elapsed();
     let allocations = ALLOCATIONS.load(Ordering::Relaxed);
@@ -117,11 +123,11 @@ fn main() {
         allocations as f64 / qr_iters as f64
     );
 
-    black_box(eigh_full_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+    black_box(eigh_full_dyn(&mut dense, &input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..eigh_iters {
-        black_box(eigh_full_dyn(&mut dense, &rule, &dyn_space, tensor.data()).unwrap());
+        black_box(eigh_full_dyn(&mut dense, &input).unwrap());
     }
     let elapsed = start.elapsed();
     let allocations = ALLOCATIONS.load(Ordering::Relaxed);

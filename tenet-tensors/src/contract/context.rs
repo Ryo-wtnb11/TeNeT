@@ -28,7 +28,7 @@ use super::backend::{
 use super::dynamic::{
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
-use super::dynamic_space::DynamicFusionMapSpace;
+use super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, tensorcontract_fusion_structure, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
@@ -969,6 +969,39 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcontract_fusion_dyn_into<R>(
         &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        // Why not accept a separate rule: the lhs bound space is the authority
+        // used for planning and execution; the raw core only checks identities.
+        self.tensorcontract_fusion_dyn_into_raw(
+            lhs_space.provider(),
+            dst_space.space(),
+            dst_data,
+            lhs_space.space(),
+            lhs_data,
+            rhs_space.space(),
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tensorcontract_fusion_dyn_into_raw<R>(
+        &mut self,
         rule: &R,
         dst_space: &DynamicFusionMapSpace,
         dst_data: &mut [D],
@@ -990,7 +1023,7 @@ where
             lhs_space,
             rhs_space,
             axes,
-            || match super::fusion::tensorcontract_fusion_structure_dyn(
+            || match super::fusion::tensorcontract_fusion_structure_dyn_raw(
                 rule,
                 dst_space,
                 lhs_space,
@@ -1006,7 +1039,7 @@ where
                 Err(err) => Err(err),
             },
             || {
-                super::fusion::prepare_tensorcontract_fusion_plan_dyn(
+                super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw(
                     rule, dst_space, lhs_space, rhs_space, axes,
                 )
                 .map(Arc::new)
@@ -1039,6 +1072,36 @@ where
     /// zero-filled for `beta == 0` (blocks without a contributing GEMM stay).
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcontract_fusion_dyn_into_generic<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: FusionRule,
+    {
+        self.tensorcontract_fusion_dyn_into_generic_raw(
+            lhs_space.provider(),
+            dst_space.space(),
+            dst_data,
+            lhs_space.space(),
+            lhs_data,
+            rhs_space.space(),
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tensorcontract_fusion_dyn_into_generic_raw<R>(
         &mut self,
         rule: &R,
         dst_space: &DynamicFusionMapSpace,
@@ -1100,6 +1163,38 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcontract_fusion_dyn_direct_on_storage<R, G, DDst, DLhs, DRhs>(
         &mut self,
+        gemm: &mut G,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst: &mut DDst,
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs: &DLhs,
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs: &DRhs,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        self.tensorcontract_fusion_dyn_direct_on_storage_raw(
+            lhs_space.provider(),
+            gemm,
+            dst_space.space(),
+            dst,
+            lhs_space.space(),
+            lhs,
+            rhs_space.space(),
+            rhs,
+            axes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tensorcontract_fusion_dyn_direct_on_storage_raw<R, G, DDst, DLhs, DRhs>(
+        &mut self,
         rule: &R,
         gemm: &mut G,
         dst_space: &DynamicFusionMapSpace,
@@ -1123,7 +1218,7 @@ where
             lhs_space,
             rhs_space,
             axes,
-            || match super::fusion::tensorcontract_fusion_structure_dyn(
+            || match super::fusion::tensorcontract_fusion_structure_dyn_raw(
                 rule,
                 dst_space,
                 lhs_space,
@@ -1139,7 +1234,7 @@ where
                 Err(err) => Err(err),
             },
             || {
-                super::fusion::prepare_tensorcontract_fusion_plan_dyn(
+                super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw(
                     rule, dst_space, lhs_space, rhs_space, axes,
                 )
                 .map(Arc::new)

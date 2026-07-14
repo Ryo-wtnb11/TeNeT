@@ -7,6 +7,8 @@
 //! conventions, so equal spectra validate the fusion-space structure and the
 //! blockwise SVD end to end.
 
+use std::sync::Arc;
+
 use tenet_core::{
     BlockKey, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
@@ -57,7 +59,7 @@ fn fill_value(
 
 fn run_case<R>(name: &str, rule: &R, sectors: &[SectorId], label_of: impl Fn(SectorId) -> i64)
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + Clone,
 {
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, DEGENERACY)), false);
     let leg_dim = sectors.len() * DEGENERACY;
@@ -126,7 +128,9 @@ where
     }
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let spectra = svd_vals(&mut dense, rule, &tensor).unwrap();
+    let input =
+        tenet_matrixalgebra::BoundTensorMap::try_new(Arc::new(rule.clone()), tensor).unwrap();
+    let spectra = svd_vals(&mut dense, &input.as_ref()).unwrap();
     let mut entries: Vec<(i64, Vec<f64>)> = spectra
         .iter()
         .map(|entry| (label_of(entry.sector), entry.values.clone()))

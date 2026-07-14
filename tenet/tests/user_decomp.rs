@@ -2,6 +2,8 @@
 //! methods (step 3 of the user API), including a cross-check against the
 //! typed expert layer.
 
+use std::sync::Arc;
+
 use tenet::core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     SU2FusionRule, SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
@@ -473,6 +475,19 @@ fn inv_and_pinv_sanity() {
     }
 }
 
+#[test]
+fn pinv_rejects_invalid_rcond_for_dense_and_diagonal_inputs() {
+    // What: public validation runs before both dense SVD and the diagonal shortcut.
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let dense = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 119).unwrap();
+    let diagonal = dense.svd_compact().unwrap().1;
+    for rcond in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(dense.pinv(rcond).is_err());
+        assert!(diagonal.pinv(rcond).is_err());
+    }
+}
+
 /// Cross-checks the user-layer `svd_compact` elementwise against the typed
 /// expert layer on the same flat storage (NOUT = 2, NIN = 2).
 #[test]
@@ -509,7 +524,8 @@ fn svd_compact_cross_checks_against_typed_expert_layer() {
     let typed =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(t.data().to_vec(), typed_space).unwrap();
     let mut executor = tenet::dense::DefaultDenseExecutor::new();
-    let expert = tenet::matrixalgebra::svd_compact(&mut executor, &rule, &typed).unwrap();
+    let input = tenet::matrixalgebra::BoundTensorMap::try_new(Arc::new(rule), typed).unwrap();
+    let expert = tenet::matrixalgebra::svd_compact(&mut executor, &input.as_ref()).unwrap();
 
     let (u, s, vh) = t.svd_compact().unwrap();
     assert_close(u.data(), expert.u.data(), 1e-12);

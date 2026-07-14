@@ -202,6 +202,133 @@ fn c64_svd_compact_recomposes_and_u_unitary() {
     }
 }
 
+#[test]
+fn c64_qr_null_polar_inverse_and_pseudoinverse_are_end_to_end() {
+    // What: every complex decomposition path applies conjugate adjoints and reconstructs its input.
+    let rt = Runtime::builder().build().unwrap();
+    for v in [u1_space(), su2_space()] {
+        let square = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 47).unwrap();
+        let norm = square.norm().unwrap();
+
+        let (q, r) = square.qr_compact().unwrap();
+        assert!(
+            q.compose(&r)
+                .unwrap()
+                .add_c64(&square, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-10 * (1.0 + norm)
+        );
+        let (l, q) = square.lq_compact().unwrap();
+        assert!(
+            l.compose(&q)
+                .unwrap()
+                .add_c64(&square, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-10 * (1.0 + norm)
+        );
+
+        let (w, p) = square.left_polar().unwrap();
+        assert!(
+            w.compose(&p)
+                .unwrap()
+                .add_c64(&square, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-9 * (1.0 + norm)
+        );
+        let (p, w) = square.right_polar().unwrap();
+        assert!(
+            p.compose(&w)
+                .unwrap()
+                .add_c64(&square, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-9 * (1.0 + norm)
+        );
+
+        let well_conditioned = square
+            .compose(&square.adjoint().unwrap())
+            .unwrap()
+            .add_c64(&Tensor::id(&rt, Dtype::C64, [&v]).unwrap(), one(), one())
+            .unwrap();
+        let inverse = well_conditioned.inv().unwrap();
+        let identity = Tensor::id(&rt, Dtype::C64, [&v]).unwrap();
+        assert!(
+            inverse
+                .compose(&well_conditioned)
+                .unwrap()
+                .add_c64(&identity, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-8 * (1.0 + identity.norm().unwrap())
+        );
+
+        let tall = Tensor::rand_with_seed(&rt, Dtype::C64, [&v, &v], [&v], 48).unwrap();
+        let (q_full, r_full) = tall.qr_full().unwrap();
+        assert!(
+            q_full
+                .compose(&r_full)
+                .unwrap()
+                .add_c64(&tall, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-9 * (1.0 + tall.norm().unwrap())
+        );
+        let pinv = tall.pinv(1.0e-12).unwrap();
+        let projected = pinv.compose(&tall).unwrap();
+        assert!(
+            projected
+                .compose(&projected)
+                .unwrap()
+                .add_c64(&projected, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-8 * (1.0 + projected.norm().unwrap())
+        );
+
+        let left_null = tall.left_null().unwrap();
+        assert!(
+            left_null
+                .adjoint()
+                .unwrap()
+                .compose(&tall)
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-9 * (1.0 + tall.norm().unwrap())
+        );
+        let wide = tall.adjoint().unwrap();
+        let (l_full, q_full) = wide.lq_full().unwrap();
+        assert!(
+            l_full
+                .compose(&q_full)
+                .unwrap()
+                .add_c64(&wide, one(), -one())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-9 * (1.0 + wide.norm().unwrap())
+        );
+        let right_null = wide.right_null().unwrap();
+        assert!(
+            wide.compose(&right_null.adjoint().unwrap())
+                .unwrap()
+                .norm()
+                .unwrap()
+                < 1.0e-9 * (1.0 + wide.norm().unwrap())
+        );
+    }
+}
+
 /// `eig_full` of a REAL tensor returns c64 factors with
 /// `V * diag(lambda) * V^-1 ~ t` (this is why the dtype-erased storage
 /// exists: the output dtype differs from the input's).

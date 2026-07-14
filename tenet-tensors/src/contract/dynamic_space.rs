@@ -1,10 +1,12 @@
 use std::any::{Any, TypeId};
+use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, DimVec, FusionRule, FusionTensorMapSpace,
-    FusionTreeHomSpace, HomSpaceId, MultiplicityFreeRigidSymbols, RuleIdentity,
+    FusionTreeBlockKey, FusionTreeHomSpace, HomSpaceId, MultiplicityFreeFusionRule,
+    MultiplicityFreeRigidSymbols, RuleIdentity,
 };
 
 use crate::cache::operation_global_registry;
@@ -188,7 +190,263 @@ pub struct DynamicFusionMapSpace {
     rule_identity: Option<tenet_core::RuleIdentity>,
 }
 
+/// A complete dynamic fusion space bound to the provider that defines it.
+///
+/// Construct this with [`Self::bind_multiplicity_free`] for a
+/// [`MultiplicityFreeFusionRule`] and [`Self::bind_generic`] for a generic
+/// fusion rule. Both constructors compare the space against the exact tree set
+/// produced by the selected enumeration mode, so choosing the wrong mode can
+/// only succeed when the two modes are semantically identical for that space.
+/// A missing rule identity is rejected rather than inferred.
+pub struct BoundDynamicFusionMapSpace<R> {
+    space: DynamicFusionMapSpace,
+    provider: Arc<R>,
+}
+
+impl<R> Clone for BoundDynamicFusionMapSpace<R> {
+    fn clone(&self) -> Self {
+        Self {
+            space: self.space.clone(),
+            provider: Arc::clone(&self.provider),
+        }
+    }
+}
+
+impl<R> fmt::Debug for BoundDynamicFusionMapSpace<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundDynamicFusionMapSpace")
+            .field("space", &self.space)
+            .field("provider_type", &std::any::type_name::<R>())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R> BoundDynamicFusionMapSpace<R>
+where
+    R: FusionRule,
+{
+    pub(crate) fn from_derived(
+        provider: Arc<R>,
+        space: DynamicFusionMapSpace,
+    ) -> Result<Self, OperationError> {
+        // Why not enumerate the tree grid again: callers in this crate create
+        // `space` through checked structural operations from an already-bound
+        // source. Re-enumeration would duplicate that work without adding a
+        // new trust boundary; the rule identity remains cheap to verify.
+        space.validate_rule(provider.as_ref())?;
+        Ok(Self { space, provider })
+    }
+
+    /// Builds and binds a multiplicity-free space in one checked pass.
+    pub fn from_degeneracy_shapes<Shapes>(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let space =
+            DynamicFusionMapSpace::from_degeneracy_shapes(provider.as_ref(), homspace, shapes)?;
+        Ok(Self { space, provider })
+    }
+
+    /// Builds and binds a multiplicity-aware space in one checked pass.
+    pub fn from_degeneracy_shapes_generic<Shapes>(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            provider.as_ref(),
+            homspace,
+            shapes,
+        )?;
+        Ok(Self { space, provider })
+    }
+
+    fn bind_with_keys(
+        space: DynamicFusionMapSpace,
+        provider: Arc<R>,
+        keys: Vec<FusionTreeBlockKey>,
+    ) -> Result<Self, OperationError> {
+        space.validate_rule(provider.as_ref())?;
+        space.validate_complete_tree_grid(&keys)?;
+        Ok(Self { space, provider })
+    }
+
+    /// Binds a space using multiplicity-free tree enumeration.
+    pub fn bind_multiplicity_free(
+        space: DynamicFusionMapSpace,
+        provider: Arc<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let keys = space
+            .homspace()
+            .fusion_tree_keys(provider.as_ref())
+            .to_vec();
+        Self::bind_with_keys(space, provider, keys)
+    }
+
+    /// Builds a checked contraction result while retaining the exact provider
+    /// allocation shared by both operands.
+    pub fn contracted_multiplicity_free(
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        if lhs.provider.rule_identity() != rhs.provider.rule_identity() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::FusionRuleMismatch {
+                    expected: lhs.provider.rule_identity(),
+                    actual: rhs.provider.rule_identity(),
+                },
+            ));
+        }
+        // The lhs is the authority for a result of two independently-built but
+        // semantically identical tensors. Why not require Arc::ptr_eq: public
+        // tensors may own distinct provider allocations with one RuleIdentity.
+        let space = DynamicFusionMapSpace::contracted(
+            lhs.provider.as_ref(),
+            &lhs.space,
+            &rhs.space,
+            lhs_axes,
+            rhs_axes,
+        )?;
+        Self::from_derived(Arc::clone(&lhs.provider), space)
+    }
+
+    /// Builds a multiplicity-aware contraction result and normalizes its
+    /// authority to the lhs provider allocation.
+    pub fn contracted_generic(
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, OperationError> {
+        if lhs.provider.rule_identity() != rhs.provider.rule_identity() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::FusionRuleMismatch {
+                    expected: lhs.provider.rule_identity(),
+                    actual: rhs.provider.rule_identity(),
+                },
+            ));
+        }
+        let space = DynamicFusionMapSpace::contracted_generic(
+            lhs.provider.as_ref(),
+            &lhs.space,
+            &rhs.space,
+            lhs_axes,
+            rhs_axes,
+        )?;
+        Self::from_derived(Arc::clone(&lhs.provider), space)
+    }
+
+    /// Tree-transform result retaining the source provider proof.
+    pub fn transformed_multiplicity_free(
+        &self,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let space = self.space.transformed(self.provider.as_ref(), operation)?;
+        Self::from_derived(Arc::clone(&self.provider), space)
+    }
+
+    /// Generic tree-transform result retaining the source provider proof.
+    pub fn transformed_generic(
+        &self,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, OperationError> {
+        let space = self
+            .space
+            .transformed_generic(self.provider.as_ref(), operation)?;
+        Self::from_derived(Arc::clone(&self.provider), space)
+    }
+
+    /// Creates the zero-copy adjoint replay view while retaining the exact
+    /// provider allocation of the source binding.
+    pub fn adjoint_view(&self) -> Result<Self, OperationError> {
+        let space = self.space.adjoint_view()?;
+        Self::from_derived(Arc::clone(&self.provider), space)
+    }
+
+    /// Binds a space using multiplicity-aware generic tree enumeration.
+    pub fn bind_generic(
+        space: DynamicFusionMapSpace,
+        provider: Arc<R>,
+    ) -> Result<Self, OperationError> {
+        let keys = space
+            .homspace()
+            .fusion_tree_keys_generic(provider.as_ref())
+            .map_err(OperationError::from_core_preserving_context)?;
+        Self::bind_with_keys(space, provider, keys)
+    }
+
+    #[inline]
+    /// Read-only access to the validated dynamic layout for expert planning
+    /// and diagnostics. The provider remains attached to this binding.
+    pub fn space(&self) -> &DynamicFusionMapSpace {
+        &self.space
+    }
+
+    #[inline]
+    pub fn provider(&self) -> &R {
+        self.provider.as_ref()
+    }
+
+    #[inline]
+    pub fn provider_arc(&self) -> &Arc<R> {
+        &self.provider
+    }
+}
+
 impl DynamicFusionMapSpace {
+    fn validate_complete_tree_grid(
+        &self,
+        keys: &[FusionTreeBlockKey],
+    ) -> Result<(), OperationError> {
+        let structure = self.structure();
+        if structure.block_count() != keys.len() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::BlockCountMismatch {
+                    expected: keys.len(),
+                    actual: structure.block_count(),
+                },
+            ));
+        }
+        let mut shapes = Vec::with_capacity(keys.len());
+        for key in keys {
+            let block_index = structure
+                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+                .ok_or_else(|| {
+                    OperationError::from_core_preserving_context(CoreError::MissingBlockKey {
+                        key: BlockKey::FusionTree(key.clone()),
+                    })
+                })?;
+            let block = structure
+                .block(block_index)
+                .map_err(OperationError::from_core_preserving_context)?;
+            shapes.push(block.shape().to_vec());
+        }
+        self.homspace
+            .validate_degeneracy_shapes(keys, &shapes)
+            .map_err(OperationError::from_core_preserving_context)
+    }
+
     /// Rank-erases a typed fusion space (shares the hom space and subblock
     /// structure handles; no data copies).
     pub fn from_typed<const NOUT: usize, const NIN: usize>(
@@ -299,7 +557,7 @@ impl DynamicFusionMapSpace {
     /// the hom space is permuted and the full tree set of the result is
     /// enumerated (trees the transform coefficients never reach stay as
     /// structural zeros, keeping every coupled sector grid complete).
-    pub fn transformed<R>(
+    pub(crate) fn transformed<R>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -422,7 +680,7 @@ impl DynamicFusionMapSpace {
     /// braided / transposed result space, enumerated with multiplicity-aware
     /// keys. Not cached (the Generic path is not on a hot loop yet — same
     /// non-memoized rationale as the Stage B3b cache siblings).
-    pub fn transformed_generic<R>(
+    pub(crate) fn transformed_generic<R>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -480,7 +738,7 @@ impl DynamicFusionMapSpace {
     /// open axes ascending on the codomain side, `rhs` open axes ascending on
     /// the domain side). Mirrors the destination TensorKit's
     /// `tensorcontract!` with default `pAB` writes into.
-    pub fn contracted<R>(
+    pub(crate) fn contracted<R>(
         rule: &R,
         lhs: &Self,
         rhs: &Self,
@@ -625,7 +883,7 @@ impl DynamicFusionMapSpace {
     /// rationale as the B3b transform siblings). Every other step
     /// (`tensorcontract_homspace`, leg degeneracies, `scratch_subblock_structure`)
     /// is already rule-agnostic or `FusionRule`-bound.
-    pub fn contracted_generic<R>(
+    pub(crate) fn contracted_generic<R>(
         rule: &R,
         lhs: &Self,
         rhs: &Self,
@@ -716,7 +974,7 @@ impl DynamicFusionMapSpace {
     /// no data movement implied. The block layout is a strided view into the
     /// source layout, so this space is for replay bookkeeping, not for
     /// allocating fresh coupled storage.
-    pub fn adjoint_view(&self) -> Result<Self, OperationError> {
+    pub(crate) fn adjoint_view(&self) -> Result<Self, OperationError> {
         let homspace = FusionTreeHomSpace::new(
             self.homspace.domain().clone(),
             self.homspace.codomain().clone(),
@@ -816,7 +1074,114 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
 mod scratch_cache_tests {
     use super::*;
     use crate::test_support::CACHE_TEST_LOCK;
-    use tenet_core::{FusionProductSpace, SectorLeg, U1FusionRule, U1Irrep};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tenet_core::{
+        BlockSpec, BraidingStyleKind, FusionProductSpace, FusionStyleKind,
+        MultiplicityFreeFusionSymbols, RuleIdentity, SectorId, SectorLeg, SectorVec, U1FusionRule,
+        U1Irrep, Z2FusionRule, Z2Irrep,
+    };
+
+    #[derive(Clone)]
+    struct CountingRule {
+        identity: RuleIdentity,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingRule {
+        fn new() -> Self {
+            Self {
+                identity: RuleIdentity::new_unique::<Self>(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl FusionRule for CountingRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            self.identity.clone()
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            [SectorId::new(0)].into_iter().collect()
+        }
+    }
+
+    impl tenet_core::MultiplicityFreeFusionRule for CountingRule {}
+    impl MultiplicityFreeFusionSymbols for CountingRule {
+        type Scalar = f64;
+        fn scalar_one(&self) -> f64 {
+            1.0
+        }
+        fn scalar_conj(&self, value: f64) -> f64 {
+            value
+        }
+        fn f_symbol_scalar(
+            &self,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+        ) -> f64 {
+            1.0
+        }
+        fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+            1.0
+        }
+    }
+    impl MultiplicityFreeRigidSymbols for CountingRule {
+        fn dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn twist_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+    }
+
+    #[test]
+    fn raw_transform_rejects_a_different_rule_identity() {
+        // What: crate-internal derivation still rejects a provider other than
+        // the one recorded by the source, even though public callers can only
+        // reach this operation through BoundDynamicFusionMapSpace.
+        let first = CountingRule::new();
+        let second = CountingRule::new();
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &first,
+            FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
+            [vec![1]],
+        )
+        .unwrap();
+
+        let error = space
+            .transformed(&second, &TreeTransformOperation::permute([0], []))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+    }
 
     // Single-charge U(1) source in a chosen bond dimension (the last leg of each
     // block shape); one coupled sector, block shape [deg, deg].
@@ -828,6 +1193,207 @@ mod scratch_cache_tests {
         let count = hom.fusion_tree_keys(&rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count])
             .unwrap()
+    }
+
+    fn z2_matrix_space() -> DynamicFusionMapSpace {
+        let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &Z2FusionRule,
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bound_space_rejects_wrong_and_missing_rule_identity() {
+        let space = z2_matrix_space();
+        let wrong = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            space.clone(),
+            Arc::new(U1FusionRule),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            wrong,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+
+        let unbound = DynamicFusionMapSpace {
+            rule_identity: None,
+            ..space
+        };
+        let missing =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(unbound, Arc::new(Z2FusionRule))
+                .unwrap_err();
+        assert!(matches!(
+            missing,
+            OperationError::Core(CoreError::MissingFusionRuleIdentity)
+        ));
+    }
+
+    #[test]
+    fn bound_space_requires_the_complete_tree_grid() {
+        let complete = z2_matrix_space();
+        let first = complete.structure().block(0).unwrap();
+        let incomplete_structure = BlockStructure::from_blocks_with_rank(
+            complete.rank(),
+            vec![BlockSpec::with_key(
+                first.key().clone(),
+                first.shape().to_vec(),
+                first.strides().to_vec(),
+                first.offset(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let incomplete = DynamicFusionMapSpace {
+            subblock_structure: Arc::new(incomplete_structure),
+            ..complete
+        };
+
+        let error =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(incomplete, Arc::new(Z2FusionRule))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::BlockCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn binding_mode_mismatch_is_rejected_by_exact_tree_validation() {
+        let space = z2_matrix_space();
+        let multiplicity_free = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            space.clone(),
+            Arc::new(Z2FusionRule),
+        )
+        .unwrap();
+        let generic_error =
+            BoundDynamicFusionMapSpace::bind_generic(space, Arc::new(Z2FusionRule)).unwrap_err();
+
+        assert!(matches!(
+            generic_error,
+            OperationError::MissingBlockKey { .. }
+        ));
+        assert_eq!(multiplicity_free.clone().space(), multiplicity_free.space());
+    }
+
+    #[test]
+    fn direct_bound_construction_enumerates_no_more_than_raw_construction() {
+        let hom = || FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        let raw_rule = CountingRule::new();
+        DynamicFusionMapSpace::from_degeneracy_shapes(&raw_rule, hom(), [vec![1, 1]]).unwrap();
+        let raw_calls = raw_rule.calls.load(Ordering::Relaxed);
+
+        let bound_rule = Arc::new(CountingRule::new());
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&bound_rule),
+            hom(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+
+        assert_eq!(bound_rule.calls.load(Ordering::Relaxed), raw_calls);
+    }
+
+    #[test]
+    fn derived_bound_contract_and_transform_do_not_reenumerate_for_binding() {
+        // What: a derived proof adds no tree-grid pass beyond raw output build.
+        let hom = || FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+
+        let raw_rule = CountingRule::new();
+        let raw =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&raw_rule, hom(), [vec![1, 1]]).unwrap();
+        raw_rule.calls.store(0, Ordering::Relaxed);
+        let _ = DynamicFusionMapSpace::contracted(&raw_rule, &raw, &raw, &[1], &[0]).unwrap();
+        let raw_contract_calls = raw_rule.calls.load(Ordering::Relaxed);
+
+        let bound_rule = Arc::new(CountingRule::new());
+        let bound = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&bound_rule),
+            hom(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        bound_rule.calls.store(0, Ordering::Relaxed);
+        let contracted =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&bound, &bound, &[1], &[0])
+                .unwrap();
+        assert_eq!(bound_rule.calls.load(Ordering::Relaxed), raw_contract_calls);
+        assert!(Arc::ptr_eq(contracted.provider_arc(), &bound_rule));
+
+        let raw_transform_rule = CountingRule::new();
+        let raw_transform =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&raw_transform_rule, hom(), [vec![1, 1]])
+                .unwrap();
+        raw_transform_rule.calls.store(0, Ordering::Relaxed);
+        let operation = TreeTransformOperation::permute([0], [1]);
+        let _ = raw_transform
+            .transformed(&raw_transform_rule, &operation)
+            .unwrap();
+        let raw_transform_calls = raw_transform_rule.calls.load(Ordering::Relaxed);
+
+        let bound_transform_rule = Arc::new(CountingRule::new());
+        let bound_transform = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&bound_transform_rule),
+            hom(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        bound_transform_rule.calls.store(0, Ordering::Relaxed);
+        let transformed = bound_transform
+            .transformed_multiplicity_free(&operation)
+            .unwrap();
+        assert_eq!(
+            bound_transform_rule.calls.load(Ordering::Relaxed),
+            raw_transform_calls
+        );
+        assert!(Arc::ptr_eq(
+            transformed.provider_arc(),
+            &bound_transform_rule
+        ));
+    }
+
+    #[test]
+    fn bound_contract_normalizes_equal_identity_to_lhs_provider() {
+        // What: independently allocated providers with one semantic identity
+        // compose, while a distinct identity is rejected before execution.
+        let rule = CountingRule::new();
+        let lhs_provider = Arc::new(rule.clone());
+        let rhs_provider = Arc::new(rule);
+        assert!(!Arc::ptr_eq(&lhs_provider, &rhs_provider));
+        let hom = || FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        let lhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&lhs_provider),
+            hom(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let rhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&rhs_provider),
+            hom(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let output =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[1], &[0])
+                .unwrap();
+        assert!(Arc::ptr_eq(output.provider_arc(), &lhs_provider));
+
+        let other_provider = Arc::new(CountingRule::new());
+        let other =
+            BoundDynamicFusionMapSpace::from_degeneracy_shapes(other_provider, hom(), [vec![1, 1]])
+                .unwrap();
+        let error =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &other, &[1], &[0])
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
     }
 
     #[test]

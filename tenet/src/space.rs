@@ -1,8 +1,11 @@
 //! User-layer vector spaces: sector content plus degeneracies for one leg.
 
+use std::sync::Arc;
+
 use tenet_core::{
-    FusionRule, ProductSectorCodec, SU2Irrep, SectorId, SectorLeg, Su3FusionRule,
-    TensorKitProductCodec, U1Irrep, Z2Irrep,
+    FermionParityFusionRule, FusionRule, ProductFusionRule, ProductSectorCodec, RuleIdentity,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su3FusionRule, TensorKitProductCodec,
+    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 use crate::error::Error;
@@ -61,53 +64,88 @@ pub(crate) enum RuleKind {
     Su3,
 }
 
+pub(crate) type U1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule>;
+pub(crate) type Fz2U1Su2Rule =
+    ProductFusionRule<ProductFusionRule<FermionParityFusionRule, U1FusionRule>, SU2FusionRule>;
+
+#[derive(Clone, Debug)]
+pub(crate) enum UserRuleContext {
+    U1(Arc<U1FusionRule>),
+    Z2(Arc<Z2FusionRule>),
+    FZ2(Arc<FermionParityFusionRule>),
+    SU2(Arc<SU2FusionRule>),
+    U1FZ2(Arc<U1Fz2Rule>),
+    FZ2U1SU2(Arc<Fz2U1Su2Rule>),
+    Su3(Arc<Su3FusionRule>),
+}
+
+impl UserRuleContext {
+    pub(crate) fn kind(&self) -> RuleKind {
+        match self {
+            Self::U1(_) => RuleKind::U1,
+            Self::Z2(_) => RuleKind::Z2,
+            Self::FZ2(_) => RuleKind::FZ2,
+            Self::SU2(_) => RuleKind::SU2,
+            Self::U1FZ2(_) => RuleKind::U1FZ2,
+            Self::FZ2U1SU2(_) => RuleKind::FZ2U1SU2,
+            Self::Su3(_) => RuleKind::Su3,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> RuleIdentity {
+        match self {
+            Self::U1(rule) => rule.rule_identity(),
+            Self::Z2(rule) => rule.rule_identity(),
+            Self::FZ2(rule) => rule.rule_identity(),
+            Self::SU2(rule) => rule.rule_identity(),
+            Self::U1FZ2(rule) => rule.rule_identity(),
+            Self::FZ2U1SU2(rule) => rule.rule_identity(),
+            Self::Su3(rule) => rule.rule_identity(),
+        }
+    }
+}
+
+impl PartialEq for UserRuleContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+
+impl Eq for UserRuleContext {}
+
+impl AsRef<UserRuleContext> for UserRuleContext {
+    fn as_ref(&self) -> &UserRuleContext {
+        self
+    }
+}
+
 /// Dispatches on a [`RuleKind`], binding `$rule` to a reference to the
 /// concrete expert-layer fusion rule inside `$body`.
 macro_rules! with_rule {
-    ($kind:expr, $rule:ident, $body:expr) => {
-        match $kind {
-            $crate::space::RuleKind::U1 => {
-                let $rule = &tenet_core::U1FusionRule;
+    ($context:expr, $rule:ident, $body:expr) => {
+        match $context {
+            $crate::space::UserRuleContext::U1(provider) => {
+                let $rule = provider.as_ref();
                 $body
             }
-            $crate::space::RuleKind::Z2 => {
-                let $rule = &tenet_core::Z2FusionRule;
+            $crate::space::UserRuleContext::Z2(provider) => {
+                let $rule = provider.as_ref();
                 $body
             }
-            $crate::space::RuleKind::FZ2 => {
-                let $rule = &tenet_core::FermionParityFusionRule;
+            $crate::space::UserRuleContext::FZ2(provider) => {
+                let $rule = provider.as_ref();
                 $body
             }
-            $crate::space::RuleKind::SU2 => {
-                let $rule = &tenet_core::SU2FusionRule;
+            $crate::space::UserRuleContext::SU2(provider) => {
+                let $rule = provider.as_ref();
                 $body
             }
-            $crate::space::RuleKind::U1FZ2 => {
-                let $rule = &tenet_core::ProductFusionRule::<
-                    tenet_core::U1FusionRule,
-                    tenet_core::FermionParityFusionRule,
-                >::new(
-                    tenet_core::U1FusionRule,
-                    tenet_core::FermionParityFusionRule,
-                );
+            $crate::space::UserRuleContext::U1FZ2(provider) => {
+                let $rule = provider.as_ref();
                 $body
             }
-            $crate::space::RuleKind::FZ2U1SU2 => {
-                // Left-associated (fZ2 ⊠ U1) ⊠ SU2, matching TensorKit's
-                // left-associated triple product.
-                let $rule = &tenet_core::ProductFusionRule::<
-                    tenet_core::ProductFusionRule<
-                        tenet_core::FermionParityFusionRule,
-                        tenet_core::U1FusionRule,
-                    >,
-                    tenet_core::SU2FusionRule,
-                >::new(
-                    tenet_core::ProductFusionRule::new(
-                        tenet_core::FermionParityFusionRule,
-                        tenet_core::U1FusionRule,
-                    ),
-                    tenet_core::SU2FusionRule,
-                );
+            $crate::space::UserRuleContext::FZ2U1SU2(provider) => {
+                let $rule = provider.as_ref();
                 $body
             }
             // Su3 is `FusionStyleKind::Generic`, so it CANNOT bind through this
@@ -117,7 +155,7 @@ macro_rules! with_rule {
             // BEFORE reaching here; anything else is not yet implemented. This
             // arm is `!`-typed, so it needs no `$body` and keeps every mult-free
             // call site byte-for-byte unchanged (the χ32 zero-cost guarantee).
-            $crate::space::RuleKind::Su3 => {
+            $crate::space::UserRuleContext::Su3(_) => {
                 unimplemented!(
                     "this operation is not yet supported for SU(3) tensors \
                      (Stage B3b implements permute/braid/transpose; svd/qr/trace/\
@@ -127,8 +165,6 @@ macro_rules! with_rule {
         }
     };
 }
-pub(crate) use with_rule;
-
 /// A graded vector space for one tensor leg: a list of `(sector, degeneracy)`
 /// pairs plus a dual flag, tagged with its fusion rule.
 ///
@@ -147,13 +183,21 @@ pub(crate) use with_rule;
 /// assert_eq!(w.dim(), 7);
 /// assert_eq!(w.dual(), v);
 /// ```
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Space {
-    pub(crate) rule: RuleKind,
+    pub(crate) context: Arc<UserRuleContext>,
     /// `(sector id, degeneracy)` pairs, stored in the internal sector-id
     /// encoding of the tagged rule.
     pub(crate) sectors: Vec<(SectorId, usize)>,
     pub(crate) dual: bool,
+}
+
+impl PartialEq for Space {
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.context, &other.context) || self.context == other.context)
+            && self.sectors == other.sectors
+            && self.dual == other.dual
+    }
 }
 
 impl Space {
@@ -163,7 +207,7 @@ impl Space {
     /// mirroring TensorKit's `ArgumentError` at `GradedSpace` construction
     /// (gradedspace.jl:49-56) — instead of surfacing later as an
     /// inconsistent `dim()` or a tensor-construction panic.
-    fn new(rule: RuleKind, sectors: Vec<(SectorId, usize)>) -> Self {
+    fn new(context: Arc<UserRuleContext>, sectors: Vec<(SectorId, usize)>) -> Self {
         let mut sectors = sectors;
         sectors.retain(|&(_, degeneracy)| degeneracy > 0);
         sectors.sort_by_key(|(sector, _)| *sector);
@@ -175,10 +219,18 @@ impl Space {
             );
         }
         Self {
-            rule,
+            context,
             sectors,
             dual: false,
         }
+    }
+
+    pub(crate) fn rule_kind(&self) -> RuleKind {
+        self.context.kind()
+    }
+
+    pub(crate) fn rule_context(&self) -> &Arc<UserRuleContext> {
+        &self.context
     }
 
     /// U(1)-graded space from `(charge, degeneracy)` pairs.
@@ -198,7 +250,7 @@ impl Space {
         I: IntoIterator<Item = (i32, usize)>,
     {
         Self::new(
-            RuleKind::U1,
+            Arc::new(UserRuleContext::U1(Arc::new(U1FusionRule))),
             charges
                 .into_iter()
                 .map(|(charge, deg)| (U1Irrep::new(charge).sector_id(), deg))
@@ -219,7 +271,7 @@ impl Space {
         I: IntoIterator<Item = (u8, usize)>,
     {
         Self::new(
-            RuleKind::Z2,
+            Arc::new(UserRuleContext::Z2(Arc::new(Z2FusionRule))),
             parities
                 .into_iter()
                 .map(|(parity, deg)| (Z2Irrep::new(parity).sector_id(), deg))
@@ -241,7 +293,7 @@ impl Space {
         I: IntoIterator<Item = (u8, usize)>,
     {
         Self::new(
-            RuleKind::FZ2,
+            Arc::new(UserRuleContext::FZ2(Arc::new(FermionParityFusionRule))),
             parities
                 .into_iter()
                 .map(|(parity, deg)| (SectorId::new(usize::from(parity & 1)), deg))
@@ -264,7 +316,7 @@ impl Space {
         I: IntoIterator<Item = (usize, usize)>,
     {
         Self::new(
-            RuleKind::SU2,
+            Arc::new(UserRuleContext::SU2(Arc::new(SU2FusionRule))),
             spins
                 .into_iter()
                 .map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin).sector_id(), deg))
@@ -285,7 +337,7 @@ impl Space {
     where
         I: IntoIterator<Item = ((u8, u8), usize)>,
     {
-        let rule = Su3FusionRule::new();
+        let rule = Arc::new(Su3FusionRule::new());
         let sectors = irreps
             .into_iter()
             .map(|((p, q), deg)| {
@@ -298,7 +350,7 @@ impl Space {
                     })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(Self::new(RuleKind::Su3, sectors))
+        Ok(Self::new(Arc::new(UserRuleContext::Su3(rule)), sectors))
     }
 
     /// U(1) x fermion-parity product space from `((charge, parity),
@@ -325,7 +377,13 @@ impl Space {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(Self::new(RuleKind::U1FZ2, sectors))
+        Ok(Self::new(
+            Arc::new(UserRuleContext::U1FZ2(Arc::new(U1Fz2Rule::new(
+                U1FusionRule,
+                FermionParityFusionRule,
+            )))),
+            sectors,
+        ))
     }
 
     /// fZ2 x U(1) x SU(2) triple-product space from `((parity, charge,
@@ -360,7 +418,13 @@ impl Space {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(Self::new(RuleKind::FZ2U1SU2, sectors))
+        Ok(Self::new(
+            Arc::new(UserRuleContext::FZ2U1SU2(Arc::new(Fz2U1Su2Rule::new(
+                ProductFusionRule::new(FermionParityFusionRule, U1FusionRule),
+                SU2FusionRule,
+            )))),
+            sectors,
+        ))
     }
 
     /// The dual space: every sector is replaced by its dual and the dual
@@ -368,8 +432,7 @@ impl Space {
     pub fn dual(&self) -> Self {
         // Su3 is Generic, so it cannot ride the mult-free `with_rule!` binding;
         // `dual` needs only `FusionRule::dual`, handled directly.
-        if self.rule == RuleKind::Su3 {
-            let rule = Su3FusionRule::new();
+        if let UserRuleContext::Su3(rule) = self.context.as_ref() {
             let mut sectors: Vec<(SectorId, usize)> = self
                 .sectors
                 .iter()
@@ -377,12 +440,12 @@ impl Space {
                 .collect();
             sectors.sort_by_key(|(sector, _)| *sector);
             return Self {
-                rule: self.rule,
+                context: Arc::clone(&self.context),
                 sectors,
                 dual: !self.dual,
             };
         }
-        let sectors = with_rule!(self.rule, rule, {
+        let sectors = with_rule!(self.context.as_ref(), rule, {
             fn dualize<R: FusionRule>(
                 rule: &R,
                 sectors: &[(SectorId, usize)],
@@ -397,7 +460,7 @@ impl Space {
         let mut sectors = sectors;
         sectors.sort_by_key(|(sector, _)| *sector);
         Self {
-            rule: self.rule,
+            context: Arc::clone(&self.context),
             sectors,
             dual: !self.dual,
         }
@@ -408,9 +471,8 @@ impl Space {
     /// SU(2)).
     pub fn dim(&self) -> usize {
         use tenet_core::MultiplicityFreeRigidSymbols;
-        if self.rule == RuleKind::Su3 {
+        if let UserRuleContext::Su3(rule) = self.context.as_ref() {
             use tenet_core::GenericRigidSymbols;
-            let rule = Su3FusionRule::new();
             return self
                 .sectors
                 .iter()
@@ -421,7 +483,7 @@ impl Space {
                 })
                 .sum();
         }
-        with_rule!(self.rule, rule, {
+        with_rule!(self.context.as_ref(), rule, {
             self.sectors
                 .iter()
                 .map(|&(sector, deg)| deg * (rule.dim_scalar(sector).round() as usize))
@@ -437,13 +499,13 @@ impl Space {
     /// `true` when `other` carries the same fusion rule, i.e. the two spaces
     /// can appear on the same tensor / be fused.
     pub fn same_rule(&self, other: &Space) -> bool {
-        self.rule == other.rule
+        Arc::ptr_eq(&self.context, &other.context) || self.context == other.context
     }
 
     /// Decodes an internal sector id into the user-facing label for this
     /// space's rule. Inverse of the encoding done by the constructors.
     fn decode_sector(&self, sector: SectorId) -> SectorLabel {
-        match self.rule {
+        match self.rule_kind() {
             RuleKind::U1 => SectorLabel::U1(
                 U1Irrep::from_sector_id(sector)
                     .expect("invalid U1 sector id")
@@ -493,7 +555,7 @@ impl Space {
     /// the label's variant does not match this space's rule or the label
     /// does not fit the sector-id encoding.
     fn encode_sector(&self, label: SectorLabel) -> Option<SectorId> {
-        match (self.rule, label) {
+        match (self.rule_kind(), label) {
             (RuleKind::U1, SectorLabel::U1(charge)) => Some(U1Irrep::new(charge).sector_id()),
             (RuleKind::Z2, SectorLabel::Z2(parity)) => Some(Z2Irrep::new(parity).sector_id()),
             (RuleKind::FZ2, SectorLabel::FZ2(parity)) => {
@@ -559,7 +621,7 @@ impl Space {
     /// `Result`: that signature change breaks every multiplicity-free caller,
     /// a breaking change disproportionate to closing one SU(3) panic surface.
     pub fn try_sectors(&self) -> Result<Vec<(SectorLabel, usize)>, Error> {
-        if self.rule == RuleKind::Su3 {
+        if self.rule_kind() == RuleKind::Su3 {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::try_sectors",
                 rule: "SU(3)",
@@ -592,10 +654,12 @@ impl Space {
     /// non-breaking read-back is a dedicated method returning the concrete
     /// `(p, q)` labels. [`Error::RuleMismatch`] on a non-SU(3) space.
     pub fn su3_sectors(&self) -> Result<Vec<((u8, u8), usize)>, Error> {
-        if self.rule != RuleKind::Su3 {
+        if self.rule_kind() != RuleKind::Su3 {
             return Err(Error::RuleMismatch);
         }
-        let rule = Su3FusionRule::new();
+        let UserRuleContext::Su3(rule) = self.context.as_ref() else {
+            unreachable!("rule kind and provider context are coherent")
+        };
         Ok(self
             .sectors
             .iter()
@@ -608,10 +672,12 @@ impl Space {
     /// [`Error::RuleMismatch`] on a non-SU(3) space, [`Error::InvalidArgument`]
     /// for a `(p, q)` outside the `dim <= 27` table.
     pub fn su3_degeneracy(&self, p: u8, q: u8) -> Result<Option<usize>, Error> {
-        if self.rule != RuleKind::Su3 {
+        if self.rule_kind() != RuleKind::Su3 {
             return Err(Error::RuleMismatch);
         }
-        let rule = Su3FusionRule::new();
+        let UserRuleContext::Su3(rule) = self.context.as_ref() else {
+            unreachable!("rule kind and provider context are coherent")
+        };
         let sector = rule.sector_of(p, q).ok_or_else(|| {
             Error::InvalidArgument(format!(
                 "SU(3) irrep ({p},{q}) is outside the dim<=27 table"
@@ -637,18 +703,18 @@ impl Space {
     ///
     /// Errors with [`Error::RuleMismatch`] when the rules differ.
     pub fn fuse(&self, other: &Space) -> Result<Space, Error> {
-        if self.rule != other.rule {
+        if !self.same_rule(other) {
             return Err(Error::RuleMismatch);
         }
         // SU(3) cannot use the multiplicity-free dispatch below; keep the
         // public Result boundary recoverable until a generic fuse is wired.
-        if self.rule == RuleKind::Su3 {
+        if self.rule_kind() == RuleKind::Su3 {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::fuse",
                 rule: "SU(3)",
             });
         }
-        let fused = with_rule!(self.rule, rule, {
+        let fused = with_rule!(self.context.as_ref(), rule, {
             fn fuse_sectors<R: FusionRule>(
                 rule: &R,
                 left: &[(SectorId, usize)],
@@ -667,7 +733,7 @@ impl Space {
             fuse_sectors(rule, &self.sectors, &other.sectors)
         });
         Ok(Self {
-            rule: self.rule,
+            context: Arc::clone(&self.context),
             sectors: fused,
             dual: false,
         })
@@ -684,8 +750,8 @@ impl Space {
             .split_first()
             .ok_or_else(|| Error::InvalidArgument("fuse_all needs at least one space".into()))?;
         if !rest.is_empty()
-            && first.rule == RuleKind::Su3
-            && rest.iter().all(|space| space.rule == first.rule)
+            && first.rule_kind() == RuleKind::Su3
+            && rest.iter().all(|space| first.same_rule(space))
         {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::fuse_all",
@@ -712,11 +778,51 @@ impl Space {
 
     /// Reconstructs the user-facing space from an expert-layer leg, keyed by
     /// the fusion rule it lives under. Inverse of [`Self::sector_leg`].
-    pub(crate) fn from_leg(rule: RuleKind, leg: &SectorLeg) -> Self {
+    pub(crate) fn from_leg(context: Arc<UserRuleContext>, leg: &SectorLeg) -> Self {
         Self {
-            rule,
+            context,
             sectors: leg.iter().collect(),
             dual: leg.is_dual(),
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_context_tests {
+    use super::*;
+
+    #[test]
+    fn separately_constructed_builtin_spaces_compare_by_semantic_identity() {
+        // What: semantic equality is independent of the provider Arc allocation.
+        let first = Space::u1([(0, 2)]);
+        let second = Space::u1([(0, 2)]);
+
+        assert!(!Arc::ptr_eq(&first.context, &second.context));
+        assert_eq!(first.context.identity(), second.context.identity());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn different_provider_identity_rejects_space_equality_and_fusion() {
+        // What: overlapping sector ids cannot erase distinct fusion-rule identities.
+        let u1 = Space::u1([(0, 1)]);
+        let z2 = Space::z2([(0, 1)]);
+
+        assert_ne!(u1.context.identity(), z2.context.identity());
+        assert_ne!(u1, z2);
+        assert!(matches!(u1.fuse(&z2), Err(Error::RuleMismatch)));
+    }
+
+    #[test]
+    fn derived_spaces_inherit_the_actual_context_arc() {
+        // What: every structural derivation retains the source provider allocation.
+        let source = Space::u1([(0, 2)]);
+        let dual = source.dual();
+        let rebuilt = Space::from_leg(Arc::clone(&source.context), &source.sector_leg());
+        let fused = source.fuse(&rebuilt).unwrap();
+
+        assert!(Arc::ptr_eq(&source.context, &dual.context));
+        assert!(Arc::ptr_eq(&source.context, &rebuilt.context));
+        assert!(Arc::ptr_eq(&source.context, &fused.context));
     }
 }

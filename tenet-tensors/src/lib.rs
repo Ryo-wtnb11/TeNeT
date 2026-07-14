@@ -22,7 +22,8 @@ mod tree_context;
 mod tree_transform;
 
 pub use adjoint::{
-    adjoint, adjoint_dyn, adjoint_dyn_generic, adjoint_space_dyn, adjoint_space_dyn_generic,
+    adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_space_dyn,
+    adjoint_bound_space_dyn_generic,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{
@@ -30,7 +31,6 @@ pub use cache::{
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
     TreeTransformStructureCache, TreeTransformStructureCacheKey,
 };
-pub use contract::DynamicFusionMapSpace;
 #[cfg(test)]
 pub(crate) use contract::{
     contracted_fusion_tree_basis_matches, TensorContractDenseRouteKind,
@@ -54,6 +54,7 @@ pub use contract::{
     TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
+pub use contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
