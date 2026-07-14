@@ -303,51 +303,100 @@ mod inactive_destination_tests {
     fn compile_rejects_inactive_destination_aliases() {
         let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
         let dst_structure = custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 0)]);
-        assert!(TreeTransformStructure::<f64>::compile_structures(
-            &dst_structure,
-            &src_structure,
-            &[],
-        )
-        .is_err());
+        assert_eq!(
+            TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[],)
+                .unwrap_err(),
+            OperationError::OverlappingTransformDestination {
+                first_dst_block: 0,
+                second_dst_block: 1,
+                offset: 0
+            }
+        );
     }
 
     #[test]
     fn compile_rejects_active_inactive_destination_aliases() {
         let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
         let dst_structure = custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 0)]);
-        assert!(TreeTransformStructure::compile_structures(
-            &dst_structure,
-            &src_structure,
-            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
-        )
-        .is_err());
+        assert_eq!(
+            TreeTransformStructure::compile_structures(
+                &dst_structure,
+                &src_structure,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+            )
+            .unwrap_err(),
+            OperationError::OverlappingTransformDestination {
+                first_dst_block: 0,
+                second_dst_block: 1,
+                offset: 0
+            }
+        );
     }
 
     #[test]
     fn compile_rejects_active_destination_aliases() {
         let src_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
         let dst_structure = custom_structure(vec![block(0, 1, 1, 0), block(1, 1, 1, 0)]);
-        assert!(TreeTransformStructure::compile_structures(
-            &dst_structure,
-            &src_structure,
-            &[
-                TreeTransformBlockSpec::single(0, 0, 1.0),
-                TreeTransformBlockSpec::single(1, 1, 1.0),
-            ],
-        )
-        .is_err());
+        assert_eq!(
+            TreeTransformStructure::compile_structures(
+                &dst_structure,
+                &src_structure,
+                &[
+                    TreeTransformBlockSpec::single(0, 0, 1.0),
+                    TreeTransformBlockSpec::single(1, 1, 1.0),
+                ],
+            )
+            .unwrap_err(),
+            OperationError::OverlappingTransformDestination {
+                first_dst_block: 0,
+                second_dst_block: 1,
+                offset: 0
+            }
+        );
     }
 
     #[test]
     fn compile_rejects_self_overlapping_destination_layout() {
         let src_structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
         let dst_structure = custom_structure(vec![block(0, 2, 0, 0)]);
-        assert!(TreeTransformStructure::compile_structures(
-            &dst_structure,
-            &src_structure,
-            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        assert_eq!(
+            TreeTransformStructure::compile_structures(
+                &dst_structure,
+                &src_structure,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+            )
+            .unwrap_err(),
+            OperationError::OverlappingTransformDestination {
+                first_dst_block: 0,
+                second_dst_block: 0,
+                offset: 0
+            }
+        );
+    }
+
+    #[test]
+    fn compile_rejects_nonzero_stride_self_overlap() {
+        let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
+        let dst_structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::with_key(BlockKey::sector_ids([0]), vec![2, 2], vec![1, 1], 0).unwrap(),
+            ],
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(
+            TreeTransformStructure::compile_structures(
+                &dst_structure,
+                &src_structure,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+            )
+            .unwrap_err(),
+            OperationError::OverlappingTransformDestination {
+                first_dst_block: 0,
+                second_dst_block: 0,
+                offset: 1,
+            }
+        );
     }
 
     #[test]
@@ -371,6 +420,15 @@ mod inactive_destination_tests {
         )
         .unwrap();
         assert_eq!(dst, [5.0, 10.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn many_range_connected_interleaved_destinations_are_valid() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![1]]).unwrap();
+        let dst_structure =
+            custom_structure((0..64).map(|offset| block(offset, 2, 64, offset)).collect());
+        TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[])
+            .unwrap();
     }
 
     #[test]
@@ -556,6 +614,7 @@ mod inactive_destination_tests {
         )
         .unwrap();
         let attributed = profile.validate
+            + profile.inactive_scale
             + profile.single_total
             + profile.multi_workspace_prepare
             + profile.multi_pack
@@ -1066,7 +1125,9 @@ where
     validate_replay_storage_len(src_structure, src_data.len())?;
     profile.validate += start.elapsed();
 
+    let start = std::time::Instant::now();
     scale_inactive_destinations(kernels, structure, dst_data, beta)?;
+    profile.inactive_scale += start.elapsed();
 
     if threads > 1 {
         tree_transform_blocks_with_batched_recoupling_parallel(

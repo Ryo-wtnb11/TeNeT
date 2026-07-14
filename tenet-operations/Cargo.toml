@@ -19,6 +19,7 @@ strided-kernel = { version = "0.3", features = ["parallel"] }
 # for all strided/transform work. strided-kernel exposes no public pool
 # or scope API to route through; if it grows one, switch to it.
 rayon = "1.10"
+rustc-hash = "2"
 
 [features]
 default = ["cpu-faer"]

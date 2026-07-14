@@ -1574,6 +1574,10 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.tree_replay.validate, iterations)
     );
     println!(
+        "profile_tree_inactive_scale_ns,{:.3}",
+        nanos_per(profile.tree_replay.inactive_scale, iterations)
+    );
+    println!(
         "profile_tree_single_total_ns,{:.3}",
         nanos_per(profile.tree_replay.single_total, iterations)
     );

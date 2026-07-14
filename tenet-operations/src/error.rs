@@ -33,6 +33,11 @@ pub enum OperationError {
     DuplicateTransformDestination {
         dst_block: usize,
     },
+    OverlappingTransformDestination {
+        first_dst_block: usize,
+        second_dst_block: usize,
+        offset: usize,
+    },
     ElementCountMismatch {
         expected: usize,
         actual: usize,
@@ -142,6 +147,14 @@ impl fmt::Display for OperationError {
                     "tree transform destination block {dst_block} appears in more than one block"
                 )
             }
+            Self::OverlappingTransformDestination {
+                first_dst_block,
+                second_dst_block,
+                offset,
+            } => write!(
+                f,
+                "tree transform destination blocks {first_dst_block} and {second_dst_block} overlap at storage offset {offset}"
+            ),
             Self::ElementCountMismatch { expected, actual } => {
                 write!(
                     f,
