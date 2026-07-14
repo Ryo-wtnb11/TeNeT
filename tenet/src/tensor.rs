@@ -661,10 +661,15 @@ macro_rules! with_data {
 /// 2-norm of everything discarded.
 #[derive(Clone, Debug)]
 pub struct SvdTrunc {
+    /// Left isometry `U` (codomain legs `<- bond`).
     pub u: Tensor,
+    /// Diagonal singular-value tensor `S` (`bond <- bond`).
     pub s: Tensor,
+    /// Right isometry `V†` (`bond <- domain legs`).
     pub vh: Tensor,
+    /// Kept singular values per coupled sector.
     pub singular_values: Vec<SectorSpectrum>,
+    /// Quantum-dimension-weighted 2-norm of the discarded singular values.
     pub error: f64,
 }
 
@@ -673,9 +678,13 @@ pub struct SvdTrunc {
 /// eigenvalues.
 #[derive(Clone, Debug)]
 pub struct EighTrunc {
+    /// Diagonal eigenvalue tensor `D` (`bond <- bond`), real for Hermitian input.
     pub d: Tensor,
+    /// Eigenvector isometry `V` (codomain legs `<- bond`).
     pub v: Tensor,
+    /// Kept eigenvalues per coupled sector.
     pub eigenvalues: Vec<SectorSpectrum>,
+    /// Quantum-dimension-weighted 2-norm of the discarded eigenvalues.
     pub error: f64,
 }
 
@@ -685,9 +694,13 @@ pub struct EighTrunc {
 /// quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
 #[derive(Clone, Debug)]
 pub struct EigTrunc {
+    /// Diagonal eigenvalue tensor `D` (`bond <- bond`), always c64.
     pub d: Tensor,
+    /// Eigenvector tensor `V` (codomain legs `<- bond`), always c64.
     pub v: Tensor,
+    /// Kept (complex) eigenvalues per coupled sector.
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
+    /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
     pub error: f64,
 }
 
@@ -1594,6 +1607,9 @@ macro_rules! with_bound_ctx {
     };
 }
 
+/// A block-sparse symmetric tensor map `codomain <- domain` with dynamic rank,
+/// carrying its [`Runtime`] and a rule-erased fusion space. This is the
+/// everyday user-layer type; see the crate-level docs for the execution model.
 #[derive(Debug)]
 pub struct Tensor {
     rt: Runtime,

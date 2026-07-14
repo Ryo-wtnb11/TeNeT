@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 //! Public facade for the active TeNeT rebuild.
 //!
@@ -72,18 +73,27 @@ pub mod mathematics {
     #![doc = include_str!("mathematics.md")]
 }
 
+/// Expert layer: the structural data layer (sectors, fusion rules, fusion-tree
+/// spaces, block layout, typed [`core::TensorMap`]). Re-export of `tenet-core`.
 pub mod core {
     pub use tenet_core::*;
 }
 
+/// Expert layer: the dense block execution boundary (GEMM, transpose kernels).
+/// Re-export of `tenet-dense`.
 pub mod dense {
     pub use tenet_dense::*;
 }
 
+/// Expert layer: contraction / tree-transform / trace execution and the
+/// context and cache types the [`prelude::Runtime`] wraps. Re-export of
+/// `tenet-tensors`.
 pub mod operations {
     pub use tenet_tensors::*;
 }
 
+/// Expert layer: factorizations and matrix functions the [`prelude::Tensor`]
+/// decomposition methods pass through to. Re-export of `tenet-matrixalgebra`.
 pub mod matrixalgebra {
     pub use tenet_matrixalgebra::*;
 }

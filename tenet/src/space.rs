@@ -23,14 +23,25 @@ pub enum SectorLabel {
     /// Fermion parity (`0` even, `1` odd), as passed to [`Space::fz2`].
     FZ2(u8),
     /// SU(2) spin as `twice_spin = 2j`, as passed to [`Space::su2`].
-    SU2 { twice_spin: usize },
+    SU2 {
+        /// Twice the spin, `2j` (integer).
+        twice_spin: usize,
+    },
     /// U(1) x fermion-parity product sector, as passed to [`Space::product`].
-    U1FZ2 { charge: i32, parity: u8 },
+    U1FZ2 {
+        /// U(1) charge.
+        charge: i32,
+        /// Fermion parity (`0` even, `1` odd).
+        parity: u8,
+    },
     /// fZ2 x U(1) x SU(2) triple-product sector, as passed to
     /// [`Space::fz2_u1_su2`].
     FZ2U1SU2 {
+        /// Fermion parity (`0` even, `1` odd).
         parity: u8,
+        /// U(1) charge.
         charge: i32,
+        /// Twice the spin, `2j` (integer).
         twice_spin: usize,
     },
     // NOTE: no SU(3) variant. Adding one would break every downstream
