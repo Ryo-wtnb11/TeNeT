@@ -410,6 +410,56 @@ fn compact_svd_noncanonical_layout_uses_copy_fallback() {
 }
 
 #[test]
+fn compact_qr_canonical_layout_skips_input_pack_and_factor_scatter() {
+    // What: canonical compact QR reads source regions and writes final factor regions directly.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_factor_copy_probe();
+    qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(
+        crate::factorize::compact_factor_copy_probe(),
+        crate::factorize::CompactFactorCopyProbe::default()
+    );
+}
+
+#[test]
+fn compact_qr_noncanonical_layout_uses_copy_fallback() {
+    // What: expert noncanonical compact QR retains positive pack-and-scatter copy evidence.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_compact_factor_copy_probe();
+    qr_compact_dyn(&mut dense, &input).unwrap();
+    let probe = crate::factorize::compact_factor_copy_probe();
+
+    assert!(probe.input_pack_bytes > 0);
+    assert!(probe.output_scatter_bytes > 0);
+}
+
+#[test]
+fn compact_svd_and_qr_share_one_factor_geometry_plan() {
+    // What: compact SVD and compact QR resolve one immutable geometry authority.
+    let tensor = rectangular_svd_tensor(17, 13);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+
+    let svd_plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    let qr_plan = crate::factorize::compact_factor_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&svd_plan, &qr_plan));
+}
+
+#[test]
 fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
     // What: a provider failure cannot mutate borrowed tensor storage or return partial factors.
     let rule = Z2FusionRule;
