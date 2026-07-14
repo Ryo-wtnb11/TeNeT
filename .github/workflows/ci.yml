@@ -353,3 +353,37 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -A clippy::result_large_err
         working-directory: tenet
         continue-on-error: true
+
+  perf:
+    name: zero-cost regression canary
+    needs: changes
+    if: needs.changes.outputs.light_rust != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: perf
+      # No timing-based failure: shared CI runners are too noisy for a
+      # pass/fail latency threshold to mean anything (see the module doc on
+      # benches/fusion_tree_key.rs). The actual regression gate is the
+      # `size_of` canary test below — it fails if `FusionTreeKey` silently
+      # grows a field, which is the thing that would quietly reintroduce
+      # cost on the multiplicity-free hot path. This job additionally runs
+      # the criterion bench so it stays compiling and executable, without
+      # asserting on its numbers.
+      - name: size_of canary for FusionTreeKey
+        run: cargo test -p tenet-core fusion_tree_key_size_has_not_silently_grown
+        working-directory: tenet
+      - name: FusionTreeKey hash/eq microbench (informational, not a gate)
+        run: cargo bench -p tenet-core --bench fusion_tree_key
+        working-directory: tenet

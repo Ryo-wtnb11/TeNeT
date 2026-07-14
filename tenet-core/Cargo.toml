@@ -20,3 +20,14 @@ lru = "0.12"
 # `Scalar` for the recoupling engine's F/R symbols — version matches the
 # other workspace crates that already depend on it (tenet, tenet-dense, ...).
 num-complex = "0.4"
+
+[dev-dependencies]
+# Zero-cost-claim canary (#153): a tiny hash/eq microbench for the
+# mult-free `FusionTreeKey` path (see benches/fusion_tree_key.rs; the
+# companion `size_of` assert lives in src/tests.rs, next to the type it
+# pins). Only pulled in for `cargo bench`, never a normal build.
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "fusion_tree_key"
+harness = false
