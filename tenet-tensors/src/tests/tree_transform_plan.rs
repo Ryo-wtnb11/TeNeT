@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 #[test]
 fn tree_transform_compile_keyed_pairs_tree_blocks_by_key_not_index_for_all_numeric_dtypes() {
@@ -1897,6 +1898,28 @@ fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
     }
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
+
+    // What: the borrowed-operation overwrite entry point ignores destination bits
+    // while reusing the same compiled structure on its warm invocation.
+    let dst_structure = Arc::clone(cached.structure());
+    let src_structure = Arc::clone(src.structure());
+    for _ in 0..2 {
+        cached.data_mut().fill(f64::NAN);
+        context
+            .tree_transform_dyn_overwrite_into_ref(
+                &rule,
+                &operation,
+                &dst_structure,
+                &src_structure,
+                cached.data_mut(),
+                src.data(),
+                2.0,
+            )
+            .unwrap();
+        assert_eq!(cached.data(), expected.data());
+    }
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
 }
 
 #[test]
@@ -3755,6 +3778,32 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
     .unwrap();
 
     assert_eq!(dst_cache.data(), dst_facade.data());
+
+    // What: the generic-fusion overwrite entry point writes directly over dirty
+    // destination storage on repeated non-memoized compilation.
+    let mut context = TreeTransformExecutionContext::<
+        f64,
+        crate::tree_transform::TreeTransformSu3RuleCacheKey,
+    >::default();
+    let mut dst_overwrite = make(f64::NAN);
+    let dst_structure = Arc::clone(dst_overwrite.structure());
+    let src_structure = Arc::clone(src.structure());
+    for _ in 0..2 {
+        dst_overwrite.data_mut().fill(f64::NAN);
+        context
+            .tree_transform_dyn_overwrite_into_generic(
+                &rule,
+                TreeTransformOperation::permute([1, 0], []),
+                &dst_structure,
+                &src_structure,
+                dst_overwrite.data_mut(),
+                src.data(),
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(dst_overwrite.data(), dst_facade.data());
+    }
+    assert_eq!(context.cache().structure_len(), 0);
 }
 
 // ===================== Stage B3c-1: SU(4) DATA-ONLY smoke ==================
