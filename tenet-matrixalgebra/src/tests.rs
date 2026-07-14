@@ -1672,6 +1672,38 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
     assert_eq!(composed.vh.data(), direct.vh.data());
 }
 
+#[test]
+fn svd_trunc_builds_only_the_returned_diagonal_factor() {
+    // What: partial and full truncation each materialize S once at the final returned rank.
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    for truncation in [Truncation::rank(5), Truncation::Full] {
+        crate::factorize::reset_diagonal_bond_build_probe();
+        let result = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
+        let returned_rank = result
+            .singular_values()
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum();
+        assert_eq!(
+            crate::factorize::diagonal_bond_build_probe(),
+            crate::factorize::DiagonalBondBuildProbe {
+                calls: 1,
+                values: returned_rank,
+            }
+        );
+    }
+}
+
 fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,

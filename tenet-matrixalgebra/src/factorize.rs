@@ -722,6 +722,16 @@ where
     D: FactorScalar,
     V: Copy,
 {
+    #[cfg(test)]
+    DIAGONAL_BOND_BUILD_PROBE.with(|probe| {
+        let mut current = probe.get();
+        current.calls += 1;
+        current.values += spectrum
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum::<usize>();
+        probe.set(current);
+    });
     let space = diagonal_bond_bound_space(provider, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
     BoundDynFactor::from_bound(space, data, 1, 1)
@@ -938,6 +948,14 @@ pub(crate) struct CompactSvdCopyProbe {
 #[cfg(test)]
 thread_local! {
     static COMPACT_SVD_COPY_PROBE: Cell<CompactSvdCopyProbe> = Cell::default();
+    static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DiagonalBondBuildProbe {
+    pub calls: usize,
+    pub values: usize,
 }
 
 #[cfg(test)]
@@ -948,6 +966,16 @@ pub(crate) fn reset_compact_svd_copy_probe() {
 #[cfg(test)]
 pub(crate) fn compact_svd_copy_probe() -> CompactSvdCopyProbe {
     COMPACT_SVD_COPY_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_diagonal_bond_build_probe() {
+    DIAGONAL_BOND_BUILD_PROBE.with(|probe| probe.set(DiagonalBondBuildProbe::default()));
+}
+
+#[cfg(test)]
+pub(crate) fn diagonal_bond_build_probe() -> DiagonalBondBuildProbe {
+    DIAGONAL_BOND_BUILD_PROBE.with(Cell::get)
 }
 
 #[cfg(test)]
