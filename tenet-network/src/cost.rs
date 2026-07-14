@@ -87,7 +87,7 @@ impl DenseCostModel {
     }
 
     /// Number of scalar elements in a tensor with these legs (the product of the
-    /// leg dimensions). Used as the dense FLOP/size proxy by [`pair_cost`].
+    /// leg dimensions). Used as the dense FLOP/size proxy by `pair_cost`.
     ///
     /// The product is accumulated with [`usize::saturating_mul`] so a large
     /// network whose true size exceeds `usize::MAX` *saturates* to `usize::MAX`

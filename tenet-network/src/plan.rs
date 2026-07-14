@@ -111,7 +111,7 @@ impl ContractionPlan {
 
     /// Construct a plan for an already parsed network.
     ///
-    /// In addition to the topology checks in [`validate`](Self::validate), this
+    /// In addition to the topology checks in `validate`, this
     /// path knows each input tensor's leg labels (from `ir`) and therefore
     /// additionally verifies that every step's declared `result_labels` equals
     /// what contracting its two operands actually produces. See
@@ -351,7 +351,7 @@ impl ContractionPlan {
     /// Verify that every step's declared `result_labels` is *mathematically*
     /// consistent with contracting its two operands.
     ///
-    /// [`validate`](Self::validate) only checks topology (operand ids in range,
+    /// `validate` only checks topology (operand ids in range,
     /// single final result, …); it trusts the labels each step claims to emit.
     /// The executor in `einsum_exec::execute_plan`, however, derives the actual
     /// result leg order purely from the two operands: a label shared by *both*

@@ -1492,7 +1492,7 @@ where
 
     /// Replays a prepared contraction. The tensors must share the prepared
     /// tensors' fusion-space handles, so tensors created from the same
-    /// [`FusionTensorMapSpace`] handle (or clones of the prepared ones) are
+    /// `FusionTensorMapSpace` handle (or clones of the prepared ones) are
     /// valid.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_prepared_tensorcontract_fusion<

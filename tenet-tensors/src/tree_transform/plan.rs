@@ -712,8 +712,8 @@ where
 
 /// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
 /// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
-/// [`build_multiplicity_free_tree_pair_transform_group_plan`]: it reuses the
-/// exact same group-spec assembly ([`assemble_tree_pair_group_spec`], generic
+/// `build_multiplicity_free_tree_pair_transform_group_plan`: it reuses the
+/// exact same group-spec assembly (`assemble_tree_pair_group_spec`, generic
 /// over the coefficient type) and differs only in the recoupling-row source
 /// (`transformed_generic_tree_pair_rows`).
 ///
