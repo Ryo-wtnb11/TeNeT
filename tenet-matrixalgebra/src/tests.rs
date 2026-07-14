@@ -1882,7 +1882,7 @@ fn svd_full_gauge_fixes_extra_vh_rows_without_changing_product() {
         assert!(pivot.im.abs() < 1e-14, "U pivot {pivot} not real");
         assert!(pivot.re >= 0.0, "U pivot {pivot} negative");
     }
-    let extra_pivot = vh[2 + 3 * 0];
+    let extra_pivot = vh[2]; // row 2, col 0 (row + 3 * col)
     assert!(
         extra_pivot.im.abs() < 1e-14,
         "Vh pivot {extra_pivot} not real"
