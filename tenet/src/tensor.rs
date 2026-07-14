@@ -40,7 +40,8 @@ use tenet_tensors::{
 
 use crate::error::Error;
 use crate::runtime::{
-    with_rule_ctx, BuiltinKey, Ctx, Ctxs, ProductKey, Runtime, Su3Key, TripleKey,
+    with_rule_ctx, BuiltinKey, Ctx, Ctxs, ProductKey, Runtime, RuntimeExecutionConfig, Su3Key,
+    TripleKey,
 };
 use crate::space::{with_rule, RuleKind, Space};
 
@@ -584,18 +585,33 @@ impl PermuteOverwriteCache {
 
 impl TensorExecutionContext {
     /// Builds caller-owned execution state with the same CPU execution
-    /// configuration as `runtime`.
+    /// configuration as `runtime`, bound to it for runtime validation.
     pub fn for_runtime(runtime: &Runtime) -> Result<Self, Error> {
-        let config = runtime.execution_config();
+        let mut context = Self::for_config(runtime.execution_config())?;
+        context.runtime = Some(runtime.clone());
+        Ok(context)
+    }
+
+    /// Builds execution state from a runtime's execution configuration WITHOUT
+    /// the runtime back-reference. Used by the standalone-op context pool
+    /// (#155): a pooled context lives inside the runtime, so storing a `Runtime`
+    /// clone here would form a reference cycle that leaks the runtime. Standalone
+    /// ops drive the per-rule contexts directly (they never call the
+    /// runtime-validating `try_*` methods), so the back-reference is unneeded.
+    pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
+        // All 28 transform backends built here ride the runtime's ONE shared
+        // CPU context — a fresh context per executor would multiply rayon
+        // pools per pooled/cloned TensorExecutionContext (the macOS
+        // thread-cap failure behind #155's context pool).
         let mut context = Self {
-            runtime: Some(runtime.clone()),
-            u1: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            z2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            su2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            u1_fz2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            fz2_u1_su2: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
-            su3: Ctxs::with_config(config.dense_threads, config.gemm_kind)?,
+            runtime: None,
+            u1: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            z2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            fz2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            su2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            u1_fz2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            fz2_u1_su2: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
+            su3: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,
         };
         if let Some(threads) = config.recoupling_threads {
             context.set_recoupling_threads(threads);
@@ -2732,7 +2748,12 @@ impl Tensor {
         lhs_axes: &[usize],
         rhs_axes: &[usize],
     ) -> Result<Self, Error> {
-        let mut state = self.rt.lock();
+        // Lease a per-rule context for this op instead of holding the coarse
+        // runtime lock, so concurrent contracts on a shared runtime run in
+        // parallel (#155). The leased context carries the same per-rule `Ctxs`
+        // the locked state did, so this is byte-identical single-threaded.
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
         // SU(N) (Generic): dedicated non-macro core/compose route — the mult-free
         // `with_rule_ctx!` binding cannot host a Generic rule. Only the
         // fully-direct GEMM (compose) route runs here: the block GEMM is
@@ -2759,7 +2780,7 @@ impl Tensor {
                 rhs_axes_seam,
             )?;
             let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
-            D::ctx_of(&mut state.su3).tensorcontract_fusion_dyn_into_generic(
+            D::ctx_of(&mut context.su3).tensorcontract_fusion_dyn_into_generic(
                 &rule,
                 &dst_space,
                 &mut data,
@@ -2777,10 +2798,9 @@ impl Tensor {
                 D::from_real(1.0),
                 D::from_real(0.0),
             )?;
-            drop(state);
             return Ok(self.with(dst_space, D::lift(data)));
         }
-        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
+        let (space, data) = with_rule_ctx!(self.rule, context, rule, ctxs, {
             // `dst` is the user-facing result: a lazy-adjoint operand contributes
             // its adjoint space (`self.space`/`rhs.space` already are adjoint), so
             // this matches the materialized-adjoint result exactly.
@@ -2812,7 +2832,6 @@ impl Tensor {
             )?;
             Ok::<_, Error>((dst_space, D::lift(data)))
         })?;
-        drop(state);
         Ok(self.with(space, data))
     }
 
@@ -2980,7 +2999,11 @@ impl Tensor {
         src_data: &[D],
         operation: TreeTransformOperation,
     ) -> Result<Self, Error> {
-        let mut state = self.rt.lock();
+        // Lease a per-rule context instead of holding the coarse runtime lock,
+        // so concurrent permute/braid/transpose on a shared runtime run in
+        // parallel (#155); byte-identical single-threaded.
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
         // SU(3) (Generic): dedicated non-macro path — build the generic result
         // space and drive the non-memoized generic tree-transform. The recoupling
         // coefficient scalar is f64 for either data dtype, so the generic braid
@@ -2989,7 +3012,7 @@ impl Tensor {
             let rule = Su3FusionRule::new();
             let dst_space = self.space.transformed_generic(&rule, &operation)?;
             let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
-            D::ctx_of(&mut state.su3)
+            D::ctx_of(&mut context.su3)
                 .tree_context_mut()
                 .tree_transform_dyn_into_generic(
                     &rule,
@@ -3002,10 +3025,9 @@ impl Tensor {
                     D::from_real(0.0),
                 )?;
             let out = (dst_space, D::lift(data));
-            drop(state);
             return Ok(self.with(out.0, out.1));
         }
-        let (space, data) = with_rule_ctx!(self.rule, state, rule, ctxs, {
+        let (space, data) = with_rule_ctx!(self.rule, context, rule, ctxs, {
             let dst_space = self.space.transformed(rule, &operation)?;
             let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
             D::ctx_of(ctxs).tree_context_mut().tree_transform_dyn_into(
@@ -3020,7 +3042,6 @@ impl Tensor {
             )?;
             Ok::<_, Error>((dst_space, D::lift(data)))
         })?;
-        drop(state);
         Ok(self.with(space, data))
     }
 
@@ -3646,14 +3667,16 @@ impl Tensor {
             return Ok((out.u, out.s, out.vh));
         }
         let complex = self.dtype() == Dtype::C64;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             // SU(N) (Generic): the block-level SVD engine is symmetry-agnostic;
             // only the factor-space builders differ (multiplicity-aware keys).
             let (u, vh, spectrum) = if self.rule == RuleKind::Su3 {
                 tenet_matrixalgebra::svd_compact_factors_dyn_generic(
-                    &mut *state.dense,
+                    dense.dense(),
                     &Su3FusionRule::new(),
                     &self.space,
                     data,
@@ -3661,7 +3684,7 @@ impl Tensor {
             } else {
                 with_rule!(self.rule, rule, {
                     tenet_matrixalgebra::svd_compact_factors_dyn(
-                        &mut *state.dense,
+                        dense.dense(),
                         rule,
                         &self.space,
                         data,
@@ -3688,11 +3711,13 @@ impl Tensor {
                 rule: "SU(3)",
             });
         }
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::svd_full_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::svd_full_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok((
                 self.from_dyn(out.u),
@@ -3712,14 +3737,16 @@ impl Tensor {
         // (see `svd_compact`). `out.singular_values` is also returned, so it is
         // cloned into the diagonal factor.
         let complex = self.dtype() == Dtype::C64;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             // SU(N) (Generic): same engine, generic factor spaces, and the
             // integer-rounded sqrt_dim² truncation weight.
             let out = if self.rule == RuleKind::Su3 {
                 tenet_matrixalgebra::svd_trunc_dyn_generic(
-                    &mut *state.dense,
+                    dense.dense(),
                     &Su3FusionRule::new(),
                     &self.space,
                     data,
@@ -3728,7 +3755,7 @@ impl Tensor {
             } else {
                 with_rule!(self.rule, rule, {
                     tenet_matrixalgebra::svd_trunc_dyn(
-                        &mut *state.dense,
+                        dense.dense(),
                         rule,
                         &self.space,
                         data,
@@ -3749,19 +3776,21 @@ impl Tensor {
     /// All singular values per coupled sector, descending (MatrixAlgebraKit
     /// `svd_vals`). Real for both dtypes.
     pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             if self.rule == RuleKind::Su3 {
                 tenet_matrixalgebra::svd_vals_dyn_generic(
-                    &mut *state.dense,
+                    dense.dense(),
                     &Su3FusionRule::new(),
                     &self.space,
                     data,
                 )
             } else {
                 with_rule!(self.rule, rule, {
-                    tenet_matrixalgebra::svd_vals_dyn(&mut *state.dense, rule, &self.space, data)
+                    tenet_matrixalgebra::svd_vals_dyn(dense.dense(), rule, &self.space, data)
                 })
             }
             .map_err(Into::into)
@@ -3775,19 +3804,21 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return self.qr_cuda(storage);
         }
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let (q, r) = if self.rule == RuleKind::Su3 {
                 tenet_matrixalgebra::qr_compact_dyn_generic(
-                    &mut *state.dense,
+                    dense.dense(),
                     &Su3FusionRule::new(),
                     &self.space,
                     data,
                 )
             } else {
                 with_rule!(self.rule, rule, {
-                    tenet_matrixalgebra::qr_compact_dyn(&mut *state.dense, rule, &self.space, data)
+                    tenet_matrixalgebra::qr_compact_dyn(dense.dense(), rule, &self.space, data)
                 })
             }?;
             Ok((self.from_dyn(q), self.from_dyn(r)))
@@ -3805,11 +3836,13 @@ impl Tensor {
                 rule: "SU(3)",
             });
         }
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let (q, r) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::qr_full_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::qr_full_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok((self.from_dyn(q), self.from_dyn(r)))
         })
@@ -3818,19 +3851,21 @@ impl Tensor {
     /// Compact LQ `t = l * q` (MatrixAlgebraKit `lq_compact`): `q` has
     /// orthonormal rows per coupled sector.
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let (l, q) = if self.rule == RuleKind::Su3 {
                 tenet_matrixalgebra::lq_compact_dyn_generic(
-                    &mut *state.dense,
+                    dense.dense(),
                     &Su3FusionRule::new(),
                     &self.space,
                     data,
                 )
             } else {
                 with_rule!(self.rule, rule, {
-                    tenet_matrixalgebra::lq_compact_dyn(&mut *state.dense, rule, &self.space, data)
+                    tenet_matrixalgebra::lq_compact_dyn(dense.dense(), rule, &self.space, data)
                 })
             }?;
             Ok((self.from_dyn(l), self.from_dyn(q)))
@@ -3847,11 +3882,13 @@ impl Tensor {
                 rule: "SU(3)",
             });
         }
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let (l, q) = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::lq_full_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::lq_full_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok((self.from_dyn(l), self.from_dyn(q)))
         })
@@ -3873,11 +3910,13 @@ impl Tensor {
     /// `left_null`).
     pub fn left_null(&self) -> Result<Self, Error> {
         self.reject_unwired_su3("Tensor::left_null")?;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::left_null_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::left_null_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok(self.from_dyn(out))
         })
@@ -3887,11 +3926,13 @@ impl Tensor {
     /// `right_null`).
     pub fn right_null(&self) -> Result<Self, Error> {
         self.reject_unwired_su3("Tensor::right_null")?;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::right_null_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::right_null_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok(self.from_dyn(out))
         })
@@ -3905,11 +3946,14 @@ impl Tensor {
     }
 
     fn left_polar_impl<D: UserScalar>(&self, data: &[D]) -> Result<(Self, Self), Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
-        let (w, p) = with_rule_ctx!(self.rule, state, rule, ctxs, {
+        // Lease a dense executor and a per-rule context for this op instead of
+        // holding the coarse runtime lock (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        let (w, p) = with_rule_ctx!(self.rule, context, rule, ctxs, {
             tenet_matrixalgebra::left_polar_dyn(
-                &mut *state.dense,
+                dense.dense(),
                 D::ctx_of(ctxs),
                 rule,
                 &self.space,
@@ -3927,11 +3971,13 @@ impl Tensor {
     }
 
     fn right_polar_impl<D: UserScalar>(&self, data: &[D]) -> Result<(Self, Self), Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
-        let (p, w) = with_rule_ctx!(self.rule, state, rule, ctxs, {
+        // Lease executor + context for this op instead of the coarse lock (#155).
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        let (p, w) = with_rule_ctx!(self.rule, context, rule, ctxs, {
             tenet_matrixalgebra::right_polar_dyn(
-                &mut *state.dense,
+                dense.dense(),
                 D::ctx_of(ctxs),
                 rule,
                 &self.space,
@@ -3958,11 +4004,13 @@ impl Tensor {
         // `eigh_full_dyn` returns only the spectrum + eigenvectors (no dense d),
         // so nothing O(rank²) is materialized and discarded here (#56 item N).
         let complex = self.dtype() == Dtype::C64;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eigh_full_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eigh_full_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok((
                 self.from_diagonal_real_spectrum(out.eigenvalues, complex)?,
@@ -3983,12 +4031,14 @@ impl Tensor {
         // `eigh_full`). `out.eigenvalues` is also returned to the caller, so it
         // is cloned into the diagonal factor.
         let complex = self.dtype() == Dtype::C64;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eigh_trunc_dyn(
-                    &mut *state.dense,
+                    dense.dense(),
                     rule,
                     &self.space,
                     data,
@@ -4008,11 +4058,13 @@ impl Tensor {
     /// (MatrixAlgebraKit `eigh_vals`). Real for both dtypes.
     pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
         self.reject_unwired_su3("Tensor::eigh_vals")?;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eigh_vals_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eigh_vals_dyn(dense.dense(), rule, &self.space, data)
             })
             .map_err(Into::into)
         })
@@ -4025,11 +4077,13 @@ impl Tensor {
     /// `eigen`, whose `D` and `V` are `ComplexF64` for real input.
     pub fn eig_full(&self) -> Result<(Self, Self), Error> {
         self.reject_unwired_su3("Tensor::eig_full")?;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eig_full_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eig_full_dyn(dense.dense(), rule, &self.space, data)
             })?;
             Ok((
                 self.from_diagonal_complex_spectrum(out.eigenvalues)?,
@@ -4043,12 +4097,14 @@ impl Tensor {
     /// are always c64.
     pub fn eig_trunc(&self, truncation: &Truncation) -> Result<EigTrunc, Error> {
         self.reject_unwired_su3("Tensor::eig_trunc")?;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             let out = with_rule!(self.rule, rule, {
                 tenet_matrixalgebra::eig_trunc_dyn(
-                    &mut *state.dense,
+                    dense.dense(),
                     rule,
                     &self.space,
                     data,
@@ -4068,11 +4124,13 @@ impl Tensor {
     /// (MatrixAlgebraKit `eig_vals`). Complex for both dtypes.
     pub fn eig_vals(&self) -> Result<Vec<SectorSpectrum<Complex64>>, Error> {
         self.reject_unwired_su3("Tensor::eig_vals")?;
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
+        // Lease a dense executor for this op instead of the coarse runtime lock,
+        // so concurrent factorizations on a shared runtime run in parallel
+        // (#155); byte-identical single-threaded.
+        let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
             with_rule!(self.rule, rule, {
-                tenet_matrixalgebra::eig_vals_dyn(&mut *state.dense, rule, &self.space, data)
+                tenet_matrixalgebra::eig_vals_dyn(dense.dense(), rule, &self.space, data)
             })
             .map_err(Into::into)
         })
@@ -4086,16 +4144,12 @@ impl Tensor {
     }
 
     fn exp_impl<D: UserScalar>(&self, data: &[D]) -> Result<Self, Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
-        let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
-            tenet_matrixalgebra::exp_dyn(
-                &mut *state.dense,
-                D::ctx_of(ctxs),
-                rule,
-                &self.space,
-                data,
-            )
+        // Lease executor + context for this op instead of the coarse lock (#155).
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        let out = with_rule_ctx!(self.rule, context, rule, ctxs, {
+            tenet_matrixalgebra::exp_dyn(dense.dense(), D::ctx_of(ctxs), rule, &self.space, data)
         })?;
         Ok(self.from_dyn(out))
     }
@@ -4114,16 +4168,12 @@ impl Tensor {
     }
 
     fn inv_impl<D: UserScalar>(&self, data: &[D]) -> Result<Self, Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
-        let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
-            tenet_matrixalgebra::inv_dyn(
-                &mut *state.dense,
-                D::ctx_of(ctxs),
-                rule,
-                &self.space,
-                data,
-            )
+        // Lease executor + context for this op instead of the coarse lock (#155).
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        let out = with_rule_ctx!(self.rule, context, rule, ctxs, {
+            tenet_matrixalgebra::inv_dyn(dense.dense(), D::ctx_of(ctxs), rule, &self.space, data)
         })?;
         Ok(self.from_dyn(out))
     }
@@ -4142,11 +4192,13 @@ impl Tensor {
     }
 
     fn pinv_impl<D: UserScalar>(&self, data: &[D], rcond: f64) -> Result<Self, Error> {
-        let mut guard = self.rt.lock();
-        let state = &mut *guard;
-        let out = with_rule_ctx!(self.rule, state, rule, ctxs, {
+        // Lease executor + context for this op instead of the coarse lock (#155).
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        let out = with_rule_ctx!(self.rule, context, rule, ctxs, {
             tenet_matrixalgebra::pinv_dyn(
-                &mut *state.dense,
+                dense.dense(),
                 D::ctx_of(ctxs),
                 rule,
                 &self.space,
@@ -5960,3 +6012,83 @@ where
 
 #[cfg(test)]
 mod compact_diagonal_tests;
+
+#[cfg(test)]
+mod shared_context_tests {
+    use super::*;
+
+    /// One rayon pool per Runtime (#155 follow-up): the CI thread-cap failure
+    /// (`failed to spawn thread: WouldBlock` on macOS) came from every minted
+    /// executor building its own eager env-sized rayon pool — 28 transform
+    /// backends per `TensorExecutionContext`, times one context per concurrent
+    /// lease. Every transform backend in the runtime STATE and in a freshly
+    /// leased pooled context must therefore share the build-time
+    /// `SharedCpuContext`. The dense factorization executors go through the
+    /// same `with_shared_context` seam (`build` / `mint_dense`), pinned by
+    /// `transform_ops_builds_for_every_faer_config` in `runtime`.
+    #[test]
+    fn runtime_and_leased_contexts_share_one_cpu_context() {
+        fn assert_shared<Key: Clone + Eq + std::hash::Hash + Send + Sync + 'static>(
+            ctxs: &mut Ctxs<Key>,
+            shared: &tenet_dense::SharedCpuContext,
+        ) {
+            assert!(ctxs
+                .f64
+                .tree_context_mut()
+                .backend_mut()
+                .dense()
+                .shares_cpu_context(shared));
+            assert!(ctxs
+                .f64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared));
+            assert!(ctxs
+                .c64
+                .tree_context_mut()
+                .backend_mut()
+                .dense()
+                .shares_cpu_context(shared));
+            assert!(ctxs
+                .c64
+                .contract_backend()
+                .dense()
+                .shares_cpu_context(shared));
+        }
+
+        fn assert_all_rules(
+            context: &mut TensorExecutionContext,
+            shared: &tenet_dense::SharedCpuContext,
+        ) {
+            assert_shared(&mut context.u1, shared);
+            assert_shared(&mut context.z2, shared);
+            assert_shared(&mut context.fz2, shared);
+            assert_shared(&mut context.su2, shared);
+            assert_shared(&mut context.u1_fz2, shared);
+            assert_shared(&mut context.fz2_u1_su2, shared);
+            assert_shared(&mut context.su3, shared);
+        }
+
+        let rt = Runtime::builder().build().expect("runtime");
+        let shared = rt.execution_config().shared_ctx.clone();
+
+        // Runtime state: all 7 rules x 2 dtypes x 2 backends.
+        {
+            let mut state = rt.lock();
+            assert_shared(&mut state.u1, &shared);
+            assert_shared(&mut state.z2, &shared);
+            assert_shared(&mut state.fz2, &shared);
+            assert_shared(&mut state.su2, &shared);
+            assert_shared(&mut state.u1_fz2, &shared);
+            assert_shared(&mut state.fz2_u1_su2, &shared);
+            assert_shared(&mut state.su3, &shared);
+        }
+
+        // A pooled standalone-op context, and the network path's per-call
+        // context, ride the same shared context.
+        let mut lease = rt.lease_context().expect("lease");
+        assert_all_rules(lease.context(), &shared);
+        let mut network_context = TensorExecutionContext::for_runtime(&rt).expect("context");
+        assert_all_rules(&mut network_context, &shared);
+    }
+}
