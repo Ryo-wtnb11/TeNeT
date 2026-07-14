@@ -426,6 +426,129 @@ fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
 }
 
 #[test]
+fn compact_svd_plan_reuses_clone_before_init_and_concurrent_first_use() {
+    // What: one semantic compact-SVD plan serves clones made before and during first use.
+    let tensor = rectangular_svd_tensor(23, 17);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let before_init = bound.space().clone();
+    let spaces = (0..8).map(|_| before_init.clone()).collect::<Vec<_>>();
+    let plans = std::thread::scope(|scope| {
+        spaces
+            .iter()
+            .map(|space| {
+                scope.spawn(|| {
+                    crate::factorize::compact_svd_plan_for_test(space)
+                        .unwrap()
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let after_init = bound.space().clone();
+    let after = crate::factorize::compact_svd_plan_for_test(&after_init)
+        .unwrap()
+        .unwrap();
+
+    assert!(plans.iter().all(|plan| Arc::ptr_eq(plan, &plans[0])));
+    assert!(Arc::ptr_eq(&after, &plans[0]));
+}
+
+#[test]
+fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
+    // What: one semantic plan serves distinct provider Arcs while U/S/Vh inherit each caller.
+    let tensor = rectangular_svd_tensor(7, 5);
+    let first_provider = Arc::new(Z2FusionRule);
+    let second_provider = Arc::new(Z2FusionRule);
+    let first = bound_tensor(Arc::clone(&first_provider), &tensor);
+    let second = bound_tensor(Arc::clone(&second_provider), &tensor);
+    let first_plan = crate::factorize::compact_svd_plan_for_test(first.space())
+        .unwrap()
+        .unwrap();
+    let second_plan = crate::factorize::compact_svd_plan_for_test(second.space())
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(&first_plan, &second_plan));
+
+    let first_input = BoundDynamicTensorRef::try_new(first.space(), tensor.data()).unwrap();
+    let second_input = BoundDynamicTensorRef::try_new(second.space(), tensor.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let first_svd = svd_compact_dyn(&mut dense, &first_input).unwrap();
+    let second_svd = svd_compact_dyn(&mut dense, &second_input).unwrap();
+
+    for factor in [first_svd.u(), first_svd.s(), first_svd.vh()] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &first_provider));
+    }
+    for factor in [second_svd.u(), second_svd.s(), second_svd.vh()] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &second_provider));
+    }
+}
+
+#[test]
+fn compact_svd_cached_plan_does_not_retain_first_provider() {
+    // What: a cached semantic plan never owns the provider that first built it.
+    let tensor = rectangular_svd_tensor(19, 11);
+    let provider = Arc::new(Z2FusionRule);
+    let weak = Arc::downgrade(&provider);
+    let bound = bound_tensor(Arc::clone(&provider), &tensor);
+    let plan = crate::factorize::compact_svd_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+
+    drop(bound);
+    drop(provider);
+
+    assert!(weak.upgrade().is_none());
+    assert!(Arc::strong_count(&plan) >= 1);
+}
+
+#[test]
+fn compact_svd_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
+    // What: every nonzero source sector has exactly one shape-correct U/Vh route and no extras.
+    let rule = Z2FusionRule;
+    let tensor = rectangular_svd_tensor(17, 13);
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let plan = crate::factorize::compact_svd_plan_for_test(bound.space())
+        .unwrap()
+        .unwrap();
+    let (source, u, vh) = crate::factorize::compact_svd_plan_regions_for_test(&plan);
+
+    let mut duplicate = u.to_vec();
+    duplicate.push(u[0].clone());
+    assert!(crate::factorize::validate_compact_svd_routes_for_test(
+        &rule, &source, &duplicate, &vh,
+    )
+    .is_err());
+    assert!(
+        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &[], &vh,).is_err()
+    );
+    assert!(
+        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &vh, &vh,).is_err()
+    );
+
+    let multi = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let multi_bound = bound_tensor(Arc::new(rule), &multi);
+    let multi_plan = crate::factorize::compact_svd_plan_for_test(multi_bound.space())
+        .unwrap()
+        .unwrap();
+    let (_, multi_u, _) = crate::factorize::compact_svd_plan_regions_for_test(&multi_plan);
+    let mut extra = u.to_vec();
+    extra.push(
+        multi_u
+            .iter()
+            .find(|region| region.coupled() == Some(SectorId::new(1)))
+            .unwrap()
+            .clone(),
+    );
+    assert!(
+        crate::factorize::validate_compact_svd_routes_for_test(&rule, &source, &extra, &vh,)
+            .is_err()
+    );
+}
+
+#[test]
 fn tsvd_fusion_reconstructs_su2_tensor() {
     run_tsvd_reconstruction_case(
         &SU2FusionRule,
@@ -525,6 +648,13 @@ fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
     // What: exact final-factor spans work for both compact rectangular shapes.
     assert_rectangular_direct_svd(5, 3);
     assert_rectangular_direct_svd(3, 5);
+}
+
+#[test]
+fn compact_svd_direct_plan_accepts_zero_rank_sectors() {
+    // What: empty row or column sectors publish an empty spectrum without factor routes.
+    assert_rectangular_direct_svd(0, 3);
+    assert_rectangular_direct_svd(3, 0);
 }
 
 #[test]
