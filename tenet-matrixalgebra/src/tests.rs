@@ -1673,6 +1673,24 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
 }
 
 #[test]
+fn truncate_svd_full_reuses_the_prebuilt_diagonal_factor() {
+    // What: composed compact-then-full truncation moves its existing S without rebuilding it.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let compact = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let result = truncate_svd(compact, &Truncation::Full).unwrap();
+
+    assert_eq!(result.error, 0.0);
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe::default()
+    );
+}
+
+#[test]
 fn svd_trunc_builds_only_the_returned_diagonal_factor() {
     // What: partial and full truncation each materialize S once at the final returned rank.
     let rule = SU2FusionRule;
@@ -1685,23 +1703,152 @@ fn svd_trunc_builds_only_the_returned_diagonal_factor() {
     );
     let input = bound_tensor(Arc::new(rule), &tensor);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let full_rank = svd_vals_dyn(&mut dense, &input.as_ref().dynamic())
+        .unwrap()
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum::<usize>();
 
-    for truncation in [Truncation::rank(5), Truncation::Full] {
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let partial =
+        svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &Truncation::rank(5)).unwrap();
+    let partial_rank = partial
+        .singular_values()
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum();
+    assert!(partial_rank < full_rank);
+    assert!(partial.error() > 0.0);
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe {
+            calls: 1,
+            values: partial_rank,
+        }
+    );
+
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let full = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &Truncation::Full).unwrap();
+    let returned_full_rank = full
+        .singular_values()
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum::<usize>();
+    assert_eq!(returned_full_rank, full_rank);
+    assert_eq!(full.error(), 0.0);
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe {
+            calls: 1,
+            values: full_rank,
+        }
+    );
+}
+
+#[test]
+fn svd_trunc_zero_rank_returns_empty_factors_and_the_full_error() {
+    // What: an all-discard decision publishes rank-zero factors and reports the entire weighted norm.
+    let rule = SU2FusionRule;
+    let provider = Arc::new(rule);
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let input = bound_tensor(Arc::clone(&provider), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let full_spectrum = svd_vals_dyn(&mut dense, &input.as_ref().dynamic()).unwrap();
+    let expected_error = full_spectrum
+        .iter()
+        .map(|entry| {
+            rule.dim_scalar(entry.sector)
+                * entry.values.iter().map(|value| value * value).sum::<f64>()
+        })
+        .sum::<f64>()
+        .sqrt();
+
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let result =
+        svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &Truncation::rank(0)).unwrap();
+
+    assert!(result.singular_values().is_empty());
+    assert!(result.u().data().is_empty());
+    assert!(result.s().data().is_empty());
+    assert!(result.vh().data().is_empty());
+    assert!((result.error() - expected_error).abs() < 1e-12);
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe {
+            calls: 1,
+            values: 0,
+        }
+    );
+    for factor in [result.u(), result.s(), result.vh()] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
+    }
+}
+
+#[test]
+fn svd_trunc_dense_failure_preserves_input_and_builds_no_diagonal_factor() {
+    // What: a failed dense SVD leaves borrowed input unchanged and cannot publish or build factors.
+    let rule = Z2FusionRule;
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let mut dense = FailAfterObservingSvdInput::default();
+
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let result = svd_trunc(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        &Truncation::rank(1),
+    );
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe::default()
+    );
+}
+
+fn assert_zero_axis_svd_trunc(rows: usize, cols: usize) {
+    let rule = Z2FusionRule;
+    let tensor = rectangular_svd_tensor(rows, cols);
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    for truncation in [Truncation::Full, Truncation::rank(1)] {
         crate::factorize::reset_diagonal_bond_build_probe();
         let result = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
-        let returned_rank = result
-            .singular_values()
-            .iter()
-            .map(|entry| entry.values.len())
-            .sum();
+        assert_eq!(
+            result
+                .singular_values()
+                .iter()
+                .map(|entry| entry.values.len())
+                .sum::<usize>(),
+            0
+        );
+        assert!(result.u().data().is_empty());
+        assert!(result.s().data().is_empty());
+        assert!(result.vh().data().is_empty());
+        assert_eq!(result.error(), 0.0);
         assert_eq!(
             crate::factorize::diagonal_bond_build_probe(),
             crate::factorize::DiagonalBondBuildProbe {
                 calls: 1,
-                values: returned_rank,
+                values: 0,
             }
         );
     }
+}
+
+#[test]
+fn svd_trunc_accepts_zero_row_and_zero_column_sectors() {
+    // What: natural empty sectors remain rank zero for full and partial truncation.
+    assert_zero_axis_svd_trunc(0, 3);
+    assert_zero_axis_svd_trunc(3, 0);
 }
 
 fn hermitian_test_tensor<R>(rule: &R, sectors: &[SectorId]) -> TensorMap<f64, 2, 2>

@@ -1130,8 +1130,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let compact = svd_compact_dyn(dense, input)?;
-    truncate_svd_dyn(compact, truncation)
+    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, input)?;
+    truncate_svd_factors_dyn(u, None, vh, singular_values, truncation)
 }
 
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
@@ -1847,24 +1847,56 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = compact.u.space().provider();
-    let decision = decide_bond_truncation(rule, &compact.singular_values, truncation, true);
-    if compact
-        .singular_values
+    truncate_svd_factors_dyn(
+        compact.u,
+        Some(compact.s),
+        compact.vh,
+        compact.singular_values,
+        truncation,
+    )
+}
+
+/// Decides and applies SVD truncation to compact factors, then materializes
+/// the returned diagonal factor at the selected rank.
+///
+/// Why not always build `S` here: the public truncating path has no useful
+/// untruncated diagonal to reuse. Why not always require a missing `S`: the
+/// composed compact-then-truncate path can return its existing factor when the
+/// decision keeps every value.
+fn truncate_svd_factors_dyn<R, D>(
+    u: BoundDynFactor<R, D>,
+    untruncated_s: Option<BoundDynFactor<R, D>>,
+    vh: BoundDynFactor<R, D>,
+    mut singular_values: Vec<SectorSpectrum>,
+    truncation: &Truncation,
+) -> Result<SvdTruncDyn<R, D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let decision = decide_bond_truncation(u.space().provider(), &singular_values, truncation, true);
+    if singular_values
         .iter()
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
+        let s = match untruncated_s {
+            Some(s) => s,
+            None => diagonal_bond_svd_factor(
+                Arc::clone(u.space().provider_arc()),
+                &singular_values,
+                &D::from_real,
+            )?,
+        };
         return Ok(SvdTruncDyn {
-            u: compact.u,
-            s: compact.s,
-            vh: compact.vh,
-            singular_values: compact.singular_values,
-            error: 0.0,
+            u,
+            s,
+            vh,
+            singular_values,
+            error: decision.error,
         });
     }
 
-    let mut singular_values = compact.singular_values;
     for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
         entry.values.truncate(count);
     }
@@ -1876,25 +1908,25 @@ where
 
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
 
-    let bond_axis = compact.u.space().space().nout();
-    let provider = Arc::clone(compact.u.space().provider_arc());
+    let bond_axis = u.space().space().nout();
+    let provider = Arc::clone(u.space().provider_arc());
     let u_factor = sliced_bond_bound_factor(
         Arc::clone(&provider),
-        compact.u.space().space(),
-        compact.u.data(),
+        u.space().space(),
+        u.data(),
         bond_axis,
         &kept_of,
-        compact.u.space().space().nout(),
+        u.space().space().nout(),
         1,
     )?;
     let vh_factor = sliced_bond_bound_factor(
         Arc::clone(&provider),
-        compact.vh.space().space(),
-        compact.vh.data(),
+        vh.space().space(),
+        vh.data(),
         0,
         &kept_of,
         1,
-        compact.vh.space().space().nin(),
+        vh.space().space().nin(),
     )?;
     let s_factor = diagonal_bond_svd_factor(provider, &singular_values, &D::from_real)?;
     Ok(SvdTruncDyn {
