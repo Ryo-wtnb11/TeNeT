@@ -4132,6 +4132,25 @@ fn tensorcontract_fusion_parallel_transform_replay_matches_serial() {
         ],
         3,
     );
+    let left_rule = FpU1Rule::default();
+    let product_rule = FpU1Su2Rule::default();
+    let left_sector =
+        |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+    let product_sector = |parity, charge, twice_spin| {
+        product_rule.encode_sector(
+            left_sector(parity, charge),
+            SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+        )
+    };
+    run_case(
+        &product_rule,
+        &[
+            product_sector(SectorId::new(0), 0, 0),
+            product_sector(SectorId::new(1), 1, 1),
+            product_sector(SectorId::new(1), -1, 1),
+        ],
+        2,
+    );
 }
 
 /// Parallel replay must preserve the fermionic twist sign: the deg-2 dual-leg

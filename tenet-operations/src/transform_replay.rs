@@ -12,6 +12,9 @@ use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
+use crate::transform_structure::{
+    TreeTransformPackReplay, TreeTransformScatterReplay, TreeTransformSingleReplay,
+};
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, ConjugateValue,
     DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
@@ -397,8 +400,9 @@ mod inactive_destination_tests {
             TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[])
                 .unwrap();
         let mut dst = vec![10.0, 20.0, 30.0, 40.0];
-        tree_transform_structure_with_strided_kernel_raw(
+        tree_transform_structure_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
             &structure,
             &Arc::new(dst_structure),
@@ -407,9 +411,148 @@ mod inactive_destination_tests {
             &[3.0],
             1.0,
             0.5,
+            4,
         )
         .unwrap();
         assert_eq!(dst, [5.0, 10.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn threaded_active_interleaved_layout_uses_the_serial_fallback() {
+        let src_structure = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
+        let dst_structure = custom_structure(vec![block(0, 2, 2, 0), block(1, 2, 2, 1)]);
+        let structure = TreeTransformStructure::compile_structures(
+            &dst_structure,
+            &src_structure,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 2.0),
+                TreeTransformBlockSpec::single(1, 1, -1.0),
+            ],
+        )
+        .unwrap();
+        assert!(!structure.parallel_schedule().singles_slice_disjoint);
+        let src = [1.0, 2.0, 3.0, 4.0];
+        let mut serial = [10.0, 20.0, 30.0, 40.0];
+        let mut threaded = serial;
+        let dst_structure = Arc::new(dst_structure);
+        let src_structure = Arc::new(src_structure);
+        for (dst, threads) in [(&mut serial[..], 1), (&mut threaded[..], 4)] {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &dst_structure,
+                &src_structure,
+                dst,
+                &src,
+                1.0,
+                0.5,
+                threads,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(threaded, serial);
+        assert_eq!(threaded, [7.0, 7.0, 19.0, 16.0]);
+    }
+
+    #[test]
+    fn threaded_replay_handles_rank_zero_blocks() {
+        let structure = Arc::new(
+            BlockStructure::packed_column_major(0, [Vec::<usize>::new(), Vec::new()]).unwrap(),
+        );
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 2.0),
+                TreeTransformBlockSpec::single(1, 1, -1.0),
+            ],
+        )
+        .unwrap();
+        let src = [3.0, 5.0];
+        let mut serial = [10.0, 20.0];
+        let mut threaded = serial;
+        for (dst, threads) in [(&mut serial[..], 1), (&mut threaded[..], 4)] {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &structure,
+                &structure,
+                dst,
+                &src,
+                1.0,
+                0.5,
+                threads,
+            )
+            .unwrap();
+        }
+        assert_eq!(threaded, serial);
+        assert_eq!(threaded, [11.0, 5.0]);
+    }
+
+    #[test]
+    fn threaded_replay_ignores_zero_extent_work() {
+        let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![0]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        assert!(transform.parallel_schedule().singles.is_empty());
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            &mut [],
+            &[],
+            1.0,
+            f64::NAN,
+            4,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn zero_extent_profile_counts_match_serial_replay() {
+        let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![0]]).unwrap());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        let mut serial = TreeTransformReplayProfile::default();
+        let mut threaded = TreeTransformReplayProfile::default();
+        for (profile, threads) in [(&mut serial, 1), (&mut threaded, 4)] {
+            tree_transform_structure_with_structural_recoupling_raw_profiled(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &structure,
+                &structure,
+                &mut [],
+                &[],
+                1.0,
+                0.0,
+                threads,
+                profile,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(threaded.single_blocks, serial.single_blocks);
+        assert_eq!(threaded.multi_blocks, serial.multi_blocks);
+        assert_eq!(threaded.packed_columns, serial.packed_columns);
+        assert_eq!(threaded.scattered_columns, serial.scattered_columns);
     }
 
     #[test]
@@ -429,8 +572,9 @@ mod inactive_destination_tests {
             TreeTransformStructure::<f64>::compile_structures(&dst_structure, &src_structure, &[])
                 .unwrap();
         let mut dst = vec![10.0, 99.0, 30.0];
-        tree_transform_structure_with_strided_kernel_raw(
+        tree_transform_structure_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
             &structure,
             &Arc::new(dst_structure),
@@ -439,6 +583,7 @@ mod inactive_destination_tests {
             &[3.0],
             1.0,
             0.5,
+            4,
         )
         .unwrap();
         assert_eq!(dst, [5.0, 99.0, 15.0]);
@@ -447,8 +592,9 @@ mod inactive_destination_tests {
     #[test]
     fn nan_beta_reaches_active_and_inactive_destinations() {
         let (mut dst, src, structure) = fixture();
-        tree_transform_structure_with_strided_kernel_raw(
+        tree_transform_structure_with_structural_recoupling_raw(
             &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
             &structure,
             &Arc::clone(dst.structure()),
@@ -457,6 +603,7 @@ mod inactive_destination_tests {
             src.data(),
             1.0,
             f64::NAN,
+            4,
         )
         .unwrap();
         assert!(dst.data().iter().all(|value| value.is_nan()));
@@ -1361,61 +1508,244 @@ where
     Ok(())
 }
 
-/// Inclusive index range `[lo, hi]` touched by a layout's strided walk over
-/// `shape` from `offset` (negative strides walk downward).
-fn layout_index_range(
-    layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
-) -> (isize, isize) {
-    let mut lo = layout.offset;
-    let mut hi = layout.offset;
-    for (&extent, &stride) in layouts
-        .shape(layout)
-        .iter()
-        .zip(layouts.strides(layout).iter())
-    {
-        let span = (extent as isize - 1) * stride;
-        if span < 0 {
-            lo += span;
-        } else {
-            hi += span;
-        }
-    }
-    (lo, hi)
+fn parallel_split(items: usize, threads: usize) -> usize {
+    let left_threads = threads / 2;
+    items
+        .saturating_mul(left_threads)
+        .div_ceil(threads)
+        .clamp(1, items - 1)
 }
 
-/// Splits `data` into one disjoint `&mut` region per item (items sorted by
-/// `lo`, each `(payload, lo, hi)` an inclusive touched range); each result
-/// carries the region and its absolute start index so layout offsets can be
-/// rebased. Returns `None` when regions overlap or run out of bounds — valid
-/// packed transform structures never do (compile rejects duplicate
-/// destination blocks), so `None` only guards degenerate stride patterns and
-/// sends the caller down the serial path.
-#[allow(clippy::type_complexity)]
-fn split_regions<'a, T, P: Copy>(
-    data: &'a mut [T],
-    items: &[(P, isize, isize)],
-) -> Option<Vec<(P, &'a mut [T], isize)>> {
-    let mut regions = Vec::with_capacity(items.len());
-    let mut rest = data;
-    // Absolute index where `rest` begins.
-    let mut consumed = 0isize;
-    for &(payload, lo, hi) in items {
-        if lo < consumed || hi < lo {
-            return None;
-        }
-        let skip = (lo - consumed) as usize;
-        let len = (hi - lo + 1) as usize;
-        if skip.checked_add(len)? > rest.len() {
-            return None;
-        }
-        let (_, tail) = std::mem::take(&mut rest).split_at_mut(skip);
-        let (region, tail) = tail.split_at_mut(len);
-        regions.push((payload, region, lo));
-        rest = tail;
-        consumed = hi + 1;
+#[allow(clippy::too_many_arguments)]
+fn replay_pack_columns<A, D>(
+    mut kernels: A,
+    layouts: &TreeTransformLayoutTable,
+    items: &[TreeTransformPackReplay],
+    packed_source: &mut [D],
+    packed_start: usize,
+    src_data: &[D],
+    storage_conjugate: bool,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    D: DenseRecouplingScalar + ConjugateValue,
+{
+    if items.is_empty() {
+        return Ok(());
     }
-    Some(regions)
+    if threads <= 1 || items.len() == 1 {
+        for item in items {
+            pack_layout_into_column(
+                &mut kernels,
+                layouts,
+                layouts.entry(item.src_layout),
+                src_data,
+                packed_source,
+                item.packed_offset - packed_start,
+                storage_conjugate,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let middle = parallel_split(items.len(), threads);
+    let boundary = items[middle].packed_offset;
+    let (left_data, right_data) = packed_source.split_at_mut(boundary - packed_start);
+    let (left_items, right_items) = items.split_at(middle);
+    let left_threads = threads / 2;
+    let right_threads = threads - left_threads;
+    let right_kernels = kernels.clone();
+    let (left, right) = rayon::join(
+        || {
+            replay_pack_columns(
+                kernels,
+                layouts,
+                left_items,
+                left_data,
+                packed_start,
+                src_data,
+                storage_conjugate,
+                left_threads,
+            )
+        },
+        || {
+            replay_pack_columns(
+                right_kernels,
+                layouts,
+                right_items,
+                right_data,
+                boundary,
+                src_data,
+                storage_conjugate,
+                right_threads,
+            )
+        },
+    );
+    left?;
+    right
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_single_blocks<A, D, C>(
+    mut kernels: A,
+    structure: &TreeTransformStructure<C>,
+    items: &[TreeTransformSingleReplay],
+    dst_data: &mut [D],
+    dst_start: isize,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    if items.is_empty() {
+        return Ok(());
+    }
+    if threads <= 1 || items.len() == 1 {
+        let mut zero_strides = Vec::new();
+        for item in items {
+            let dst_layout = structure.layouts.entry(item.dst_layout);
+            let src_layout = structure.layouts.entry(item.src_layout);
+            let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
+            kernels.add_strided(
+                &mut zero_strides,
+                dst_data,
+                src_data,
+                structure.layouts.shape(dst_layout),
+                structure.layouts.strides(dst_layout),
+                structure.layouts.strides(src_layout),
+                dst_layout.offset - dst_start,
+                src_layout.offset,
+                structure.storage_conjugate(),
+                scale,
+                beta,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let middle = parallel_split(items.len(), threads);
+    let boundary = items[middle].dst_lo;
+    let split =
+        usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
+    let (left_data, right_data) = dst_data.split_at_mut(split);
+    let (left_items, right_items) = items.split_at(middle);
+    let left_threads = threads / 2;
+    let right_threads = threads - left_threads;
+    let right_kernels = kernels.clone();
+    let (left, right) = rayon::join(
+        || {
+            replay_single_blocks(
+                kernels,
+                structure,
+                left_items,
+                left_data,
+                dst_start,
+                src_data,
+                alpha,
+                beta,
+                left_threads,
+            )
+        },
+        || {
+            replay_single_blocks(
+                right_kernels,
+                structure,
+                right_items,
+                right_data,
+                boundary,
+                src_data,
+                alpha,
+                beta,
+                right_threads,
+            )
+        },
+    );
+    left?;
+    right
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_scatter_columns<A, D>(
+    mut kernels: A,
+    layouts: &TreeTransformLayoutTable,
+    items: &[TreeTransformScatterReplay],
+    dst_data: &mut [D],
+    dst_start: isize,
+    packed_destination: &[D],
+    alpha: D,
+    beta: D,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    D: DenseRecouplingScalar + ConjugateValue,
+{
+    if items.is_empty() {
+        return Ok(());
+    }
+    if threads <= 1 || items.len() == 1 {
+        for item in items {
+            let layout = layouts.entry(item.dst_layout);
+            kernels.axpby_strided(
+                dst_data,
+                packed_destination,
+                layouts.shape(layout),
+                layouts.strides(layout),
+                layouts.packed_strides(layout),
+                layout.offset - dst_start,
+                offset_to_isize(item.packed_offset)?,
+                alpha,
+                beta,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let middle = parallel_split(items.len(), threads);
+    let boundary = items[middle].dst_lo;
+    let split =
+        usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
+    let (left_data, right_data) = dst_data.split_at_mut(split);
+    let (left_items, right_items) = items.split_at(middle);
+    let left_threads = threads / 2;
+    let right_threads = threads - left_threads;
+    let right_kernels = kernels.clone();
+    let (left, right) = rayon::join(
+        || {
+            replay_scatter_columns(
+                kernels,
+                layouts,
+                left_items,
+                left_data,
+                dst_start,
+                packed_destination,
+                alpha,
+                beta,
+                left_threads,
+            )
+        },
+        || {
+            replay_scatter_columns(
+                right_kernels,
+                layouts,
+                right_items,
+                right_data,
+                boundary,
+                packed_destination,
+                alpha,
+                beta,
+                right_threads,
+            )
+        },
+    );
+    left?;
+    right
 }
 
 /// Threaded variant of [`tree_transform_blocks_with_batched_recoupling`]
@@ -1428,17 +1758,19 @@ fn split_regions<'a, T, P: Copy>(
 ///   rejects duplicate destination blocks
 ///   (`OperationError::DuplicateTransformDestination`) and pack columns are
 ///   disjoint scratch ranges by construction; the workspace forbids `unsafe`,
-///   so disjointness is realized structurally by pre-splitting the buffers
-///   into per-item `&mut` regions (`split_at_mut`) and rebasing offsets,
-///   instead of TensorKit-style shared writes.
+///   so disjointness is realized structurally by recursively splitting the
+///   buffers at compiled boundaries (`split_at_mut`) and rebasing offsets,
+///   instead of TensorKit-style shared writes. Interleaved layouts whose
+///   bounding slices overlap stay serial: exact element disjointness is not
+///   enough to create independent Rust slices without unsafe code.
 /// - The batched recoupling GEMM stays ONE serial grouped call between the
 ///   two parallel phases — the dense executor owns its own parallelism and
 ///   no nesting arises because the batch submits outside both regions.
 ///
-/// Scheduling: rayon parallel iterators on the global pool (the same pool
-/// strided-kernel's threaded kernels use), with `with_min_len` bounding the
-/// split count to the configured `threads` — the moral equivalent of
-/// TensorKit's `min(ntasks, nblocks)` spawned workers.
+/// Scheduling uses recursive `rayon::join` on the global pool (the same pool
+/// strided-kernel's threaded kernels use), capped by the configured worker
+/// count. The replay descriptors and split boundaries are compiled into the
+/// structure, so warm replay does not reconstruct operation-neutral Vecs.
 ///
 /// Per-task state is one cloned kernel adapter (a ZST for the strided
 /// adapter) and one `Vec::new()` zero-strides scratch (no allocation until a
@@ -1469,13 +1801,12 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
     C: Copy + Sync,
 {
-    use rayon::prelude::*;
-
     let layouts = &structure.layouts;
     let recoupling_plan = structure.recoupling_plan();
+    let schedule = structure.parallel_schedule();
 
-    // Build phase (serial): size the pack scratch from the compile-time plan,
-    // ensure converted coefficients, and collect the parallel work items.
+    // Replay only prepares numerical scratch; operation-neutral descriptors
+    // and safe split boundaries were compiled with the structure.
     let start = profile.as_ref().map(|_| std::time::Instant::now());
     workspace.prepare_packed_buffers(
         recoupling_plan.source_len(),
@@ -1486,54 +1817,7 @@ where
         profile.multi_workspace_prepare += start.elapsed();
     }
 
-    // (dst_layout, src_layout, coefficient index) per Single block.
-    let mut singles: Vec<(usize, usize, usize)> = Vec::new();
-    // (source layout, packed source offset, column length) per Multi pack column.
-    let mut pack_columns: Vec<(usize, usize, usize)> = Vec::new();
-    // (dst layout, packed destination offset) per Multi scatter column.
-    let mut scatter_columns: Vec<(usize, usize)> = Vec::new();
-
-    for block in &structure.blocks {
-        let TreeTransformBlock::Single {
-            dst_layout,
-            src_layout,
-            coefficient,
-        } = *block
-        else {
-            continue;
-        };
-        singles.push((dst_layout, src_layout, coefficient));
-    }
-    for (block_index, job) in recoupling_plan.entries() {
-        let TreeTransformBlock::Multi {
-            dst_layout_start,
-            dst_count,
-            src_layout_start,
-            src_count,
-            element_count,
-            ..
-        } = *recoupling_multi_block(structure, block_index)?
-        else {
-            unreachable!("recoupling_multi_block only returns Multi blocks");
-        };
-        debug_assert_eq!(job.rows, element_count);
-        debug_assert_eq!(job.contracted, src_count);
-        debug_assert_eq!(job.cols, dst_count);
-        for src_index in 0..src_count {
-            pack_columns.push((
-                src_layout_start + src_index,
-                job.lhs_offset + src_index * element_count,
-                element_count,
-            ));
-        }
-        for dst_index in 0..dst_count {
-            scatter_columns.push((
-                dst_layout_start + dst_index,
-                job.dst_offset + dst_index * element_count,
-            ));
-        }
-    }
-    let single_count = singles.len();
+    let single_count = schedule.single_block_count;
     let multi_count = recoupling_plan.jobs().len();
     let start = profile.as_ref().map(|_| std::time::Instant::now());
     let converted = ensure_recoupling_coefficients(workspace, structure)?;
@@ -1547,120 +1831,56 @@ where
         profile.multi_blocks += multi_count;
     }
 
-    // At most `threads` parallel chunks per phase (TensorKit's
-    // `min(ntasks, nblocks)` worker bound) on rayon's global pool.
-    let min_len = |items: usize| items.div_ceil(threads).max(1);
     let storage_conjugate = structure.storage_conjugate();
 
     // Phase A: pack columns and Single applies in parallel.
     {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
 
-        let mut source_items: Vec<(usize, isize, isize)> = Vec::with_capacity(pack_columns.len());
-        for &(layout, offset, len) in &pack_columns {
-            if len == 0 {
-                return Err(OperationError::ElementCountOverflow);
-            }
-            let hi_offset = offset
-                .checked_add(len)
-                .and_then(|end| end.checked_sub(1))
-                .ok_or(OperationError::ElementCountOverflow)?;
-            source_items.push((
-                layout,
-                offset_to_isize(offset)?,
-                offset_to_isize(hi_offset)?,
-            ));
-        }
-        source_items.sort_unstable_by_key(|&(_, lo, _)| lo);
-        let column_regions =
-            split_regions(workspace.packed.source_mut().as_mut_slice(), &source_items).ok_or_else(
-                || OperationError::StridedKernel {
-                    message: "recoupling source scratch ranges are not disjoint".to_string(),
-                },
-            )?;
-        let pack_chunk = min_len(column_regions.len());
-        column_regions
-            .into_par_iter()
-            .with_min_len(pack_chunk)
-            .try_for_each_init(
-                || kernels.clone(),
-                |kernels, (layout, column, _)| {
-                    pack_layout_into_column(
-                        kernels,
-                        layouts,
-                        layouts.entry(layout),
-                        src_data,
-                        column,
-                        0,
-                        storage_conjugate,
-                    )
-                },
-            )?;
+        replay_pack_columns(
+            kernels.clone(),
+            layouts,
+            &schedule.pack_columns,
+            workspace.packed.source_mut().as_mut_slice(),
+            0,
+            src_data,
+            storage_conjugate,
+            threads,
+        )?;
 
-        // Single blocks write disjoint destination subblocks: split dst_data
-        // into per-item regions and rebase the destination offsets.
-        let mut items: Vec<((usize, usize, usize), isize, isize)> = singles
-            .iter()
-            .map(|&item| {
-                let (lo, hi) = layout_index_range(layouts, layouts.entry(item.0));
-                (item, lo, hi)
-            })
-            .collect();
-        items.sort_unstable_by_key(|&(_, lo, _)| lo);
-        match split_regions(dst_data, &items) {
-            Some(regions) => {
-                let single_chunk = min_len(regions.len());
-                regions
-                    .into_par_iter()
-                    .with_min_len(single_chunk)
-                    .try_for_each_init(
-                        || (kernels.clone(), Vec::new()),
-                        |(kernels, zero_strides),
-                         ((dst_layout, src_layout, coefficient), region, region_start)| {
-                            let dst_layout = layouts.entry(dst_layout);
-                            let src_layout = layouts.entry(src_layout);
-                            let scale =
-                                alpha.scale_by_coefficient(structure.coefficient(coefficient));
-                            kernels.add_strided(
-                                zero_strides,
-                                region,
-                                src_data,
-                                layouts.shape(dst_layout),
-                                layouts.strides(dst_layout),
-                                layouts.strides(src_layout),
-                                dst_layout.offset - region_start,
-                                src_layout.offset,
-                                storage_conjugate,
-                                scale,
-                                beta,
-                            )
-                        },
-                    )?;
-            }
-            // Degenerate (overlapping) regions: fall back to the serial
-            // Single loop; valid packed structures never reach this.
-            None => {
-                let mut zero_strides = Vec::new();
-                for &(dst_layout, src_layout, coefficient) in &singles {
-                    tree_transform_single_with_strided_kernel(
-                        kernels,
-                        &mut zero_strides,
-                        layouts,
-                        layouts.entry(dst_layout),
-                        layouts.entry(src_layout),
-                        structure.coefficient(coefficient),
-                        storage_conjugate,
-                        dst_data,
-                        src_data,
-                        alpha,
-                        beta,
-                    )?;
-                }
+        if schedule.singles_slice_disjoint {
+            replay_single_blocks(
+                kernels.clone(),
+                structure,
+                &schedule.singles,
+                dst_data,
+                0,
+                src_data,
+                alpha,
+                beta,
+                threads,
+            )?;
+        } else {
+            let mut zero_strides = Vec::new();
+            for item in &schedule.singles {
+                tree_transform_single_with_strided_kernel(
+                    kernels,
+                    &mut zero_strides,
+                    layouts,
+                    layouts.entry(item.dst_layout),
+                    layouts.entry(item.src_layout),
+                    structure.coefficient(item.coefficient),
+                    storage_conjugate,
+                    dst_data,
+                    src_data,
+                    alpha,
+                    beta,
+                )?;
             }
         }
 
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-            profile.packed_columns += pack_columns.len();
+            profile.packed_columns += schedule.packed_column_count;
             profile.multi_pack += start.elapsed();
         }
     }
@@ -1690,57 +1910,36 @@ where
     {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         let packed_destination = workspace.packed.destination().as_slice();
-        let mut items: Vec<((usize, usize), isize, isize)> = scatter_columns
-            .iter()
-            .map(|&item| {
-                let (lo, hi) = layout_index_range(layouts, layouts.entry(item.0));
-                (item, lo, hi)
-            })
-            .collect();
-        items.sort_unstable_by_key(|&(_, lo, _)| lo);
-        match split_regions(dst_data, &items) {
-            Some(regions) => {
-                let scatter_chunk = min_len(regions.len());
-                regions
-                    .into_par_iter()
-                    .with_min_len(scatter_chunk)
-                    .try_for_each_init(
-                        || kernels.clone(),
-                        |kernels, ((layout, packed_offset), region, region_start)| {
-                            let layout = layouts.entry(layout);
-                            kernels.axpby_strided(
-                                region,
-                                packed_destination,
-                                layouts.shape(layout),
-                                layouts.strides(layout),
-                                layouts.packed_strides(layout),
-                                layout.offset - region_start,
-                                offset_to_isize(packed_offset)?,
-                                alpha,
-                                beta,
-                            )
-                        },
-                    )?;
-            }
-            None => {
-                let mut zero_strides = Vec::new();
-                for &(layout, packed_offset) in &scatter_columns {
-                    scatter_column_into_layout(
-                        kernels,
-                        &mut zero_strides,
-                        layouts,
-                        layouts.entry(layout),
-                        packed_destination,
-                        packed_offset,
-                        dst_data,
-                        alpha,
-                        beta,
-                    )?;
-                }
+        if schedule.scatter_slice_disjoint {
+            replay_scatter_columns(
+                kernels.clone(),
+                layouts,
+                &schedule.scatter_columns,
+                dst_data,
+                0,
+                packed_destination,
+                alpha,
+                beta,
+                threads,
+            )?;
+        } else {
+            let mut zero_strides = Vec::new();
+            for item in &schedule.scatter_columns {
+                scatter_column_into_layout(
+                    kernels,
+                    &mut zero_strides,
+                    layouts,
+                    layouts.entry(item.dst_layout),
+                    packed_destination,
+                    item.packed_offset,
+                    dst_data,
+                    alpha,
+                    beta,
+                )?;
             }
         }
         if let (Some(profile), Some(start)) = (profile, start) {
-            profile.scattered_columns += scatter_columns.len();
+            profile.scattered_columns += schedule.scattered_column_count;
             profile.multi_scatter += start.elapsed();
         }
     }
