@@ -109,6 +109,43 @@ jobs:
       - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
 
+  # opt-path (wraps opt-einsum-path) and cotengra-python (shells out to an
+  # installed Python `cotengra`) have real code but, unlike the backend rows
+  # above, no matrix coverage anywhere in CI (#153). Both need a host
+  # execution backend to run anything, so cpu-faer rides along. Unlike
+  # backend-contract this runs the actual test suite, not just `cargo
+  # check`: the point is to start exercising optimizer_fallback.rs /
+  # plan_cache.rs's feature-gated tests, which today never run in CI.
+  # cotengra-python is build + unit tests only — its one test that shells
+  # out to Python (`runs_installed_cotengra_when_requested`) early-returns
+  # unless `TENET_RUN_COTENGRA_PYTHON_TEST` is set, so no Python env is
+  # needed here.
+  feature-contract:
+    name: feature contract (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: opt-path, features: "opt-path,cpu-faer" }
+          - { name: cotengra-python, features: "cotengra-python,cpu-faer" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: feature-${{ matrix.name }}
+      - run: cargo test --workspace --no-default-features --features "${{ matrix.features }}"
+        working-directory: tenet
+
   no-backend-contract:
     name: no backend is rejected explicitly
     runs-on: ubuntu-latest
