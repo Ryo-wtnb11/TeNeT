@@ -143,6 +143,18 @@ impl RuleIdentity {
 }
 
 pub trait FusionRule: 'static {
+    /// Stable semantic identity of this provider.
+    ///
+    /// Equal identities require immutable equivalence of every operation that
+    /// can affect fusion-space structure or numerical recoupling, including
+    /// fusion/braiding styles, vacuum, fusion channels, duals, F/R symbols,
+    /// dimensions, twists, and bends.
+    /// Returning one identity for semantically different providers violates
+    /// this trait contract.
+    ///
+    /// Why not `TypeId` or the provider address: one Rust type may hold
+    /// different tables, while distinct allocations may represent the same
+    /// immutable rule and must be safe to share in semantic caches.
     fn rule_identity(&self) -> RuleIdentity;
 
     fn fusion_style(&self) -> FusionStyleKind;

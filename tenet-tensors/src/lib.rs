@@ -54,7 +54,9 @@ pub use contract::{
     TensorContractFusionProfile, TensorContractFusionRoute, TensorContractPlanKey,
     TensorContractStructure, TensorContractStructureTerm, TensorContractWorkspace,
 };
-pub use contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+pub use contract::{
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, ValidatedDynamicFusionLayout,
+};
 pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
