@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use tenet_core::{
     BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTensorMapSpace,
     FusionTreeHomSpace, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
@@ -6,29 +7,10 @@ use tenet_core::{
 };
 use tenet_tensors::{
     adjoint, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
-    TensorContractFusionExecutionContext, TensorContractSpec, TensorTraceAxisSpec,
-    TensorTraceFusionStructure, TreeTransformBuiltinRuleCacheKey,
+    BoundDynamicFusionMapSpace, TensorContractFusionExecutionContext, TensorContractSpec,
+    TreeTransformBuiltinRuleCacheKey,
 };
-use tenet_tensors::{DynamicFusionMapSpace, OperationError, TreeTransformOperation};
-
-#[test]
-fn space_built_for_z2_rejects_u1_operation_with_same_integer_sector() {
-    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
-        &Z2FusionRule,
-        FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
-        [vec![1]],
-    )
-    .unwrap();
-
-    let error = space
-        .transformed(&U1FusionRule, &TreeTransformOperation::permute([0], []))
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        OperationError::Core(CoreError::FusionRuleMismatch { .. })
-    ));
-}
+use tenet_tensors::{DynamicFusionMapSpace, OperationError};
 
 #[derive(Clone)]
 struct SymbolOnlyRule {
@@ -324,26 +306,6 @@ fn fusion_contract_context_rejects_unbound_space_before_warm_resolution_cache_hi
 }
 
 #[test]
-fn space_rejects_same_type_rule_when_only_symbols_differ() {
-    let first = SymbolOnlyRule::new(1.0);
-    let second = SymbolOnlyRule::new(-1.0);
-    let space = DynamicFusionMapSpace::from_degeneracy_shapes(
-        &first,
-        FusionTreeHomSpace::from_sector_ids([(0, 1)], []),
-        [vec![1]],
-    )
-    .unwrap();
-
-    let error = space
-        .transformed(&second, &TreeTransformOperation::permute([0], []))
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        OperationError::Core(CoreError::FusionRuleMismatch { .. })
-    ));
-}
-
-#[test]
 fn dynamic_trace_rejects_same_type_rule_when_only_symbols_differ() {
     let first = SymbolOnlyRule::new(1.0);
     let second = SymbolOnlyRule::new(-1.0);
@@ -354,13 +316,10 @@ fn dynamic_trace_rejects_same_type_rule_when_only_symbols_differ() {
     )
     .unwrap();
 
-    let error = TensorTraceFusionStructure::<f64>::compile_fusion_dyn(
-        &second,
-        &space,
-        &space,
-        TensorTraceAxisSpec::new(&[0], &[], &[]),
-    )
-    .unwrap_err();
+    // What: the wrong provider is rejected at the one raw-to-bound ingress;
+    // public trace APIs cannot accept an independent provider afterwards.
+    let error =
+        BoundDynamicFusionMapSpace::bind_multiplicity_free(space, Arc::new(second)).unwrap_err();
     assert!(matches!(
         error,
         OperationError::Core(CoreError::FusionRuleMismatch { .. })

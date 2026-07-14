@@ -313,6 +313,15 @@ per coupled sector across the codomain | domain split:
 - [`prelude::Tensor::svd_trunc`] — truncated SVD; see below.
 - [`prelude::Tensor::svd_compact`] / [`prelude::Tensor::svd_full`] /
   [`prelude::Tensor::svd_vals`].
+
+For generic-fusion SU(3) tensors, the supported decomposition subset is
+`svd_compact`, `svd_trunc`, `svd_vals`, `qr_compact`, `lq_compact`,
+`left_orth`, and `right_orth`. Full SVD/QR/LQ, null spaces, spectral
+decompositions, polar decompositions, and `inv`/`pinv`/`exp` are currently
+unsupported. The full and complementary-space operations require a
+multiplicity-aware completion; TeNeT returns `Error::UnsupportedForRule`
+instead of applying a multiplicity-free construction that would produce the
+wrong space.
 - [`prelude::Tensor::qr_compact`] / [`prelude::Tensor::qr_full`],
   [`prelude::Tensor::lq_compact`] / [`prelude::Tensor::lq_full`].
 - [`prelude::Tensor::left_orth`] / [`prelude::Tensor::right_orth`] —
@@ -574,12 +583,14 @@ tensorcontract_into(
 assert_eq!(c.data(), &[19.0, 43.0, 22.0, 50.0]);
 ```
 
-**Dynamic `_dyn` API** ([`operations::DynamicFusionMapSpace`] + flat data
-slices, `tensorcontract_fusion_dyn_into`, `tree_transform_dyn_into`,
-`adjoint_dyn`, `matrixalgebra::svd_*_dyn` / `eigh_*_dyn` / ...): rank is a
-runtime value with no ceiling. This is exactly what [`prelude::Tensor`]
-calls; drop to it when you need dynamic rank without the user layer's
-runtime/rule erasure (e.g. your own context management or scalar types).
+**Dynamic `_dyn` API** (`tensorcontract_fusion_dyn_into`,
+`tree_transform_dyn_into`, and the `matrixalgebra::*_dyn` functions): rank is
+a runtime value with no ceiling. Provider-sensitive matrix algebra takes a
+validated [`matrixalgebra::BoundDynamicTensorRef`], which borrows a
+[`operations::BoundDynamicFusionMapSpace`] together with its flat data. The
+fusion provider is therefore inherited from the space rather than supplied as
+an independent argument. This is exactly what [`prelude::Tensor`] calls; drop
+to it when you need dynamic rank without the user layer's runtime erasure.
 
 ### If you are coming from TensorKit
 

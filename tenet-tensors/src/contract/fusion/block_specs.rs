@@ -10,7 +10,7 @@ use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::OperationError;
 use tenet_operations::TensorContractSpec;
 
-use super::super::dynamic_space::DynamicFusionMapSpace;
+use super::super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use super::super::fusion_block::validate_fusion_contract_rule;
 use super::super::structure::{
     TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure,
@@ -73,7 +73,7 @@ where
     let rhs_fusion = rhs
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    tensorcontract_fusion_structure_dyn(
+    tensorcontract_fusion_structure_dyn_raw(
         rule,
         &DynamicFusionMapSpace::from_typed(dst_fusion),
         &DynamicFusionMapSpace::from_typed(lhs_fusion),
@@ -84,10 +84,33 @@ where
     )
 }
 
-/// Dynamic-rank variant of [`tensorcontract_fusion_structure`]. The storage
-/// structures are the layouts the source data slices are replayed with (for
-/// unconjugated operands these are the spaces' own subblock structures).
+/// Dynamic-rank variant of [`tensorcontract_fusion_structure`] retaining the
+/// checked provider authority carried by the spaces.
 pub fn tensorcontract_fusion_structure_dyn<R>(
+    dst: &BoundDynamicFusionMapSpace<R>,
+    lhs: &BoundDynamicFusionMapSpace<R>,
+    rhs: &BoundDynamicFusionMapSpace<R>,
+    lhs_storage_structure: Arc<tenet_core::BlockStructure>,
+    rhs_storage_structure: Arc<tenet_core::BlockStructure>,
+    axes: TensorContractSpec<'_>,
+) -> Result<TensorContractStructure, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    // Why not accept a separate rule: a caller must not be able to pair a
+    // layout with a second semantic provider after the checked bind boundary.
+    tensorcontract_fusion_structure_dyn_raw(
+        lhs.provider(),
+        dst.space(),
+        lhs.space(),
+        rhs.space(),
+        lhs_storage_structure,
+        rhs_storage_structure,
+        axes,
+    )
+}
+
+pub(crate) fn tensorcontract_fusion_structure_dyn_raw<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,

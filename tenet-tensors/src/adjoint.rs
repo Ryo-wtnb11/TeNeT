@@ -15,7 +15,7 @@ use tenet_core::{
 };
 
 use crate::cache::operation_global_registry;
-use crate::contract::DynamicFusionMapSpace;
+use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
 
@@ -111,7 +111,7 @@ where
 /// and even this metadata build pays per-key shape lookups plus
 /// `from_degeneracy_shapes`/`scratch_subblock_structure`/content interning, so
 /// an equal source resolves the already-built space instead (#118).
-pub fn adjoint_space_dyn<R>(
+pub(crate) fn adjoint_space_dyn<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
 ) -> Result<DynamicFusionMapSpace, OperationError>
@@ -188,7 +188,7 @@ where
 /// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
 /// domain swapped) together with freshly allocated coupled-layout data whose
 /// blocks are the conjugate transposes of the source blocks.
-pub fn adjoint_dyn<R, D>(
+pub(crate) fn adjoint_dyn<R, D>(
     rule: &R,
     space: &DynamicFusionMapSpace,
     data: &[D],
@@ -269,6 +269,62 @@ where
     Ok((adjoint_space, result))
 }
 
+/// Dynamic-rank adjoint that retains the exact provider allocation of its
+/// checked source space.
+pub fn adjoint_bound_dyn<R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    data: &[D],
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    let (output, data) = adjoint_dyn(space.provider(), space.space(), data)?;
+    let output =
+        BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)?;
+    Ok((output, data))
+}
+
+/// Generic dynamic-rank adjoint that retains the exact provider allocation of
+/// its checked source space.
+pub fn adjoint_bound_dyn_generic<R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    data: &[D],
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
+where
+    R: FusionRule,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    let (output, data) = adjoint_dyn_generic(space.provider(), space.space(), data)?;
+    let output =
+        BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)?;
+    Ok((output, data))
+}
+
+/// Lazy-adjoint metadata retaining the exact provider allocation of the
+/// checked source space.
+pub fn adjoint_bound_space_dyn<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
+    let output = adjoint_space_dyn(space.provider(), space.space())?;
+    BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
+}
+
+/// Generic lazy-adjoint metadata retaining the exact provider allocation of
+/// the checked source space.
+pub fn adjoint_bound_space_dyn_generic<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: FusionRule,
+{
+    let output = adjoint_space_dyn_generic(space.provider(), space.space())?;
+    BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
+}
+
 /// Generic-fusion (SU(N)) sibling of [`adjoint_space_dyn`]. The adjoint is a
 /// pure per-block relabel — codomain and domain trees swap wholesale and each
 /// coupled block is transposed — with NO leg bending and NO recoupling, so it
@@ -276,7 +332,7 @@ where
 /// rule: the only difference from the mult-free path is that the block keys are
 /// enumerated multiplicity-aware (vertex-labelled fusion trees). Bound relaxes
 /// to [`FusionRule`] accordingly (no F/R symbols are touched).
-pub fn adjoint_space_dyn_generic<R>(
+pub(crate) fn adjoint_space_dyn_generic<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
 ) -> Result<DynamicFusionMapSpace, OperationError>
@@ -328,7 +384,7 @@ where
 /// mult-free path — no recoupling coefficients enter — so this is the eager
 /// materialization TensorKit takes when an SU(N) adjoint is consumed by
 /// something other than a contraction.
-pub fn adjoint_dyn_generic<R, D>(
+pub(crate) fn adjoint_dyn_generic<R, D>(
     rule: &R,
     space: &DynamicFusionMapSpace,
     data: &[D],

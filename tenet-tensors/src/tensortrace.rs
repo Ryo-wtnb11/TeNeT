@@ -9,7 +9,7 @@ use tenet_core::{
     TensorStorage,
 };
 
-use crate::contract::DynamicFusionMapSpace;
+use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use crate::lowering::{adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes};
 use crate::strided::offset_to_isize;
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
@@ -183,9 +183,23 @@ impl<C> TensorTraceFusionStructure<C> {
         )
     }
 
-    /// Dynamic-rank [`Self::compile_fusion_spaces`] over
-    /// [`DynamicFusionMapSpace`] handles (the user-layer representation).
+    /// Dynamic-rank [`Self::compile_fusion_spaces`] retaining the source
+    /// provider authority.
     pub fn compile_fusion_dyn<R>(
+        dst: &BoundDynamicFusionMapSpace<R>,
+        src: &BoundDynamicFusionMapSpace<R>,
+        axes: TensorTraceAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+    {
+        // Why not accept a separate rule: trace coefficients are categorical
+        // semantics, so they must come from the provider that proved the source.
+        Self::compile_fusion_dyn_raw(src.provider(), dst.space(), src.space(), axes)
+    }
+
+    pub(crate) fn compile_fusion_dyn_raw<R>(
         rule: &R,
         dst: &DynamicFusionMapSpace,
         src: &DynamicFusionMapSpace,
@@ -1070,12 +1084,48 @@ where
 /// Dynamic-rank fusion tensortrace: partial (or full) trace of `src` over
 /// the `axes` trace pairs into caller-allocated `dst_data`
 /// (`dst = beta * dst + alpha * trace(src)`), operating on
-/// [`DynamicFusionMapSpace`] handles plus raw coupled-layout slices —
+/// provider-bound dynamic spaces plus raw coupled-layout slices —
 /// the dynamic analog of [`crate::tensortrace_fusion_into`], sharing the
 /// same term compilation (TensorKit `tensortrace!` semantics: quantum
 /// dimension factors and twists, i.e. the fermionic supertrace).
 #[allow(clippy::too_many_arguments)]
 pub fn tensortrace_fusion_dyn_into<R, D>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    dst_data: &mut [D],
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    tensortrace_fusion_dyn_into_raw(
+        src_space.provider(),
+        dst_space.space(),
+        dst_data,
+        src_space.space(),
+        src_data,
+        axes,
+        alpha,
+        beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensortrace_fusion_dyn_into_raw<R, D>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
     dst_data: &mut [D],
@@ -1100,7 +1150,7 @@ where
         + strided_kernel::MaybeSendSync,
 {
     let structure =
-        TensorTraceFusionStructure::compile_fusion_dyn(rule, dst_space, src_space, axes)?;
+        TensorTraceFusionStructure::compile_fusion_dyn_raw(rule, dst_space, src_space, axes)?;
     scale_trace_destination(dst_data, beta);
     let descriptor = structure.descriptor();
     for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {

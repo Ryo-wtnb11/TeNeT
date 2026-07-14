@@ -1,15 +1,143 @@
 use tenet_core::{
-    BlockKey, FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeKey, MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    BlockKey, BraidingStyleKind, CoreError, FusionProductSpace, FusionRule, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
+    Z2FusionRule,
 };
 use tenet_tensors::{
-    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, OperationError, OutputAxisOrder,
+    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
+    TreeTransformRuleCacheKey,
 };
 
-use crate::factorize::truncate_svd;
+use crate::factorize::{dyn_space_of, truncate_svd, BoundTensorMap};
 use crate::*;
+use std::sync::Arc;
+use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite};
+
+struct RejectExecutorCalls;
+
+#[derive(Clone)]
+struct IdentityQdimRule {
+    identity: RuleIdentity,
+    qdim: f64,
+}
+
+impl IdentityQdimRule {
+    fn new(qdim: f64) -> Self {
+        Self {
+            identity: RuleIdentity::new_unique::<Self>(),
+            qdim,
+        }
+    }
+}
+
+impl FusionRule for IdentityQdimRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.identity.clone()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+        [SectorId::new(0)].into_iter().collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for IdentityQdimRule {}
+
+impl MultiplicityFreeFusionSymbols for IdentityQdimRule {
+    type Scalar = f64;
+    fn scalar_one(&self) -> f64 {
+        1.0
+    }
+    fn scalar_conj(&self, value: f64) -> f64 {
+        value
+    }
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for IdentityQdimRule {
+    fn dim_scalar(&self, _: SectorId) -> f64 {
+        self.qdim
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+        self.qdim.recip()
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        self.qdim.sqrt()
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        self.qdim.sqrt().recip()
+    }
+    fn twist_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+fn bound_tensor<R, D, const NOUT: usize, const NIN: usize>(
+    provider: Arc<R>,
+    tensor: &TensorMap<D, NOUT, NIN>,
+) -> BoundTensorMap<R, D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Clone,
+{
+    BoundTensorMap::try_new(provider, tensor.clone()).unwrap()
+}
+
+macro_rules! bound_tensor_ref {
+    ($provider:expr, $tensor:expr) => {
+        bound_tensor($provider, $tensor).as_ref()
+    };
+}
+
+impl DenseExecutor for RejectExecutorCalls {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("validation must reject the input before SVD execution")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("validation must reject the input before QR execution")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("validation must reject the input before EIGH execution")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("validation must reject the input before dense execution")
+    }
+}
 
 fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
     lhs: &TensorMap<f64, NOUT, NIN>,
@@ -103,7 +231,8 @@ fn scale_vt_rows_by_singular_values<R, const NIN: usize>(
 fn run_tsvd_reconstruction_case<R>(rule: &R, sectors: &[SectorId], coupled_layout: bool)
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>
+        + Clone,
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
@@ -130,7 +259,12 @@ where
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_trunc(&mut dense_executor, rule, &tensor, &Truncation::Full).unwrap();
+    let svd = svd_trunc(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule.clone()), &tensor),
+        &Truncation::Full,
+    )
+    .unwrap();
 
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {
@@ -143,7 +277,7 @@ where
         assert!(entry.values.iter().all(|&value| value >= -1e-12));
     }
 
-    let mut scaled_vt = svd.vh.clone();
+    let mut scaled_vt = svd.vh.tensor().clone();
     scale_vt_rows_by_singular_values(rule, &mut scaled_vt, &svd.singular_values);
 
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
@@ -286,16 +420,157 @@ where
     .unwrap()
 }
 
+#[test]
+fn svd_rejects_a_different_provider_before_dense_execution() {
+    let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+
+    let _backend = RejectExecutorCalls;
+    let error = match BoundTensorMap::try_new(Arc::new(U1FusionRule), tensor) {
+        Ok(_) => panic!("mismatched provider must not produce an authority"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
+#[test]
+fn svd_full_rejects_a_different_provider_before_dense_execution() {
+    let tensor = tsvd_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+
+    let _backend = RejectExecutorCalls;
+    let error = match BoundTensorMap::try_new(Arc::new(U1FusionRule), tensor) {
+        Ok(_) => panic!("mismatched provider must not produce an authority"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
+#[test]
+fn public_svd_authority_rejects_same_type_with_different_identity_and_qdim() {
+    // What: provider provenance, not the Rust type or sector ids, owns qdim.
+    let source_rule = IdentityQdimRule::new(1.0);
+    let other_rule = IdentityQdimRule::new((1.0 + 5.0_f64.sqrt()) / 2.0);
+    let tensor = tsvd_test_tensor(&source_rule, &[SectorId::new(0)]);
+
+    let _backend = RejectExecutorCalls;
+    let error = match BoundTensorMap::try_new(Arc::new(other_rule), tensor) {
+        Ok(_) => panic!("different provider identity must not produce an authority"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::FusionRuleMismatch { .. })
+    ));
+}
+
+#[test]
+fn svd_input_rejects_short_storage_before_dense_execution() {
+    let tensor = tsvd_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dyn_space_of(&tensor).unwrap(),
+        Arc::new(Z2FusionRule),
+    )
+    .unwrap();
+    let short = &tensor.data()[..tensor.data().len() - 1];
+
+    let error = match BoundDynamicTensorRef::try_new(&bound, short) {
+        Ok(_) => panic!("short storage must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::DimensionMismatch { .. })
+    ));
+}
+
+#[test]
+fn pinv_rejects_invalid_rcond_before_dense_execution() {
+    // What: invalid cutoff policy is rejected without entering the factorization backend.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    for rcond in [-1.0, f64::NAN, f64::INFINITY] {
+        let mut dense = RejectExecutorCalls;
+        let mut context = default_context();
+        let error = pinv(&mut dense, &mut context, &input.as_ref(), rcond).unwrap_err();
+        assert!(matches!(error, OperationError::InvalidArgument { .. }));
+    }
+}
+
+#[test]
+fn spectral_outputs_retain_the_exact_input_provider_allocation() {
+    // What: scalar promotion and spectral recomposition preserve provider authority by Arc identity.
+    let rule = Z2FusionRule;
+    let provider = Arc::new(rule);
+    let hermitian = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let hermitian_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dyn_space_of(&hermitian).unwrap(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let hermitian_input =
+        BoundDynamicTensorRef::try_new(&hermitian_space, hermitian.data()).unwrap();
+    let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let general_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dyn_space_of(&general).unwrap(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let general_input = BoundDynamicTensorRef::try_new(&general_space, general.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let eigh = eigh_full_dyn(&mut dense, &hermitian_input).unwrap();
+    assert!(Arc::ptr_eq(&provider, eigh.v().space().provider_arc()));
+
+    let eig = eig_full_dyn(&mut dense, &general_input).unwrap();
+    assert!(Arc::ptr_eq(&provider, eig.v().space().provider_arc()));
+
+    let mut context = default_context();
+    let exponential = exp_dyn(&mut dense, &mut context, &hermitian_input).unwrap();
+    assert!(Arc::ptr_eq(&provider, exponential.space().provider_arc()));
+}
+
+#[test]
+fn typed_svd_borrows_input_authority_and_retains_its_exact_allocation() {
+    // What: borrowed typed input creates no replacement authority, and every SVD factor inherits it.
+    let rule = Z2FusionRule;
+    let provider = Arc::new(rule);
+    let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let input = bound_tensor(Arc::clone(&provider), &tensor);
+    let first = input.as_ref();
+    let second = input.as_ref();
+
+    assert!(std::ptr::eq(first.space(), input.space()));
+    assert!(std::ptr::eq(second.space(), input.space()));
+    assert!(std::ptr::eq(first.tensor(), input.tensor()));
+    assert!(std::ptr::eq(second.tensor(), input.tensor()));
+
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let factors = svd_compact(&mut dense, &first).unwrap();
+    assert!(Arc::ptr_eq(&provider, factors.u.space().provider_arc()));
+    assert!(Arc::ptr_eq(&provider, factors.s.space().provider_arc()));
+    assert!(Arc::ptr_eq(&provider, factors.vh.space().provider_arc()));
+}
+
 fn reconstruct_from_svd<R>(
     rule: &R,
     template: &TensorMap<f64, 2, 2>,
-    svd: &SvdTrunc<f64, 2, 2>,
+    svd: &SvdTrunc<R, f64, 2, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
 {
-    let mut scaled_vt = svd.vh.clone();
+    let mut scaled_vt = svd.vh.tensor().clone();
     scale_vt_rows_by_singular_values(rule, &mut scaled_vt, &svd.singular_values);
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; template.data().len()],
@@ -331,8 +606,7 @@ fn tsvd_truncdim_bounds_weighted_dimension_and_reports_error_su2() {
     let max_dim = 10usize;
     let svd = svd_trunc(
         &mut dense_executor,
-        &rule,
-        &tensor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
         &Truncation::rank(max_dim),
     )
     .unwrap();
@@ -364,7 +638,12 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
     let tensor = tsvd_test_tensor(&rule, &sectors);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
-    let full = svd_trunc(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
+    let full = svd_trunc(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        &Truncation::Full,
+    )
+    .unwrap();
     let threshold = {
         let mut all: Vec<f64> = full
             .singular_values
@@ -377,8 +656,7 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
 
     let svd = svd_trunc(
         &mut dense_executor,
-        &rule,
-        &tensor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
         &Truncation::absolute_cutoff(threshold),
     )
     .unwrap();
@@ -419,8 +697,7 @@ fn tsvd_truncerr_respects_relative_tolerance() {
     let tolerance = 0.2;
     let svd = svd_trunc(
         &mut dense_executor,
-        &rule,
-        &tensor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
         &Truncation::relative_error(tolerance),
     )
     .unwrap();
@@ -463,14 +740,22 @@ fn leftorth_fusion_reconstructs_z2_and_su2_tensors() {
             let rule = Z2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &sectors);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, r) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
+            let (q, r) = qr_compact(
+                &mut dense_executor,
+                &bound_tensor_ref!(Arc::new(rule), &tensor),
+            )
+            .unwrap();
             let reconstructed = contract_pair(&rule, &tensor, &q, &r);
             assert_svd_blocks_match(&tensor, &reconstructed);
         } else {
             let rule = SU2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &sectors);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, r) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
+            let (q, r) = qr_compact(
+                &mut dense_executor,
+                &bound_tensor_ref!(Arc::new(rule), &tensor),
+            )
+            .unwrap();
             let reconstructed = contract_pair(&rule, &tensor, &q, &r);
             assert_svd_blocks_match(&tensor, &reconstructed);
         }
@@ -483,7 +768,11 @@ fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
         let rule = Z2FusionRule;
         let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
         let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-        let (l, q) = lq_compact(&mut dense_executor, &rule, &tensor).unwrap();
+        let (l, q) = lq_compact(
+            &mut dense_executor,
+            &bound_tensor_ref!(Arc::new(rule), &tensor),
+        )
+        .unwrap();
         let reconstructed = contract_pair(&rule, &tensor, &l, &q);
         assert_svd_blocks_match(&tensor, &reconstructed);
     }
@@ -497,7 +786,11 @@ fn rightorth_fusion_reconstructs_z2_and_su2_tensors() {
             ],
         );
         let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-        let (l, q) = lq_compact(&mut dense_executor, &rule, &tensor).unwrap();
+        let (l, q) = lq_compact(
+            &mut dense_executor,
+            &bound_tensor_ref!(Arc::new(rule), &tensor),
+        )
+        .unwrap();
         let reconstructed = contract_pair(&rule, &tensor, &l, &q);
         assert_svd_blocks_match(&tensor, &reconstructed);
     }
@@ -545,7 +838,12 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_trunc(&mut dense_executor, &rule, &tensor, &Truncation::Full).unwrap();
+    let svd = svd_trunc(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        &Truncation::Full,
+    )
+    .unwrap();
     let s_tensor = svd.s.clone();
 
     let mut context =
@@ -601,10 +899,19 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let composed = {
-        let compact = svd_compact(&mut dense_executor, &rule, &tensor).unwrap();
-        truncate_svd(&rule, compact, &truncation).unwrap()
+        let compact = svd_compact(
+            &mut dense_executor,
+            &bound_tensor_ref!(Arc::new(rule), &tensor),
+        )
+        .unwrap();
+        truncate_svd(compact, &truncation).unwrap()
     };
-    let direct = svd_trunc(&mut dense_executor, &rule, &tensor, &truncation).unwrap();
+    let direct = svd_trunc(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        &truncation,
+    )
+    .unwrap();
 
     assert_eq!(composed.singular_values, direct.singular_values);
     assert!((composed.error - direct.error).abs() < 1e-15);
@@ -725,7 +1032,11 @@ fn eigh_full_satisfies_the_eigen_equation() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let eigh = eigh_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let eigh = eigh_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
 
     for entry in &eigh.eigenvalues {
         for pair in entry.values.windows(2) {
@@ -744,7 +1055,11 @@ fn eigh_trunc_truncates_by_magnitude_and_keeps_eigen_equation() {
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
-    let full = eigh_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let full = eigh_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
     let full_count: usize = full
         .eigenvalues
         .iter()
@@ -753,8 +1068,7 @@ fn eigh_trunc_truncates_by_magnitude_and_keeps_eigen_equation() {
     let max_dim = full_count / 2;
     let eigh = eigh_trunc(
         &mut dense_executor,
-        &rule,
-        &tensor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
         &Truncation::rank(max_dim),
     )
     .unwrap();
@@ -914,7 +1228,11 @@ fn qr_full_gives_square_unitary_and_reconstructs() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (q, r) = qr_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let (q, r) = qr_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
 
     let matrices = dense_sector_matrices(2, &q);
     for (_, rows, cols, _) in &matrices {
@@ -931,7 +1249,11 @@ fn lq_full_reconstructs() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (l, q) = lq_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let (l, q) = lq_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
     let reconstructed = contract_pair(&rule, &tensor, &l, &q);
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
@@ -941,7 +1263,11 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let full = svd_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let full = svd_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
 
     let matrices = dense_sector_matrices(2, &full.u);
     for (_, rows, cols, _) in &matrices {
@@ -1002,9 +1328,10 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
             shape
         })
         .collect::<Vec<_>>();
-    let dims = full.u.space().dims();
+    let dims = full.u.tensor().space().dims();
     let us_space = FusionTensorMapSpace::<2, 1>::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<2, 1>::from_dims([dims[0], dims[1]], [full.s.space().dims()[1]]).unwrap(),
+        TensorMapSpace::<2, 1>::from_dims([dims[0], dims[1]], [full.s.tensor().space().dims()[1]])
+            .unwrap(),
         us_hom,
         &rule,
         shapes,
@@ -1067,7 +1394,12 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
     .unwrap();
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let svd = svd_trunc(&mut dense_executor, &rule, &tensor, &Truncation::rank(8)).unwrap();
+    let svd = svd_trunc(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        &Truncation::rank(8),
+    )
+    .unwrap();
     assert!(svd.error > 0.0);
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {
@@ -1076,7 +1408,7 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
     }
 
     // Scale Vh rows by the (real) singular values.
-    let mut scaled_vh = svd.vh.clone();
+    let mut scaled_vh = svd.vh.tensor().clone();
     {
         let structure = std::sync::Arc::clone(scaled_vh.structure());
         for index in 0..structure.block_count() {
@@ -1162,7 +1494,11 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
     // Non-symmetric endomorphism.
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let eig = eig_full(&mut dense_executor, &rule, &tensor).unwrap();
+    let eig = eig_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
 
     for entry in &eig.eigenvalues {
         for pair in entry.values.windows(2) {
@@ -1253,7 +1589,11 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
     )
     .unwrap();
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let null = left_null(&mut dense_executor, &rule, &tall).unwrap();
+    let null = left_null(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tall),
+    )
+    .unwrap();
 
     let null_matrices = dense_sector_matrices(2, &null);
     assert!(!null_matrices.is_empty());
@@ -1297,7 +1637,11 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
         wide_space,
     )
     .unwrap();
-    let null = right_null(&mut dense_executor, &rule, &wide).unwrap();
+    let null = right_null(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &wide),
+    )
+    .unwrap();
 
     let null_matrices = dense_sector_matrices(1, &null);
     assert!(!null_matrices.is_empty());
@@ -1333,6 +1677,259 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
     }
 }
 
+fn one_sector_matrix<D: Clone>(data: Vec<D>) -> TensorMap<D, 1, 1> {
+    one_sector_rectangular_matrix(data, 2, 2)
+}
+
+fn one_sector_rectangular_matrix<D: Clone>(
+    data: Vec<D>,
+    rows: usize,
+    cols: usize,
+) -> TensorMap<D, 1, 1> {
+    let rule = Z2FusionRule;
+    let codomain = SectorLeg::new([(SectorId::new(0), rows)], false);
+    let domain = SectorLeg::new([(SectorId::new(0), cols)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain]),
+        FusionProductSpace::new([domain]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+        homspace,
+        &rule,
+        vec![vec![rows, cols]],
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(data, space).unwrap()
+}
+
+#[test]
+fn rectangular_full_svd_has_square_outer_factors_and_reconstructs() {
+    // What: full SVD returns U(m,m), S(m,n), Vh(n,n) and recomposes tall and wide inputs.
+    let rule = Z2FusionRule;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (rows, cols) in [(2, 3), (3, 2)] {
+        let matrix = one_sector_rectangular_matrix(
+            (0..rows * cols)
+                .map(|index| ((index * 5 + 1) % 11) as f64 - 4.0)
+                .collect(),
+            rows,
+            cols,
+        );
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let full = svd_full(&mut dense, &input.as_ref()).unwrap();
+        assert_eq!(full.u.structure().block(0).unwrap().shape(), &[rows, rows]);
+        assert_eq!(full.s.structure().block(0).unwrap().shape(), &[rows, cols]);
+        assert_eq!(full.vh.structure().block(0).unwrap().shape(), &[cols, cols]);
+
+        let mut us = vec![0.0; rows * cols];
+        for col in 0..cols {
+            for inner in 0..rows {
+                for row in 0..rows {
+                    us[row + rows * col] +=
+                        full.u.data()[row + rows * inner] * full.s.data()[inner + rows * col];
+                }
+            }
+        }
+        let mut reconstructed = vec![0.0; rows * cols];
+        for col in 0..cols {
+            for inner in 0..cols {
+                for row in 0..rows {
+                    reconstructed[row + rows * col] +=
+                        us[row + rows * inner] * full.vh.data()[inner + cols * col];
+                }
+            }
+        }
+        for (actual, expected) in reconstructed.iter().zip(matrix.data()) {
+            assert!((actual - expected).abs() < 1.0e-9);
+        }
+    }
+}
+
+#[test]
+fn rank_deficient_real_null_spaces_include_zero_and_duplicate_directions() {
+    // What: numerical nullity, not the rectangular shape deficit, determines both null spaces.
+    let rule = Z2FusionRule;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (matrix, expected_nullity) in [
+        (one_sector_matrix(vec![0.0; 4]), 2),
+        (one_sector_matrix(vec![1.0, 2.0, 1.0, 2.0]), 1),
+        (one_sector_matrix(vec![1.0, 1.0, 2.0, 2.0]), 1),
+    ] {
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        let left_shape = left.structure().block(0).unwrap().shape();
+        let right_shape = right.structure().block(0).unwrap().shape();
+        assert_eq!(left_shape, &[2, expected_nullity]);
+        assert_eq!(right_shape, &[expected_nullity, 2]);
+
+        for null_col in 0..expected_nullity {
+            for matrix_col in 0..2 {
+                let dot = (0..2)
+                    .map(|row| {
+                        left.data()[row + 2 * null_col] * matrix.data()[row + 2 * matrix_col]
+                    })
+                    .sum::<f64>();
+                assert!(dot.abs() < 1.0e-10);
+            }
+        }
+        for matrix_row in 0..2 {
+            for null_row in 0..expected_nullity {
+                let dot = (0..2)
+                    .map(|col| {
+                        matrix.data()[matrix_row + 2 * col]
+                            * right.data()[null_row + expected_nullity * col]
+                    })
+                    .sum::<f64>();
+                assert!(dot.abs() < 1.0e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn numerical_null_rank_uses_the_documented_f64_threshold() {
+    // What: singular values immediately below and above
+    // epsilon(f64) * max(m, n) * sigma_max fall on opposite rank decisions.
+    let rule = Z2FusionRule;
+    let tolerance = f64::EPSILON * 2.0;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+        let matrix = one_sector_matrix(vec![1.0, 0.0, 0.0, small]);
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        if expected_nullity == 0 {
+            assert!(left.data().is_empty());
+            assert!(right.data().is_empty());
+        } else {
+            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
+            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
+        }
+    }
+}
+
+#[test]
+fn numerical_null_rank_uses_the_documented_f32_threshold() {
+    // What: the rank contract follows the input dtype rather than silently
+    // applying the f64 machine epsilon to f32 sectors.
+    let rule = Z2FusionRule;
+    let tolerance = f32::EPSILON * 2.0;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (small, expected_nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+        let matrix = one_sector_matrix(vec![1.0_f32, 0.0, 0.0, small]);
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        if expected_nullity == 0 {
+            assert!(left.data().is_empty());
+            assert!(right.data().is_empty());
+        } else {
+            assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 1]);
+            assert_eq!(right.structure().block(0).unwrap().shape(), &[1, 2]);
+        }
+    }
+}
+
+#[test]
+fn rectangular_rank_deficient_null_spaces_include_shape_and_rank_deficits() {
+    // What: tall and wide sectors include both the rectangular shape deficit
+    // and additional null directions caused by numerical rank deficiency.
+    let rule = Z2FusionRule;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (rows, cols, data, left_nullity, right_nullity) in [
+        (3, 2, vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0], 2, 1),
+        (2, 3, vec![1.0, 2.0, 2.0, 4.0, 3.0, 6.0], 1, 2),
+    ] {
+        let matrix = one_sector_rectangular_matrix(data, rows, cols);
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        assert_eq!(
+            left.structure().block(0).unwrap().shape(),
+            &[rows, left_nullity]
+        );
+        assert_eq!(
+            right.structure().block(0).unwrap().shape(),
+            &[right_nullity, cols]
+        );
+
+        for null_col in 0..left_nullity {
+            for matrix_col in 0..cols {
+                let dot = (0..rows)
+                    .map(|row| {
+                        left.data()[row + rows * null_col] * matrix.data()[row + rows * matrix_col]
+                    })
+                    .sum::<f64>();
+                assert!(dot.abs() < 1.0e-9);
+            }
+        }
+        for matrix_row in 0..rows {
+            for null_row in 0..right_nullity {
+                let dot = (0..cols)
+                    .map(|col| {
+                        matrix.data()[matrix_row + rows * col]
+                            * right.data()[null_row + right_nullity * col]
+                    })
+                    .sum::<f64>();
+                assert!(dot.abs() < 1.0e-9);
+            }
+        }
+    }
+}
+
+#[test]
+fn rank_deficient_complex_null_spaces_include_zero_and_duplicate_directions() {
+    // What: complex conjugation and numerical-rank detection preserve the full left/right kernels.
+    use num_complex::Complex64;
+
+    let rule = Z2FusionRule;
+    let zero = Complex64::new(0.0, 0.0);
+    let duplicate = one_sector_matrix(vec![
+        Complex64::new(1.0, 1.0),
+        Complex64::new(2.0, -1.0),
+        Complex64::new(1.0, 1.0),
+        Complex64::new(2.0, -1.0),
+    ]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    for (matrix, expected_nullity) in [(one_sector_matrix(vec![zero; 4]), 2), (duplicate, 1)] {
+        let input = bound_tensor(Arc::new(rule), &matrix);
+        let left = left_null(&mut dense, &input.as_ref()).unwrap();
+        let right = right_null(&mut dense, &input.as_ref()).unwrap();
+        assert_eq!(
+            left.structure().block(0).unwrap().shape(),
+            &[2, expected_nullity]
+        );
+        assert_eq!(
+            right.structure().block(0).unwrap().shape(),
+            &[expected_nullity, 2]
+        );
+
+        for null_col in 0..expected_nullity {
+            for matrix_col in 0..2 {
+                let dot = (0..2)
+                    .map(|row| {
+                        left.data()[row + 2 * null_col].conj() * matrix.data()[row + 2 * matrix_col]
+                    })
+                    .sum::<Complex64>();
+                assert!(dot.norm() < 1.0e-10);
+            }
+        }
+        for matrix_row in 0..2 {
+            for null_row in 0..expected_nullity {
+                let dot = (0..2)
+                    .map(|col| {
+                        matrix.data()[matrix_row + 2 * col]
+                            * right.data()[null_row + expected_nullity * col].conj()
+                    })
+                    .sum::<Complex64>();
+                assert!(dot.norm() < 1.0e-10);
+            }
+        }
+    }
+}
+
 #[test]
 fn spectrum_only_entry_points_return_descending_magnitudes() {
     let rule = Z2FusionRule;
@@ -1340,21 +1937,33 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
     let general = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
-    let svd = svd_vals(&mut dense_executor, &rule, &general).unwrap();
+    let svd = svd_vals(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &general),
+    )
+    .unwrap();
     assert!(!svd.is_empty());
     for entry in &svd {
         for pair in entry.values.windows(2) {
             assert!(pair[0] >= pair[1] - 1e-12);
         }
     }
-    let eigh = eigh_vals(&mut dense_executor, &rule, &hermitian).unwrap();
+    let eigh = eigh_vals(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &hermitian),
+    )
+    .unwrap();
     assert!(!eigh.is_empty());
     for entry in &eigh {
         for pair in entry.values.windows(2) {
             assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
         }
     }
-    let eig = eig_vals(&mut dense_executor, &rule, &general).unwrap();
+    let eig = eig_vals(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &general),
+    )
+    .unwrap();
     assert!(!eig.is_empty());
     for entry in &eig {
         for pair in entry.values.windows(2) {
@@ -1387,22 +1996,43 @@ fn values_only_entry_points_match_untruncated_decomposition_spectra() {
         }
     };
 
-    let svd_vals_spectra = svd_vals(&mut dense_executor, &rule, &general).unwrap();
-    let svd_compact_spectra = svd_compact(&mut dense_executor, &rule, &general)
-        .unwrap()
-        .singular_values;
+    let svd_vals_spectra = svd_vals(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &general),
+    )
+    .unwrap();
+    let svd_compact_spectra = svd_compact(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &general),
+    )
+    .unwrap()
+    .singular_values;
     assert_real_close(&svd_vals_spectra, &svd_compact_spectra);
 
-    let eigh_vals_spectra = eigh_vals(&mut dense_executor, &rule, &hermitian).unwrap();
-    let eigh_full_spectra = eigh_full(&mut dense_executor, &rule, &hermitian)
-        .unwrap()
-        .eigenvalues;
+    let eigh_vals_spectra = eigh_vals(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &hermitian),
+    )
+    .unwrap();
+    let eigh_full_spectra = eigh_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &hermitian),
+    )
+    .unwrap()
+    .eigenvalues;
     assert_real_close(&eigh_vals_spectra, &eigh_full_spectra);
 
-    let eig_vals_spectra = eig_vals(&mut dense_executor, &rule, &general).unwrap();
-    let eig_full_spectra = eig_full(&mut dense_executor, &rule, &general)
-        .unwrap()
-        .eigenvalues;
+    let eig_vals_spectra = eig_vals(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &general),
+    )
+    .unwrap();
+    let eig_full_spectra = eig_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &general),
+    )
+    .unwrap()
+    .eigenvalues;
     assert_eq!(eig_vals_spectra.len(), eig_full_spectra.len());
     for (a, b) in eig_vals_spectra.iter().zip(&eig_full_spectra) {
         assert_eq!(a.sector, b.sector);
@@ -1436,6 +2066,37 @@ fn default_context() -> TensorContractFusionExecutionContext<f64, TreeTransformB
 }
 
 #[test]
+fn derived_matrix_functions_inherit_the_exact_provider_arc() {
+    // What: every migrated owned result retains the input authority allocation.
+    let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+    let provider = Arc::new(Z2FusionRule);
+    let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dyn_space_of(&tensor).unwrap(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&bound, tensor.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let (w_left, p_left) = left_polar_dyn(&mut dense, &mut context, &input).unwrap();
+    let (p_right, w_right) = right_polar_dyn(&mut dense, &mut context, &input).unwrap();
+    let inverse = inv_dyn(&mut dense, &mut context, &input).unwrap();
+    let pseudo_inverse = pinv_dyn(&mut dense, &mut context, &input, 1.0e-13).unwrap();
+
+    for factor in [
+        &w_left,
+        &p_left,
+        &p_right,
+        &w_right,
+        &inverse,
+        &pseudo_inverse,
+    ] {
+        assert!(Arc::ptr_eq(factor.space().provider_arc(), &provider));
+    }
+}
+
+#[test]
 fn adjoint_composition_gives_the_identity_on_the_bond() {
     let rule = SU2FusionRule;
     let tensor = tsvd_test_tensor(
@@ -1446,7 +2107,11 @@ fn adjoint_composition_gives_the_identity_on_the_bond() {
         ],
     );
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
+    let (q, _) = qr_compact(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
     let qh = tenet_tensors::adjoint(&rule, &q).unwrap();
     let mut context = default_context();
     let identity = crate::compose::compose(&mut context, &rule, &qh, &q).unwrap();
@@ -1471,8 +2136,18 @@ fn exp_of_a_hermitian_tensor_inverts_under_negation() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 
-    let forward = exp(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
-    let backward = exp(&mut dense_executor, &mut context, &rule, &negated).unwrap();
+    let forward = exp(
+        &mut dense_executor,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
+    let backward = exp(
+        &mut dense_executor,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &negated),
+    )
+    .unwrap();
     let identity = crate::compose::compose(&mut context, &rule, &forward, &backward).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
@@ -1505,7 +2180,13 @@ fn pinv_satisfies_the_moore_penrose_identity() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 
-    let plus = pinv(&mut dense_executor, &mut context, &rule, &tensor, 1e-12).unwrap();
+    let plus = pinv(
+        &mut dense_executor,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+        1e-12,
+    )
+    .unwrap();
     let tp = crate::compose::compose(&mut context, &rule, &tensor, &plus).unwrap();
     let tpt = crate::compose::compose(&mut context, &rule, &tp, &tensor).unwrap();
     for (index, (lhs, rhs)) in tpt.data().iter().zip(tensor.data()).enumerate() {
@@ -1522,7 +2203,12 @@ fn inv_composes_to_the_identity() {
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
-    let inverse = inv(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let inverse = inv(
+        &mut dense_executor,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
     let identity = crate::compose::compose(&mut context, &rule, &tensor, &inverse).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
@@ -1540,16 +2226,24 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 
-    let (isometry, positive) =
-        left_polar(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let (isometry, positive) = left_polar(
+        &mut dense_executor,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
     let reconstructed = crate::compose::compose(&mut context, &rule, &isometry, &positive).unwrap();
     assert_svd_blocks_match(&tensor, &reconstructed);
     let wh = tenet_tensors::adjoint(&rule, &isometry).unwrap();
     let unit = crate::compose::compose(&mut context, &rule, &wh, &isometry).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &unit));
 
-    let (positive, isometry) =
-        right_polar(&mut dense_executor, &mut context, &rule, &tensor).unwrap();
+    let (positive, isometry) = right_polar(
+        &mut dense_executor,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
     let reconstructed = crate::compose::compose(&mut context, &rule, &positive, &isometry).unwrap();
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
@@ -1592,8 +2286,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let svd = svd_trunc(
         &mut dense_executor,
-        &rule,
-        &tensor_f32,
+        &bound_tensor_ref!(Arc::new(rule), &tensor_f32),
         &Truncation::rank(8),
     )
     .unwrap();
@@ -1601,7 +2294,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
 
     // Reconstruct through an f32 contraction and compare against the
     // truncation error at single precision.
-    let mut scaled_vh = svd.vh.clone();
+    let mut scaled_vh = svd.vh.tensor().clone();
     {
         let structure = std::sync::Arc::clone(scaled_vh.structure());
         for index in 0..structure.block_count() {
@@ -1673,7 +2366,11 @@ fn single_precision_svd_and_eig_work_end_to_end() {
         c32_space,
     )
     .unwrap();
-    let eig = eig_full(&mut dense_executor, &rule, &tensor_c32).unwrap();
+    let eig = eig_full(
+        &mut dense_executor,
+        &bound_tensor_ref!(Arc::new(rule), &tensor_c32),
+    )
+    .unwrap();
     assert!(!eig.eigenvalues.is_empty());
     for entry in &eig.eigenvalues {
         for pair in entry.values.windows(2) {
@@ -1904,8 +2601,9 @@ fn qr_compact_positive_gauge_idempotent_on_isometry() {
             let rule = Z2FusionRule;
             let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
-            let (q2, r2) = qr_compact(&mut dense_executor, &rule, &q).unwrap();
+            let input = bound_tensor(Arc::new(rule), &tensor);
+            let (q, _) = qr_compact(&mut dense_executor, &input.as_ref()).unwrap();
+            let (q2, r2) = qr_compact(&mut dense_executor, &q.as_ref()).unwrap();
             assert_svd_blocks_match(&q, &q2);
             assert_identity_sector_matrices(&dense_sector_matrices(1, &r2));
         } else {
@@ -1918,8 +2616,9 @@ fn qr_compact_positive_gauge_idempotent_on_isometry() {
                 ],
             );
             let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-            let (q, _) = qr_compact(&mut dense_executor, &rule, &tensor).unwrap();
-            let (q2, r2) = qr_compact(&mut dense_executor, &rule, &q).unwrap();
+            let input = bound_tensor(Arc::new(rule), &tensor);
+            let (q, _) = qr_compact(&mut dense_executor, &input.as_ref()).unwrap();
+            let (q2, r2) = qr_compact(&mut dense_executor, &q.as_ref()).unwrap();
             assert_svd_blocks_match(&q, &q2);
             assert_identity_sector_matrices(&dense_sector_matrices(1, &r2));
         }
@@ -1931,8 +2630,9 @@ fn lq_compact_positive_gauge_idempotent_on_isometry() {
     let rule = Z2FusionRule;
     let tensor = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
-    let (_, q) = lq_compact(&mut dense_executor, &rule, &tensor).unwrap();
-    let (l2, q2) = lq_compact(&mut dense_executor, &rule, &q).unwrap();
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    let (_, q) = lq_compact(&mut dense_executor, &input.as_ref()).unwrap();
+    let (l2, q2) = lq_compact(&mut dense_executor, &q.as_ref()).unwrap();
     assert_svd_blocks_match(&q, &q2);
     assert_identity_sector_matrices(&dense_sector_matrices(1, &l2));
 }

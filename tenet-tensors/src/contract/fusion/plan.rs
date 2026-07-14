@@ -4,7 +4,7 @@ use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
-use super::super::dynamic_space::DynamicFusionMapSpace;
+use super::super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use super::super::structure::TensorContractAxisPlan;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,7 +126,7 @@ where
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
     rhs.validate_rule(rule)?;
-    prepare_tensorcontract_fusion_plan_dyn(
+    prepare_tensorcontract_fusion_plan_dyn_raw(
         rule,
         &DynamicFusionMapSpace::from_typed(dst),
         &DynamicFusionMapSpace::from_typed(lhs),
@@ -135,9 +135,30 @@ where
     )
 }
 
-/// Dynamic-rank variant of [`prepare_tensorcontract_fusion_plan`]: same
-/// lowering, spaces given as [`DynamicFusionMapSpace`] handles.
+/// Dynamic-rank variant of [`prepare_tensorcontract_fusion_plan`] retaining
+/// the checked provider authority carried by the input spaces.
 pub fn prepare_tensorcontract_fusion_plan_dyn<R>(
+    dst: &BoundDynamicFusionMapSpace<R>,
+    lhs: &BoundDynamicFusionMapSpace<R>,
+    rhs: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    // Why not accept a separate rule: the bound spaces are the semantic
+    // authority. The raw core still performs cheap identity checks without
+    // re-enumerating any fusion-tree grid.
+    prepare_tensorcontract_fusion_plan_dyn_raw(
+        lhs.provider(),
+        dst.space(),
+        lhs.space(),
+        rhs.space(),
+        axes,
+    )
+}
+
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,

@@ -629,6 +629,7 @@ where
 mod tests {
     use super::*;
     use crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn;
+    use crate::BoundDynamicFusionMapSpace;
     use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
     use tenet_operations::axis::OutputAxisOrder;
 
@@ -666,7 +667,7 @@ mod tests {
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let rule = U1FusionRule;
+        let rule = Arc::new(U1FusionRule);
         let a = u1_matrix_space(&rule, 3);
         let b = u1_matrix_space(&rule, 3);
         // Precondition: independently built content-equal spaces do carry
@@ -692,13 +693,15 @@ mod tests {
     // [`FastKey`] no longer holds.
     #[test]
     fn dynamic_tree_plan_is_content_independent_across_chi() {
-        let rule = U1FusionRule;
+        let rule = Arc::new(U1FusionRule);
         // Swap contraction (permutes rhs), forcing the tree-transform route.
         let axes =
             TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
         let plan = |deg| {
-            let space = u1_matrix_space(&rule, deg);
-            prepare_tensorcontract_fusion_plan_dyn(&rule, &space, &space, &space, axes).unwrap()
+            let raw = u1_matrix_space(rule.as_ref(), deg);
+            let space =
+                BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::clone(&rule)).unwrap();
+            prepare_tensorcontract_fusion_plan_dyn(&space, &space, &space, axes).unwrap()
         };
         assert_eq!(plan(1), plan(3));
     }
