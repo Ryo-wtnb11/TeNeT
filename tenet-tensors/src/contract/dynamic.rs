@@ -1961,6 +1961,11 @@ mod tests {
 
     #[test]
     fn dynamic_fusion_fast_space_key_uses_structure_content_identity() {
+        // Held across both builds so a concurrent `reset_global_operation_caches`
+        // cannot evict `first_structure` and hand `second_structure` a fresh id.
+        let _guard = crate::cache::GLOBAL_RESET_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let first_structure = one_block_structure();
         let second_structure = one_block_structure();
         assert!(!Arc::ptr_eq(&first_structure, &second_structure));
