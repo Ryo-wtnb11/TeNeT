@@ -31,7 +31,10 @@ fn work(rt: &Runtime, seed: u64) -> (f64, f64) {
     let c = a.contract(&b, &[2, 3], &[0, 1]).unwrap(); // ContextPool
     let p = c.permute(&[1, 0], &[3, 2]).unwrap(); // ContextPool
     let s = p.svd_vals().unwrap(); // ExecutorPool
-    let first = s.first().and_then(|spec| spec.values.first().copied()).unwrap();
+    let first = s
+        .first()
+        .and_then(|spec| spec.values.first().copied())
+        .unwrap();
     (c.norm().unwrap(), first)
 }
 
@@ -66,6 +69,7 @@ fn shared_runtime_concurrent_ops_match_serial_bit_for_bit() {
         })
         .collect();
     for h in handles {
-        h.join().expect("worker thread panicked (pool state corrupted?)");
+        h.join()
+            .expect("worker thread panicked (pool state corrupted?)");
     }
 }
