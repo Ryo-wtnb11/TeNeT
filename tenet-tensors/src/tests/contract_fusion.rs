@@ -3730,6 +3730,34 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
             "actual {actual} expected {expected}"
         );
     }
+
+    dst.data_mut()
+        .copy_from_slice(&[Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)]);
+    let mut context = TensorContractFusionExecutionContext::<Complex64, _>::default();
+    let mut profile = TensorContractFusionProfile::default();
+    context
+        .tensorcontract_fusion_into_profiled(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            axes,
+            alpha,
+            beta,
+            &mut profile,
+        )
+        .unwrap();
+
+    // What: the product-rule RHS is already in core order and its contracted
+    // codomain axis is nondual, so the dynamic output route borrows it.
+    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    assert_eq!(profile.rhs_transform_calls, 0);
+    for (&actual, &expected) in dst.data().iter().zip(&expected) {
+        assert!(
+            (actual - expected).norm() < 1.0e-12,
+            "profiled actual {actual} expected {expected}"
+        );
+    }
 }
 
 fn copy_blocks_between_layouts(dst: &mut TensorMap<f64, 2, 2>, src: &TensorMap<f64, 2, 2>) {

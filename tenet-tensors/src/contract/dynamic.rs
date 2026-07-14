@@ -2325,7 +2325,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_storage_context_identity_output_allocates_scratch_from_operand_storages() {
+    fn dynamic_storage_context_identity_output_borrows_both_sources() {
         let rule = Z2FusionRule;
         let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
         let fusion_space = || {
@@ -2408,6 +2408,7 @@ mod tests {
             TrackingScratch<f64>,
         >::default();
         let lhs_before = lhs.data().to_vec();
+        let rhs_before = rhs.data().to_vec();
 
         for _ in 0..2 {
             dst.data_mut().copy_from_slice(&[10.0, 20.0]);
@@ -2430,20 +2431,14 @@ mod tests {
             .unwrap();
 
             assert_eq!(dst.data(), expected_dst.data());
-            // What: borrowing an already-core LHS never mutates its source storage.
+            // What: borrowing already-core sources never mutates either input.
             assert_eq!(lhs.data(), lhs_before);
+            assert_eq!(rhs.data(), rhs_before);
         }
         let allocations = allocations.borrow();
-        assert_eq!(
-            allocations[..1],
-            [ScratchAllocation {
-                label: "rhs",
-                len: 2,
-            }]
-        );
-        // What: the identity LHS needs no transform allocation, and the core
-        // contraction GEMMs directly without pack/scatter allocations.
-        assert_eq!(allocations[1..], []);
+        // What: identity no-twist sources need no transform allocation, and
+        // the core contraction GEMMs directly without pack/scatter allocation.
+        assert_eq!(allocations.as_slice(), []);
     }
 
     #[test]

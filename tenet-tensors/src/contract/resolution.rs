@@ -628,7 +628,10 @@ mod tests {
     use super::*;
     use crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn;
     use crate::BoundDynamicFusionMapSpace;
-    use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
+    use tenet_core::{
+        FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, ProductFusionRuleExt,
+        SU2FusionRule, SU2Irrep, SectorId, SectorLeg, U1FusionRule, U1Irrep,
+    };
     use tenet_operations::axis::OutputAxisOrder;
 
     // Two-leg-per-side U(1) matrix space (three charges) in a chosen bond
@@ -648,6 +651,61 @@ mod tests {
         );
         let count = hom.fusion_tree_keys(rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![deg; 4]; count]).unwrap()
+    }
+
+    fn single_sector_matrix_space<R>(
+        rule: &R,
+        sector: SectorId,
+        codomain_dual: bool,
+        domain_dual: bool,
+    ) -> DynamicFusionMapSpace
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(sector, 1)], codomain_dual)]),
+            FusionProductSpace::new([SectorLeg::new([(sector, 1)], domain_dual)]),
+        );
+        let count = hom.fusion_tree_keys(rule).len();
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![1, 1]; count]).unwrap()
+    }
+
+    #[test]
+    fn rhs_twist_requirement_uses_external_domain_dual_and_product_parity() {
+        let fermion = FermionParityFusionRule;
+        let odd = SectorId::new(1);
+        let cases = [
+            (false, false, 0, false),
+            (true, false, 0, true),
+            (false, false, 1, true),
+            (false, true, 1, false),
+        ];
+        for (codomain_dual, domain_dual, rhs_axis, expected) in cases {
+            let rhs = single_sector_matrix_space(&fermion, odd, codomain_dual, domain_dual);
+            let rhs_axes = [rhs_axis];
+            let axes = TensorContractSpec::with_default_output_order(&[0], &rhs_axes);
+            // What: codomain uses its stored dual flag, while domain external
+            // duality is the inverse of its stored flag.
+            assert_eq!(
+                rhs_contract_requires_twist(&fermion, &rhs, axes).unwrap(),
+                expected
+            );
+        }
+
+        let fp_u1 = FermionParityFusionRule.product(U1FusionRule);
+        let odd_charge = fp_u1.encode_sector(odd, U1Irrep::new(0).sector_id());
+        let product = fp_u1.product(SU2FusionRule);
+        let odd_product =
+            product.encode_sector(odd_charge, SU2Irrep::from_twice_spin(0).sector_id());
+        let rhs = single_sector_matrix_space(&product, odd_product, true, false);
+        // What: a bosonic U(1) x SU(2) component does not erase the odd fZ2
+        // twist on an externally dual product-sector axis.
+        assert!(rhs_contract_requires_twist(
+            &product,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[0], &[0]),
+        )
+        .unwrap());
     }
 
     // New capability of content re-keying: content-equal spaces backed by
