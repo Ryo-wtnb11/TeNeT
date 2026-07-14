@@ -6766,6 +6766,43 @@ mod bound_provider_tests {
 mod tk_user_api_tests {
     use super::*;
 
+    fn sequential_f64_tensor(rt: &Runtime, codomain: &[&Space], domain: &[&Space]) -> Tensor {
+        let mut tensor = Tensor::zeros(
+            rt,
+            Dtype::F64,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+        )
+        .unwrap();
+        let Data::F64(data) = Arc::get_mut(&mut tensor.data).unwrap() else {
+            unreachable!("requested f64 tensor")
+        };
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = (index + 1) as f64;
+        }
+        tensor
+    }
+
+    fn assert_external_axis_order(output: &Tensor, source: &Tensor, axes: &[usize]) {
+        assert_eq!(output.rank(), axes.len());
+        for (output_axis, &source_axis) in axes.iter().enumerate() {
+            assert_eq!(
+                output.space(output_axis).unwrap(),
+                source.space(source_axis).unwrap()
+            );
+        }
+    }
+
+    fn assert_tensorkit_fixture(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "TensorKit fixture mismatch at {index}: actual={actual}, expected={expected}"
+            );
+        }
+    }
+
     #[test]
     fn index_count_aliases_match_rank_accessors() {
         // What: numout/numin/numind are exact TK-named aliases of the rank accessors.
@@ -6790,6 +6827,145 @@ mod tk_user_api_tests {
         let back = r.repartition(2).unwrap();
         assert_eq!(back.data(), t.data());
         assert!(t.repartition(4).is_err());
+    }
+
+    #[test]
+    fn repartition_uses_tensorkit_planar_axis_order_for_heterogeneous_u1_legs() {
+        // What: a 2|2 -> 3|1 repartition moves the last domain leg across the
+        // boundary and matches TensorKit's independently generated dense data.
+        let rt = Runtime::builder().build().unwrap();
+        let a = Space::u1([(0, 1)]);
+        let b = Space::u1([(0, 2)]);
+        let c = Space::u1([(0, 3)]);
+        let d = Space::u1([(0, 4)]);
+        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+
+        let output = source.repartition(3).unwrap();
+
+        assert_eq!((output.codomain_rank(), output.domain_rank()), (3, 1));
+        assert_external_axis_order(&output, &source, &[0, 1, 3, 2]);
+        assert_tensorkit_fixture(
+            output.data(),
+            &[
+                1.0, 2.0, 7.0, 8.0, 13.0, 14.0, 19.0, 20.0, 3.0, 4.0, 9.0, 10.0, 15.0, 16.0, 21.0,
+                22.0, 5.0, 6.0, 11.0, 12.0, 17.0, 18.0, 23.0, 24.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn repartition_same_split_shares_storage_without_transforming() {
+        // What: repartitioning to the current split is a zero-copy no-op.
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::su2([(0, 1), (1, 2)]);
+        let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 191).unwrap();
+
+        let output = source.repartition(source.codomain_rank()).unwrap();
+
+        assert!(Arc::ptr_eq(&output.space, &source.space));
+        assert!(Arc::ptr_eq(&output.data, &source.data));
+    }
+
+    #[test]
+    fn repartition_matches_tensorkit_for_fermion_odd_sectors() {
+        // What: a planar boundary move preserves TensorKit's fZ2 odd-sector
+        // signs instead of introducing a symmetric-permutation crossing.
+        let rt = Runtime::builder().build().unwrap();
+        let a = Space::fz2([(0, 1), (1, 1)]);
+        let b = Space::fz2([(0, 2), (1, 1)]);
+        let c = Space::fz2([(0, 1), (1, 2)]);
+        let d = Space::fz2([(0, 2), (1, 2)]);
+        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+
+        let output = source.repartition(3).unwrap();
+
+        assert_external_axis_order(&output, &source, &[0, 1, 3, 2]);
+        assert_tensorkit_fixture(
+            output.data(),
+            &[
+                1.0, 2.0, 4.0, 5.0, 3.0, 6.0, 31.0, 32.0, 34.0, 35.0, 33.0, 36.0, 19.0, 20.0, 25.0,
+                26.0, 21.0, 27.0, 7.0, 8.0, 13.0, 14.0, 9.0, 15.0, 22.0, 23.0, 28.0, 29.0, 24.0,
+                30.0, 10.0, 11.0, 16.0, 17.0, 12.0, 18.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn repartition_matches_tensorkit_for_su2_recoupling() {
+        // What: SU2 repartition with nontrivial inner lines reproduces the
+        // TensorKit F-move coefficients on reduced data.
+        let rt = Runtime::builder().build().unwrap();
+        let a = Space::su2([(0, 1), (1, 1)]);
+        let b = Space::su2([(0, 1), (1, 1)]);
+        let c = Space::su2([(0, 1), (1, 1)]);
+        let d = Space::su2([(0, 1), (1, 2)]);
+        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+
+        let output = source.repartition(3).unwrap();
+
+        assert_external_axis_order(&output, &source, &[0, 1, 3, 2]);
+        assert_tensorkit_fixture(
+            output.data(),
+            &[
+                1.0,
+                2.0,
+                12.727_922_061_357_859,
+                15.556_349_186_104_049,
+                14.142_135_623_730_955,
+                16.970_562_748_477_143,
+                7.000_000_000_000_002,
+                8.000_000_000_000_002,
+                -2.121_320_343_559_643,
+                -3.535_533_905_932_737_8,
+                -2.828_427_124_746_190_3,
+                -4.242_640_687_119_286,
+                15.921_683_328_090_658,
+                17.146_428_199_482_248,
+            ],
+        );
+        assert!(output
+            .space
+            .structure()
+            .sector_structure()
+            .blocks()
+            .iter()
+            .any(|block| matches!(block.key(), BlockKey::FusionTree(key) if !key.codomain_innerlines().is_empty())));
+    }
+
+    #[test]
+    fn repartition_matches_tensorkit_for_nested_fz2_u1_su2() {
+        // What: nested product coefficients retain both odd parity and SU2
+        // recoupling semantics across a planar boundary move.
+        let rt = Runtime::builder().build().unwrap();
+        let base = [((0, 0, 0), 1), ((1, 0, 1), 1)];
+        let a = Space::fz2_u1_su2(base).unwrap();
+        let b = Space::fz2_u1_su2(base).unwrap();
+        let c = Space::fz2_u1_su2(base).unwrap();
+        let d = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 0, 1), 2)]).unwrap();
+        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+
+        let output = source.repartition(3).unwrap();
+
+        assert_external_axis_order(&output, &source, &[0, 1, 3, 2]);
+        assert_tensorkit_fixture(
+            output.data(),
+            &[
+                1.0,
+                2.0,
+                15.556_349_186_104_049,
+                18.384_776_310_850_24,
+                16.970_562_748_477_143,
+                19.798_989_873_223_334,
+                9.000_000_000_000_002,
+                10.000_000_000_000_002,
+                -2.121_320_343_559_643,
+                -3.535_533_905_932_737_8,
+                -2.828_427_124_746_190_3,
+                -4.242_640_687_119_286,
+                8.573_214_099_741_124,
+                9.797_958_971_132_713,
+            ],
+        );
     }
 
     #[test]
