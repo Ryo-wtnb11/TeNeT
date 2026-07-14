@@ -742,6 +742,9 @@ fn realloc_moved_transition_preserves_concurrently_reused_old_address() {
     assert!(register_live(old, 8));
 
     let origin = detach_realloc_origin(old).expect("old origin must be tracked");
+    // What: detaching address identity reserves the live origin metrics until
+    // the allocator reports whether the realloc succeeded.
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 8);
     let old_address = old as usize;
     // What: another allocator thread may reuse the freed address before the moved
     // realloc result is committed to the registry.
@@ -769,6 +772,8 @@ fn realloc_failed_transition_restores_origin_without_duplicate_metrics() {
     let old = 0x1000usize as *mut u8;
     assert!(register_live(old, 8));
     let origin = detach_realloc_origin(old).expect("old origin must be tracked");
+    assert_eq!(LIVE_BYTES.load(Ordering::Relaxed), 8);
+    assert_eq!(PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed), 8);
 
     // What: a failed realloc restores the exact old origin without reporting a
     // second allocation or a successful realloc event.
