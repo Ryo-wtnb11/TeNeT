@@ -1855,6 +1855,51 @@ fn tree_pair_transform_context_accepts_custom_host_storage() {
 }
 
 #[test]
+fn tree_transform_overwrite_facade_and_context_ignore_destination_bits() {
+    let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+    let src =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
+    let mut expected = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![0.0; dst_space.required_len().unwrap()],
+        dst_space.clone(),
+    )
+    .unwrap();
+    tree_transform_into(&rule, operation.clone(), &mut expected, &src, 2.0, 0.0).unwrap();
+
+    let mut one_shot = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![f64::NAN; dst_space.required_len().unwrap()],
+        dst_space.clone(),
+    )
+    .unwrap();
+    tree_transform_overwrite_into(&rule, operation.clone(), &mut one_shot, &src, 2.0).unwrap();
+    assert_eq!(one_shot.data(), expected.data());
+
+    let mut cached = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![f64::NAN; dst_space.required_len().unwrap()],
+        dst_space,
+    )
+    .unwrap();
+    let mut context = TreeTransformExecutionContext::<f64, RuleKey>::default();
+    for _ in 0..2 {
+        cached.data_mut().fill(f64::NAN);
+        tree_transform_overwrite_into_with_context(
+            &mut context,
+            &rule,
+            operation.clone(),
+            &mut cached,
+            &src,
+            2.0,
+        )
+        .unwrap();
+        assert_eq!(cached.data(), expected.data());
+    }
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+}
+
+#[test]
 fn tree_transform_cache_reuses_product_plan_across_degeneracy_shapes() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;

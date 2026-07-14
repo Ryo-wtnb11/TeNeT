@@ -181,6 +181,49 @@ where
         backend.tree_transform_structure_into(workspace, &structure, dst, src, alpha, beta)
     }
 
+    pub fn tree_transform_overwrite_into<
+        R,
+        const DST_NOUT: usize,
+        const DST_NIN: usize,
+        const SRC_NOUT: usize,
+        const SRC_NIN: usize,
+        SDst,
+        SSrc,
+        DDst,
+        DSrc,
+    >(
+        &mut self,
+        rule: &R,
+        operation: TreeTransformOperation,
+        dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
+        src: &TensorMap<D, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+        alpha: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        DDst: HostWritableStorage<D>,
+        DSrc: HostReadableStorage<D>,
+    {
+        let Self {
+            backend,
+            workspace,
+            cache,
+        } = self;
+        cache.set_recoupling_threads(backend.recoupling_threads());
+        let structure = cache.get_or_compile_tree_pair(rule, operation, dst, src)?;
+        let dst_structure = Arc::clone(dst.structure());
+        let src_structure = Arc::clone(src.structure());
+        backend.tree_transform_structure_overwrite_into_raw(
+            workspace,
+            &structure,
+            &dst_structure,
+            &src_structure,
+            dst.data_mut(),
+            src.data(),
+            alpha,
+        )
+    }
+
     /// Dynamic-rank tree transform (permute / braid / transpose): operates
     /// on raw slices plus their block structures, through the same
     /// structure-compile cache as the typed facade. `dst_data` must be

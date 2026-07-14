@@ -83,6 +83,39 @@ where
         beta: D,
     ) -> Result<(), OperationError>;
 
+    fn tree_transform_structure_overwrite_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError> {
+        structure.validate_replay_structures(dst_structure, src_structure)?;
+        crate::transform_replay::validate_replay_storage_len(src_structure, src_data.len())?;
+        let mut kernels =
+            StridedHostKernelAdapter::with_transpose_backend(self.transpose_backend());
+        let mut zero_strides = Vec::new();
+        crate::transform_replay::zero_tree_transform_destination(
+            &mut kernels,
+            &mut zero_strides,
+            dst_structure,
+            dst_data,
+        )?;
+        self.tree_transform_structure_into_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            D::one(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn tree_transform_structure_into_raw_profiled(
         &mut self,
@@ -106,6 +139,32 @@ where
             src_data,
             alpha,
             beta,
+        );
+        profile.total += start.elapsed();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tree_transform_structure_overwrite_into_raw_profiled(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        profile: &mut TreeTransformReplayProfile,
+    ) -> Result<(), OperationError> {
+        let start = std::time::Instant::now();
+        let result = self.tree_transform_structure_overwrite_into_raw(
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
         );
         profile.total += start.elapsed();
         result
@@ -484,6 +543,28 @@ where
             beta,
         )
     }
+
+    fn tree_transform_structure_overwrite_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError> {
+        crate::tree_transform_structure_overwrite_with_strided_kernel_raw(
+            &mut StridedHostKernelAdapter::default(),
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+        )
+    }
 }
 
 impl<E, D, C> TreeTransformBackend<D, C> for DenseTreeTransformOperations<E>
@@ -567,6 +648,31 @@ where
         )
     }
 
+    fn tree_transform_structure_overwrite_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<(), OperationError> {
+        let threads = self.effective_recoupling_threads(dst_data.len());
+        crate::tree_transform_structure_overwrite_with_structural_recoupling_raw(
+            &mut self.kernel_adapter(),
+            &mut self.dense,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            threads,
+        )
+    }
+
     fn tree_transform_structure_into_raw_profiled(
         &mut self,
         workspace: &mut Self::Workspace,
@@ -595,11 +701,109 @@ where
             profile,
         )
     }
+
+    fn tree_transform_structure_overwrite_into_raw_profiled(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        structure: &TreeTransformStructure<C>,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        dst_data: &mut [D],
+        src_data: &[D],
+        alpha: D,
+        profile: &mut TreeTransformReplayProfile,
+    ) -> Result<(), OperationError> {
+        let threads = self.effective_recoupling_threads(dst_data.len());
+        crate::tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled(
+            &mut self.kernel_adapter(),
+            &mut self.dense,
+            workspace,
+            structure,
+            dst_structure,
+            src_structure,
+            dst_data,
+            src_data,
+            alpha,
+            threads,
+            profile,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn overwrite_fixture() -> (
+        Arc<BlockStructure>,
+        Arc<BlockStructure>,
+        TreeTransformStructure<f64>,
+    ) {
+        let src = Arc::new(BlockStructure::packed_column_major(1, [vec![1]]).unwrap());
+        let dst = Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
+        let structure = TreeTransformStructure::compile_structures(
+            &dst,
+            &src,
+            &[crate::TreeTransformBlockSpec::single(0, 0, 2.0)],
+        )
+        .unwrap();
+        (dst, src, structure)
+    }
+
+    struct RequiredMethodsOnlyBackend;
+
+    impl TreeTransformBackend<f64, f64> for RequiredMethodsOnlyBackend {
+        type Workspace = TreeTransformWorkspace<f64>;
+
+        fn tree_transform_structure_into<
+            const DST_NOUT: usize,
+            const DST_NIN: usize,
+            const SRC_NOUT: usize,
+            const SRC_NIN: usize,
+            SDst,
+            SSrc,
+            DDst,
+            DSrc,
+        >(
+            &mut self,
+            workspace: &mut Self::Workspace,
+            structure: &TreeTransformStructure<f64>,
+            dst: &mut TensorMap<f64, DST_NOUT, DST_NIN, SDst, DDst>,
+            src: &TensorMap<f64, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError>
+        where
+            DDst: HostWritableStorage<f64>,
+            DSrc: HostReadableStorage<f64>,
+        {
+            HostTensorOperations
+                .tree_transform_structure_into(workspace, structure, dst, src, alpha, beta)
+        }
+
+        fn tree_transform_structure_into_raw(
+            &mut self,
+            workspace: &mut Self::Workspace,
+            structure: &TreeTransformStructure<f64>,
+            dst_structure: &Arc<BlockStructure>,
+            src_structure: &Arc<BlockStructure>,
+            dst_data: &mut [f64],
+            src_data: &[f64],
+            alpha: f64,
+            beta: f64,
+        ) -> Result<(), OperationError> {
+            HostTensorOperations.tree_transform_structure_into_raw(
+                workspace,
+                structure,
+                dst_structure,
+                src_structure,
+                dst_data,
+                src_data,
+                alpha,
+                beta,
+            )
+        }
+    }
 
     fn assert_tensor_operations_backend<B: TensorOperationsBackend>() {}
     fn assert_host_tensor_operations_backend<B: HostTensorOperationsBackend>() {}
@@ -644,5 +848,116 @@ mod tests {
 
         assert_eq!(backend.effective_recoupling_threads(8), 1);
         assert_eq!(backend.effective_recoupling_threads(9), 4);
+    }
+
+    #[test]
+    fn provided_overwrite_keeps_existing_backend_implementations_source_compatible() {
+        let (dst_structure, src_structure, structure) = overwrite_fixture();
+        let mut dst = [f64::NAN; 2];
+
+        RequiredMethodsOnlyBackend
+            .tree_transform_structure_overwrite_into_raw(
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut dst,
+                &[3.0],
+                1.0,
+            )
+            .unwrap();
+
+        assert_eq!(dst, [6.0, 0.0]);
+    }
+
+    #[test]
+    fn provided_profiled_methods_keep_required_only_backends_correct() {
+        let (dst_structure, src_structure, structure) = overwrite_fixture();
+        let mut workspace = TreeTransformWorkspace::default();
+        let mut backend = RequiredMethodsOnlyBackend;
+        let mut generic_dst = [10.0, 20.0];
+        let mut generic_profile = TreeTransformReplayProfile::default();
+        backend
+            .tree_transform_structure_into_raw_profiled(
+                &mut workspace,
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut generic_dst,
+                &[3.0],
+                1.0,
+                0.5,
+                &mut generic_profile,
+            )
+            .unwrap();
+        assert_eq!(generic_dst, [11.0, 10.0]);
+
+        let mut overwrite_dst = [f64::NAN; 2];
+        let mut overwrite_profile = TreeTransformReplayProfile::default();
+        backend
+            .tree_transform_structure_overwrite_into_raw_profiled(
+                &mut workspace,
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut overwrite_dst,
+                &[3.0],
+                1.0,
+                &mut overwrite_profile,
+            )
+            .unwrap();
+        assert_eq!(overwrite_dst, [6.0, 0.0]);
+    }
+
+    #[test]
+    fn builtin_overwrite_backends_execute_raw_and_profiled_one_pass_routes() {
+        let (dst_structure, src_structure, structure) = overwrite_fixture();
+        let mut workspace = TreeTransformWorkspace::default();
+
+        let mut host_dst = [f64::NAN; 2];
+        HostTensorOperations
+            .tree_transform_structure_overwrite_into_raw(
+                &mut workspace,
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut host_dst,
+                &[3.0],
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(host_dst, [6.0, 0.0]);
+
+        let mut dense = DenseTreeTransformOperations::default();
+        let mut dense_dst = [f64::NAN; 2];
+        dense
+            .tree_transform_structure_overwrite_into_raw(
+                &mut workspace,
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut dense_dst,
+                &[3.0],
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(dense_dst, [6.0, 0.0]);
+
+        dense_dst.fill(f64::NAN);
+        let mut profile = TreeTransformReplayProfile::default();
+        dense
+            .tree_transform_structure_overwrite_into_raw_profiled(
+                &mut workspace,
+                &structure,
+                &dst_structure,
+                &src_structure,
+                &mut dense_dst,
+                &[3.0],
+                1.0,
+                &mut profile,
+            )
+            .unwrap();
+        assert_eq!(dense_dst, [6.0, 0.0]);
+        assert_eq!(profile.single_blocks, 1);
     }
 }

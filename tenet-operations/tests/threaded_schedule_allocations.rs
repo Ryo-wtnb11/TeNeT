@@ -8,6 +8,7 @@ use tenet_dense::{
     DenseTensor, DenseWrite,
 };
 use tenet_operations::{
+    tree_transform_structure_overwrite_with_structural_recoupling_raw,
     tree_transform_structure_with_structural_recoupling_raw, StridedHostKernelAdapter,
     TreeTransformBlockSpec, TreeTransformStructure, TreeTransformWorkspace,
 };
@@ -150,6 +151,54 @@ fn warm_threaded_replay_does_not_allocate_schedule_storage() {
     // What: the operation-neutral threaded schedule performs no caller-thread
     // allocation after warmup. Worker/backend allocations are intentionally
     // outside this oracle; the removed schedule Vecs lived on this thread.
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    replay();
+    COUNTING.set(false);
+
+    assert_eq!(ALLOCATIONS.get(), 0);
+}
+
+#[test]
+fn warm_threaded_overwrite_replay_does_not_allocate_on_the_caller_thread() {
+    let block_structure = Arc::new(
+        BlockStructure::packed_column_major(1, [vec![4], vec![4], vec![4], vec![4]]).unwrap(),
+    );
+    let structure = TreeTransformStructure::compile_structures(
+        &block_structure,
+        &block_structure,
+        &[
+            TreeTransformBlockSpec::multi(vec![0, 1], vec![0, 1], vec![1.0, 0.0, 0.0, 1.0]),
+            TreeTransformBlockSpec::single(2, 2, 1.0),
+            TreeTransformBlockSpec::single(3, 3, -1.0),
+        ],
+    )
+    .unwrap();
+    let src = (0..16).map(|value| value as f64 + 1.0).collect::<Vec<_>>();
+    let mut dst = vec![f64::NAN; 16];
+    let mut kernels = StridedHostKernelAdapter::default();
+    let mut dense = NoAllocDenseExecutor;
+    let mut workspace = TreeTransformWorkspace::default();
+
+    let mut replay = || {
+        tree_transform_structure_overwrite_with_structural_recoupling_raw(
+            &mut kernels,
+            &mut dense,
+            &mut workspace,
+            &structure,
+            &block_structure,
+            &block_structure,
+            &mut dst,
+            &src,
+            1.0,
+            4,
+        )
+        .unwrap();
+    };
+
+    replay();
+    // Why not count process-wide allocations: worker/backend allocation is
+    // outside this canary; the overwrite replay scratch lives on this thread.
     ALLOCATIONS.set(0);
     COUNTING.set(true);
     replay();
