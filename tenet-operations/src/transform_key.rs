@@ -107,9 +107,10 @@ impl TreeTransformOperation {
     /// codomain/domain split for a source with the given ranks.
     ///
     /// Braid levels must also describe every source leg. Their values do not
-    /// matter once the permutation has zero adjacent swaps. Why not classify
-    /// transpose here: a planar transpose/repartition can carry bend and dual
-    /// semantics even when a flattened order appears unchanged.
+    /// matter once the permutation has zero adjacent swaps. A transpose is
+    /// identity only at the exact current split. Why not infer from cyclic
+    /// position alone: a split-changing transpose carries bend and dual
+    /// semantics even when no ordinary axis swap is visible.
     pub fn is_identity_for(&self, codomain_rank: usize, domain_rank: usize) -> bool {
         let axes_are_identity = |codomain: &[usize], domain: &[usize]| {
             codomain.iter().copied().eq(0..codomain_rank)
@@ -133,7 +134,10 @@ impl TreeTransformOperation {
                     && domain_levels.len() == domain_rank
                     && axes_are_identity(codomain_permutation, domain_permutation)
             }
-            Self::Transpose { .. } => false,
+            Self::Transpose {
+                codomain_permutation,
+                domain_permutation,
+            } => axes_are_identity(codomain_permutation, domain_permutation),
         }
     }
 }
