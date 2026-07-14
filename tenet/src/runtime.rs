@@ -311,6 +311,11 @@ macro_rules! with_rule_ctx {
 pub(crate) use with_rule_ctx;
 
 struct RuntimeInner {
+    // ponytail: standalone ops hold this for the whole op (all rules/dtypes
+    // serialize together). Use per-thread Runtimes or the network/tensor!
+    // cached-plan path for data parallelism today; see #155 and
+    // docs/backend_policy.md#parallel-execution-current-state for the
+    // planned context-lease fix.
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
