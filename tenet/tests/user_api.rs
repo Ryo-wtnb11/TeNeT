@@ -879,6 +879,19 @@ fn space_sectors_round_trip_all_constructors() {
 }
 
 #[test]
+fn try_sectors_matches_sectors_on_multiplicity_free_rules() {
+    // try_sectors is Ok with byte-identical content to sectors() on every
+    // mult-free rule (the SU(3) Err path lives in su3_panic_firewall.rs).
+    for space in [
+        Space::u1([(-1, 2), (0, 3), (1, 2)]),
+        Space::z2([(0, 2), (1, 3)]),
+        Space::su2([(0, 2), (1, 3)]),
+    ] {
+        assert_eq!(space.try_sectors(), Ok(space.sectors()));
+    }
+}
+
+#[test]
 fn space_degeneracy_and_is_dual() {
     let v = Space::u1([(-1, 2), (0, 3)]);
     assert_eq!(v.degeneracy(SectorLabel::U1(-1)), Some(2));
