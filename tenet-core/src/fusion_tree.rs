@@ -1693,8 +1693,9 @@ where
 /// Batched [`multiplicity_free_permute_tree_pair`] over a block: symmetric
 /// braiding with the trivial level ordering.
 ///
-/// The empty/group contract is identical to
-/// [`multiplicity_free_braid_tree_pair_block`].
+/// The group contract is identical to
+/// [`multiplicity_free_braid_tree_pair_block`]. Symmetric braiding remains a
+/// required capability even for an empty source block.
 pub fn multiplicity_free_permute_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -1705,17 +1706,37 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let Some(group) = validate_tree_pair_block_group(src_keys)? else {
-        return Ok(Vec::new());
-    };
+    let group = validate_tree_pair_block_group(src_keys)?;
     if !rule.braiding_style().is_symmetric() {
         return Err(CoreError::UnsupportedBraidingStyle {
             expected: "symmetric braiding",
             actual: rule.braiding_style(),
         });
     }
+    let Some(group) = group else {
+        return Ok(Vec::new());
+    };
     let codomain_rank = group.codomain_rank;
     let domain_rank = group.domain_rank;
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    if tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ) {
+        return Ok(src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), rule.scalar_one())])
+            .collect());
+    }
+    // Why not construct these before the identity check: their only purpose
+    // is to assign crossing order during a nontrivial permutation.
     let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
     let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
     multiplicity_free_braid_tree_pair_block_validated(
