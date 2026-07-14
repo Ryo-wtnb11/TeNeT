@@ -1786,19 +1786,28 @@ mod tests {
             su2(1),
         );
         let domain_right = rule.encode_sector(
-            left_rule.encode_sector(z2_odd(), u1(-1)),
+            left_rule.encode_sector(z2_odd(), u1(1)),
             su2(2),
         );
-        let source = FusionTreeBlockKey::pair_from_sector_ids(
-            [coupled.id()],
-            [domain_left.id(), domain_right.id()],
-            Some(coupled.id()),
-            [false],
-            [false, true],
-            [],
-            [],
-            [],
-            [1],
+        let source = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [coupled],
+                Some(coupled),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [domain_left, domain_right],
+                Some(coupled),
+                [false, true],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
         );
 
         let actual = multiplicity_free_braid_tree_pair(
