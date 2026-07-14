@@ -85,10 +85,6 @@ impl HyperEdge {
     pub fn is_output(&self) -> bool {
         self.output_position.is_some()
     }
-
-    pub fn is_contracted(&self) -> bool {
-        self.output_position.is_none()
-    }
 }
 
 /// TeNeT's internal representation of a parsed einsum expression.
@@ -204,14 +200,6 @@ impl NetworkIR {
 
     pub fn output_rank(&self) -> usize {
         self.output_labels.len()
-    }
-
-    pub fn contracted_edges(&self) -> impl Iterator<Item = &HyperEdge> {
-        self.edges.iter().filter(|edge| edge.is_contracted())
-    }
-
-    pub fn output_edges(&self) -> impl Iterator<Item = &HyperEdge> {
-        self.edges.iter().filter(|edge| edge.is_output())
     }
 
     pub fn labels_for_tensor(&self, id: TensorId) -> Result<&[TemporaryLabel]> {

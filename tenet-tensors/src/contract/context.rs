@@ -467,11 +467,6 @@ where
     }
 
     #[inline]
-    pub fn workspace_mut(&mut self) -> &mut B::Workspace {
-        &mut self.workspace
-    }
-
-    #[inline]
     pub fn cache(&self) -> &TensorContractCache {
         &self.cache
     }
@@ -747,18 +742,8 @@ where
     }
 
     #[inline]
-    pub fn contract_workspace_mut(&mut self) -> &mut BC::Workspace {
-        &mut self.contract_workspace
-    }
-
-    #[inline]
     pub fn contract_cache(&self) -> &TensorContractCache<TensorContractBlockPlanKey> {
         &self.contract_cache
-    }
-
-    #[inline]
-    pub fn contract_cache_mut(&mut self) -> &mut TensorContractCache<TensorContractBlockPlanKey> {
-        &mut self.contract_cache
     }
 
     /// Entries in the unified contraction resolution cache (route + plan

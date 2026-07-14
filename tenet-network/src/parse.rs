@@ -108,10 +108,6 @@ pub(crate) fn parse_label_list_with_split(text: &str) -> Result<ParsedLabelList>
     }
 }
 
-pub(crate) fn label_count(text: &str) -> Result<usize> {
-    Ok(parse_label_list(text)?.len())
-}
-
 fn parse_label_char(label: char) -> Result<TemporaryLabel> {
     if label.is_ascii_alphabetic() {
         Ok(TemporaryLabel::from(label))

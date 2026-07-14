@@ -1372,72 +1372,6 @@ where
         )
     }
 
-    pub fn get_or_compile_tree_pair_structures<R>(
-        &mut self,
-        rule: &R,
-        operation: TreeTransformOperation,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
-        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
-        RuleKey: 'static + Send + Sync,
-    {
-        let rule_key = rule.tree_transform_rule_cache_key();
-        if let Some(structure) = self.fast_structure(
-            &rule_key,
-            TreeTransformPlanScope::TreePair,
-            &operation,
-            dst_structure,
-            src_structure,
-            false,
-        ) {
-            return Ok(structure);
-        }
-        let plan_key = TreeTransformSectorPlanKey::new(
-            rule_key.clone(),
-            TreeTransformPlanScope::TreePair,
-            operation.clone(),
-            src_structure,
-        )?;
-        if !self.policy.stores_entries() {
-            self.stats.plan_misses += 1;
-            self.stats.structure_misses += 1;
-            let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
-            return Ok(Arc::new(
-                plan.compile_shared_structures_with_storage_conjugation(
-                    Arc::clone(dst_structure),
-                    Arc::clone(src_structure),
-                    false,
-                )?,
-            ));
-        }
-        if self.plans.contains_key(&plan_key) {
-            self.stats.plan_hits += 1;
-            self.touch_plan(&plan_key);
-        } else {
-            self.stats.plan_misses += 1;
-            let plan = self.get_or_compile_global_tree_pair_plan(
-                rule,
-                &rule_key,
-                operation.clone(),
-                src_structure,
-                &plan_key,
-            )?;
-            self.insert_plan_arc(plan_key.clone(), plan);
-        }
-        self.get_or_compile_structure_from_structures(
-            rule_key,
-            TreeTransformPlanScope::TreePair,
-            operation,
-            plan_key,
-            dst_structure,
-            src_structure,
-        )
-    }
-
     pub fn get_or_compile_tree_pair_structures_with_storage_conjugation<R>(
         &mut self,
         rule: &R,
@@ -1755,30 +1689,6 @@ where
             Arc::clone(&structure),
         );
         Ok(structure)
-    }
-
-    fn get_or_compile_structure_from_structures(
-        &mut self,
-        rule_key: RuleKey,
-        scope: TreeTransformPlanScope,
-        operation: TreeTransformOperation,
-        plan_key: TreeTransformSectorPlanKey<RuleKey>,
-        dst_structure: &Arc<BlockStructure>,
-        src_structure: &Arc<BlockStructure>,
-    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
-    where
-        T: 'static + Copy + Send + Sync,
-        RuleKey: 'static + Send + Sync,
-    {
-        self.get_or_compile_structure_from_structures_with_storage_conjugation(
-            rule_key,
-            scope,
-            operation,
-            plan_key,
-            dst_structure,
-            src_structure,
-            false,
-        )
     }
 
     fn get_or_compile_structure_from_structures_with_storage_conjugation(
