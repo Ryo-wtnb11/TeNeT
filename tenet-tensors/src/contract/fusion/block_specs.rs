@@ -458,17 +458,13 @@ pub(crate) fn external_axis_is_dual(
     homspace: &FusionTreeHomSpace,
     axis: usize,
 ) -> Result<bool, OperationError> {
-    if axis < homspace.codomain().len() {
-        Ok(homspace.codomain().legs()[axis].is_dual())
-    } else if axis < homspace.rank() {
-        Ok(!homspace.domain().legs()[axis - homspace.codomain().len()].is_dual())
-    } else {
-        Err(OperationError::InvalidAxisSet {
+    homspace
+        .external_axis_is_dual(axis)
+        .ok_or_else(|| OperationError::InvalidAxisSet {
             tensor: "rhs",
             axes: vec![axis],
             rank: homspace.rank(),
         })
-    }
 }
 
 fn contracted_external_sectors_match(

@@ -2507,23 +2507,21 @@ impl Tensor {
             };
             return lhs.contract(&rhs, lhs_axes, rhs_axes);
         }
-        // Order-parity fast path for a real diagonal operand (#75): instead of
+        // Order-parity fast path for a real or complex diagonal operand (#75): instead of
         // densifying it to an O(d²) block-diagonal and running an O(d²·n) GEMM,
         // scale the OTHER operand's contracted leg by the spectrum (O(d·n)) and
         // `permute` the result into the contract output arrangement (O(n)). The
         // `permute` reuses the tested recoupling/repartition machinery, so the
         // result space — including leg duality and the codomain/domain split — is
-        // correct for ANY geometry, not just edge legs. This is the same
+        // correct for the proven canonical geometries at any leg position within
+        // the preserved partition side. This is the same
         // scale + one-permute structure TensorKit runs (a `Diagonal` block scales
         // the recoupled operand); see docs/complexity_parity_policy.md.
         //
-        // `contract` (tensorcontract!) applies a supertrace twist to `rhs`'s DUAL
-        // contracted legs; `mul!` (the scaling below) does not. The exact
-        // relation, from the cancellation `compose` performs, is
-        // `contract(a, b) = mul!(a, b.twist(dual contracted rhs legs))`. So
-        // pre-twist `rhs`'s dual contracted leg: when `rhs` is the diagonal, fold
-        // θ into the spectrum (no densify); when `rhs` is the dense operand,
-        // `twist` it. θ = ±1 by charge parity, identity for bosonic rules.
+        // `contract` (tensorcontract!) applies a supertrace twist to `rhs`'s
+        // externally dual contracted legs; `mul!` does not. The canonical
+        // diagonal routes below therefore fold that RHS twist into the scaled
+        // operand. θ = ±1 by charge parity, identity for bosonic rules.
         // SU(N) (Generic) is bosonic and cannot ride the mult-free `with_rule!`
         // binding; short-circuit the twist probe (the diagonal fast path below
         // never fires for it — SU(N) has no `Data::Diagonal` factors yet).
@@ -2532,14 +2530,20 @@ impl Tensor {
                 rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
             });
         if lhs_axes.len() == 1 && rhs_axes.len() == 1 {
-            let twist_rhs_leg = fermionic && rhs.leg_is_dual(rhs_axes[0]);
+            let twist_rhs_leg = fermionic && rhs.external_axis_is_dual(rhs_axes[0]);
             let diagonal_dst = if self.diagonal_data().is_some() || rhs.diagonal_data().is_some() {
                 Some(self.contraction_output_space(rhs, lhs_axes, rhs_axes)?)
             } else {
                 None
             };
+            // Why not scale a noncanonical diagonal axis: crossing the
+            // codomain/domain partition can dualize its sector label, while
+            // block-local scaling indexes the compact spectrum by raw labels.
+            // Keep those routes dense until scaling carries an explicit relabel.
             match (self.diagonal_data(), rhs.diagonal_data()) {
-                (Some(lhs), Some(rhs_diagonal)) if self.rule != RuleKind::Su3 => {
+                (Some(lhs), Some(rhs_diagonal))
+                    if self.rule != RuleKind::Su3 && lhs_axes == [1] && rhs_axes == [0] =>
+                {
                     let folded_rhs = self.twist_folded_diagonal(rhs_diagonal, twist_rhs_leg);
                     let dst_space = diagonal_dst
                         .expect("diagonal destination prepared when both operands are diagonal");
@@ -2552,7 +2556,9 @@ impl Tensor {
                 // A * D: scale A's contracted leg by the (twist-folded) spectrum,
                 // then repartition to the output arrangement (A's open axes ->
                 // codomain, the scaled leg -> domain).
-                (None, Some(diagonal)) => {
+                (None, Some(diagonal))
+                    if lhs_axes[0] >= self.codomain_rank() && rhs_axes[0] == 0 =>
+                {
                     let leg = lhs_axes[0];
                     let folded = self.twist_folded_diagonal(diagonal, twist_rhs_leg);
                     let scaled = self.scaled_axis_copy_diagonal(Some(leg), &folded)?;
@@ -2563,7 +2569,7 @@ impl Tensor {
                 }
                 // D * A: pre-twist A's dual contracted leg, scale it, then
                 // repartition (the scaled leg -> codomain 0, A's open -> domain).
-                (Some(diagonal), None) => {
+                (Some(diagonal), None) if lhs_axes[0] == 1 && rhs_axes[0] < rhs.codomain_rank() => {
                     let leg = rhs_axes[0];
                     let pretwisted = if twist_rhs_leg {
                         rhs.twist(&[leg])?
@@ -3530,17 +3536,11 @@ impl Tensor {
         }
     }
 
-    /// Whether leg `axis` (flat, codomain-first) carries a dual space, read from
-    /// the hom-space legs (the same duality `compose` checks to decide which
-    /// contracted legs `contract` twists).
-    fn leg_is_dual(&self, axis: usize) -> bool {
-        let hom = self.space.homspace();
-        let nout = self.codomain_rank();
-        if axis < nout {
-            hom.codomain().legs()[axis].is_dual()
-        } else {
-            hom.domain().legs()[axis - nout].is_dual()
-        }
+    fn external_axis_is_dual(&self, axis: usize) -> bool {
+        self.space
+            .homspace()
+            .external_axis_is_dual(axis)
+            .expect("contract axes are validated before diagonal dispatch")
     }
 
     /// Folds the supertrace twist into compact values. Why not call `twist` on
