@@ -190,6 +190,31 @@ pub struct DynamicFusionMapSpace {
     rule_identity: Option<tenet_core::RuleIdentity>,
 }
 
+fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {
+    let expected_nout = space.homspace().codomain().len();
+    let expected_nin = space.homspace().domain().len();
+    if space.nout() != expected_nout || space.nin() != expected_nin {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::FusionSpaceSplitMismatch {
+                expected_nout,
+                expected_nin,
+                actual_nout: space.nout(),
+                actual_nin: space.nin(),
+            },
+        ));
+    }
+    let expected_rank = expected_nout + expected_nin;
+    if space.structure().rank() != expected_rank {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::StructureRankMismatch {
+                expected: expected_rank,
+                actual: space.structure().rank(),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// A complete dynamic fusion space bound to the provider that defines it.
 ///
 /// Construct this with [`Self::bind_multiplicity_free`] for a
@@ -233,6 +258,7 @@ where
         // `space` through checked structural operations from an already-bound
         // source. Re-enumeration would duplicate that work without adding a
         // new trust boundary; the rule identity remains cheap to verify.
+        validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
         Ok(Self { space, provider })
     }
@@ -250,7 +276,7 @@ where
     {
         let space =
             DynamicFusionMapSpace::from_degeneracy_shapes(provider.as_ref(), homspace, shapes)?;
-        Ok(Self { space, provider })
+        Self::from_derived(provider, space)
     }
 
     /// Builds and binds a multiplicity-aware space in one checked pass.
@@ -268,7 +294,7 @@ where
             homspace,
             shapes,
         )?;
-        Ok(Self { space, provider })
+        Self::from_derived(provider, space)
     }
 
     fn bind_with_keys(
@@ -276,6 +302,7 @@ where
         provider: Arc<R>,
         keys: Vec<FusionTreeBlockKey>,
     ) -> Result<Self, OperationError> {
+        validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
         space.validate_complete_tree_grid(&keys)?;
         Ok(Self { space, provider })
@@ -1067,6 +1094,96 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
             codomain_permutation.as_slice(),
             domain_permutation.as_slice(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod bound_invariant_tests {
+    use super::*;
+    use tenet_core::{BlockSpec, Z2FusionRule};
+
+    fn matrix_space() -> DynamicFusionMapSpace {
+        let rule = Z2FusionRule;
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![1, 1]]).unwrap()
+    }
+
+    #[test]
+    fn bound_space_rejects_incoherent_axis_split() {
+        // What: a bound space cannot disagree with its hom-space codomain/domain split.
+        let raw = DynamicFusionMapSpace {
+            nout: 0,
+            nin: 2,
+            ..matrix_space()
+        };
+
+        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            raw,
+            Arc::new(Z2FusionRule),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionSpaceSplitMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn bound_space_rejects_incoherent_structure_rank() {
+        // What: a bound space cannot attach storage with a rank different from its hom space.
+        let raw = matrix_space();
+        let block = raw.structure().block(0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(
+            1,
+            vec![BlockSpec::with_key(
+                block.key().clone(),
+                vec![1],
+                vec![1],
+                0,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let raw = DynamicFusionMapSpace {
+            subblock_structure: Arc::new(structure),
+            ..raw
+        };
+
+        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            raw,
+            Arc::new(Z2FusionRule),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::StructureRankMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn direct_bound_builders_keep_coherent_split_and_rank() {
+        // What: both multiplicity-free and generic direct builders satisfy bound invariants.
+        let provider = Arc::new(Z2FusionRule);
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        let multiplicity_free = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            homspace.clone(),
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let generic = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            provider,
+            homspace,
+            [vec![1, 1]],
+        )
+        .unwrap();
+
+        assert_eq!(multiplicity_free.space().nout(), 1);
+        assert_eq!(generic.space().nin(), 1);
+        assert_eq!(multiplicity_free.space().structure().rank(), 2);
+        assert_eq!(generic.space().structure().rank(), 2);
     }
 }
 
