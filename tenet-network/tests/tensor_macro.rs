@@ -69,6 +69,58 @@ fn permuted_output_labels_match_contract_ordered() {
 }
 
 #[test]
+fn planned_crossed_output_preserves_heterogeneous_leg_spaces() {
+    let rt = Runtime::builder().build().unwrap();
+    let a = Space::u1([(-2, 1), (0, 2)]);
+    let b = Space::u1([(-1, 2), (1, 1)]);
+    let bond = Space::u1([(-1, 1), (0, 3), (2, 1)]);
+    let c = Space::u1([(0, 1), (2, 2)]);
+    let d = Space::u1([(-3, 1), (1, 2)]);
+    let lhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&a, &b], [&bond], 224_601).unwrap();
+    let rhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&c, &d], 224_602).unwrap();
+    let network = Network::new(
+        vec![
+            vec!["a", "b", "k"]
+                .into_iter()
+                .map(TemporaryLabel::from)
+                .collect(),
+            vec!["k", "c", "d"]
+                .into_iter()
+                .map(TemporaryLabel::from)
+                .collect(),
+        ],
+        vec![false, false],
+        vec![Some(2), Some(1)],
+        ["d", "a", "b", "c"]
+            .into_iter()
+            .map(TemporaryLabel::from)
+            .collect(),
+        Some(2),
+    )
+    .unwrap();
+    let tensors = [&lhs, &rhs];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let default = lhs.contract(&rhs, &[2], &[0]).unwrap();
+    let expected = default.permute(&[3, 0], &[1, 2]).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+
+    let cold = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let warm = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    // What: pAB maps every heterogeneous open leg to the requested output
+    // position; equality of flat data alone cannot detect a swapped Space.
+    for actual in [&cold, &warm] {
+        assert_close(actual.data(), expected.data(), 1e-12);
+        for axis in 0..actual.rank() {
+            assert_eq!(actual.space(axis), expected.space(axis));
+        }
+    }
+}
+
+#[test]
 fn single_tensor_macro_is_a_permute() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
@@ -254,7 +306,8 @@ fn planned_network_reuses_execution_workspace() {
     );
     assert_eq!(
         after_second.orientation_layout_preparations - after_first.orientation_layout_preparations,
-        1
+        0,
+        "crossed pAB must be compiled into the contraction destination"
     );
     assert_eq!(
         after_third.contract_layout_preparations - after_second.contract_layout_preparations,
@@ -273,6 +326,15 @@ fn planned_network_reuses_execution_workspace() {
             - after_second.orientation_structural_comparisons,
         0
     );
+    assert_eq!(
+        after_third.owned_orientations - after_first.owned_orientations,
+        0
+    );
+    assert_eq!(
+        after_third.reused_orientations - after_first.reused_orientations,
+        0
+    );
+    assert_eq!(workspace.retained_intermediate_buffer_count(), 1);
 
     let z = Space::z2([(0, 2), (1, 2)]);
     let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();
@@ -287,7 +349,129 @@ fn planned_network_reuses_execution_workspace() {
     assert_close(recovered.data(), expected.data(), 1e-12);
     assert_eq!(
         workspace.stats().reused_intermediates - before_recovery.reused_intermediates,
-        2
+        1
+    );
+}
+
+#[test]
+fn split_changing_intermediate_keeps_sequential_orientation_replay() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 224_801).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v], 224_802).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 224_803).unwrap();
+    let label = |name: &str| TemporaryLabel::from(name);
+    let network = Network::new(
+        vec![
+            vec![label("a"), label("c")],
+            vec![label("c"), label("b"), label("d")],
+            vec![label("b"), label("d"), label("e")],
+        ],
+        vec![false; 3],
+        vec![Some(1), Some(1), Some(2)],
+        vec![label("e"), label("a")],
+        Some(1),
+    )
+    .unwrap();
+    let tensors = [&a, &b, &c];
+    let planned = network
+        .plan(
+            &tensors,
+            &LabelOrderDenseOptimizer::new(vec![label("c"), label("b"), label("d")]),
+        )
+        .unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_cold = workspace.stats();
+    let warm = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_warm = workspace.stats();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_second_warm = workspace.stats();
+
+    // What: moving the planar boundary is not pAB-only. Warm replay retains
+    // the proven contract destination followed by one orientation replay.
+    assert_close(warm.data(), expected.data(), 1e-12);
+    assert_eq!(
+        after_warm.reused_orientations - after_cold.reused_orientations,
+        1
+    );
+    assert_eq!(
+        after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
+        1
+    );
+    assert_eq!(
+        after_second_warm.contract_layout_preparations - after_warm.contract_layout_preparations,
+        0
+    );
+    assert_eq!(
+        after_second_warm.orientation_layout_preparations
+            - after_warm.orientation_layout_preparations,
+        0
+    );
+}
+
+#[test]
+fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_811).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_812).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_813).unwrap();
+    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
+    let network = Network::new(
+        vec![
+            labels(&["i", "j"]),
+            labels(&["j", "k"]),
+            labels(&["k", "l"]),
+        ],
+        vec![false; 3],
+        vec![Some(1); 3],
+        labels(&["l", "i"]),
+        Some(1),
+    )
+    .unwrap();
+    let tensors = [&a, &b, &c];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_cold = workspace.stats();
+    let warm = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_warm = workspace.stats();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_second_warm = workspace.stats();
+
+    // What: generic fusion does not enter the multiplicity-free ordered seam.
+    assert_eq!(warm.data_c64(), expected.data_c64());
+    assert_eq!(
+        after_warm.reused_orientations - after_cold.reused_orientations,
+        1
+    );
+    assert_eq!(
+        after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
+        1
+    );
+    assert_eq!(
+        after_second_warm.contract_layout_preparations - after_warm.contract_layout_preparations,
+        0
+    );
+    assert_eq!(
+        after_second_warm.orientation_layout_preparations
+            - after_warm.orientation_layout_preparations,
+        0
     );
 }
 

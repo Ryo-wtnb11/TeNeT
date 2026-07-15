@@ -393,6 +393,7 @@ struct CompiledStep {
     lhs_contract_axes: Vec<usize>,
     rhs_contract_axes: Vec<usize>,
     result_permutation: Option<(Vec<usize>, Vec<usize>)>,
+    result_output_axes: Option<Vec<usize>>,
 }
 
 /// Caller-owned tensor slots for repeated execution of a [`PlannedNetwork`].
@@ -447,6 +448,16 @@ impl NetworkExecutionWorkspace {
     #[doc(hidden)]
     pub fn stats(&self) -> NetworkExecutionStats {
         self.stats
+    }
+
+    #[doc(hidden)]
+    pub fn retained_intermediate_buffer_count(&self) -> usize {
+        self.intermediates
+            .iter()
+            .map(|buffers| {
+                usize::from(buffers.contracted.is_some()) + usize::from(buffers.oriented.is_some())
+            })
+            .sum()
     }
 
     #[cfg(test)]
@@ -553,6 +564,65 @@ impl PlannedNetwork {
                 .take()
                 .ok_or_else(|| invalid("rhs operand already consumed"))?;
             let rhs_producer = workspace.slot_producers[step.rhs_slot].take();
+
+            // Replay a same-split pAB directly into its retained oriented slot.
+            // Compile-time filtering leaves boundary-moving orientations on the
+            // established two-stage path; incompatible storage also falls through.
+            if let Some(output_axes) = &step.result_output_axes {
+                if let Some(mut destination) = workspace.intermediates[step_index].oriented.take() {
+                    let preparations = workspace.intermediates[step_index]
+                        .contract_cache
+                        .preparations();
+                    let structural_comparisons = workspace.intermediates[step_index]
+                        .contract_cache
+                        .structural_comparisons();
+                    let overwrite = workspace
+                        .tensor_context
+                        .as_mut()
+                        .expect("execution context initialized")
+                        .try_contract_ordered_overwrite_into(
+                            &mut workspace.intermediates[step_index].contract_cache,
+                            &mut destination,
+                            &lhs,
+                            &rhs,
+                            &step.lhs_contract_axes,
+                            &step.rhs_contract_axes,
+                            output_axes,
+                            identity_scalar(lhs.dtype()),
+                        );
+                    workspace.stats.contract_layout_preparations += workspace.intermediates
+                        [step_index]
+                        .contract_cache
+                        .preparations()
+                        - preparations;
+                    workspace.stats.contract_structural_comparisons += workspace.intermediates
+                        [step_index]
+                        .contract_cache
+                        .structural_comparisons()
+                        - structural_comparisons;
+                    match overwrite {
+                        Ok(OverwriteOutcome::Written) => {
+                            drop(workspace.intermediates[step_index].contracted.take());
+                            workspace.stats.reused_intermediates += 1;
+                            workspace.stats.reused_contractions += 1;
+                            return_intermediate(workspace, lhs, lhs_producer);
+                            return_intermediate(workspace, rhs, rhs_producer);
+                            workspace.slots[step.result_slot] = Some(destination);
+                            workspace.slot_producers[step.result_slot] = Some((step_index, true));
+                            continue;
+                        }
+                        Ok(OverwriteOutcome::Incompatible) => {
+                            workspace.intermediates[step_index].oriented = Some(destination);
+                        }
+                        Err(error) => {
+                            workspace.intermediates[step_index].oriented = Some(destination);
+                            return_intermediate(workspace, lhs, lhs_producer);
+                            return_intermediate(workspace, rhs, rhs_producer);
+                            return Err(error);
+                        }
+                    }
+                }
+            }
 
             let contraction = if let Some(mut destination) =
                 workspace.intermediates[step_index].contracted.take()
@@ -804,9 +874,10 @@ fn compile_schedule(
                 .map(|(_, label)| label.clone()),
         );
 
+        let lhs_open_count = lhs_labels.len() - lhs_contract_axes.len();
         let result_permutation = compiled_intermediate_permutation(
             &result_labels,
-            lhs_labels.len() - lhs_contract_axes.len(),
+            lhs_open_count,
             step.result(),
             plan.steps(),
             &consumers,
@@ -832,6 +903,12 @@ fn compile_schedule(
             result_slot,
             lhs_contract_axes,
             rhs_contract_axes,
+            // pAB reorders axes inside the existing split. Moving the split is
+            // a repartition and remains an explicit orientation operation.
+            result_output_axes: result_permutation
+                .as_ref()
+                .filter(|(codomain, _)| codomain.len() == lhs_open_count)
+                .map(|(codomain, domain)| codomain.iter().chain(domain).copied().collect()),
             result_permutation,
         });
     }

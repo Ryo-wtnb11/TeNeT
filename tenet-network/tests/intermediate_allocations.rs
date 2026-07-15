@@ -675,9 +675,9 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
     );
     if workload.permutes_intermediate() {
         if reuse {
-            assert_eq!((owned, reused), (3, 6));
+            assert_eq!((owned, reused), (3, 3));
             assert_eq!((owned_contractions, reused_contractions), (3, 3));
-            assert_eq!((owned_orientations, reused_orientations), (0, 3));
+            assert_eq!((owned_orientations, reused_orientations), (0, 0));
         } else {
             assert_eq!((owned, reused), (9, 0));
             assert_eq!((owned_contractions, reused_contractions), (6, 0));
@@ -750,7 +750,7 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
             assert_eq!(values.len(), 15);
             let expected_structural = if reuse {
                 if workload.permutes_intermediate() {
-                    3_000_006
+                    3_000_003
                 } else {
                     3_000_006
                 }
@@ -1167,6 +1167,13 @@ fn measured_intermediate_arena_accounting() {
             assert!(fresh_payload_allocs > reused_payload_allocs);
             assert!(fresh_payload_retained > reused_payload_retained);
             assert!(fresh_payload_peak > reused_payload_peak);
+            if workload.permutes_intermediate() {
+                // What: warm crossed-pAB replay allocates only the escaping
+                // output payload, with no standalone contracted or orientation
+                // payload retained in the workspace.
+                assert_eq!(reused_payload_allocs, 1);
+                assert_eq!(reused_payload_retained, 0);
+            }
             assert!(fresh
                 .iter()
                 .all(|sample| sample.payload_output_live_bytes == sample.payload_size_bytes));
