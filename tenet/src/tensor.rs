@@ -33,10 +33,8 @@ use tenet_matrixalgebra::{
 };
 #[cfg(feature = "cuda")]
 use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
-#[cfg(feature = "cuda")]
-use tenet_tensors::OperationError;
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OutputAxisOrder,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
     TreeTransformRuleCacheKey,
 };
@@ -1197,14 +1195,16 @@ fn validate_contracted_axes(contracted: &[usize], rank: usize) -> Result<(), Err
 }
 
 fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
-    if axes.len() != rank {
-        return Err(Error::InvalidArgument(format!(
-            "invalid output axis list {axes:?} for rank {rank}"
-        )));
+    if axes.len() == rank && validate_contracted_axes(axes, rank).is_ok() {
+        return Ok(());
     }
-    validate_contracted_axes(axes, rank).map_err(|_| {
-        Error::InvalidArgument(format!("invalid output axis list {axes:?} for rank {rank}"))
-    })
+    Err(
+        OperationError::Core(tenet_core::CoreError::InvalidPermutation {
+            permutation: axes.to_vec(),
+            rank,
+        })
+        .into(),
+    )
 }
 
 // ---------------------------------------------------------------------------
