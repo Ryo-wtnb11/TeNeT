@@ -18,6 +18,7 @@ use crate::{
     RecouplingCoefficientAction, ReportsPlacement, TreeTransformReplayProfile,
     TreeTransformStructure,
 };
+use tenet_dense::DefaultDenseExecutor;
 use tenet_operations::tree_transform_structure_with_storage_workspace_strided_kernel;
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformScalar;
@@ -128,6 +129,61 @@ where
 
     pub fn into_parts(self) -> (B, B::Workspace, TreeTransformCache<C, RuleKey>) {
         (self.backend, self.workspace, self.cache)
+    }
+}
+
+impl<D, RuleKey, C>
+    TreeTransformExecutionContext<D, RuleKey, C, DenseTreeTransformOperations<DefaultDenseExecutor>>
+where
+    D: crate::DenseRecouplingScalar + RecouplingCoefficientAction<C> + crate::ConjugateValue,
+    C: 'static + Copy + Clone + Add<Output = C> + Mul<Output = C> + Zero + Send + Sync,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+{
+    /// Attempts the serial built-in writer used by owned tensor transforms.
+    /// `Ok(None)` means the proof was unavailable and no output was allocated.
+    ///
+    /// This concrete cross-crate entrypoint is internal and unstable despite
+    /// being public for `tenet`; downstream callers must not rely on it.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_tree_transform_dyn_overwrite_owned<R>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        nout: usize,
+        src_data: &[D],
+        alpha: D,
+    ) -> Result<Option<Vec<D>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    {
+        if self.backend.recoupling_threads() != 1 {
+            return Ok(None);
+        }
+        self.cache.set_recoupling_threads(1);
+        let structure = self
+            .cache
+            .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+                rule,
+                operation,
+                dst_structure,
+                src_structure,
+                false,
+            )?;
+        let transpose_backend = self.backend.transpose_backend();
+        tenet_operations::try_tree_transform_structure_overwrite_owned_raw(
+            self.backend.dense_mut(),
+            &mut self.workspace,
+            transpose_backend,
+            &structure,
+            dst_structure,
+            src_structure,
+            nout,
+            src_data,
+            alpha,
+        )
     }
 }
 

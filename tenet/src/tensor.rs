@@ -3547,17 +3547,34 @@ impl Tensor {
         }
         let data = with_user_rule_ctx!(self.space, context, rule, ctxs, {
             let dst_space = dst_bound.raw();
-            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
-            D::ctx_of(ctxs).tree_context_mut().tree_transform_dyn_into(
-                rule,
-                operation,
-                &Arc::clone(dst_space.structure()),
-                self.space.structure(),
-                &mut data,
-                src_data,
-                D::from_real(1.0),
-                D::from_real(0.0),
-            )?;
+            let required_len = dst_space.required_len()?;
+            let owned = D::ctx_of(ctxs)
+                .tree_context_mut()
+                .try_tree_transform_dyn_overwrite_owned(
+                    rule,
+                    &operation,
+                    &Arc::clone(dst_space.structure()),
+                    self.space.structure(),
+                    dst_space.nout(),
+                    src_data,
+                    D::from_real(1.0),
+                )?;
+            let data = if let Some(data) = owned {
+                data
+            } else {
+                let mut data = vec![D::from_real(0.0); required_len];
+                D::ctx_of(ctxs).tree_context_mut().tree_transform_dyn_into(
+                    rule,
+                    operation,
+                    &Arc::clone(dst_space.structure()),
+                    self.space.structure(),
+                    &mut data,
+                    src_data,
+                    D::from_real(1.0),
+                    D::from_real(0.0),
+                )?;
+                data
+            };
             Ok::<_, Error>(D::lift(data))
         })?;
         self.with_bound(dst_bound, data)
@@ -7078,6 +7095,51 @@ mod tk_user_api_tests {
                 9.797_958_971_132_713,
             ],
         );
+    }
+
+    #[test]
+    fn threaded_owned_transform_fallback_preserves_nonabelian_results() {
+        // What: configuring threaded recoupling leaves the new serial-only
+        // owned writer and reproduces the initialized SU2/product path for
+        // both real and complex storage.
+        let serial = Runtime::builder().build().unwrap();
+        let threaded = Runtime::builder().recoupling_threads(2).build().unwrap();
+
+        let su2 = Space::su2([(0, 1), (1, 2)]);
+        let serial_su2 =
+            Tensor::rand_with_seed(&serial, Dtype::C64, [&su2, &su2], [&su2, &su2], 226)
+                .unwrap()
+                .repartition(3)
+                .unwrap();
+        let threaded_su2 =
+            Tensor::rand_with_seed(&threaded, Dtype::C64, [&su2, &su2], [&su2, &su2], 226)
+                .unwrap()
+                .repartition(3)
+                .unwrap();
+        assert_eq!(threaded_su2.data_c64(), serial_su2.data_c64());
+
+        let product = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 0, 1), 2)]).unwrap();
+        let serial_product = Tensor::rand_with_seed(
+            &serial,
+            Dtype::F64,
+            [&product, &product],
+            [&product, &product],
+            227,
+        )
+        .unwrap()
+        .repartition(1)
+        .unwrap();
+        let threaded_product = Tensor::rand_with_seed(
+            &threaded,
+            Dtype::F64,
+            [&product, &product],
+            [&product, &product],
+            227,
+        )
+        .unwrap()
+        .repartition(1)
+        .unwrap();
+        assert_eq!(threaded_product.data(), serial_product.data());
     }
 
     #[test]
