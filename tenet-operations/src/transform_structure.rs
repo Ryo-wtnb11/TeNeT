@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
-use crate::strided::{column_major_strides_isize, element_count, offset_to_isize};
+use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
 use crate::transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformKeyBlockSpec,
@@ -1077,6 +1077,17 @@ impl TreeTransformLayoutTable {
         strides: &[usize],
         offset: usize,
     ) -> Result<usize, OperationError> {
+        self.push_block_mapped(rank, shape, strides, offset, None)
+    }
+
+    fn push_block_mapped(
+        &mut self,
+        rank: usize,
+        shape: &[usize],
+        strides: &[usize],
+        offset: usize,
+        axes: Option<&[usize]>,
+    ) -> Result<usize, OperationError> {
         if shape.len() != rank {
             return Err(OperationError::RankMismatch {
                 expected: rank,
@@ -1089,24 +1100,44 @@ impl TreeTransformLayoutTable {
                 actual: strides.len(),
             });
         }
-        let element_count = element_count(shape)?;
+        let axis = |index: usize| axes.map_or(index, |axes| axes[index]);
+        let element_count = (0..rank).try_fold(1usize, |count, index| {
+            count
+                .checked_mul(shape[axis(index)])
+                .ok_or(OperationError::ElementCountOverflow)
+        })?;
+        let mut packed_stride = 1usize;
+        for index in 0..rank {
+            isize::try_from(packed_stride).map_err(|_| OperationError::StrideOverflow {
+                value: packed_stride,
+            })?;
+            packed_stride = packed_stride
+                .checked_mul(shape[axis(index)])
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+        for index in 0..rank {
+            let stride = strides[axis(index)];
+            isize::try_from(stride)
+                .map_err(|_| OperationError::StrideOverflow { value: stride })?;
+        }
+        let offset = offset_to_isize(offset)?;
+
         let layout_start = self.shapes.len();
-        let packed_strides = column_major_strides_isize(shape)?;
-        self.shapes.extend_from_slice(shape);
-        self.strides.extend(
-            strides
-                .iter()
-                .map(|&stride| {
-                    isize::try_from(stride)
-                        .map_err(|_| OperationError::StrideOverflow { value: stride })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
-        self.packed_strides.extend_from_slice(&packed_strides);
+        self.shapes.reserve(rank);
+        self.strides.reserve(rank);
+        self.packed_strides.reserve(rank);
+        let mut packed_stride = 1usize;
+        for index in 0..rank {
+            let axis = axis(index);
+            self.shapes.push(shape[axis]);
+            self.strides.push(strides[axis] as isize);
+            self.packed_strides.push(packed_stride as isize);
+            packed_stride *= shape[axis];
+        }
         self.entries.push(TreeTransformLayout {
             layout_start,
             rank,
-            offset: offset_to_isize(offset)?,
+            offset,
             element_count,
         });
         Ok(element_count)
@@ -1124,9 +1155,7 @@ impl TreeTransformLayoutTable {
             return self.push_block(rank, shape, strides, offset);
         };
         validate_axis_permutation(axes, rank)?;
-        let shape = axes.iter().map(|&axis| shape[axis]).collect::<Vec<_>>();
-        let strides = axes.iter().map(|&axis| strides[axis]).collect::<Vec<_>>();
-        self.push_block(rank, &shape, &strides, offset)
+        self.push_block_mapped(rank, shape, strides, offset, Some(axes))
     }
 }
 
@@ -1137,7 +1166,8 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Operatio
             rank,
         });
     }
-    let mut seen = vec![false; rank];
+    let mut seen = SmallVec::<[bool; 16]>::new();
+    seen.resize(rank, false);
     for &axis in axes {
         if axis >= rank || seen[axis] {
             return Err(OperationError::InvalidPermutation {
@@ -1249,6 +1279,70 @@ mod tests {
         assert_eq!(
             first.recoupling_coefficients_dst_src(),
             second.recoupling_coefficients_dst_src()
+        );
+    }
+
+    #[test]
+    fn mapped_layout_append_preserves_axis_order_and_column_major_metadata() {
+        let mut layouts = TreeTransformLayoutTable::default();
+
+        let count = layouts
+            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 7, Some(&[2, 0, 1]))
+            .unwrap();
+
+        // What: source-axis permutation changes stored shape and source
+        // strides in the requested order while packed strides describe that
+        // same final shape.
+        let layout = layouts.entry(0);
+        assert_eq!(count, 24);
+        assert_eq!(layouts.shape(layout), &[4, 2, 3]);
+        assert_eq!(layouts.strides(layout), &[6, 1, 2]);
+        assert_eq!(layouts.packed_strides(layout), &[1, 4, 8]);
+        assert_eq!(layout.offset, 7);
+    }
+
+    #[test]
+    fn mapped_layout_validation_is_atomic_and_keeps_permuted_zero_extent_order() {
+        let mut layouts = TreeTransformLayoutTable::default();
+        let empty = layouts.clone();
+
+        let error = layouts
+            .push_block_with_axes(3, &[2, 3, 4], &[1, 2, 6], 0, Some(&[0, 0, 2]))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::InvalidPermutation {
+                axes: vec![0, 0, 2],
+                rank: 3,
+            }
+        );
+        assert_eq!(layouts, empty);
+
+        let count = layouts
+            .push_block_with_axes(3, &[usize::MAX, 2, 0], &[1, 1, 1], 0, Some(&[2, 0, 1]))
+            .unwrap();
+        // What: validation follows the materialized permutation's order, so a
+        // leading zero extent keeps the same non-overflowing element count.
+        assert_eq!(count, 0);
+        assert_eq!(layouts.shape(layouts.entry(0)), &[0, usize::MAX, 2]);
+    }
+
+    #[test]
+    fn high_rank_axis_validation_accepts_reverse_and_rejects_late_duplicate() {
+        let rank = 257;
+        let reverse = (0..rank).rev().collect::<Vec<_>>();
+        let mut duplicate = reverse.clone();
+        duplicate[rank - 1] = duplicate[rank - 2];
+
+        // What: validation remains correct when rank exceeds inline metadata
+        // capacity, including a duplicate discovered only at the final axis.
+        assert_eq!(validate_axis_permutation(&reverse, rank), Ok(()));
+        assert_eq!(
+            validate_axis_permutation(&duplicate, rank),
+            Err(OperationError::InvalidPermutation {
+                axes: duplicate,
+                rank,
+            })
         );
     }
 }

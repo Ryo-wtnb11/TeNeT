@@ -503,6 +503,39 @@ where
     Ok(specs)
 }
 
+struct DenseRecouplingRows<T> {
+    coefficients: Vec<T>,
+    src_count: usize,
+}
+
+impl<T> DenseRecouplingRows<T>
+where
+    T: Clone + Add<Output = T> + Zero,
+{
+    fn new(src_count: usize) -> Self {
+        Self {
+            coefficients: Vec::with_capacity(src_count),
+            src_count,
+        }
+    }
+
+    fn push_zero_row(&mut self) -> usize {
+        let row = self.coefficients.len() / self.src_count;
+        self.coefficients
+            .resize_with(self.coefficients.len() + self.src_count, T::zero);
+        row
+    }
+
+    fn add(&mut self, dst_row: usize, src_column: usize, coefficient: T) {
+        let index = dst_row * self.src_count + src_column;
+        self.coefficients[index] = self.coefficients[index].clone() + coefficient;
+    }
+
+    fn into_coefficients(self) -> Vec<T> {
+        self.coefficients
+    }
+}
+
 fn assemble_all_codomain_group_specs<R, T, F>(
     rule: &R,
     src_structure: &BlockStructure,
@@ -519,7 +552,7 @@ where
     let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
     let mut dst_keys = Vec::<BlockKey>::new();
     let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
-    let mut rows = Vec::<Vec<T>>::new();
+    let mut rows = DenseRecouplingRows::new(src_block_indices.len());
     let mut direct_rows = Vec::with_capacity(src_block_indices.len());
     let mut direct_dst_keys = FxHashSet::default();
     let mut is_injective_singleton = true;
@@ -552,9 +585,6 @@ where
         } else {
             is_injective_singleton = false;
         }
-        for row in &mut rows {
-            row.push(T::zero());
-        }
         for (dst_codomain_tree, coefficient) in transformed.iter() {
             let dst_key = BlockKey::from(FusionTreeBlockKey::pair(
                 dst_codomain_tree.clone(),
@@ -566,10 +596,11 @@ where
                 let dst_row = dst_keys.len();
                 dst_index_by_key.insert(dst_key.clone(), dst_row);
                 dst_keys.push(dst_key);
-                rows.push(vec![T::zero(); src_column + 1]);
-                dst_row
+                let allocated_row = rows.push_zero_row();
+                debug_assert_eq!(allocated_row, dst_row);
+                allocated_row
             };
-            rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
+            rows.add(dst_row, src_column, coefficient.clone());
         }
     }
 
@@ -586,16 +617,11 @@ where
         return Err(OperationError::EmptyTransformBlock);
     }
 
-    let src_count = src_keys.len();
-    let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
-    for row in rows {
-        recoupling_coefficients_dst_src.extend(row);
-    }
     Ok(vec![TreeTransformGroupBlockSpec::multi(
         group.group_key().clone(),
         dst_keys,
         src_keys,
-        recoupling_coefficients_dst_src,
+        rows.into_coefficients(),
     )
     .with_source_axes(source_axes.to_vec())])
 }
@@ -1161,7 +1187,7 @@ where
     let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
     let mut dst_keys = Vec::<BlockKey>::new();
     let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
-    let mut rows = Vec::<Vec<T>>::new();
+    let mut rows = DenseRecouplingRows::new(src_block_indices.len());
     let mut direct_rows = Vec::with_capacity(src_block_indices.len());
     let mut direct_dst_keys = FxHashSet::default();
     let mut is_injective_singleton = true;
@@ -1191,9 +1217,6 @@ where
             is_injective_singleton = false;
         }
 
-        for row in &mut rows {
-            row.push(T::zero());
-        }
         for (dst_tree_key, coefficient) in transformed.iter() {
             let dst_key = BlockKey::from(dst_tree_key.clone());
             let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
@@ -1202,10 +1225,11 @@ where
                 let dst_row = dst_keys.len();
                 dst_index_by_key.insert(dst_key.clone(), dst_row);
                 dst_keys.push(dst_key);
-                rows.push(vec![T::zero(); src_column + 1]);
-                dst_row
+                let allocated_row = rows.push_zero_row();
+                debug_assert_eq!(allocated_row, dst_row);
+                allocated_row
             };
-            rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
+            rows.add(dst_row, src_column, coefficient.clone());
         }
     }
 
@@ -1222,16 +1246,11 @@ where
         return Err(OperationError::EmptyTransformBlock);
     }
 
-    let src_count = src_keys.len();
-    let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
-    for row in rows {
-        recoupling_coefficients_dst_src.extend(row);
-    }
     Ok(vec![TreeTransformGroupBlockSpec::multi(
         group.group_key().clone(),
         dst_keys,
         src_keys,
-        recoupling_coefficients_dst_src,
+        rows.into_coefficients(),
     )
     .with_source_axes(source_axes.to_vec())])
 }
