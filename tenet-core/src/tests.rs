@@ -530,6 +530,139 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct SplitOnlyCountingRule {
+        f_calls: std::sync::atomic::AtomicUsize,
+        r_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FusionRule for SplitOnlyCountingRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new(left.id() ^ right.id())]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for SplitOnlyCountingRule {}
+
+    impl MultiplicityFreeFusionSymbols for SplitOnlyCountingRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            self.f_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            1.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            self.r_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            1.0
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for SplitOnlyCountingRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    fn legacy_split_only_tree_pair_route<R>(
+        rule: &R,
+        source: &FusionTreeBlockKey,
+        target_codomain_rank: usize,
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    {
+        // What: freeze the pre-shortcut composition as an independent oracle:
+        // repartition to all-codomain, apply the identity tree braid, then
+        // repartition back to the requested split.
+        let total_rank =
+            source.codomain_tree().uncoupled().len() + source.domain_tree().uncoupled().len();
+        let identity = (0..total_rank).collect::<Vec<_>>();
+        let levels = identity.clone();
+        let all_codomain =
+            multiplicity_free_repartition_tree_pair(rule, source, total_rank)?;
+        let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
+            multiplicity_free_braid_tree(
+                rule,
+                key.codomain_tree(),
+                &identity,
+                &levels,
+            )
+            .map(|terms| {
+                terms
+                    .into_iter()
+                    .map(|(tree, coefficient)| {
+                        (
+                            FusionTreeBlockKey::pair(tree, key.domain_tree().clone()),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })?;
+        multiplicity_free_repartition_terms(rule, braided, target_codomain_rank)
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct AsymmetricAnyonicRule;
 
@@ -1543,6 +1676,262 @@ mod tests {
         // What: equal external labels do not form one block group when their
         // outer-multiplicity semantics differ.
         assert_mixed_tree_pair_block_group_is_rejected(&[base, generic]);
+    }
+
+    #[test]
+    fn split_only_tree_pair_braid_uses_only_the_required_bend() {
+        // What: moving the split from 1|2 to 2|1 with unchanged linearized
+        // external-leg order evaluates one bend and no braid symbols, for both
+        // the single-source and block entry points.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [0, 1],
+            Some(1),
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        );
+
+        let rule = SplitOnlyCountingRule::default();
+        let single = multiplicity_free_braid_tree_pair(
+            &rule,
+            &source,
+            &[0, 2],
+            &[1],
+            &[0],
+            &[1, 2],
+        )
+        .unwrap();
+        assert_eq!(rule.f_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(rule.r_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        rule.f_calls
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let block = multiplicity_free_braid_tree_pair_block(
+            &rule,
+            std::slice::from_ref(&source),
+            &[0, 2],
+            &[1],
+            &[0],
+            &[1, 2],
+        )
+        .unwrap();
+        assert_eq!(rule.f_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(rule.r_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(block, vec![single]);
+    }
+
+    #[test]
+    fn split_only_su2_braid_matches_legacy_composition_in_both_directions() {
+        // What: SU(2) 2|2 -> 3|1 and 2|2 -> 1|3 retain the exact tree keys,
+        // dual flags, and bend coefficients of the old all-codomain route.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 2],
+            [2, 1],
+            Some(1),
+            [false, true],
+            [true, false],
+            [],
+            [],
+            [1],
+            [1],
+        );
+
+        for (codomain_axes, domain_axes, target_rank) in
+            [(&[0, 1, 3][..], &[2][..], 3), (&[0][..], &[2, 3, 1][..], 1)]
+        {
+            let actual = multiplicity_free_braid_tree_pair(
+                &SU2FusionRule,
+                &source,
+                codomain_axes,
+                domain_axes,
+                &[0, 1],
+                &[2, 3],
+            )
+            .unwrap();
+            let expected =
+                legacy_split_only_tree_pair_route(&SU2FusionRule, &source, target_rank).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for ((actual_key, actual_coefficient), (expected_key, expected_coefficient)) in
+                actual.iter().zip(&expected)
+            {
+                assert_eq!(actual_key, expected_key);
+                assert!((actual_coefficient - expected_coefficient).abs() < 1.0e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn split_only_tree_pair_braid_handles_empty_split_boundaries() {
+        // What: the two extreme repartitions 0|2 -> 2|0 and 2|0 -> 0|2
+        // preserve the same keys, dual flags, and coefficients as the direct
+        // primitive, including an empty codomain or domain tree.
+        let all_domain = FusionTreeBlockKey::pair_from_sector_ids(
+            [],
+            [1, 1],
+            Some(0),
+            [],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        );
+        let to_codomain = multiplicity_free_braid_tree_pair(
+            &SU2FusionRule,
+            &all_domain,
+            &[1, 0],
+            &[],
+            &[],
+            &[0, 1],
+        )
+        .unwrap();
+        let expected_codomain =
+            multiplicity_free_repartition_tree_pair(&SU2FusionRule, &all_domain, 2).unwrap();
+        assert_eq!(to_codomain, expected_codomain);
+
+        let all_codomain = &to_codomain[0].0;
+        let to_domain = multiplicity_free_braid_tree_pair(
+            &SU2FusionRule,
+            all_codomain,
+            &[],
+            &[1, 0],
+            &[0, 1],
+            &[],
+        )
+        .unwrap();
+        let expected_domain =
+            multiplicity_free_repartition_tree_pair(&SU2FusionRule, all_codomain, 0).unwrap();
+        assert_eq!(to_domain, expected_domain);
+    }
+
+    #[test]
+    fn split_only_nested_product_braid_matches_legacy_composition() {
+        // What: a non-Abelian fZ2 x U(1) x SU(2) tree preserves the product
+        // bend sign and duality bookkeeping of the old all-codomain route in
+        // both split directions.
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let coupled = rule.encode_sector(
+            left_rule.encode_sector(z2_even(), u1(0)),
+            su2(1),
+        );
+        let domain_left = rule.encode_sector(
+            left_rule.encode_sector(z2_odd(), u1(1)),
+            su2(1),
+        );
+        let domain_right = rule.encode_sector(
+            left_rule.encode_sector(z2_odd(), u1(1)),
+            su2(2),
+        );
+        let source = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [coupled],
+                Some(coupled),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [domain_left, domain_right],
+                Some(coupled),
+                [false, true],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+        );
+
+        let forward = multiplicity_free_braid_tree_pair(
+            &rule,
+            &source,
+            &[0, 2],
+            &[1],
+            &[0],
+            &[1, 2],
+        )
+        .unwrap();
+        let expected = legacy_split_only_tree_pair_route(&rule, &source, 2).unwrap();
+        assert_eq!(forward.len(), expected.len());
+        assert!(forward[0].1 < 0.0);
+        for ((actual_key, actual_coefficient), (expected_key, expected_coefficient)) in
+            forward.iter().zip(&expected)
+        {
+            assert_eq!(actual_key, expected_key);
+            assert!((actual_coefficient - expected_coefficient).abs() < 1.0e-12);
+        }
+
+        let reverse_source = &forward[0].0;
+        let reverse = multiplicity_free_braid_tree_pair(
+            &rule,
+            reverse_source,
+            &[0],
+            &[2, 1],
+            &[0, 1],
+            &[2],
+        )
+        .unwrap();
+        let reverse_expected =
+            legacy_split_only_tree_pair_route(&rule, reverse_source, 1).unwrap();
+        assert_eq!(reverse.len(), reverse_expected.len());
+        assert!(reverse[0].1 < 0.0);
+        for ((actual_key, actual_coefficient), (expected_key, expected_coefficient)) in
+            reverse.iter().zip(&reverse_expected)
+        {
+            assert_eq!(actual_key, expected_key);
+            assert!((actual_coefficient - expected_coefficient).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn nonidentity_tree_pair_braid_does_not_enter_split_only_path() {
+        // What: changing the split does not suppress a real external-leg
+        // permutation, and malformed axis maps still fail validation.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [0, 1],
+            Some(1),
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        );
+
+        let rule = SplitOnlyCountingRule::default();
+        multiplicity_free_braid_tree_pair(
+            &rule,
+            &source,
+            &[2, 0],
+            &[1],
+            &[0],
+            &[1, 2],
+        )
+        .unwrap();
+        assert!(rule.r_calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+
+        for (codomain_axes, domain_axes) in
+            [(&[0, 0][..], &[1][..]), (&[0, 3][..], &[1][..]), (&[0][..], &[1][..])]
+        {
+            assert!(multiplicity_free_braid_tree_pair(
+                &rule,
+                &source,
+                codomain_axes,
+                domain_axes,
+                &[0],
+                &[1, 2],
+            )
+            .is_err());
+        }
     }
 
     #[test]

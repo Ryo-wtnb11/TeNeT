@@ -28,14 +28,14 @@ use num_traits::{One, Zero};
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
 use tenet_core::{
-    unique_permute_tree_pair, BlockKey, BlockSpec, BlockStructure, BlockView, BlockViewMut,
-    BraidingStyleKind, CoreError, DegeneracyStructure, FermionParityFusionRule, FusionProductSpace,
-    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeGroupKey,
-    FusionTreeHomSpace, FusionTreeKey, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreePivotalSymbols,
-    MultiplicityFreeRigidSymbols, Placement, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, SectorStructure, SectorVec, SimilarStorage, TensorMap, TensorMapSpace,
-    TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
+    multiplicity_free_repartition_tree_pair, unique_permute_tree_pair, BlockKey, BlockSpec,
+    BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError, DegeneracyStructure,
+    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
+    FusionTreeBlockKey, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, Placement, ProductFusionRule,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, SimilarStorage,
+    TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 

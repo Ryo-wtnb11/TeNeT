@@ -1113,6 +1113,13 @@ where
         codomain_rank,
         domain_rank,
     )?;
+    if permutation.iter().copied().eq(0..permutation.len()) {
+        return multiplicity_free_repartition_tree_pair(
+            rule,
+            tree_pair,
+            codomain_permutation.len(),
+        );
+    }
     let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
     levels.extend_from_slice(codomain_levels);
     levels.extend(domain_levels.iter().rev().copied());
@@ -1599,6 +1606,14 @@ where
         codomain_rank,
         domain_rank,
     )?;
+    if permutation.iter().copied().eq(0..permutation.len()) {
+        return src_keys
+            .iter()
+            .map(|key| {
+                multiplicity_free_repartition_tree_pair(rule, key, codomain_permutation.len())
+            })
+            .collect();
+    }
     let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
     levels.extend_from_slice(codomain_levels);
     levels.extend(domain_levels.iter().rev().copied());
