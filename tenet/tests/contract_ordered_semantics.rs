@@ -99,6 +99,43 @@ fn crossed_output_order_matches_sequential_for_lazy_complex_adjoint() {
 }
 
 #[test]
+fn crossed_output_order_matches_sequential_for_rhs_and_both_lazy_adjoints() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::u1([(-2, 1), (-1, 2), (1, 3)]);
+    let lhs_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 224_211).unwrap();
+    let rhs_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 224_212).unwrap();
+    let plain_lhs =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 224_213).unwrap();
+    let output_axes = [2, 0, 3, 1];
+
+    for (lhs, rhs, lhs_axes, rhs_axes) in [
+        (plain_lhs.clone(), rhs_parent.adjoint().unwrap(), vec![2], vec![0]),
+        (
+            lhs_parent.adjoint().unwrap(),
+            rhs_parent.adjoint().unwrap(),
+            vec![2],
+            vec![0],
+        ),
+    ] {
+        let default = lhs.contract(&rhs, &lhs_axes, &rhs_axes).unwrap();
+        let expected = default
+            .permute(&output_axes[..2], &output_axes[2..])
+            .unwrap();
+        let actual = lhs
+            .contract_ordered(&rhs, &lhs_axes, &rhs_axes, &output_axes)
+            .unwrap();
+        // What: crossed pAB keeps either operand's lazy conjugation folded into
+        // the contraction seam without changing the oriented reduced blocks.
+        assert_eq!(actual.data_c64().len(), expected.data_c64().len());
+        for (&actual, &expected) in actual.data_c64().iter().zip(expected.data_c64()) {
+            assert!((actual - expected).norm() < 1.0e-11);
+        }
+    }
+}
+
+#[test]
 fn ordered_contract_preserves_output_validation_and_zero_splits() {
     let runtime = Runtime::builder().build().unwrap();
     let space = Space::fz2([(0, 1), (1, 2)]);
@@ -138,6 +175,23 @@ fn ordered_contract_preserves_output_validation_and_zero_splits() {
         .permute(&[], &[1, 0])
         .unwrap();
     assert_close(zero_lhs_split.data(), zero_lhs_expected.data());
+}
+
+#[test]
+fn ordered_contract_preserves_contraction_error_precedence() {
+    let runtime = Runtime::builder().build().unwrap();
+    let lhs_space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+    let rhs_space = Space::u1([(-1, 1), (0, 3), (1, 1)]);
+    let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&lhs_space], [&lhs_space], 224_321)
+        .unwrap();
+    let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&rhs_space], [&rhs_space], 224_322)
+        .unwrap();
+
+    let expected = lhs.contract(&rhs, &[1], &[0]).unwrap_err();
+    let actual = lhs.contract_ordered(&rhs, &[1], &[0], &[0]).unwrap_err();
+    // What: pAB validation remains after contraction compatibility, matching
+    // the historical contract-then-permute API when both inputs are invalid.
+    assert_eq!(actual, expected);
 }
 
 #[test]
