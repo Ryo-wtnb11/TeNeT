@@ -436,7 +436,9 @@ impl SectorStructure {
             let left = blocks[pair[0]].key();
             let right = blocks[pair[1]].key();
             if left == right {
-                return Err(CoreError::DuplicateBlockKey { key: left.clone() });
+                return Err(CoreError::DuplicateBlockKey {
+                    key: Box::new(left.clone()),
+                });
             }
         }
         let compact_lookup = CompactBlockLookup::from_blocks(&blocks);
@@ -551,7 +553,7 @@ impl SectorStructure {
                         src_lookup
                             .get(id)
                             .ok_or_else(|| CoreError::MissingBlockKey {
-                                key: block.key().clone(),
+                                key: Box::new(block.key().clone()),
                             })
                     })
                     .collect();
@@ -572,12 +574,12 @@ impl SectorStructure {
             match dst_key.cmp(src_key) {
                 std::cmp::Ordering::Less => {
                     return Err(CoreError::MissingBlockKey {
-                        key: dst_key.clone(),
+                        key: Box::new(dst_key.clone()),
                     });
                 }
                 std::cmp::Ordering::Greater => {
                     return Err(CoreError::MissingBlockKey {
-                        key: src_key.clone(),
+                        key: Box::new(src_key.clone()),
                     });
                 }
                 std::cmp::Ordering::Equal => {
@@ -590,13 +592,13 @@ impl SectorStructure {
         if dst_pos < self.sorted_indices.len() {
             let dst_index = self.sorted_indices[dst_pos];
             return Err(CoreError::MissingBlockKey {
-                key: self.blocks[dst_index].key().clone(),
+                key: Box::new(self.blocks[dst_index].key().clone()),
             });
         }
         if src_pos < src.sorted_indices.len() {
             let src_index = src.sorted_indices[src_pos];
             return Err(CoreError::MissingBlockKey {
-                key: src.blocks[src_index].key().clone(),
+                key: Box::new(src.blocks[src_index].key().clone()),
             });
         }
         Ok(src_for_dst)
@@ -1309,7 +1311,9 @@ impl BlockStructure {
     pub fn block_by_key(&self, key: &BlockKey) -> Result<BlockRef<'_>, CoreError> {
         let index = self
             .find_block_index_by_key(key)
-            .ok_or_else(|| CoreError::MissingBlockKey { key: key.clone() })?;
+            .ok_or_else(|| CoreError::MissingBlockKey {
+                key: Box::new(key.clone()),
+            })?;
         self.block(index)
     }
 
@@ -1317,7 +1321,7 @@ impl BlockStructure {
         let index = self
             .find_block_index_by_fusion_tree_key(key)
             .ok_or_else(|| CoreError::MissingBlockKey {
-                key: BlockKey::FusionTree(key.clone()),
+                key: Box::new(BlockKey::FusionTree(key.clone())),
             })?;
         self.block(index)
     }

@@ -48,7 +48,7 @@ where
 {
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -109,7 +109,7 @@ where
 {
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -152,7 +152,7 @@ where
 {
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -240,7 +240,7 @@ where
 {
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -373,7 +373,7 @@ where
 
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -822,7 +822,7 @@ where
 {
     if !rule.fusion_style().has_multiplicity() {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -990,7 +990,7 @@ where
 
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -1098,7 +1098,7 @@ where
 {
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -1297,7 +1297,7 @@ where
 {
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: rule.fusion_style(),
         });
     }
@@ -1357,7 +1357,7 @@ fn validate_all_codomain_operation_scope(
     operation: &TreeTransformOperation,
 ) -> Result<(), OperationError> {
     let scope_error = || OperationError::UnsupportedTreeTransformScope {
-        operation: operation.clone(),
+        operation: Box::new(operation.clone()),
         message: "all-codomain UniqueFusion lowering requires an empty domain operation",
     };
 
@@ -1375,7 +1375,7 @@ fn validate_all_codomain_operation_scope(
             Err(scope_error())
         }
         TreeTransformOperation::Transpose { .. } => Err(OperationError::UnsupportedTreeTransformScope {
-            operation: operation.clone(),
+            operation: Box::new(operation.clone()),
             message: "all-codomain UniqueFusion lowering supports explicit Permute or Braid operations",
         }),
     }

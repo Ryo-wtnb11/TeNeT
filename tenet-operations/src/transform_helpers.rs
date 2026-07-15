@@ -35,7 +35,9 @@ pub fn block_indices_for_keys(
         .map(|key| {
             structure
                 .find_block_index_by_key(key)
-                .ok_or_else(|| OperationError::MissingBlockKey { key: key.clone() })
+                .ok_or_else(|| OperationError::MissingBlockKey {
+                    key: Box::new(key.clone()),
+                })
         })
         .collect()
 }

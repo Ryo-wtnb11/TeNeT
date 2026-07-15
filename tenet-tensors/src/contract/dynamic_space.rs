@@ -514,7 +514,7 @@ impl DynamicFusionMapSpace {
                 .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
                 .ok_or_else(|| {
                     OperationError::from_core_preserving_context(CoreError::MissingBlockKey {
-                        key: BlockKey::FusionTree(key.clone()),
+                        key: Box::new(BlockKey::FusionTree(key.clone())),
                     })
                 })?;
             let block = structure

@@ -342,12 +342,13 @@ jobs:
         with:
           workspaces: tenet
           key: clippy
-      # Non-gating for now (#153). `-A clippy::result_large_err` silences
-      # the one deliberate, already-reviewed trade-off (public
-      # `tenet::Error` is boxed; the internal expert layer is intentionally
-      # unboxed). Past that allow, `cargo clippy --workspace --all-targets`
-      # still turns up ~130 pre-existing warnings spread across ~25 other
-      # lint categories (clippy::too_many_arguments, clippy::type_complexity,
+      # Non-gating for now (#153). `clippy::result_large_err` no longer needs
+      # an `-A` here: #231 boxed the large payloads on `CoreError` and
+      # `OperationError` (536 -> 96 B, under the lint's default threshold),
+      # so the whole category self-clears. `cargo clippy --workspace
+      # --all-targets` still turns up ~130 pre-existing warnings spread
+      # across ~25 other lint categories (clippy::too_many_arguments,
+      # clippy::type_complexity,
       # clippy::manual_contains, clippy::doc_lazy_continuation,
       # clippy::needless_range_loop, clippy::useless_vec,
       # clippy::large_enum_variant, clippy::wrong_self_convention, ...) —
@@ -357,7 +358,7 @@ jobs:
       # counts first), then flip this job to `-D warnings` once clippy is
       # clean. `continue-on-error: true` keeps the job's output visible in
       # the Actions UI without blocking merges in the meantime.
-      - run: cargo clippy --workspace --all-targets -- -A clippy::result_large_err
+      - run: cargo clippy --workspace --all-targets
         working-directory: tenet
         continue-on-error: true
 

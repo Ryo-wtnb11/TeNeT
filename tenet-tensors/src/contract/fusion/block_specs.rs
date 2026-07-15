@@ -327,7 +327,7 @@ where
                 .structure()
                 .find_block_index_by_fusion_tree_key(&dst_key)
                 .ok_or_else(|| OperationError::MissingBlockKey {
-                    key: BlockKey::from(dst_key.clone()),
+                    key: Box::new(BlockKey::from(dst_key.clone())),
                 })?;
             let coefficient = rhs_contract_twist_factor(
                 rule,
@@ -416,7 +416,7 @@ where
                             .structure()
                             .find_block_index_by_fusion_tree_key(&dst_key)
                             .ok_or_else(|| OperationError::MissingBlockKey {
-                                key: BlockKey::from(dst_key.clone()),
+                                key: Box::new(BlockKey::from(dst_key.clone())),
                             })?;
                         specs.push(TensorContractBlockSpec::with_coefficient(
                             dst_index,

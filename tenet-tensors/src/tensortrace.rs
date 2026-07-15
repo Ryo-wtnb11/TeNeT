@@ -839,7 +839,7 @@ where
             let dst_block = dst_structure
                 .find_block_index_by_fusion_tree_key(&dst_key)
                 .ok_or_else(|| OperationError::MissingBlockKey {
-                    key: BlockKey::from(dst_key.clone()),
+                    key: Box::new(BlockKey::from(dst_key.clone())),
                 })?;
             terms.push(TensorTraceFusionStructureTerm {
                 dst_key,

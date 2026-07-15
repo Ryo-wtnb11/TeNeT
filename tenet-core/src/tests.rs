@@ -2555,7 +2555,7 @@ mod tests {
         assert_eq!(
             err,
             CoreError::MissingBlockKey {
-                key: BlockKey::from(missing),
+                key: Box::new(BlockKey::from(missing)),
             }
         );
     }
@@ -3464,7 +3464,7 @@ mod tests {
         assert_eq!(
             err,
             CoreError::DuplicateBlockKey {
-                key: BlockKey::sector_ids([7])
+                key: Box::new(BlockKey::sector_ids([7]))
             }
         );
     }
@@ -8488,6 +8488,15 @@ mod tests {
     #[test]
     fn fusion_tree_key_size_has_not_silently_grown() {
         assert_eq!(std::mem::size_of::<FusionTreeKey>(), 264);
+    }
+
+    // Canary (#231) against `CoreError` regrowing past the clippy
+    // `result_large_err` threshold: `{Missing,Duplicate}BlockKey` box their
+    // `BlockKey` payload precisely to keep every `Result<_, CoreError>` return
+    // pointer-cheap on the hot paths that propagate it with `?`.
+    #[test]
+    fn core_error_size_has_not_silently_grown() {
+        assert!(std::mem::size_of::<CoreError>() <= 128);
     }
 
     #[test]

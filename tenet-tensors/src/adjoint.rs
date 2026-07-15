@@ -144,11 +144,16 @@ where
                 key.domain_tree().clone(),
                 key.codomain_tree().clone(),
             ));
-            let index = structure.find_block_index_by_key(&source_key).ok_or(
-                OperationError::MissingBlockKey {
-                    key: source_key.clone(),
-                },
-            )?;
+            // Why-not eager `ok_or`: this closure runs once per block on the
+            // warm adjoint-fold loop (#231) -- an eager `ok_or` builds the
+            // 96 B `OperationError` payload on every success, not just on the
+            // (cold) missing-key path; `ok_or_else` defers construction to
+            // the actual error case.
+            let index = structure
+                .find_block_index_by_key(&source_key)
+                .ok_or_else(|| OperationError::MissingBlockKey {
+                    key: Box::new(source_key.clone()),
+                })?;
             let source_shape = structure
                 .block(index)
                 .map_err(OperationError::from_core_preserving_context)?
@@ -205,7 +210,9 @@ where
         ));
         let source_index = structure
             .find_block_index_by_key(&source_key)
-            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            })?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -337,11 +344,11 @@ where
                 key.domain_tree().clone(),
                 key.codomain_tree().clone(),
             ));
-            let index = structure.find_block_index_by_key(&source_key).ok_or(
-                OperationError::MissingBlockKey {
-                    key: source_key.clone(),
-                },
-            )?;
+            let index = structure
+                .find_block_index_by_key(&source_key)
+                .ok_or_else(|| OperationError::MissingBlockKey {
+                    key: Box::new(source_key.clone()),
+                })?;
             let source_shape = structure
                 .block(index)
                 .map_err(OperationError::from_core_preserving_context)?
@@ -398,7 +405,9 @@ where
         ));
         let source_index = structure
             .find_block_index_by_key(&source_key)
-            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            })?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -470,11 +479,11 @@ where
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
-        let index = structure.find_block_index_by_key(&source_key).ok_or(
-            OperationError::MissingBlockKey {
-                key: source_key.clone(),
-            },
-        )?;
+        let index = structure
+            .find_block_index_by_key(&source_key)
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(source_key.clone()),
+            })?;
         Ok(structure
             .block(index)
             .map_err(OperationError::from_core_preserving_context)?
@@ -528,7 +537,9 @@ where
         ));
         let source_index = structure
             .find_block_index_by_key(&source_key)
-            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            })?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;

@@ -1739,7 +1739,7 @@ fn tensorcontract_fusion_block_specs_rejects_missing_destination_subblock() {
     assert_eq!(
         err,
         OperationError::MissingBlockKey {
-            key: keys[1].clone().into()
+            key: Box::new(keys[1].clone().into())
         }
     );
 }
