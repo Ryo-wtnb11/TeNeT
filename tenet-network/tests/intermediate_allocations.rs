@@ -44,6 +44,7 @@ thread_local! {
     static TEST_THREAD_REALLOC_CALLS: Cell<u64> = const { Cell::new(0) };
     static TEST_THREAD_REALLOC_ALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
     static TEST_THREAD_REALLOC_DEALLOCATED_BYTES: Cell<u64> = const { Cell::new(0) };
+    static BOUNDARY_DEALLOC_COUNTED: Cell<Option<bool>> = const { Cell::new(None) };
     static DEALLOC_BOUNDARY_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
     #[cfg(test)]
     static REALLOC_TRANSITION_HOOK: RefCell<Option<DeallocBoundaryHook>> = const { RefCell::new(None) };
@@ -345,6 +346,7 @@ fn record_dealloc_result(pointer: *mut u8) -> bool {
         .try_with(|slot| slot.borrow_mut().take())
         .ok()
         .flatten();
+    let observe_boundary = boundary_hook.is_some();
     if let Some(hook) = boundary_hook {
         // Why not leave the hook installed: synchronization may enter the allocator,
         // so the one-shot hook must be removed before crossing the test boundary.
@@ -352,6 +354,11 @@ fn record_dealloc_result(pointer: *mut u8) -> bool {
         hook.resume.recv().unwrap();
     }
     let count_event = ENABLED.load(Ordering::Relaxed);
+    if observe_boundary {
+        // Why not inspect the thread's aggregate deallocation counters: the
+        // synchronization hook may release its own tracked storage on this thread.
+        let _ = BOUNDARY_DEALLOC_COUNTED.try_with(|counted| counted.set(Some(count_event)));
+    }
     if count_event {
         DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
@@ -967,8 +974,7 @@ fn dealloc_snapshots_probe_state_after_unregistering_origin() {
     let (resume_tx, resume_rx) = mpsc::sync_channel(0);
 
     let worker = std::thread::spawn(move || {
-        PROBE_THREAD_DEALLOC_CALLS.set(0);
-        PROBE_THREAD_DEALLOCATED_BYTES.set(0);
+        BOUNDARY_DEALLOC_COUNTED.set(None);
         PROBE_THREAD_ENABLED.set(true);
         DEALLOC_BOUNDARY_HOOK.with_borrow_mut(|slot| {
             *slot = Some(DeallocBoundaryHook {
@@ -979,10 +985,7 @@ fn dealloc_snapshots_probe_state_after_unregistering_origin() {
         drop(tracked);
         DEALLOC_BOUNDARY_HOOK.with_borrow_mut(Option::take);
         PROBE_THREAD_ENABLED.set(false);
-        (
-            PROBE_THREAD_DEALLOC_CALLS.get(),
-            PROBE_THREAD_DEALLOCATED_BYTES.get(),
-        )
+        BOUNDARY_DEALLOC_COUNTED.take()
     });
 
     // What: disabling the probe after unregister but before attribution excludes the free.
@@ -991,7 +994,7 @@ fn dealloc_snapshots_probe_state_after_unregistering_origin() {
         .expect("deallocation did not expose its unregister boundary");
     ENABLED.store(false, Ordering::SeqCst);
     resume_tx.send(()).unwrap();
-    assert_eq!(worker.join().unwrap(), (0, 0));
+    assert_eq!(worker.join().unwrap(), Some(false));
 }
 
 #[test]
