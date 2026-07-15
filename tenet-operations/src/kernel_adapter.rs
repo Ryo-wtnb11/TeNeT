@@ -132,14 +132,30 @@ impl FuseScratch {
 /// and adjacent axes are fused when both stride patterns are contiguous, so
 /// small replay copies avoid per-call heap allocation and plan building.
 #[derive(Clone, Copy, Debug)]
-struct FusedPairLayout {
-    rank: usize,
-    dims: [usize; FUSED_RANK_LIMIT],
-    dst_strides: [isize; FUSED_RANK_LIMIT],
-    src_strides: [isize; FUSED_RANK_LIMIT],
+pub(crate) struct FusedPairLayout {
+    pub(crate) rank: usize,
+    pub(crate) dims: [usize; FUSED_RANK_LIMIT],
+    pub(crate) dst_strides: [isize; FUSED_RANK_LIMIT],
+    pub(crate) src_strides: [isize; FUSED_RANK_LIMIT],
 }
 
-fn fuse_pair_layout(
+/// Borrowed view of a prebaked fused loop layout (issue #232).
+///
+/// Holds the exact `(dims, dst_strides, src_strides)` that [`fuse_pair_layout`]
+/// would return for one (block, role) stride pair, computed once at compile
+/// time in the immutable `TreeTransformLayoutTable` and reused across every
+/// replay call instead of recomputed. The slices live in that table's arena;
+/// `apply_fused_pair_slices` consumes them directly. dtype-independent — one
+/// baked layout serves f64 and c64 alike (the normalization never inspects
+/// values).
+#[derive(Clone, Copy, Debug)]
+pub struct BakedFusedLayout<'a> {
+    pub dims: &'a [usize],
+    pub dst_strides: &'a [isize],
+    pub src_strides: &'a [isize],
+}
+
+pub(crate) fn fuse_pair_layout(
     shape: &[usize],
     dst_strides: &[isize],
     src_strides: &[isize],
@@ -217,12 +233,49 @@ fn apply_fused_pair<T, Apply, ElementOp>(
     Apply: Fn(&mut T, T),
     ElementOp: Fn(T) -> T,
 {
-    if layout.dims[..layout.rank].iter().any(|&dim| dim == 0) {
+    apply_fused_pair_slices(
+        dst_data,
+        src_data,
+        &layout.dims[..layout.rank],
+        &layout.dst_strides[..layout.rank],
+        &layout.src_strides[..layout.rank],
+        dst_offset,
+        src_offset,
+        apply,
+        op,
+    );
+}
+
+/// Loop-nest core of [`apply_fused_pair`] over borrowed layout slices, so both
+/// the freshly-recomputed [`FusedPairLayout`] (stack arrays) and a prebaked
+/// [`BakedFusedLayout`] (arena slices, issue #232) drive the identical kernel.
+/// The slices are already normalized (extent-1 axes dropped, ordered by
+/// destination stride, contiguous runs fused); rank == `dims.len()` and is
+/// bounded by `FUSED_RANK_LIMIT`.
+#[allow(clippy::too_many_arguments)]
+fn apply_fused_pair_slices<T, Apply, ElementOp>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    dims: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    apply: Apply,
+    op: ElementOp,
+) where
+    T: Copy,
+    Apply: Fn(&mut T, T),
+    ElementOp: Fn(T) -> T,
+{
+    let rank = dims.len();
+    debug_assert!(rank <= FUSED_RANK_LIMIT);
+    if rank == 0 || dims.iter().any(|&dim| dim == 0) {
         return;
     }
-    let inner_len = layout.dims[0];
-    let inner_dst = layout.dst_strides[0];
-    let inner_src = layout.src_strides[0];
+    let inner_len = dims[0];
+    let inner_dst = dst_strides[0];
+    let inner_src = src_strides[0];
     let mut index = [0usize; FUSED_RANK_LIMIT];
     let mut dst_base = dst_offset;
     let mut src_base = src_offset;
@@ -244,17 +297,17 @@ fn apply_fused_pair<T, Apply, ElementOp>(
         }
         let mut axis = 1;
         loop {
-            if axis >= layout.rank {
+            if axis >= rank {
                 return;
             }
             index[axis] += 1;
-            dst_base += layout.dst_strides[axis];
-            src_base += layout.src_strides[axis];
-            if index[axis] < layout.dims[axis] {
+            dst_base += dst_strides[axis];
+            src_base += src_strides[axis];
+            if index[axis] < dims[axis] {
                 break;
             }
-            dst_base -= layout.dims[axis] as isize * layout.dst_strides[axis];
-            src_base -= layout.dims[axis] as isize * layout.src_strides[axis];
+            dst_base -= dims[axis] as isize * dst_strides[axis];
+            src_base -= dims[axis] as isize * src_strides[axis];
             index[axis] = 0;
             axis += 1;
         }
@@ -391,6 +444,58 @@ fn fused_pair<T, Apply, ElementOp>(
     });
 }
 
+/// [`fused_pair`] with an optional prebaked layout (issue #232). When `baked`
+/// is `Some`, the compile-time-normalized slices drive the loop directly and
+/// `fuse_pair_layout` is skipped entirely; when `None` (unbaked entry, or a
+/// rank above `FUSED_RANK_LIMIT` that never bakes) it falls back to recomputing.
+/// The zero-extent short-circuit is kept ahead of both so a baked empty marker
+/// and an unbaked empty shape behave identically.
+#[allow(clippy::too_many_arguments)]
+fn fused_pair_baked<T, Apply, ElementOp>(
+    baked: Option<BakedFusedLayout<'_>>,
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    apply: Apply,
+    op: ElementOp,
+) where
+    T: Copy,
+    Apply: Fn(&mut T, T),
+    ElementOp: Fn(T) -> T,
+{
+    if shape.iter().any(|&dim| dim == 0) {
+        return;
+    }
+    match baked {
+        Some(baked) => apply_fused_pair_slices(
+            dst_data,
+            src_data,
+            baked.dims,
+            baked.dst_strides,
+            baked.src_strides,
+            dst_offset,
+            src_offset,
+            apply,
+            op,
+        ),
+        None => fused_pair(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            apply,
+            op,
+        ),
+    }
+}
+
 /// Backend-neutral low-level kernel adapter for host-slice replay.
 ///
 /// Replay drivers (tree-transform pack/recoupling/scatter, fusion-block
@@ -450,6 +555,107 @@ pub trait HostKernelAdapter<T> {
         source_conjugate: bool,
         alpha: T,
     ) -> Result<(), OperationError>;
+
+    /// [`add_strided`](Self::add_strided) with an optional prebaked fused layout
+    /// (issue #232). The default ignores `baked` and forwards to `add_strided`,
+    /// so adapters that do not fuse (test doubles) need no change; the strided
+    /// host adapter overrides it to skip `fuse_pair_layout` on the `beta ∈ {0,1}`
+    /// fast path. `baked` is a pure function of the (block, role) stride pair, so
+    /// it is dtype-independent and correctness-neutral versus recomputation.
+    #[allow(clippy::too_many_arguments)]
+    fn add_strided_baked(
+        &mut self,
+        zero_strides: &mut Vec<isize>,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: T,
+        beta: T,
+        baked: Option<BakedFusedLayout<'_>>,
+    ) -> Result<(), OperationError> {
+        let _ = baked;
+        self.add_strided(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            alpha,
+            beta,
+        )
+    }
+
+    /// [`axpby_strided`](Self::axpby_strided) with an optional prebaked fused
+    /// layout (issue #232). See [`add_strided_baked`](Self::add_strided_baked)
+    /// for the default/override contract.
+    #[allow(clippy::too_many_arguments)]
+    fn axpby_strided_baked(
+        &mut self,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        alpha: T,
+        beta: T,
+        baked: Option<BakedFusedLayout<'_>>,
+    ) -> Result<(), OperationError> {
+        let _ = baked;
+        self.axpby_strided(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            alpha,
+            beta,
+        )
+    }
+
+    /// [`copy_scale_strided`](Self::copy_scale_strided) with an optional
+    /// prebaked fused layout (issue #232). See
+    /// [`add_strided_baked`](Self::add_strided_baked) for the default/override
+    /// contract.
+    #[allow(clippy::too_many_arguments)]
+    fn copy_scale_strided_baked(
+        &mut self,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: T,
+        baked: Option<BakedFusedLayout<'_>>,
+    ) -> Result<(), OperationError> {
+        let _ = baked;
+        self.copy_scale_strided(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            alpha,
+        )
+    }
 
     /// `dst = beta * dst` over a strided block (inactive-block scale
     /// primitive).
@@ -531,9 +737,41 @@ where
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
+        self.add_strided_baked(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            alpha,
+            beta,
+            None,
+        )
+    }
+
+    fn add_strided_baked(
+        &mut self,
+        zero_strides: &mut Vec<isize>,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: T,
+        beta: T,
+        baked: Option<BakedFusedLayout<'_>>,
+    ) -> Result<(), OperationError> {
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
-            fused_pair(
+            fused_pair_baked(
+                baked,
                 dst_data,
                 src_data,
                 shape,
@@ -580,11 +818,40 @@ where
         alpha: T,
         beta: T,
     ) -> Result<(), OperationError> {
+        self.axpby_strided_baked(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            alpha,
+            beta,
+            None,
+        )
+    }
+
+    fn axpby_strided_baked(
+        &mut self,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        alpha: T,
+        beta: T,
+        baked: Option<BakedFusedLayout<'_>>,
+    ) -> Result<(), OperationError> {
         // Assign-scatter (beta=0, alpha=1, positive strides) is a pure permuted
         // copy: route through the strided-perm blocked transpose when that
         // backend was selected and the layout is eligible; otherwise fall
         // through to the fused loop. Opt-in, never default — see
-        // `TransposeBackend` for the #114 A/B numbers behind that.
+        // `TransposeBackend` for the #114 A/B numbers behind that. The baked
+        // layout only serves the fused fallback; the strided-perm kernel builds
+        // its own plan and ignores it.
         if self.transpose_backend == TransposeBackend::StridedPerm
             && beta.is_zero()
             && alpha.is_one()
@@ -604,7 +871,8 @@ where
         }
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
-            fused_pair(
+            fused_pair_baked(
+                baked,
                 dst_data,
                 src_data,
                 shape,
@@ -648,11 +916,39 @@ where
         source_conjugate: bool,
         alpha: T,
     ) -> Result<(), OperationError> {
+        self.copy_scale_strided_baked(
+            dst_data,
+            src_data,
+            shape,
+            dst_strides,
+            src_strides,
+            dst_offset,
+            src_offset,
+            source_conjugate,
+            alpha,
+            None,
+        )
+    }
+
+    fn copy_scale_strided_baked(
+        &mut self,
+        dst_data: &mut [T],
+        src_data: &[T],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_offset: isize,
+        src_offset: isize,
+        source_conjugate: bool,
+        alpha: T,
+        baked: Option<BakedFusedLayout<'_>>,
+    ) -> Result<(), OperationError> {
         // Pack is a pure permuted copy (alpha=1, no conjugate, positive
         // strides): route it through the strided-perm blocked transpose when
         // that backend was selected and the layout is eligible; otherwise fall
         // through to the fused loop. Opt-in, never default — see
-        // `TransposeBackend` for the #114 A/B numbers behind that.
+        // `TransposeBackend` for the #114 A/B numbers behind that. The baked
+        // layout only serves the fused fallback.
         if self.transpose_backend == TransposeBackend::StridedPerm
             && alpha.is_one()
             && !source_conjugate
@@ -670,7 +966,8 @@ where
         {
             return Ok(());
         }
-        fused_pair(
+        fused_pair_baked(
+            baked,
             dst_data,
             src_data,
             shape,

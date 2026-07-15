@@ -56,7 +56,9 @@ pub use host_scalar_kernels::{
     tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
     tensortrace_raw_strided_kernel_add_with_coefficient,
 };
-pub use kernel_adapter::{HostKernelAdapter, StridedHostKernelAdapter, TransposeBackend};
+pub use kernel_adapter::{
+    BakedFusedLayout, HostKernelAdapter, StridedHostKernelAdapter, TransposeBackend,
+};
 pub use placement::ReportsPlacement;
 pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};
 pub use replay_backend::*;
