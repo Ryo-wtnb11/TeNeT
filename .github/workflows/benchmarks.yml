@@ -1,0 +1,42 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  criterion:
+    name: Criterion benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: benchmarks
+      # Why not PR CI: hosted-runner timing noise makes these diagnostic
+      # measurements unsuitable as correctness gates.
+      - name: FusionTreeKey hash/eq microbench
+        run: cargo bench -p tenet-core --bench fusion_tree_key
+        working-directory: tenet
+      - name: strided-combine microbench
+        run: cargo bench -p tenet-operations --bench strided_combine
+        working-directory: tenet
+      - name: permute U(1) many-charge microbench
+        run: cargo bench -p tenet-operations --bench permute_u1_many
+        working-directory: tenet
