@@ -4751,4 +4751,52 @@ mod b3c1_su4_smoke {
         assert!(!singles.has_pack_gemm_scatter_blocks());
         assert!(singles.baked_layouts_match_recomputed());
     }
+
+    #[test]
+    fn baked_arena_growth_reported_for_su2_recoupling_plans() {
+        // What: report and bound the baked-arena plan-size growth on the SU(2)
+        // pack/scatter recoupling plans at degeneracy 8 and 16 (issue #232
+        // plan-size table). The compact arena must beat the fixed 200-byte
+        // FusedPairLayout array it replaces for every baked entry.
+        for degeneracy in [8usize, 16] {
+            let src_key0 = all_codomain_fusion_tree_test_key(
+                [1, 1, 1, 1],
+                Some(0),
+                [false, false, false, false],
+                [0, 1],
+                [1, 1, 1],
+            );
+            let src_key1 = all_codomain_fusion_tree_test_key(
+                [1, 1, 1, 1],
+                Some(0),
+                [false, false, false, false],
+                [2, 1],
+                [1, 1, 1],
+            );
+            let structure = packed_fixture_structure(
+                4,
+                [
+                    (src_key0.clone(), vec![degeneracy; 4]),
+                    (src_key1.clone(), vec![degeneracy; 4]),
+                ],
+            )
+            .unwrap();
+            let plan = build_all_codomain_tree_transform_group_plan(
+                &SU2FusionRule,
+                TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []),
+                &structure,
+            )
+            .unwrap()
+            .compile_structures(&structure, &structure)
+            .unwrap();
+            assert!(plan.has_pack_gemm_scatter_blocks());
+            assert!(plan.baked_layouts_match_recomputed());
+            let base = plan.layouts().layout_table_bytes();
+            let baked = plan.layouts().baked_arena_bytes();
+            eprintln!(
+                "su2_d{degeneracy}: base={base}B baked={baked}B growth={:.1}%",
+                baked as f64 / base as f64 * 100.0
+            );
+        }
+    }
 }
