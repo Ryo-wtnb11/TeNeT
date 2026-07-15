@@ -357,19 +357,19 @@ fn planned_network_reuses_execution_workspace() {
 fn split_changing_intermediate_keeps_sequential_orientation_replay() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 224_801).unwrap();
-    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 224_802).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 224_801).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v], 224_802).unwrap();
     let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 224_803).unwrap();
     let label = |name: &str| TemporaryLabel::from(name);
     let network = Network::new(
         vec![
-            vec![label("a"), label("b"), label("c")],
-            vec![label("c"), label("d")],
-            vec![label("a"), label("b"), label("e")],
+            vec![label("a"), label("c")],
+            vec![label("c"), label("b"), label("d")],
+            vec![label("b"), label("d"), label("e")],
         ],
         vec![false; 3],
-        vec![Some(2), Some(1), Some(2)],
-        vec![label("d"), label("e")],
+        vec![Some(1), Some(1), Some(2)],
+        vec![label("e"), label("a")],
         Some(1),
     )
     .unwrap();
@@ -377,7 +377,7 @@ fn split_changing_intermediate_keeps_sequential_orientation_replay() {
     let planned = network
         .plan(
             &tensors,
-            &LabelOrderDenseOptimizer::new(vec![label("c"), label("a"), label("b")]),
+            &LabelOrderDenseOptimizer::new(vec![label("c"), label("b"), label("d")]),
         )
         .unwrap();
     let expected = planned.execute(&tensors).unwrap();
