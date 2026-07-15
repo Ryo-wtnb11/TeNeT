@@ -254,7 +254,8 @@ fn planned_network_reuses_execution_workspace() {
     );
     assert_eq!(
         after_second.orientation_layout_preparations - after_first.orientation_layout_preparations,
-        1
+        0,
+        "crossed pAB must be compiled into the contraction destination"
     );
     assert_eq!(
         after_third.contract_layout_preparations - after_second.contract_layout_preparations,
@@ -273,6 +274,8 @@ fn planned_network_reuses_execution_workspace() {
             - after_second.orientation_structural_comparisons,
         0
     );
+    assert_eq!(after_third.owned_orientations, 0);
+    assert_eq!(after_third.reused_orientations, 0);
 
     let z = Space::z2([(0, 2), (1, 2)]);
     let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();
