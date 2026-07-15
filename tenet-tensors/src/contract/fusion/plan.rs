@@ -7,6 +7,68 @@ use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 use super::super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use super::super::structure::TensorContractAxisPlan;
 
+/// A paired ordering of the contracted axes.
+///
+/// The two vectors are a single permutation: entries at the same position
+/// remain paired. Keeping this as one value prevents a cost model from
+/// accidentally sorting one operand independently and changing the
+/// contraction semantics. This is deliberately only a preparation primitive;
+/// it does not select a runtime winner yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ContractAxisOrderCandidate {
+    lhs: Vec<usize>,
+    rhs: Vec<usize>,
+}
+
+impl ContractAxisOrderCandidate {
+    #[inline]
+    pub(crate) fn lhs(&self) -> &[usize] {
+        &self.lhs
+    }
+
+    #[inline]
+    pub(crate) fn rhs(&self) -> &[usize] {
+        &self.rhs
+    }
+}
+
+/// Build the canonical and side-sorted candidates for a contraction.
+///
+/// Sorting is stable and always applies the same permutation to both sides.
+/// The canonical candidate is first and is therefore the authority until a
+/// layout-aware cost model is introduced. No fermionic sign is computed here:
+/// that belongs to the tree-transform execution of the selected candidate.
+pub(crate) fn contracted_axis_order_candidates(
+    lhs: &[usize],
+    rhs: &[usize],
+) -> Vec<ContractAxisOrderCandidate> {
+    assert_eq!(lhs.len(), rhs.len(), "paired contraction axes must have equal length");
+    let canonical = ContractAxisOrderCandidate {
+        lhs: lhs.to_vec(),
+        rhs: rhs.to_vec(),
+    };
+    let mut lhs_order = (0..lhs.len()).collect::<Vec<_>>();
+    lhs_order.sort_by_key(|&i| lhs[i]);
+    let lhs_sorted = ContractAxisOrderCandidate {
+        lhs: lhs_order.iter().map(|&i| lhs[i]).collect(),
+        rhs: lhs_order.iter().map(|&i| rhs[i]).collect(),
+    };
+    let mut rhs_order = (0..rhs.len()).collect::<Vec<_>>();
+    rhs_order.sort_by_key(|&i| rhs[i]);
+    let rhs_sorted = ContractAxisOrderCandidate {
+        lhs: rhs_order.iter().map(|&i| lhs[i]).collect(),
+        rhs: rhs_order.iter().map(|&i| rhs[i]).collect(),
+    };
+    let mut candidates = vec![canonical];
+    if !candidates.contains(&lhs_sorted) {
+        candidates.push(lhs_sorted);
+    }
+    if !candidates.contains(&rhs_sorted) {
+        candidates.push(rhs_sorted);
+    }
+    candidates
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionContractPlan {
     lhs_transform: TreeTransformOperation,
@@ -261,4 +323,36 @@ where
         lhs_source_conjugate,
         rhs_source_conjugate,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contracted_axis_order_candidates;
+
+    #[test]
+    fn candidates_keep_lhs_rhs_pairs_intact() {
+        let candidates = contracted_axis_order_candidates(&[3, 1, 2], &[6, 8, 4]);
+        assert_eq!(candidates[0].lhs(), &[3, 1, 2]);
+        assert_eq!(candidates[0].rhs(), &[6, 8, 4]);
+        assert_eq!(candidates[1].lhs(), &[1, 2, 3]);
+        assert_eq!(candidates[1].rhs(), &[8, 4, 6]);
+        assert_eq!(candidates[2].lhs(), &[2, 3, 1]);
+        assert_eq!(candidates[2].rhs(), &[4, 6, 8]);
+        assert_eq!(candidates.len(), 3);
+    }
+
+    #[test]
+    fn already_canonical_axes_do_not_duplicate_candidates() {
+        let candidates = contracted_axis_order_candidates(&[0, 2], &[1, 3]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].lhs(), &[0, 2]);
+        assert_eq!(candidates[0].rhs(), &[1, 3]);
+    }
+
+    #[test]
+    fn duplicate_axis_values_use_stable_pair_order() {
+        let candidates = contracted_axis_order_candidates(&[2, 1, 2], &[7, 3, 5]);
+        assert_eq!(candidates[1].lhs(), &[1, 2, 2]);
+        assert_eq!(candidates[1].rhs(), &[3, 7, 5]);
+    }
 }
