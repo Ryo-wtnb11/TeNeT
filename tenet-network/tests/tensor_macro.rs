@@ -334,6 +334,7 @@ fn planned_network_reuses_execution_workspace() {
         after_third.reused_orientations - after_first.reused_orientations,
         0
     );
+    assert_eq!(workspace.retained_intermediate_buffer_count(), 1);
 
     let z = Space::z2([(0, 2), (1, 2)]);
     let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();
@@ -348,6 +349,100 @@ fn planned_network_reuses_execution_workspace() {
     assert_close(recovered.data(), expected.data(), 1e-12);
     assert_eq!(
         workspace.stats().reused_intermediates - before_recovery.reused_intermediates,
+        1
+    );
+}
+
+#[test]
+fn split_changing_intermediate_keeps_sequential_orientation_replay() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = u1_space();
+    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 224_801).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 224_802).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 224_803).unwrap();
+    let label = |name: &str| TemporaryLabel::from(name);
+    let network = Network::new(
+        vec![
+            vec![label("a"), label("b"), label("c")],
+            vec![label("c"), label("d")],
+            vec![label("a"), label("b"), label("e")],
+        ],
+        vec![false; 3],
+        vec![Some(2), Some(1), Some(2)],
+        vec![label("d"), label("e")],
+        Some(1),
+    )
+    .unwrap();
+    let tensors = [&a, &b, &c];
+    let planned = network
+        .plan(
+            &tensors,
+            &LabelOrderDenseOptimizer::new(vec![label("c"), label("a"), label("b")]),
+        )
+        .unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_cold = workspace.stats();
+    let warm = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_warm = workspace.stats();
+
+    // What: moving the planar boundary is not pAB-only. Warm replay retains
+    // the proven contract destination followed by one orientation replay.
+    assert_close(warm.data(), expected.data(), 1e-12);
+    assert_eq!(
+        after_warm.reused_orientations - after_cold.reused_orientations,
+        1
+    );
+    assert_eq!(
+        after_warm.orientation_layout_preparations
+            - after_cold.orientation_layout_preparations,
+        1
+    );
+}
+
+#[test]
+fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+    let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_811).unwrap();
+    let b = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_812).unwrap();
+    let c = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_813).unwrap();
+    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
+    let network = Network::new(
+        vec![labels(&["i", "j"]), labels(&["j", "k"]), labels(&["k", "l"])],
+        vec![false; 3],
+        vec![Some(1); 3],
+        labels(&["l", "i"]),
+        Some(1),
+    )
+    .unwrap();
+    let tensors = [&a, &b, &c];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let expected = planned.execute(&tensors).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_cold = workspace.stats();
+    let warm = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_warm = workspace.stats();
+
+    // What: generic fusion does not enter the multiplicity-free ordered seam.
+    assert_eq!(warm.data_c64(), expected.data_c64());
+    assert_eq!(
+        after_warm.reused_orientations - after_cold.reused_orientations,
+        1
+    );
+    assert_eq!(
+        after_warm.orientation_layout_preparations
+            - after_cold.orientation_layout_preparations,
         1
     );
 }

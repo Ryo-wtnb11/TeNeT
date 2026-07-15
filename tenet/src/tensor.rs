@@ -7554,6 +7554,18 @@ mod ordered_contract_route_tests {
     use super::*;
 
     #[test]
+    fn contracted_axis_validation_handles_high_rank_and_late_duplicates() {
+        let valid = (0..64).rev().collect::<Vec<_>>();
+        validate_contracted_axes(&valid, 64).unwrap();
+        let mut duplicate = valid;
+        duplicate[63] = duplicate[0];
+        // What: validation remains correct after the inline common-rank mark
+        // storage spills to its linear-time high-rank fallback.
+        assert!(validate_contracted_axes(&duplicate, 64).is_err());
+        assert!(validate_contracted_axes(&[64], 64).is_err());
+    }
+
+    #[test]
     fn ordinary_multiplicity_free_ordered_contract_uses_fused_plan_route() {
         // What: a crossed SU2 pAB is handed to the contraction plan instead of
         // returning a default-order owned tensor to a second public permute.

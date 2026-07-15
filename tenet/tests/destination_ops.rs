@@ -153,6 +153,67 @@ fn su3_contract_overwrite_clears_structural_zero_output() {
 }
 
 #[test]
+fn ordered_contract_overwrite_rejects_invalid_pab_without_mutation() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_141).unwrap();
+    let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_142).unwrap();
+    let mut destination = lhs.contract(&rhs, &[1], &[0]).unwrap();
+    let before = destination.data().to_vec();
+    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+    let mut cache = ContractOverwriteCache::default();
+
+    for invalid in [&[][..], &[0usize][..], &[0, 0][..], &[0, 2][..]] {
+        context
+            .try_contract_ordered_overwrite_into(
+                &mut cache,
+                &mut destination,
+                &lhs,
+                &rhs,
+                &[1],
+                &[0],
+                invalid,
+                Scalar::F64(1.0),
+            )
+            .unwrap_err();
+        // What: malformed pAB is a recoverable validation error and never
+        // slices past the caller's list or mutates destination bits.
+        assert_eq!(destination.data(), before);
+    }
+}
+
+#[test]
+fn ordered_contract_overwrite_declines_su3_without_preparing() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+    let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_151).unwrap();
+    let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_152).unwrap();
+    let contracted = lhs.contract(&rhs, &[1], &[0]).unwrap();
+    let mut destination = contracted.permute(&[1], &[0]).unwrap();
+    let before = destination.data().to_vec();
+    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+    let mut cache = ContractOverwriteCache::default();
+
+    let outcome = context
+        .try_contract_ordered_overwrite_into(
+            &mut cache,
+            &mut destination,
+            &lhs,
+            &rhs,
+            &[1],
+            &[0],
+            &[1, 0],
+            Scalar::F64(1.0),
+        )
+        .unwrap();
+    // What: generic-fusion output recoupling stays on its established
+    // sequential contract-and-permute implementation.
+    assert_eq!(outcome, OverwriteOutcome::Incompatible);
+    assert_eq!(cache.preparations(), 0);
+    assert_eq!(destination.data(), before);
+}
+
+#[test]
 fn destination_dispatch_matches_owned_for_every_rule() {
     let runtime = Runtime::builder().build().unwrap();
     let spaces = vec![
