@@ -1,5 +1,9 @@
 mod block_specs;
 mod plan;
+#[cfg(test)]
+pub(crate) use plan::contracted_axis_order_candidates;
+#[cfg(test)]
+pub(crate) use plan::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order;
 
 #[cfg(test)]
 pub(crate) use block_specs::contracted_fusion_tree_basis_matches;

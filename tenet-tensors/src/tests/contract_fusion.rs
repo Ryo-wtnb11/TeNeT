@@ -326,6 +326,79 @@ fn tensorcontract_fusion_swap_matches_explicit_permute_then_compose() {
 }
 
 #[test]
+fn forced_axis_order_candidates_have_identical_u1_result() {
+    // Execute both paired orderings through the public prepared-plan facade.
+    // This is an oracle test only: runtime candidate selection remains disabled
+    // until a layout-aware cost model owns the choice.
+    let rule = U1FusionRule;
+    let sectors = [
+        U1Irrep::new(-1).sector_id(),
+        U1Irrep::new(0).sector_id(),
+        U1Irrep::new(1).sector_id(),
+    ];
+    let leg = || SectorLeg::new(sectors.map(|sector| (sector, 1)), false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let dense = TensorMapSpace::<2, 2>::from_dims([3, 3], [3, 3]).unwrap();
+    let blocks = hom.fusion_tree_keys(&rule).len();
+    let space =
+        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, vec![vec![1; 4]; blocks])
+            .unwrap();
+    let len = space.subblock_structure().required_len().unwrap();
+    let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..len).map(|i| i as f64 + 1.0).collect(),
+        space.clone(),
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..len).map(|i| 2.0 * i as f64 - 0.5).collect(),
+        space.clone(),
+    )
+    .unwrap();
+    let candidates = crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]);
+    assert!(candidates.len() >= 2);
+    let dst_dyn = DynamicFusionMapSpace::from_typed(&space);
+    let lhs_dyn = DynamicFusionMapSpace::from_typed(&space);
+    let rhs_dyn = DynamicFusionMapSpace::from_typed(&space);
+    let _prepared = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
+        &rule,
+        &dst_dyn,
+        &lhs_dyn,
+        &rhs_dyn,
+        TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        &candidates[1],
+    )
+    .unwrap();
+    let mut outputs = Vec::new();
+    for candidate in candidates.iter().take(2) {
+        let mut dst =
+            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone())
+                .unwrap();
+        tensorcontract_fusion_into(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new(
+                candidate.lhs(),
+                candidate.rhs(),
+                OutputAxisOrder::from_axes(&[0, 1, 2, 3]),
+            ),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        outputs.push(dst);
+    }
+    assert_eq!(outputs[0].fusion_space(), outputs[1].fusion_space());
+    for (a, b) in outputs[0].data().iter().zip(outputs[1].data()) {
+        assert!((a - b).abs() < 1.0e-10, "candidate mismatch: {a} vs {b}");
+    }
+}
+
+#[test]
 fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
