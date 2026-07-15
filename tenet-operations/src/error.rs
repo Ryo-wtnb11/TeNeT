@@ -245,3 +245,19 @@ impl OperationError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Canary (#231) against `OperationError` regrowing past the clippy
+    // `result_large_err` threshold: `MissingBlockKey` boxes `BlockKey` and the
+    // `TreeTransformOperation` payload on `Unsupported{FusionStyle,
+    // BraidingStyle,TreeTransformScope}` is boxed, keeping every
+    // `Result<_, OperationError>` return pointer-cheap on the hot paths that
+    // propagate it with `?`.
+    #[test]
+    fn operation_error_size_has_not_silently_grown() {
+        assert!(std::mem::size_of::<OperationError>() <= 128);
+    }
+}

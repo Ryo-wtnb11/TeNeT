@@ -8490,6 +8490,15 @@ mod tests {
         assert_eq!(std::mem::size_of::<FusionTreeKey>(), 264);
     }
 
+    // Canary (#231) against `CoreError` regrowing past the clippy
+    // `result_large_err` threshold: `{Missing,Duplicate}BlockKey` box their
+    // `BlockKey` payload precisely to keep every `Result<_, CoreError>` return
+    // pointer-cheap on the hot paths that propagate it with `?`.
+    #[test]
+    fn core_error_size_has_not_silently_grown() {
+        assert!(std::mem::size_of::<CoreError>() <= 128);
+    }
+
     #[test]
     fn coupled_sector_regions_describe_canonical_matrix_spans() {
         // What: canonical coupled storage compiles to exact sector ranges and tree extents.

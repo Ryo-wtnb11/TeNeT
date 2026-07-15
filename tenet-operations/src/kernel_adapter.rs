@@ -49,9 +49,7 @@ pub enum TransposeBackend {
 /// treat the smallest-stride axis as if it were stride-1 and silently corrupt.
 /// We detect that and decline. (Guard rationale from prototype b3ca6e5: this
 /// exact pattern corrupted the energy -1.803 vs -1.772 before the guard.)
-// result_large_err: matches the sibling adapter primitives, all of which return
-// the same large `OperationError` by design.
-#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 fn strided_perm_copy<T: Copy + strided_kernel::MaybeSendSync>(
     dst_data: &mut [T],
     src_data: &[T],

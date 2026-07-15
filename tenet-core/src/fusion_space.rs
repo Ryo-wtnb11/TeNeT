@@ -705,11 +705,6 @@ impl FusionTreeHomSpace {
     /// the codomain∩domain merge — conservative on purpose; use
     /// [`Self::fusion_tree_keys_generic_for_coupled`] for a single provably
     /// clean sector. Unbounded Generic rules never err.
-    // CoreError's large variants (BlockKey-carrying, 528B) trip
-    // `result_large_err` on every Result<_, CoreError> fn in this crate (161
-    // pre-existing instances); allowed here so the B3b fix adds no new
-    // warnings — shrinking CoreError is an orthogonal crate-wide cleanup.
-    #[allow(clippy::result_large_err)]
     pub fn fusion_tree_keys_generic<R>(
         &self,
         rule: &R,
@@ -736,7 +731,6 @@ impl FusionTreeHomSpace {
     /// tainted on either side (its trees would need out-of-table intermediates)
     /// or the fold is poisoned; `Ok(vec![])` when the sector is simply not a
     /// shared coupled candidate.
-    #[allow(clippy::result_large_err)] // see fusion_tree_keys_generic
     pub fn fusion_tree_keys_generic_for_coupled<R>(
         &self,
         rule: &R,
