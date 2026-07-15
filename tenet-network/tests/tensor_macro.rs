@@ -80,8 +80,14 @@ fn planned_crossed_output_preserves_heterogeneous_leg_spaces() {
     let rhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&c, &d], 224_602).unwrap();
     let network = Network::new(
         vec![
-            vec!["a", "b", "k"].into_iter().map(TemporaryLabel::from).collect(),
-            vec!["k", "c", "d"].into_iter().map(TemporaryLabel::from).collect(),
+            vec!["a", "b", "k"]
+                .into_iter()
+                .map(TemporaryLabel::from)
+                .collect(),
+            vec!["k", "c", "d"]
+                .into_iter()
+                .map(TemporaryLabel::from)
+                .collect(),
         ],
         vec![false, false],
         vec![Some(2), Some(1)],

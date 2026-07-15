@@ -559,9 +559,7 @@ impl PlannedNetwork {
             // Incompatible storage falls through to the established two-stage
             // contract-and-permute path below.
             if let Some(output_axes) = &step.result_output_axes {
-                if let Some(mut destination) =
-                    workspace.intermediates[step_index].oriented.take()
-                {
+                if let Some(mut destination) = workspace.intermediates[step_index].oriented.take() {
                     let preparations = workspace.intermediates[step_index]
                         .contract_cache
                         .preparations();
@@ -599,8 +597,7 @@ impl PlannedNetwork {
                             return_intermediate(workspace, lhs, lhs_producer);
                             return_intermediate(workspace, rhs, rhs_producer);
                             workspace.slots[step.result_slot] = Some(destination);
-                            workspace.slot_producers[step.result_slot] =
-                                Some((step_index, true));
+                            workspace.slot_producers[step.result_slot] = Some((step_index, true));
                             continue;
                         }
                         Ok(OverwriteOutcome::Incompatible) => {
@@ -894,9 +891,9 @@ fn compile_schedule(
             result_slot,
             lhs_contract_axes,
             rhs_contract_axes,
-            result_output_axes: result_permutation.as_ref().map(|(codomain, domain)| {
-                codomain.iter().chain(domain).copied().collect()
-            }),
+            result_output_axes: result_permutation
+                .as_ref()
+                .map(|(codomain, domain)| codomain.iter().chain(domain).copied().collect()),
             result_permutation,
         });
     }

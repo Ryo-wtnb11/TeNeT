@@ -111,7 +111,12 @@ fn crossed_output_order_matches_sequential_for_rhs_and_both_lazy_adjoints() {
     let output_axes = [2, 0, 3, 1];
 
     for (lhs, rhs, lhs_axes, rhs_axes) in [
-        (plain_lhs.clone(), rhs_parent.adjoint().unwrap(), vec![2], vec![0]),
+        (
+            plain_lhs.clone(),
+            rhs_parent.adjoint().unwrap(),
+            vec![2],
+            vec![0],
+        ),
         (
             lhs_parent.adjoint().unwrap(),
             rhs_parent.adjoint().unwrap(),
@@ -182,10 +187,10 @@ fn ordered_contract_preserves_contraction_error_precedence() {
     let runtime = Runtime::builder().build().unwrap();
     let lhs_space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
     let rhs_space = Space::u1([(-1, 1), (0, 3), (1, 1)]);
-    let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&lhs_space], [&lhs_space], 224_321)
-        .unwrap();
-    let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&rhs_space], [&rhs_space], 224_322)
-        .unwrap();
+    let lhs =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&lhs_space], [&lhs_space], 224_321).unwrap();
+    let rhs =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&rhs_space], [&rhs_space], 224_322).unwrap();
 
     let expected = lhs.contract(&rhs, &[1], &[0]).unwrap_err();
     let actual = lhs.contract_ordered(&rhs, &[1], &[0], &[0]).unwrap_err();
