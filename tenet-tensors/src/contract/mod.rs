@@ -4,6 +4,8 @@ mod context;
 mod dynamic;
 mod dynamic_space;
 mod fusion;
+#[cfg(test)]
+pub(crate) use fusion::contracted_axis_order_candidates;
 mod fusion_block;
 mod resolution;
 mod scratch;
