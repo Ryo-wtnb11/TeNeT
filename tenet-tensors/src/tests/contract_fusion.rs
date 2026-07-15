@@ -399,6 +399,70 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
 }
 
 #[test]
+fn forced_axis_order_candidates_have_identical_z2_odd_complex_result() {
+    // What: force the first two paired orderings through the same fusion
+    // executor for an odd-parity Z2 contraction, including complex data.
+    // Why: the candidate seam must preserve the fermionic parity sector;
+    // runtime cost selection is intentionally still disabled.
+    let rule = Z2FusionRule;
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let leg = || SectorLeg::new(sectors.map(|sector| (sector, 1)), false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let dense = TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap();
+    let blocks = hom.fusion_tree_keys(&rule).len();
+    let space =
+        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, vec![vec![1; 4]; blocks])
+            .unwrap();
+    let len = space.subblock_structure().required_len().unwrap();
+    let lhs = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        (0..len)
+            .map(|i| Complex64::new(i as f64 + 1.0, 0.25 * i as f64))
+            .collect(),
+        space.clone(),
+    )
+    .unwrap();
+    let rhs = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        (0..len)
+            .map(|i| Complex64::new(0.5 * i as f64 - 0.75, 1.0 - 0.1 * i as f64))
+            .collect(),
+        space.clone(),
+    )
+    .unwrap();
+    let candidates = crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]);
+    assert!(candidates.len() >= 2);
+    let mut outputs = Vec::new();
+    for candidate in candidates.iter().take(2) {
+        let mut dst = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+            vec![Complex64::zero(); len],
+            space.clone(),
+        )
+        .unwrap();
+        tensorcontract_fusion_into(
+            &rule,
+            &mut dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new(
+                candidate.lhs(),
+                candidate.rhs(),
+                OutputAxisOrder::from_axes(&[0, 1, 2, 3]),
+            ),
+            Complex64::one(),
+            Complex64::zero(),
+        )
+        .unwrap();
+        outputs.push(dst);
+    }
+    assert_eq!(outputs[0].fusion_space(), outputs[1].fusion_space());
+    for (a, b) in outputs[0].data().iter().zip(outputs[1].data()) {
+        assert!((a - b).norm() < 1.0e-10, "candidate mismatch: {a} vs {b}");
+    }
+}
+
+#[test]
 fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
