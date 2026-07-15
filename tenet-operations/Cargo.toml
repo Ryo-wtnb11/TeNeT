@@ -30,3 +30,13 @@ blas-openblas = ["tenet-dense/blas-openblas"]
 blas-mkl = ["tenet-dense/blas-mkl"]
 provider-inject = ["tenet-dense/provider-inject"]
 cuda = ["tenet-dense/cuda"]
+
+[dev-dependencies]
+# Microbench for the #230 non-contiguous strided-combine regime. Informational,
+# not a pass/fail gate (shared CI runners are too noisy); the real gate is the
+# size_of canary in host_scalar_kernels.rs. Only pulled in for `cargo bench`.
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "strided_combine"
+harness = false

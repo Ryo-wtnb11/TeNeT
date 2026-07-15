@@ -394,3 +394,9 @@ jobs:
       - name: FusionTreeKey hash/eq microbench (informational, not a gate)
         run: cargo bench -p tenet-core --bench fusion_tree_key
         working-directory: tenet
+      - name: size_of canary for the #230 offset error
+        run: cargo test -p tenet-operations offset_error_result_stays_small
+        working-directory: tenet
+      - name: strided-combine microbench (informational, not a gate)
+        run: cargo bench -p tenet-operations --bench strided_combine
+        working-directory: tenet

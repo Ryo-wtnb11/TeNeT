@@ -682,22 +682,44 @@ where
     };
 }
 
-fn checked_strided_offset(
-    base: isize,
-    index: usize,
-    stride: isize,
-) -> Result<isize, OperationError> {
-    let index = isize::try_from(index).map_err(|_| OperationError::ElementCountOverflow)?;
-    base.checked_add(
-        index
-            .checked_mul(stride)
-            .ok_or(OperationError::ElementCountOverflow)?,
-    )
-    .ok_or(OperationError::ElementCountOverflow)
+/// Overflow signal for the per-element strided offset helpers.
+///
+/// Fieldless on purpose: these helpers run once per element on the
+/// non-contiguous combine/scale recurse path, where returning
+/// `Result<_, OperationError>` (536 bytes) forced a per-element sret move +
+/// drop that dominated the profile (issue #230). This ZST-sized error keeps
+/// the hot `Result` pointer-small.
+///
+/// Why-not shrink `OperationError` itself: that is issue #231 (parked) and
+/// would ripple through every operation call site; a local error confined to
+/// this helper family fixes the hot path without touching the shared enum.
+#[derive(Clone, Copy, Debug)]
+enum OffsetError {
+    /// index/stride `isize` arithmetic overflowed.
+    ElementCount,
+    /// signed offset did not fit back into `usize`.
+    Offset,
 }
 
-fn checked_offset_to_index(offset: isize) -> Result<usize, OperationError> {
-    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
+impl From<OffsetError> for OperationError {
+    fn from(err: OffsetError) -> Self {
+        // Map to the exact variants/messages these helpers emitted before #230
+        // so every `?` call site stays observably identical.
+        match err {
+            OffsetError::ElementCount => OperationError::ElementCountOverflow,
+            OffsetError::Offset => OperationError::OffsetOverflow { value: usize::MAX },
+        }
+    }
+}
+
+fn checked_strided_offset(base: isize, index: usize, stride: isize) -> Result<isize, OffsetError> {
+    let index = isize::try_from(index).map_err(|_| OffsetError::ElementCount)?;
+    base.checked_add(index.checked_mul(stride).ok_or(OffsetError::ElementCount)?)
+        .ok_or(OffsetError::ElementCount)
+}
+
+fn checked_offset_to_index(offset: isize) -> Result<usize, OffsetError> {
+    usize::try_from(offset).map_err(|_| OffsetError::Offset)
 }
 
 fn is_column_major_contiguous(shape: &[usize], strides: &[isize]) -> Result<bool, OperationError> {
@@ -736,4 +758,31 @@ fn strided_linear_offset(
             .ok_or(OperationError::ElementCountOverflow)?;
     }
     usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // What: the offset helper family's Result must stay pointer-small so the
+    // per-element non-contiguous combine/scale loop pays no 536-byte sret move
+    // + drop (issue #230). Fails if OffsetError grows a field or OperationError
+    // is routed back onto these hot helpers.
+    #[test]
+    fn offset_error_result_stays_small() {
+        assert!(std::mem::size_of::<Result<usize, OffsetError>>() <= 16);
+    }
+
+    // What: the offset helpers still emit the exact OperationError variants they
+    // did before #230, so `?` call sites are observably unchanged.
+    #[test]
+    fn offset_helpers_map_to_original_operation_errors() {
+        // isize::MAX * 2 overflows the checked_mul -> ElementCountOverflow.
+        let err: OperationError = checked_strided_offset(0, 2, isize::MAX).unwrap_err().into();
+        assert_eq!(err, OperationError::ElementCountOverflow);
+
+        // A negative offset cannot be a usize index -> OffsetOverflow{usize::MAX}.
+        let err: OperationError = checked_offset_to_index(-1).unwrap_err().into();
+        assert_eq!(err, OperationError::OffsetOverflow { value: usize::MAX });
+    }
 }
