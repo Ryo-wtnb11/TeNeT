@@ -1166,13 +1166,16 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Operatio
             rank,
         });
     }
-    for (index, &axis) in axes.iter().enumerate() {
-        if axis >= rank || axes[..index].contains(&axis) {
+    let mut seen = SmallVec::<[bool; 16]>::new();
+    seen.resize(rank, false);
+    for &axis in axes {
+        if axis >= rank || seen[axis] {
             return Err(OperationError::InvalidPermutation {
                 axes: axes.to_vec(),
                 rank,
             });
         }
+        seen[axis] = true;
     }
     Ok(())
 }
