@@ -48,6 +48,8 @@ use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 thread_local! {
     static PERMUTE_PRE_REPLAY_POISON: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
+    static ORDERED_CONTRACT_FUSED_ROUTE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -55,6 +57,15 @@ fn observe_permute_pre_replay_poison(is_poisoned: bool) {
     PERMUTE_PRE_REPLAY_POISON.with(|observation| {
         if observation.get().is_some() {
             observation.set(Some(is_poisoned));
+        }
+    });
+}
+
+#[cfg(test)]
+fn observe_ordered_contract_fused_route() {
+    ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| {
+        if observation.get().is_some() {
+            observation.set(Some(true));
         }
     });
 }
@@ -1327,6 +1338,24 @@ impl UserBoundSpace {
             }
             _ => Err(Error::RuleMismatch),
         }
+    }
+
+    fn contracted_with_output_order(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<Self, Error> {
+        let default = self.contracted(rhs, lhs_axes, rhs_axes)?;
+        let OutputAxisOrder::Axes(output_axes) = output_order else {
+            return Ok(default);
+        };
+        let split = default.raw().nout();
+        default.transformed(&TreeTransformOperation::permute(
+            output_axes[..split].iter().copied(),
+            output_axes[split..].iter().copied(),
+        ))
     }
 
     fn transformed(&self, operation: &TreeTransformOperation) -> Result<Self, Error> {
@@ -3099,6 +3128,26 @@ impl Tensor {
         // TensorKit's `AdjointTensorMap` contraction; verified against TensorKit
         // (`A'*B == @tensor conj(A[v;w])*B[v;x]`) and, for non-self-dual (U(1))
         // symmetries, against the eager-adjoint oracle in tenet-tensors.
+        match (self.data.as_ref(), rhs.data.as_ref()) {
+            (Data::F64(_), Data::F64(_)) | (Data::C64(_), Data::C64(_)) => {
+                self.contract_host_fusion_impl(rhs, lhs_axes, rhs_axes, OutputAxisOrder::identity())
+            }
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(a), Data::CudaF64(b)) => {
+                // Device tensors are never lazy adjoints (`adjoint` rejects them).
+                self.contract_cuda_impl(rhs, a, b, lhs_axes, rhs_axes)
+            }
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    fn contract_host_fusion_impl(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<Self, Error> {
         let (lhs_space, lhs_axes_seam, lhs_conj) = self.seam_operand(lhs_axes);
         let (rhs_space, rhs_axes_seam, rhs_conj) = rhs.seam_operand(rhs_axes);
         // The seam always consumes the raw stored buffer (it never materializes):
@@ -3117,6 +3166,7 @@ impl Tensor {
                 rhs,
                 lhs_axes,
                 rhs_axes,
+                output_order,
             ),
             (Data::C64(a), Data::C64(b)) => self.contract_impl(
                 &lhs_space,
@@ -3130,12 +3180,8 @@ impl Tensor {
                 rhs,
                 lhs_axes,
                 rhs_axes,
+                output_order,
             ),
-            #[cfg(feature = "cuda")]
-            (Data::CudaF64(a), Data::CudaF64(b)) => {
-                // Device tensors are never lazy adjoints (`adjoint` rejects them).
-                self.contract_cuda_impl(rhs, a, b, lhs_axes, rhs_axes)
-            }
             _ => Err(Error::DtypeMismatch),
         }
     }
@@ -3194,17 +3240,23 @@ impl Tensor {
         rhs: &Self,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
     ) -> Result<Self, Error> {
         // Lease a per-rule context so independent operations on one runtime do
         // not serialize while bound spaces remain the fusion authority.
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
-        let dst_bound = self.space.contracted(&rhs.space, lhs_axes, rhs_axes)?;
+        let dst_bound = self.space.contracted_with_output_order(
+            &rhs.space,
+            lhs_axes,
+            rhs_axes,
+            output_order,
+        )?;
         let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
         let spec = TensorContractSpec::new_with_conjugation(
             lhs_axes_seam,
             rhs_axes_seam,
-            OutputAxisOrder::identity(),
+            output_order,
             lhs_conj,
             rhs_conj,
         );
@@ -3394,19 +3446,62 @@ impl Tensor {
         rhs_axes: &[usize],
         output_axes: &[usize],
     ) -> Result<Self, Error> {
-        let contracted = self.contract(rhs, lhs_axes, rhs_axes)?;
-        if output_axes.len() != contracted.rank() {
+        self.check_same_world(rhs)?;
+        if lhs_axes.len() != rhs_axes.len() {
+            return Err(Error::InvalidArgument(format!(
+                "contracted axis lists differ in length: {} vs {}",
+                lhs_axes.len(),
+                rhs_axes.len()
+            )));
+        }
+        let lhs_open = open_axes(lhs_axes, self.rank())?;
+        let rhs_open = open_axes(rhs_axes, rhs.rank())?;
+        let open_rank = lhs_open.len() + rhs_open.len();
+
+        let host_mult_free_dense = self.rule_kind() != RuleKind::Su3
+            && self.placement() == Placement::Host
+            && !matches!(self.data.as_ref(), Data::Diagonal(_))
+            && !matches!(rhs.data.as_ref(), Data::Diagonal(_));
+        if !host_mult_free_dense {
+            // Why not force generic fusion, compact diagonal, or device storage
+            // through the multiplicity-free host plan: those routes have distinct
+            // complexity or placement contracts. Preserve their proven sequential
+            // operation, including validation order, until each backend can consume
+            // pAB directly.
+            let contracted = self.contract(rhs, lhs_axes, rhs_axes)?;
+            if output_axes.len() != contracted.rank() {
+                return Err(Error::InvalidArgument(format!(
+                    "output axis list length {} does not match open rank {}",
+                    output_axes.len(),
+                    contracted.rank()
+                )));
+            }
+            let split = contracted.codomain_rank();
+            if output_axes.iter().copied().eq(0..contracted.rank()) {
+                return Ok(contracted);
+            }
+            return contracted.permute(&output_axes[..split], &output_axes[split..]);
+        }
+
+        if output_axes.len() != open_rank {
             return Err(Error::InvalidArgument(format!(
                 "output axis list length {} does not match open rank {}",
                 output_axes.len(),
-                contracted.rank()
+                open_rank
             )));
         }
-        let split = contracted.codomain_rank();
-        if output_axes.iter().copied().eq(0..contracted.rank()) {
-            return Ok(contracted);
+        if output_axes.iter().copied().eq(0..open_rank) {
+            return self.contract(rhs, lhs_axes, rhs_axes);
         }
-        contracted.permute(&output_axes[..split], &output_axes[split..])
+
+        #[cfg(test)]
+        observe_ordered_contract_fused_route();
+        self.contract_host_fusion_impl(
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::from_axes(output_axes),
+        )
     }
 
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
@@ -7365,5 +7460,88 @@ mod tk_user_api_tests {
         // Reassembled parts recover the original tensor.
         let recomposed = herm.add(&anti, 1.0, 1.0).unwrap();
         assert!(recomposed.add(&t, 1.0, -1.0).unwrap().norm().unwrap() < 1e-10);
+    }
+}
+
+#[cfg(test)]
+mod ordered_contract_route_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_multiplicity_free_ordered_contract_uses_fused_plan_route() {
+        // What: a crossed SU2 pAB is handed to the contraction plan instead of
+        // returning a default-order owned tensor to a second public permute.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let lhs = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::F64,
+            [&space, &space],
+            [&space, &space],
+            224_501,
+        )
+        .unwrap();
+        let rhs = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::F64,
+            [&space, &space],
+            [&space, &space],
+            224_502,
+        )
+        .unwrap();
+
+        ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.set(Some(false)));
+        let _ = lhs
+            .contract_ordered(&rhs, &[3, 2], &[0, 1], &[2, 0, 3, 1])
+            .unwrap();
+        let observed = ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.replace(None));
+
+        assert_eq!(observed, Some(true));
+    }
+
+    #[test]
+    fn compact_diagonal_ordered_contract_keeps_sequential_fallback() {
+        // What: compact diagonal complexity dispatch is not bypassed by the
+        // new host fusion route.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 2), (1, 2)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_503).unwrap();
+        let diagonal = source.svd_compact().unwrap().1;
+
+        ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.set(Some(false)));
+        let _ = diagonal
+            .contract_ordered(&diagonal, &[1], &[0], &[1, 0])
+            .unwrap();
+        let observed = ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.replace(None));
+
+        assert_eq!(observed, Some(false));
+    }
+
+    #[test]
+    fn generic_fusion_ordered_contract_keeps_sequential_fallback() {
+        // What: outer-multiplicity-capable generic fusion remains on its
+        // separately proved contract and permute implementations.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
+        let lhs =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_504).unwrap();
+        let rhs =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_505).unwrap();
+
+        ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.set(Some(false)));
+        let actual = lhs.contract_ordered(&rhs, &[1], &[0], &[1, 0]).unwrap();
+        let observed = ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.replace(None));
+        let expected = lhs
+            .contract(&rhs, &[1], &[0])
+            .unwrap()
+            .permute(&[1], &[0])
+            .unwrap();
+
+        assert_eq!(observed, Some(false));
+        assert_eq!(actual.data().len(), expected.data().len());
+        for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+            assert!((actual - expected).abs() < 1.0e-11);
+        }
     }
 }

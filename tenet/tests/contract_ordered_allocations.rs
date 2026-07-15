@@ -1,19 +1,21 @@
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tenet::prelude::*;
 
 struct CountingAllocator;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
-static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static ENABLED: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATED: Cell<u64> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc(layout) };
-        if ENABLED.load(Ordering::Relaxed) && !pointer.is_null() {
-            ALLOCATED.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        if !pointer.is_null() && ENABLED.get() {
+            ALLOCATED.set(ALLOCATED.get() + layout.size() as u64);
         }
         pointer
     }
@@ -24,8 +26,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if ENABLED.load(Ordering::Relaxed) && !pointer.is_null() {
-            ALLOCATED.fetch_add(new_size as u64, Ordering::Relaxed);
+        if !pointer.is_null() && ENABLED.get() {
+            ALLOCATED.set(ALLOCATED.get() + new_size as u64);
         }
         pointer
     }
@@ -35,11 +37,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn measure_allocated_bytes(f: impl FnOnce()) -> u64 {
-    ALLOCATED.store(0, Ordering::Relaxed);
-    ENABLED.store(true, Ordering::Release);
+    ALLOCATED.set(0);
+    ENABLED.set(true);
     f();
-    ENABLED.store(false, Ordering::Release);
-    ALLOCATED.load(Ordering::Relaxed)
+    ENABLED.set(false);
+    ALLOCATED.get()
 }
 
 #[test]
@@ -74,7 +76,11 @@ fn ordered_contract_does_not_allocate_the_default_order_owned_payload() {
 
     let sequential = || {
         let default = lhs.contract(&rhs, &lhs_axes, &rhs_axes).unwrap();
-        black_box(default.permute(&output_axes[..2], &output_axes[2..]).unwrap())
+        black_box(
+            default
+                .permute(&output_axes[..2], &output_axes[2..])
+                .unwrap(),
+        )
     };
     let fused = || {
         black_box(
