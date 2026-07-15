@@ -1226,6 +1226,26 @@ impl TreeTransformLayoutTable {
         })
     }
 
+    /// Heap bytes of the pre-#232 layout metadata (entries + shape/stride/packed
+    /// arenas), the denominator of the plan-size growth measurement. Test/diag.
+    #[doc(hidden)]
+    pub fn layout_table_bytes(&self) -> usize {
+        self.entries.len() * core::mem::size_of::<TreeTransformLayout>()
+            + self.shapes.len() * core::mem::size_of::<usize>()
+            + (self.strides.len() + self.packed_strides.len()) * core::mem::size_of::<isize>()
+    }
+
+    /// Heap bytes of the baked fused-layout arena added by #232 (the compact
+    /// SoA arena plus the per-entry slot index), the numerator of the plan-size
+    /// growth measurement. Test/diag.
+    #[doc(hidden)]
+    pub fn baked_arena_bytes(&self) -> usize {
+        self.fused_dims.len() * core::mem::size_of::<usize>()
+            + (self.fused_dst_strides.len() + self.fused_src_strides.len())
+                * core::mem::size_of::<isize>()
+            + self.fused_slots.len() * core::mem::size_of::<FusedSlot>()
+    }
+
     /// Bakes the fused layout of `entry_index` for the `dst_strides`/`src_strides`
     /// pair of its role (single/pack/scatter). Absent (unrepresentable rank, or
     /// arena index past `u32::MAX`) leaves the slot at its zero-rank default so
@@ -1597,6 +1617,47 @@ mod tests {
             TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
         assert!(!compiled.has_pack_gemm_scatter_blocks());
         assert!(compiled.baked_layouts_match_recomputed());
+    }
+
+    #[test]
+    fn baked_arena_uses_compact_real_rank_representation() {
+        // What: the compact real-rank arena (8 + 24·rank per baked entry) stays
+        // well below the fixed 200-byte FusedPairLayout stack array it replaces
+        // — the #232 GO condition that keeps the many-charge U(1) plan bounded
+        // (Phase-0: compact halves the +78% fixed-array cost to ~+40%). A deg2
+        // c21-shaped permute: 21 distinct one-leg sectors, degeneracy-2 rank-4
+        // blocks that never fuse (stay rank 4). Measured growth is reported for
+        // the plan-size table.
+        let block = |sector, offset| {
+            BlockSpec::with_key(
+                BlockKey::sector_ids([sector]),
+                vec![2, 2, 2, 2],
+                vec![1, 2, 4, 8],
+                offset,
+            )
+            .unwrap()
+        };
+        let blocks = (0..21).map(|charge| block(charge, charge * 16)).collect();
+        let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
+        let specs = (0..21)
+            .map(|b| TreeTransformBlockSpec::single(b, b, 1.0_f64).with_source_axes([1, 0, 3, 2]))
+            .collect::<Vec<_>>();
+        let compiled =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        let base = compiled.layouts().layout_table_bytes();
+        let baked = compiled.layouts().baked_arena_bytes();
+        let growth = baked as f64 / base as f64;
+        // 21 baked single-role entries at rank 4; the fixed FusedPairLayout stack
+        // array is 200 B each (rank + 3×[_; 8]) vs the compact 8 + 24·4 = 104 B.
+        let fixed_array_equivalent = 21 * 200;
+        eprintln!(
+            "u1_deg2_c21: base={base}B baked={baked}B growth={:.1}% (fixed-array baked ~{fixed_array_equivalent}B)",
+            growth * 100.0
+        );
+        assert!(
+            baked < fixed_array_equivalent,
+            "compact arena {baked}B must beat the fixed 200-byte array {fixed_array_equivalent}B"
+        );
     }
 
     #[test]
