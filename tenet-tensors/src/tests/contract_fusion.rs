@@ -413,13 +413,9 @@ fn forced_axis_order_candidates_have_identical_z2_odd_complex_result() {
     );
     let dense = TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap();
     let blocks = hom.fusion_tree_keys(&rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes(
-        dense,
-        hom,
-        &rule,
-        vec![vec![1; 4]; blocks],
-    )
-    .unwrap();
+    let space =
+        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, vec![vec![1; 4]; blocks])
+            .unwrap();
     let len = space.subblock_structure().required_len().unwrap();
     let lhs = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
         (0..len)
