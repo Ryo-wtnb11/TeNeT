@@ -180,6 +180,33 @@ fn ordered_contract_overwrite_rejects_invalid_pab_without_mutation() {
         // slices past the caller's list or mutates destination bits.
         assert_eq!(destination.data(), before);
     }
+
+    let incompatible_space = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    let incompatible_rhs = Tensor::rand_with_seed(
+        &runtime,
+        Dtype::F64,
+        [&incompatible_space],
+        [&incompatible_space],
+        30_143,
+    )
+    .unwrap();
+    let expected = lhs.contract(&incompatible_rhs, &[1], &[0]).unwrap_err();
+    let actual = context
+        .try_contract_ordered_overwrite_into(
+            &mut cache,
+            &mut destination,
+            &lhs,
+            &incompatible_rhs,
+            &[1],
+            &[0],
+            &[],
+            Scalar::F64(1.0),
+        )
+        .unwrap_err();
+    // What: contracted-space compatibility keeps precedence when pAB is also
+    // malformed, matching the owned contract-then-permute contract.
+    assert_eq!(actual, expected);
+    assert_eq!(destination.data(), before);
 }
 
 #[test]

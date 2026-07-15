@@ -390,6 +390,10 @@ fn split_changing_intermediate_keeps_sequential_orientation_replay() {
         .execute_with_workspace(&tensors, &mut workspace)
         .unwrap();
     let after_warm = workspace.stats();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_second_warm = workspace.stats();
 
     // What: moving the planar boundary is not pAB-only. Warm replay retains
     // the proven contract destination followed by one orientation replay.
@@ -401,6 +405,15 @@ fn split_changing_intermediate_keeps_sequential_orientation_replay() {
     assert_eq!(
         after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
         1
+    );
+    assert_eq!(
+        after_second_warm.contract_layout_preparations - after_warm.contract_layout_preparations,
+        0
+    );
+    assert_eq!(
+        after_second_warm.orientation_layout_preparations
+            - after_warm.orientation_layout_preparations,
+        0
     );
 }
 
@@ -436,6 +449,10 @@ fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
         .execute_with_workspace(&tensors, &mut workspace)
         .unwrap();
     let after_warm = workspace.stats();
+    planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let after_second_warm = workspace.stats();
 
     // What: generic fusion does not enter the multiplicity-free ordered seam.
     assert_eq!(warm.data_c64(), expected.data_c64());
@@ -446,6 +463,15 @@ fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
     assert_eq!(
         after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
         1
+    );
+    assert_eq!(
+        after_second_warm.contract_layout_preparations - after_warm.contract_layout_preparations,
+        0
+    );
+    assert_eq!(
+        after_second_warm.orientation_layout_preparations
+            - after_warm.orientation_layout_preparations,
+        0
     );
 }
 
