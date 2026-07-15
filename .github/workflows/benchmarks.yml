@@ -1,0 +1,41 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Keep benchmark trend data fresh without adding latency to pull requests.
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  criterion:
+    name: Criterion benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: benchmarks
+      # Why: these benches are diagnostic trend data, not a deterministic
+      # correctness gate; hosted-runner timing noise makes them unsuitable for
+      # required PR checks.
+      - name: FusionTreeKey hash/eq microbench
+        run: cargo bench -p tenet-core --bench fusion_tree_key
+        working-directory: tenet
+      - name: strided-combine microbench
+        run: cargo bench -p tenet-operations --bench strided_combine
+        working-directory: tenet
