@@ -74,22 +74,22 @@ pub enum OperationError {
         actual: usize,
     },
     UnsupportedFusionStyle {
-        operation: TreeTransformOperation,
+        operation: Box<TreeTransformOperation>,
         style: FusionStyleKind,
     },
     UnsupportedBraidingStyle {
-        operation: TreeTransformOperation,
+        operation: Box<TreeTransformOperation>,
         style: BraidingStyleKind,
     },
     UnsupportedTreeTransformScope {
-        operation: TreeTransformOperation,
+        operation: Box<TreeTransformOperation>,
         message: &'static str,
     },
     UnsupportedTensorContractScope {
         message: &'static str,
     },
     MissingBlockKey {
-        key: BlockKey,
+        key: Box<BlockKey>,
     },
     ShapeMismatch {
         dst: Vec<usize>,

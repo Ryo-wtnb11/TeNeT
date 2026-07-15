@@ -25,7 +25,7 @@ impl ValidateBraidingSupport for TreeTransformOperation {
     {
         if self.requires_symmetric_braiding() && !rule.braiding_style().is_symmetric() {
             return Err(OperationError::UnsupportedBraidingStyle {
-                operation: self.clone(),
+                operation: Box::new(self.clone()),
                 style: rule.braiding_style(),
             });
         }

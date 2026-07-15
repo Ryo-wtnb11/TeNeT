@@ -2555,7 +2555,7 @@ mod tests {
         assert_eq!(
             err,
             CoreError::MissingBlockKey {
-                key: BlockKey::from(missing),
+                key: Box::new(BlockKey::from(missing)),
             }
         );
     }
@@ -3464,7 +3464,7 @@ mod tests {
         assert_eq!(
             err,
             CoreError::DuplicateBlockKey {
-                key: BlockKey::sector_ids([7])
+                key: Box::new(BlockKey::sector_ids([7]))
             }
         );
     }

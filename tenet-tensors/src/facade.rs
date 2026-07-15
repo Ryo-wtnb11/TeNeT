@@ -309,7 +309,7 @@ where
         && !rule.supports_unitary_braid_dagger()
     {
         return Err(OperationError::UnsupportedTreeTransformScope {
-            operation,
+            operation: Box::new(operation),
             message:
                 "source adjoint explicit braid requires a unitary dagger-compatible braiding rule",
         });
@@ -411,7 +411,7 @@ where
         && !rule.supports_unitary_braid_dagger()
     {
         return Err(OperationError::UnsupportedTreeTransformScope {
-            operation,
+            operation: Box::new(operation),
             message:
                 "source adjoint explicit braid requires a unitary dagger-compatible braiding rule",
         });

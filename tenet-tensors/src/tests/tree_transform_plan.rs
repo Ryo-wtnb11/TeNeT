@@ -141,7 +141,12 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
     )
     .unwrap_err();
 
-    assert_eq!(err, OperationError::MissingBlockKey { key: key2 });
+    assert_eq!(
+        err,
+        OperationError::MissingBlockKey {
+            key: Box::new(key2)
+        }
+    );
 }
 
 #[test]
@@ -246,7 +251,7 @@ fn single_output_unique_tree_transform_helper_rejects_simple_fusion() {
     assert_eq!(
         err,
         OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: FusionStyleKind::Simple,
         }
     );
@@ -2303,7 +2308,7 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
     assert_eq!(
         err,
         OperationError::MissingBlockKey {
-            key: expected_missing,
+            key: Box::new(expected_missing),
         }
     );
 }
@@ -2883,7 +2888,7 @@ fn unique_tree_transform_plan_builder_rejects_generic_fusion() {
     assert_eq!(
         err,
         OperationError::UnsupportedFusionStyle {
-            operation,
+            operation: Box::new(operation),
             style: FusionStyleKind::Generic,
         }
     );
@@ -2915,7 +2920,7 @@ fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding
     assert_eq!(
         err,
         OperationError::UnsupportedBraidingStyle {
-            operation,
+            operation: Box::new(operation),
             style: BraidingStyleKind::Anyonic,
         }
     );
@@ -3000,7 +3005,7 @@ fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
     assert_eq!(
         err,
         OperationError::UnsupportedTreeTransformScope {
-            operation,
+            operation: Box::new(operation),
             message: "all-codomain UniqueFusion lowering requires an empty domain operation",
         }
     );
@@ -3110,7 +3115,7 @@ fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
     assert_eq!(
         err,
         OperationError::UnsupportedBraidingStyle {
-            operation,
+            operation: Box::new(operation),
             style: BraidingStyleKind::Anyonic,
         }
     );
@@ -3597,7 +3602,12 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     )
     .unwrap_err();
 
-    assert_eq!(err, OperationError::MissingBlockKey { key: missing_key });
+    assert_eq!(
+        err,
+        OperationError::MissingBlockKey {
+            key: Box::new(missing_key)
+        }
+    );
 }
 
 #[test]

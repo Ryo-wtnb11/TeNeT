@@ -146,7 +146,7 @@ where
             ));
             let index = structure.find_block_index_by_key(&source_key).ok_or(
                 OperationError::MissingBlockKey {
-                    key: source_key.clone(),
+                    key: Box::new(source_key.clone()),
                 },
             )?;
             let source_shape = structure
@@ -203,9 +203,11 @@ where
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
-        let source_index = structure
-            .find_block_index_by_key(&source_key)
-            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+        let source_index = structure.find_block_index_by_key(&source_key).ok_or(
+            OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            },
+        )?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -339,7 +341,7 @@ where
             ));
             let index = structure.find_block_index_by_key(&source_key).ok_or(
                 OperationError::MissingBlockKey {
-                    key: source_key.clone(),
+                    key: Box::new(source_key.clone()),
                 },
             )?;
             let source_shape = structure
@@ -396,9 +398,11 @@ where
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
-        let source_index = structure
-            .find_block_index_by_key(&source_key)
-            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+        let source_index = structure.find_block_index_by_key(&source_key).ok_or(
+            OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            },
+        )?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -472,7 +476,7 @@ where
         ));
         let index = structure.find_block_index_by_key(&source_key).ok_or(
             OperationError::MissingBlockKey {
-                key: source_key.clone(),
+                key: Box::new(source_key.clone()),
             },
         )?;
         Ok(structure
@@ -526,9 +530,11 @@ where
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
-        let source_index = structure
-            .find_block_index_by_key(&source_key)
-            .ok_or(OperationError::MissingBlockKey { key: source_key })?;
+        let source_index = structure.find_block_index_by_key(&source_key).ok_or(
+            OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            },
+        )?;
         let source_block = structure
             .block(source_index)
             .map_err(OperationError::from_core_preserving_context)?;

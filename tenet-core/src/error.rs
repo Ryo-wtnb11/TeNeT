@@ -76,10 +76,10 @@ pub enum CoreError {
         count: usize,
     },
     DuplicateBlockKey {
-        key: BlockKey,
+        key: Box<BlockKey>,
     },
     MissingBlockKey {
-        key: BlockKey,
+        key: Box<BlockKey>,
     },
     MissingFusionSpace,
     /// A bounded fusion table (SU(3) dim<=27, Stage B3b) cannot represent the

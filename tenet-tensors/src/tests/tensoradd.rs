@@ -1009,7 +1009,7 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_requires_unitary_dagger_rule()
     assert_eq!(
         err,
         OperationError::UnsupportedTreeTransformScope {
-            operation,
+            operation: Box::new(operation),
             message:
                 "source adjoint explicit braid requires a unitary dagger-compatible braiding rule",
         }
