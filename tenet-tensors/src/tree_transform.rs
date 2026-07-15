@@ -22,8 +22,9 @@ pub use plan::{
 pub(crate) use cache::{TreeTransformGroupPlanCache, TreeTransformGroupPlanKey};
 #[cfg(test)]
 pub(crate) use plan::{
+    build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized,
     build_multiplicity_free_tree_pair_transform_group_plan_memoized,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
-    TreePairRowMemo,
+    AllCodomainRowMemo, TreePairRowMemo,
 };

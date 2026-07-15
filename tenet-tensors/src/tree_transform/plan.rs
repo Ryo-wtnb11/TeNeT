@@ -1,5 +1,5 @@
 use core::ops::{Add, Mul};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
 use num_traits::Zero;
@@ -57,57 +57,12 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        let src_block_indices = group.block_indices();
-        let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
-        let mut dst_keys = Vec::<BlockKey>::new();
-        let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
-        let mut rows = Vec::<Vec<T>>::new();
-
-        for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
-            let block = src_structure.block(src_block_index)?;
-            let BlockKey::FusionTree(src_key) = block.key() else {
-                return Err(OperationError::ExpectedFusionTreeBlock {
-                    tensor: "src",
-                    index: src_block_index,
-                });
-            };
-            src_keys.push(BlockKey::from(src_key.clone()));
-
-            for row in &mut rows {
-                row.push(T::zero());
-            }
-            for (dst_tree_key, coefficient) in transform(src_key)? {
-                let dst_key = BlockKey::from(dst_tree_key);
-                let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
-                    dst_row
-                } else {
-                    let dst_row = dst_keys.len();
-                    dst_index_by_key.insert(dst_key.clone(), dst_row);
-                    dst_keys.push(dst_key);
-                    rows.push(vec![T::zero(); src_column + 1]);
-                    dst_row
-                };
-                rows[dst_row][src_column] = rows[dst_row][src_column].clone() + coefficient.clone();
-            }
-        }
-
-        if dst_keys.is_empty() {
-            return Err(OperationError::EmptyTransformBlock);
-        }
-        let src_count = src_keys.len();
-        let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
-        for row in rows {
-            recoupling_coefficients_dst_src.extend(row);
-        }
-        specs.push(
-            TreeTransformGroupBlockSpec::multi(
-                group.group_key().clone(),
-                dst_keys,
-                src_keys,
-                recoupling_coefficients_dst_src,
-            )
-            .with_source_axes(source_axes.clone()),
-        );
+        specs.extend(assemble_tree_pair_group_specs(
+            src_structure,
+            &group,
+            &source_axes,
+            &mut |src_key| transform(src_key).map(Arc::new),
+        )?);
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
@@ -304,7 +259,7 @@ where
                 &mut |codomain_tree| rows_for(&operation, codomain_tree),
             )?);
         } else {
-            specs.push(assemble_all_codomain_group_spec(
+            specs.extend(assemble_all_codomain_group_specs(
                 rule,
                 src_structure,
                 &group,
@@ -490,14 +445,13 @@ where
                     &mut rows_for,
                 )
             } else {
-                assemble_all_codomain_group_spec(
+                assemble_all_codomain_group_specs(
                     rule,
                     src_structure,
                     &group,
                     &source_axes,
                     &mut rows_for,
                 )
-                .map(|spec| vec![spec])
             }
         })
         .collect::<Result<Vec<_>, OperationError>>()?
@@ -549,13 +503,13 @@ where
     Ok(specs)
 }
 
-fn assemble_all_codomain_group_spec<R, T, F>(
+fn assemble_all_codomain_group_specs<R, T, F>(
     rule: &R,
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
     source_axes: &[usize],
     rows_for: &mut F,
-) -> Result<TreeTransformGroupBlockSpec<T>, OperationError>
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
     R: FusionRule,
     T: Clone + Add<Output = T> + Zero,
@@ -566,6 +520,9 @@ where
     let mut dst_keys = Vec::<BlockKey>::new();
     let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
     let mut rows = Vec::<Vec<T>>::new();
+    let mut direct_rows = Vec::with_capacity(src_block_indices.len());
+    let mut direct_dst_keys = FxHashSet::default();
+    let mut is_injective_singleton = true;
 
     for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
         let block = src_structure.block(src_block_index)?;
@@ -579,6 +536,22 @@ where
         src_keys.push(BlockKey::from(src_key.clone()));
 
         let transformed = rows_for(src_key.codomain_tree())?;
+        if let [(dst_codomain_tree, coefficient)] = transformed.as_slice() {
+            let dst_key = BlockKey::from(FusionTreeBlockKey::pair(
+                dst_codomain_tree.clone(),
+                src_key.domain_tree().clone(),
+            ));
+            if !direct_dst_keys.insert(dst_key.clone()) {
+                is_injective_singleton = false;
+            }
+            direct_rows.push((
+                BlockKey::from(src_key.clone()),
+                dst_key,
+                coefficient.clone(),
+            ));
+        } else {
+            is_injective_singleton = false;
+        }
         for row in &mut rows {
             row.push(T::zero());
         }
@@ -600,18 +573,31 @@ where
         }
     }
 
+    if let Some(direct_specs) = lower_injective_singleton_rows(
+        group,
+        source_axes,
+        direct_rows,
+        src_keys.len(),
+        is_injective_singleton,
+    ) {
+        return Ok(direct_specs);
+    }
+    if dst_keys.is_empty() {
+        return Err(OperationError::EmptyTransformBlock);
+    }
+
     let src_count = src_keys.len();
     let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
     for row in rows {
         recoupling_coefficients_dst_src.extend(row);
     }
-    Ok(TreeTransformGroupBlockSpec::multi(
+    Ok(vec![TreeTransformGroupBlockSpec::multi(
         group.group_key().clone(),
         dst_keys,
         src_keys,
         recoupling_coefficients_dst_src,
     )
-    .with_source_axes(source_axes.to_vec()))
+    .with_source_axes(source_axes.to_vec())])
 }
 
 /// Shape-independent recoupling rows for one source tree under one
@@ -780,7 +766,7 @@ where
 /// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
 /// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
 /// `build_multiplicity_free_tree_pair_transform_group_plan`: it reuses the
-/// exact same group-spec assembly (`assemble_tree_pair_group_spec`, generic
+/// exact same group-spec assembly (`assemble_tree_pair_group_specs`, generic
 /// over the coefficient type) and differs only in the recoupling-row source
 /// (`transformed_generic_tree_pair_rows`).
 ///
@@ -788,14 +774,17 @@ where
 /// builder because the two are disjoint at the type level:
 /// `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never both
 /// implemented by a real rule, so a mult-free rule can never name this
-/// function's bound, let alone reach its body. The mult-free builders and their
-/// eight `UnsupportedFusionStyle` guards are therefore left byte-for-byte
-/// untouched (the structural zero-cost guarantee). The runtime
-/// `has_multiplicity` gate below is the symmetric sibling of those guards,
-/// defending against a `GenericRigidSymbols` rule that reports a
-/// multiplicity-free style at runtime. A `has_multiplicity()` dispatch over a
-/// dyn-style entry is a Stage B3 concern (the SU(3) provider / generic-capable
-/// facade), where a caller can hold a rule of unknown style.
+/// function's bound, let alone reach its row-generation body. Both paths do
+/// intentionally share group-spec assembly, including structural monomial
+/// lowering, while retaining separate fusion-style guards and symbol APIs.
+/// Why not call this a byte-for-byte or blanket zero-cost guarantee: changes to
+/// the shared assembler are expected to affect both paths; the guarantee is
+/// that multiplicity-free rules never execute generic F/R-symbol logic. The
+/// runtime `has_multiplicity` gate below defends against a
+/// `GenericRigidSymbols` rule that reports a multiplicity-free style. A
+/// `has_multiplicity()` dispatch over a dyn-style entry is a Stage B3 concern
+/// (the SU(3) provider / generic-capable facade), where a caller can hold a rule
+/// of unknown style.
 pub fn build_generic_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
@@ -829,7 +818,7 @@ where
                 },
             )?);
         } else {
-            specs.push(assemble_tree_pair_group_spec(
+            specs.extend(assemble_tree_pair_group_specs(
                 src_structure,
                 &group,
                 &source_axes,
@@ -1056,8 +1045,7 @@ where
                     &mut rows_for,
                 )
             } else {
-                assemble_tree_pair_group_spec(src_structure, &group, &source_axes, &mut rows_for)
-                    .map(|spec| vec![spec])
+                assemble_tree_pair_group_specs(src_structure, &group, &source_axes, &mut rows_for)
             }
         })
         .collect::<Result<Vec<_>, OperationError>>()?
@@ -1104,7 +1092,7 @@ where
                 &mut |src_key| rows_for(&operation, src_key),
             )?);
         } else {
-            specs.push(assemble_tree_pair_group_spec(
+            specs.extend(assemble_tree_pair_group_specs(
                 src_structure,
                 &group,
                 &source_axes,
@@ -1155,16 +1143,16 @@ where
     Ok(specs)
 }
 
-/// Assemble one group's block spec (destination-key dedup plus the
+/// Assemble one group's block specs (destination-key dedup plus the
 /// `U[dst, src]` recoupling coefficient matrix) from per-tree recoupling
 /// rows. Groups are independent, which is what lets the parallel compile map
 /// over them.
-fn assemble_tree_pair_group_spec<T, F>(
+fn assemble_tree_pair_group_specs<T, F>(
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
     source_axes: &[usize],
     rows_for: &mut F,
-) -> Result<TreeTransformGroupBlockSpec<T>, OperationError>
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
     T: Clone + Add<Output = T> + Zero,
     F: FnMut(&FusionTreeBlockKey) -> Result<Arc<Vec<(FusionTreeBlockKey, T)>>, OperationError>,
@@ -1174,6 +1162,9 @@ where
     let mut dst_keys = Vec::<BlockKey>::new();
     let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
     let mut rows = Vec::<Vec<T>>::new();
+    let mut direct_rows = Vec::with_capacity(src_block_indices.len());
+    let mut direct_dst_keys = FxHashSet::default();
+    let mut is_injective_singleton = true;
 
     for (src_column, &src_block_index) in src_block_indices.iter().enumerate() {
         let block = src_structure.block(src_block_index)?;
@@ -1186,6 +1177,19 @@ where
         src_keys.push(BlockKey::from(src_key.clone()));
 
         let transformed = rows_for(src_key)?;
+        if let [(dst_tree_key, coefficient)] = transformed.as_slice() {
+            let dst_key = BlockKey::from(dst_tree_key.clone());
+            if !direct_dst_keys.insert(dst_key.clone()) {
+                is_injective_singleton = false;
+            }
+            direct_rows.push((
+                BlockKey::from(src_key.clone()),
+                dst_key,
+                coefficient.clone(),
+            ));
+        } else {
+            is_injective_singleton = false;
+        }
 
         for row in &mut rows {
             row.push(T::zero());
@@ -1205,18 +1209,61 @@ where
         }
     }
 
+    if let Some(direct_specs) = lower_injective_singleton_rows(
+        group,
+        source_axes,
+        direct_rows,
+        src_keys.len(),
+        is_injective_singleton,
+    ) {
+        return Ok(direct_specs);
+    }
+    if dst_keys.is_empty() {
+        return Err(OperationError::EmptyTransformBlock);
+    }
+
     let src_count = src_keys.len();
     let mut recoupling_coefficients_dst_src = Vec::with_capacity(dst_keys.len() * src_count);
     for row in rows {
         recoupling_coefficients_dst_src.extend(row);
     }
-    Ok(TreeTransformGroupBlockSpec::multi(
+    Ok(vec![TreeTransformGroupBlockSpec::multi(
         group.group_key().clone(),
         dst_keys,
         src_keys,
         recoupling_coefficients_dst_src,
     )
-    .with_source_axes(source_axes.to_vec()))
+    .with_source_axes(source_axes.to_vec())])
+}
+
+fn lower_injective_singleton_rows<T>(
+    group: &FusionTreeBlockGroup,
+    source_axes: &[usize],
+    direct_rows: Vec<(BlockKey, BlockKey, T)>,
+    src_count: usize,
+    is_injective_singleton: bool,
+) -> Option<Vec<TreeTransformGroupBlockSpec<T>>> {
+    if !is_injective_singleton || direct_rows.len() != src_count || direct_rows.is_empty() {
+        return None;
+    }
+
+    // Row cardinality plus destination-key injectivity proves independent
+    // replay. Why not inspect coefficient values: phases and non-unit scalars
+    // are valid direct maps, while numerical zeros cannot prove structure.
+    Some(
+        direct_rows
+            .into_iter()
+            .map(|(src_key, dst_key, coefficient)| {
+                TreeTransformGroupBlockSpec::single(
+                    group.group_key().clone(),
+                    dst_key,
+                    src_key,
+                    coefficient,
+                )
+                .with_source_axes(source_axes.to_vec())
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

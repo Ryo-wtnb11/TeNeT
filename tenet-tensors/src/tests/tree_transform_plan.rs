@@ -308,6 +308,337 @@ fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
 }
 
 #[test]
+fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order() {
+    // What: a nonidentity monomial group is represented by ordered direct
+    // specs even when its coefficients are neither inferred nor unit-valued.
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let src_tree0 = expect_tree_key(&src_key0);
+    let src_tree1 = expect_tree_key(&src_key1);
+    let src_structure = packed_fixture_structure(
+        4,
+        [
+            (src_key0.clone(), vec![1, 1, 1, 1]),
+            (src_key1.clone(), vec![1, 1, 1, 1]),
+        ],
+    )
+    .unwrap();
+
+    let plan = build_tree_transform_group_plan(
+        &SimpleSu2Rule,
+        TreeTransformOperation::braid([1, 0, 2, 3], [], [0, 1, 2, 3], []),
+        &src_structure,
+        |src| {
+            if src == &src_tree0 {
+                Ok(vec![(src_tree1.clone(), -2.0_f64)])
+            } else if src == &src_tree1 {
+                Ok(vec![(src_tree0.clone(), 3.0_f64)])
+            } else {
+                panic!("unexpected source key {src:?}")
+            }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(plan.specs().len(), 2);
+    assert_eq!(plan.specs()[0].src_keys(), std::slice::from_ref(&src_key0));
+    assert_eq!(plan.specs()[0].dst_keys(), std::slice::from_ref(&src_key1));
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-2.0]);
+    assert_eq!(plan.specs()[1].src_keys(), std::slice::from_ref(&src_key1));
+    assert_eq!(plan.specs()[1].dst_keys(), std::slice::from_ref(&src_key0));
+    assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);
+    assert!(plan
+        .specs()
+        .iter()
+        .all(|spec| spec.source_axes() == Some([1, 0, 2, 3].as_slice())));
+
+    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![5.0, 7.0],
+        space.clone(),
+        src_structure.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![11.0, 13.0],
+        space,
+        src_structure.clone(),
+    )
+    .unwrap();
+    let compiled = plan
+        .compile_structures(&src_structure, &src_structure)
+        .unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    // dst0 receives 3*src1 and dst1 receives -2*src0.
+    assert_eq!(dst.data(), &[75.0, 19.0]);
+    assert_eq!(
+        (workspace.source_len(), workspace.destination_len()),
+        (0, 0)
+    );
+}
+
+#[test]
+fn tree_transform_plan_builder_keeps_destination_collisions_in_multi() {
+    // What: singleton rows are not direct when two sources contribute to the
+    // same destination, because replay must preserve their sum.
+    let src_key0 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let src_key1 = all_codomain_fusion_tree_test_key(
+        [1, 1, 1, 1],
+        Some(0),
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let dst_tree = expect_tree_key(&src_key0);
+    let src_structure = packed_fixture_structure(
+        4,
+        [
+            (src_key0.clone(), vec![1, 1, 1, 1]),
+            (src_key1.clone(), vec![1, 1, 1, 1]),
+        ],
+    )
+    .unwrap();
+
+    let plan = build_tree_transform_group_plan(
+        &SimpleSu2Rule,
+        TreeTransformOperation::braid([1, 0, 2, 3], [], [0, 1, 2, 3], []),
+        &src_structure,
+        |_| Ok(vec![(dst_tree.clone(), 1.0_f64)]),
+    )
+    .unwrap();
+
+    assert_eq!(plan.specs().len(), 1);
+    assert_eq!(plan.specs()[0].src_keys(), &[src_key0, src_key1]);
+    assert_eq!(plan.specs()[0].dst_keys().len(), 1);
+}
+
+#[test]
+fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
+    // What: the first-vertex SU(2) R move is direct for every fusion channel,
+    // while preserving the channel-dependent coefficients returned by core.
+    let keys = [[0, 1], [2, 1]].map(|inner| {
+        all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(0),
+            [false, false, false, false],
+            inner,
+            [1, 1, 1],
+        )
+    });
+    let structure =
+        packed_fixture_structure(4, keys.iter().cloned().map(|key| (key, vec![1usize; 4])))
+            .unwrap();
+    let operation = TreeTransformOperation::braid([1, 0, 2, 3], [], [0, 1, 2, 3], []);
+
+    let plan =
+        build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
+            .unwrap();
+
+    assert_eq!(plan.specs().len(), keys.len());
+    for ((spec, key), expected_coefficient) in plan.specs().iter().zip(&keys).zip([-1.0, 1.0]) {
+        assert_eq!(spec.src_keys(), std::slice::from_ref(key));
+        assert_eq!(spec.dst_keys(), std::slice::from_ref(key));
+        assert_eq!(
+            spec.recoupling_coefficients_dst_src(),
+            &[expected_coefficient]
+        );
+        assert_eq!(spec.source_axes(), Some([1, 0, 2, 3].as_slice()));
+    }
+    assert!(!plan
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+
+    use crate::tree_transform::{
+        build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
+    };
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+    let build = |threads: usize, memo: &mut AllCodomainRowMemo<f64, _>| {
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan = build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+            &SU2FusionRule,
+            &rule_key,
+            operation.clone(),
+            &structure,
+            memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        )
+        .unwrap();
+        (plan, hits, misses)
+    };
+    let mut serial_memo = AllCodomainRowMemo::default();
+    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
+    let mut parallel_memo = AllCodomainRowMemo::default();
+    let (parallel, parallel_hits, parallel_misses) = build(4, &mut parallel_memo);
+    assert_eq!(parallel, serial);
+    assert_eq!(
+        (parallel_hits, parallel_misses),
+        (serial_hits, serial_misses)
+    );
+    let (warm, warm_hits, warm_misses) = build(4, &mut parallel_memo);
+    assert_eq!(warm, serial);
+    assert_eq!((warm_hits, warm_misses), (keys.len(), 0));
+
+    // What: direct replay honors alpha/beta and overwrite on strided blocks
+    // without touching storage padding or allocating pack/GEMM/scatter jobs.
+    let padded_structure = BlockStructure::from_blocks_with_rank(
+        4,
+        vec![
+            BlockSpec::with_key(keys[0].clone(), vec![2, 2, 1, 1], vec![1, 2, 4, 4], 1).unwrap(),
+            BlockSpec::with_key(keys[1].clone(), vec![2, 2, 1, 1], vec![1, 2, 4, 4], 7).unwrap(),
+        ],
+    )
+    .unwrap();
+    let space = TensorMapSpace::<4, 0>::from_dims([2, 2, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![99.0, 1.0, 2.0, 3.0, 4.0, 98.0, 97.0, 9.0, 10.0, 11.0, 12.0],
+        space.clone(),
+        padded_structure.clone(),
+    )
+    .unwrap();
+    let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![91.0, 5.0, 6.0, 7.0, 8.0, 92.0, 93.0, 13.0, 14.0, 15.0, 16.0],
+        space,
+        padded_structure.clone(),
+    )
+    .unwrap();
+    let compiled = serial
+        .compile_structures(&padded_structure, &padded_structure)
+        .unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+    assert_eq!(
+        dst.data(),
+        &[91.0, 13.0, 12.0, 17.0, 16.0, 92.0, 93.0, 57.0, 64.0, 65.0, 72.0]
+    );
+    assert_eq!(
+        (workspace.source_len(), workspace.destination_len()),
+        (0, 0)
+    );
+
+    dst.data_mut().fill(f64::NAN);
+    backend.set_recoupling_threads(4);
+    backend.set_transform_parallel_min_len(0);
+    tree_transform_overwrite_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        -2.0,
+    )
+    .unwrap();
+    assert!(dst.data()[0].is_nan());
+    assert_eq!(&dst.data()[1..5], &[2.0, 6.0, 4.0, 8.0]);
+    assert!(dst.data()[5].is_nan() && dst.data()[6].is_nan());
+    assert_eq!(&dst.data()[7..11], &[-18.0, -22.0, -20.0, -24.0]);
+}
+
+#[test]
+fn nested_fz2_u1_su2_first_pair_braid_preserves_product_phases_in_singles() {
+    // What: direct lowering preserves the product rule's fermionic sign times
+    // the SU(2) channel phase instead of synthesizing a diagonal coefficient.
+    let left_rule = FpU1Rule::default();
+    let rule = FpU1Su2Rule::default();
+    let left_sector =
+        |parity, charge| left_rule.encode_sector(parity, U1Irrep::new(charge).sector_id());
+    let sector = |parity, charge, twice_spin| {
+        rule.encode_sector(
+            left_sector(parity, charge),
+            SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+        )
+    };
+    let odd_half = sector(SectorId::new(1), 0, 1);
+    let even_singlet = sector(SectorId::new(0), 0, 0);
+    let even_triplet = sector(SectorId::new(0), 0, 2);
+    let odd_half_inner = sector(SectorId::new(1), 0, 1);
+    let keys = [even_singlet, even_triplet].map(|first_inner| {
+        BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [odd_half; 4],
+                Some(even_singlet),
+                [false; 4],
+                [first_inner, odd_half_inner],
+                [SectorId::new(1); 3],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(&rule, [], Some(even_singlet), [], [], []).unwrap(),
+        ))
+    });
+    let structure =
+        packed_fixture_structure(4, keys.iter().cloned().map(|key| (key, vec![1usize; 4])))
+            .unwrap();
+
+    let plan = build_all_codomain_tree_transform_group_plan(
+        &rule,
+        TreeTransformOperation::braid([1, 0, 2, 3], [], [0, 1, 2, 3], []),
+        &structure,
+    )
+    .unwrap();
+
+    assert_eq!(plan.specs().len(), 2);
+    for ((spec, key), expected_coefficient) in plan.specs().iter().zip(&keys).zip([1.0, -1.0]) {
+        assert_eq!(spec.src_keys(), std::slice::from_ref(key));
+        assert_eq!(spec.dst_keys(), std::slice::from_ref(key));
+        assert_eq!(
+            spec.recoupling_coefficients_dst_src(),
+            &[expected_coefficient]
+        );
+    }
+    assert!(!plan
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
+}
+
+#[test]
 fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],
@@ -3801,9 +4132,13 @@ impl GenericFusionSymbols for ToyGenericRule {
         &self,
         _a: SectorId,
         _b: SectorId,
-        _c: SectorId,
+        c: SectorId,
     ) -> GenericRMatrix<Self::Scalar> {
-        GenericRMatrix::new(vec![1.0], 1, 1)
+        if c == SectorId::new(1) {
+            GenericRMatrix::new(vec![0.0, 2.0, 3.0, 0.0], 2, 2)
+        } else {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
     }
 }
 
@@ -3906,6 +4241,84 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
     )
     .unwrap_err();
     assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
+}
+
+#[test]
+fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
+    // What: a GenericFusion R matrix whose core rows are structurally
+    // singleton and destination-injective uses the same direct replay contract.
+    let rule = ToyGenericRule {
+        style: FusionStyleKind::Generic,
+    };
+    let pairs = [SectorId::new(1), SectorId::new(2)].map(|vertex| {
+        FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [SectorId::new(1), SectorId::new(1)],
+                Some(SectorId::new(1)),
+                [false, false],
+                [],
+                [vertex],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [SectorId::new(1)],
+                Some(SectorId::new(1)),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+        )
+    });
+    let keys = pairs.clone().map(BlockKey::from);
+    let structure =
+        packed_fixture_structure(3, keys.iter().cloned().map(|key| (key, vec![1usize; 3])))
+            .unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+    let core_rows = pairs
+        .iter()
+        .map(|pair| generic_braid_tree_pair(&rule, pair, &[1, 0], &[2], &[0, 1], &[2]).unwrap())
+        .collect::<Vec<_>>();
+    assert!(core_rows.iter().all(|row| row.len() == 1));
+    assert_ne!(core_rows[0][0].0, core_rows[1][0].0);
+
+    let plan = build_generic_tree_pair_transform_group_plan(&rule, operation, &structure).unwrap();
+    assert_eq!(plan.specs().len(), 2);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[2.0]);
+    assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);
+    let compiled = plan.compile_structures(&structure, &structure).unwrap();
+    assert!(!compiled.has_pack_gemm_scatter_blocks());
+
+    let space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+    let src = TensorMap::<f64, 2, 1>::from_vec_with_structure(
+        vec![5.0, 7.0],
+        space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![11.0, 13.0], space, structure)
+            .unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut dst,
+        &src,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[75.0, 59.0]);
+    assert_eq!(
+        (workspace.source_len(), workspace.destination_len()),
+        (0, 0)
+    );
 }
 
 // ======================================================================
