@@ -264,6 +264,47 @@ where
     )
 }
 
+/// Prepare a plan with an explicitly paired contraction-axis ordering.
+///
+/// This is intentionally crate-private: it is an oracle seam for validating
+/// candidate permutations before a layout cost model is enabled. The caller
+/// must provide the same axis sets as `axes`; only their order may differ.
+#[cfg(test)]
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    candidate: &ContractAxisOrderCandidate,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    fn same_axes(a: &[usize], b: &[usize]) -> bool {
+        let mut a = a.to_vec();
+        let mut b = b.to_vec();
+        a.sort_unstable();
+        b.sort_unstable();
+        a == b
+    }
+    if !same_axes(axes.lhs_contracting_axes(), candidate.lhs())
+        || !same_axes(axes.rhs_contracting_axes(), candidate.rhs())
+    {
+        return Err(OperationError::InvalidArgument {
+            message: "candidate must preserve contracted axis sets",
+        });
+    }
+    let candidate_axes = TensorContractSpec::new_with_conjugation(
+        candidate.lhs(),
+        candidate.rhs(),
+        axes.output_permutation(),
+        axes.lhs_conjugate(),
+        axes.rhs_conjugate(),
+    );
+    prepare_tensorcontract_fusion_plan_dyn_raw(rule, dst, lhs, rhs, candidate_axes)
+}
+
 fn prepare_tensorcontract_fusion_plan_from_spaces<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
