@@ -577,6 +577,7 @@ struct PreparedContractOverwrite {
     rhs_space: Arc<UserBoundSpace>,
     lhs_axes: Vec<usize>,
     rhs_axes: Vec<usize>,
+    output_axes: Vec<usize>,
     expected: Arc<UserBoundSpace>,
 }
 
@@ -1180,17 +1181,15 @@ enum TransformKind<'a> {
     Transpose,
 }
 
-fn open_axes(contracted: &[usize], rank: usize) -> Result<Vec<usize>, Error> {
-    let mut seen = vec![false; rank];
-    for &axis in contracted {
-        if axis >= rank || seen[axis] {
+fn validate_contracted_axes(contracted: &[usize], rank: usize) -> Result<(), Error> {
+    for (position, &axis) in contracted.iter().enumerate() {
+        if axis >= rank || contracted[..position].contains(&axis) {
             return Err(Error::InvalidArgument(format!(
                 "invalid contracted axis list {contracted:?} for rank {rank}"
             )));
         }
-        seen[axis] = true;
     }
-    Ok((0..rank).filter(|&axis| !seen[axis]).collect())
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2964,8 +2963,8 @@ impl Tensor {
                 rhs_axes.len()
             )));
         }
-        open_axes(lhs_axes, self.rank())?;
-        open_axes(rhs_axes, rhs.rank())?;
+        validate_contracted_axes(lhs_axes, self.rank())?;
+        validate_contracted_axes(rhs_axes, rhs.rank())?;
         // SU(N) (Generic): a lazy-adjoint operand is materialized to plain
         // coupled data BEFORE contracting, rather than folded into the GEMM seam.
         // The mult-free seam folds a conjugate via its Structure route, whose
@@ -3454,9 +3453,9 @@ impl Tensor {
                 rhs_axes.len()
             )));
         }
-        let lhs_open = open_axes(lhs_axes, self.rank())?;
-        let rhs_open = open_axes(rhs_axes, rhs.rank())?;
-        let open_rank = lhs_open.len() + rhs_open.len();
+        validate_contracted_axes(lhs_axes, self.rank())?;
+        validate_contracted_axes(rhs_axes, rhs.rank())?;
+        let open_rank = self.rank() - lhs_axes.len() + rhs.rank() - rhs_axes.len();
 
         let host_mult_free_dense = self.rule_kind() != RuleKind::Su3
             && self.placement() == Placement::Host
@@ -3484,6 +3483,11 @@ impl Tensor {
         }
 
         if output_axes.len() != open_rank {
+            // Why not report pAB first: historically `contract_ordered` ran the
+            // contraction before inspecting pAB, so an incompatible contracted
+            // pair must retain precedence when both inputs are invalid. This
+            // compatibility-only path is cold because valid pAB skips it.
+            self.space.contracted(&rhs.space, lhs_axes, rhs_axes)?;
             return Err(Error::InvalidArgument(format!(
                 "output axis list length {} does not match open rank {}",
                 output_axes.len(),
@@ -5104,6 +5108,7 @@ impl TensorExecutionContext {
         rhs: &Tensor,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
         alpha: Scalar,
         expected: &UserBoundSpace,
     ) -> Result<(), Error> {
@@ -5136,6 +5141,7 @@ impl TensorExecutionContext {
                     rhs_data,
                     lhs_axes,
                     rhs_axes,
+                    output_order,
                     alpha,
                     0.0,
                 )
@@ -5160,6 +5166,7 @@ impl TensorExecutionContext {
                     rhs_data,
                     lhs_axes,
                     rhs_axes,
+                    output_order,
                     alpha,
                     Complex64::new(0.0, 0.0),
                 )
@@ -5260,6 +5267,60 @@ impl TensorExecutionContext {
         rhs_axes: &[usize],
         alpha: Scalar,
     ) -> Result<OverwriteOutcome, Error> {
+        self.try_contract_overwrite_with_order(
+            cache,
+            dst,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::identity(),
+            &[],
+            alpha,
+        )
+    }
+
+    /// Ordered counterpart used by compiled network replay. `output_axes`
+    /// has the same pAB meaning as [`Tensor::contract_ordered`].
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_contract_ordered_overwrite_into(
+        &mut self,
+        cache: &mut ContractOverwriteCache,
+        dst: &mut Tensor,
+        lhs: &Tensor,
+        rhs: &Tensor,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<OverwriteOutcome, Error> {
+        self.try_contract_overwrite_with_order(
+            cache,
+            dst,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::from_axes(output_axes),
+            output_axes,
+            alpha,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_contract_overwrite_with_order(
+        &mut self,
+        cache: &mut ContractOverwriteCache,
+        dst: &mut Tensor,
+        lhs: &Tensor,
+        rhs: &Tensor,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+        cache_output_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<OverwriteOutcome, Error> {
         if !self.accepts_runtime(lhs)
             || !self.accepts_runtime(rhs)
             || !self.accepts_runtime(dst)
@@ -5285,8 +5346,8 @@ impl TensorExecutionContext {
                 rhs_axes.len()
             )));
         }
-        open_axes(lhs_axes, lhs.rank())?;
-        open_axes(rhs_axes, rhs.rank())?;
+        validate_contracted_axes(lhs_axes, lhs.rank())?;
+        validate_contracted_axes(rhs_axes, rhs.rank())?;
 
         let cache_matches = cache.prepared.as_ref().is_some_and(|prepared| {
             same_dynamic_space_counted(
@@ -5299,14 +5360,21 @@ impl TensorExecutionContext {
                 &mut cache.structural_comparisons,
             ) && prepared.lhs_axes == lhs_axes
                 && prepared.rhs_axes == rhs_axes
+                && prepared.output_axes == cache_output_axes
         });
         if !cache_matches {
-            let expected = lhs.space.contracted(&rhs.space, lhs_axes, rhs_axes)?;
+            let expected = lhs.space.contracted_with_output_order(
+                &rhs.space,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+            )?;
             cache.prepared = Some(PreparedContractOverwrite {
                 lhs_space: Arc::clone(&lhs.space),
                 rhs_space: Arc::clone(&rhs.space),
                 lhs_axes: lhs_axes.to_vec(),
                 rhs_axes: rhs_axes.to_vec(),
+                output_axes: cache_output_axes.to_vec(),
                 expected: Arc::new(expected),
             });
             cache.preparations += 1;
@@ -5342,6 +5410,7 @@ impl TensorExecutionContext {
             rhs,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             prepared.expected.as_ref(),
         )?;
@@ -5460,13 +5529,22 @@ impl TensorExecutionContext {
                 rhs_axes.len()
             )));
         }
-        open_axes(lhs_axes, lhs.rank())?;
-        open_axes(rhs_axes, rhs.rank())?;
+        validate_contracted_axes(lhs_axes, lhs.rank())?;
+        validate_contracted_axes(rhs_axes, rhs.rank())?;
 
         let expected = lhs.space.contracted(&rhs.space, lhs_axes, rhs_axes)?;
         dst.validate_exact_destination_space(expected.raw())?;
 
-        self.write_contract_prepared(dst, lhs, rhs, lhs_axes, rhs_axes, alpha, &expected)
+        self.write_contract_prepared(
+            dst,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::identity(),
+            alpha,
+            &expected,
+        )
     }
 
     /// Overwrites an exact-layout dense host destination with
@@ -5517,6 +5595,7 @@ fn contract_into_bound<R, D, Key>(
     rhs_data: &[D],
     lhs_axes: &[usize],
     rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), Error>
@@ -5533,7 +5612,7 @@ where
             lhs_data,
             rhs_space,
             rhs_data,
-            TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
+            TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
             alpha,
             beta,
         )
@@ -5552,6 +5631,7 @@ fn dispatch_contract_into<D: UserScalar>(
     rhs_data: &[D],
     lhs_axes: &[usize],
     rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
     alpha: D,
     beta: D,
 ) -> Result<(), Error> {
@@ -5571,6 +5651,7 @@ fn dispatch_contract_into<D: UserScalar>(
             rhs_data,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             beta,
         ),
@@ -5589,6 +5670,7 @@ fn dispatch_contract_into<D: UserScalar>(
             rhs_data,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             beta,
         ),
@@ -5607,6 +5689,7 @@ fn dispatch_contract_into<D: UserScalar>(
             rhs_data,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             beta,
         ),
@@ -5625,6 +5708,7 @@ fn dispatch_contract_into<D: UserScalar>(
             rhs_data,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             beta,
         ),
@@ -5643,6 +5727,7 @@ fn dispatch_contract_into<D: UserScalar>(
             rhs_data,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             beta,
         ),
@@ -5661,6 +5746,7 @@ fn dispatch_contract_into<D: UserScalar>(
             rhs_data,
             lhs_axes,
             rhs_axes,
+            output_order,
             alpha,
             beta,
         ),
@@ -5677,7 +5763,7 @@ fn dispatch_contract_into<D: UserScalar>(
                 lhs_data,
                 rhs_space,
                 rhs_data,
-                TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes),
+                TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
                 alpha,
                 beta,
             )
