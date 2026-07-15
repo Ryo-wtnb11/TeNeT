@@ -18,8 +18,8 @@ use crate::transform_structure::{
     TreeTransformPackReplay, TreeTransformScatterReplay, TreeTransformSingleReplay,
 };
 use crate::{
-    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, ConjugateValue,
-    DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
+    tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
+    ConjugateValue, DenseRecouplingScalar, HostAllocator, HostKernelAdapter, OperationError,
     RecouplingCoefficientAction, ReportsPlacement, TensorAddStructure, TreeTransformBlock,
     TreeTransformLayout, TreeTransformLayoutTable, TreeTransformReplayProfile,
     TreeTransformStructure,
@@ -1708,8 +1708,8 @@ where
                 kernels,
                 workspace.zero_strides_mut(),
                 structure.layouts(),
-                structure.layouts().entry(dst_layout),
-                structure.layouts().entry(src_layout),
+                dst_layout,
+                src_layout,
                 structure.coefficient(coefficient),
                 structure.storage_conjugate(),
                 dst.data_mut(),
@@ -1881,8 +1881,8 @@ where
                 kernels,
                 &mut workspace.zero_strides,
                 structure.layouts(),
-                structure.layouts().entry(dst_layout),
-                structure.layouts().entry(src_layout),
+                dst_layout,
+                src_layout,
                 structure.coefficient(coefficient),
                 structure.storage_conjugate(),
                 dst_data,
@@ -2153,8 +2153,8 @@ where
             };
             write_uninit_layout_from_source(
                 layouts,
-                layouts.entry(dst_layout),
-                layouts.entry(src_layout),
+                dst_layout,
+                src_layout,
                 dst_data,
                 src_data,
                 structure.storage_conjugate(),
@@ -2185,7 +2185,7 @@ where
                 pack_layout_into_column(
                     &mut kernels,
                     layouts,
-                    layouts.entry(src_layout_start + src_index),
+                    src_layout_start + src_index,
                     src_data,
                     workspace.packed.source_mut().as_mut_slice(),
                     job.lhs_offset + src_index * element_count,
@@ -2217,7 +2217,7 @@ where
             for dst_index in 0..dst_count {
                 write_uninit_layout_from_packed(
                     layouts,
-                    layouts.entry(dst_layout_start + dst_index),
+                    dst_layout_start + dst_index,
                     dst_data,
                     workspace.packed.destination().as_slice(),
                     job.dst_offset + dst_index * element_count,
@@ -2454,6 +2454,70 @@ fn layout_linear_offset(
     usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
 }
 
+/// Fused loop nest over a prebaked layout writing into uninitialized memory
+/// (issue #232, condition 2), mirroring `apply_fused_pair_slices` but with
+/// `MaybeUninit::write` for the destination. Each destination offset is visited
+/// exactly once, identical to `layout_linear_offset`'s odometer, so the
+/// write-once-then-`assume_init` invariant of `initialize_owned` (#226/#233) is
+/// preserved: the normalization only drops extent-1 axes, reorders, and fuses
+/// contiguous runs — the *set* of visited (dst, src) offsets is unchanged, and
+/// there is no read-after-write within a single writer (`src` is a disjoint,
+/// fully-initialized slice). Rank is bounded by the fusion limit.
+fn write_fused_uninit<D, F>(
+    baked: BakedFusedLayout<'_>,
+    dst: &mut [MaybeUninit<D>],
+    src: &[D],
+    dst_offset: isize,
+    src_offset: isize,
+    map: F,
+) where
+    D: Copy,
+    F: Fn(D) -> D,
+{
+    let dims = baked.dims;
+    let dst_strides = baked.dst_strides;
+    let src_strides = baked.src_strides;
+    let rank = dims.len();
+    if rank == 0 || dims.iter().any(|&dim| dim == 0) {
+        return;
+    }
+    let inner_len = dims[0];
+    let inner_dst = dst_strides[0];
+    let inner_src = src_strides[0];
+    let mut index = [0usize; 8];
+    let mut dst_base = dst_offset;
+    let mut src_base = src_offset;
+    loop {
+        for position in 0..inner_len {
+            let dst_position = (dst_base + position as isize * inner_dst) as usize;
+            let src_position = (src_base + position as isize * inner_src) as usize;
+            dst[dst_position].write(map(src[src_position]));
+        }
+        let mut axis = 1;
+        loop {
+            if axis >= rank {
+                return;
+            }
+            index[axis] += 1;
+            dst_base += dst_strides[axis];
+            src_base += src_strides[axis];
+            if index[axis] < dims[axis] {
+                break;
+            }
+            dst_base -= dims[axis] as isize * dst_strides[axis];
+            src_base -= dims[axis] as isize * src_strides[axis];
+            index[axis] = 0;
+            axis += 1;
+        }
+    }
+}
+
+// Why-not fuse the zero writer: it has no paired source view, and a pure
+// permute — the deg=1 U(1) owned-path regime this optimization targets — always
+// touches every destination block, so `inactive_destination_layouts` is empty
+// and this writer never runs on the hot path. A dedicated single-side fused
+// walk would add a fourth baked role for no measured win, so it stays on the
+// per-element odometer (issue #232, condition 2).
 fn write_uninit_layout_zero<D: Zero + Copy>(
     layouts: &TreeTransformLayoutTable,
     layout: &TreeTransformLayout,
@@ -2474,8 +2538,8 @@ fn write_uninit_layout_zero<D: Zero + Copy>(
 #[allow(clippy::too_many_arguments)]
 fn write_uninit_layout_from_source<D>(
     layouts: &TreeTransformLayoutTable,
-    dst_layout: &TreeTransformLayout,
-    src_layout: &TreeTransformLayout,
+    dst_index: usize,
+    src_index: usize,
     dst: &mut [MaybeUninit<D>],
     src: &[D],
     conjugate: bool,
@@ -2484,6 +2548,19 @@ fn write_uninit_layout_from_source<D>(
 where
     D: Copy + Mul<D, Output = D> + ConjugateValue,
 {
+    let dst_layout = layouts.entry(dst_index);
+    let src_layout = layouts.entry(src_index);
+    if let Some(baked) = layouts.fused_baked(dst_index) {
+        write_fused_uninit(
+            baked,
+            dst,
+            src,
+            dst_layout.offset,
+            src_layout.offset,
+            move |value| scale * value.maybe_conj(conjugate),
+        );
+        return Ok(());
+    }
     for linear in 0..dst_layout.element_count {
         let dst_index = layout_linear_offset(
             linear,
@@ -2504,7 +2581,7 @@ where
 
 fn write_uninit_layout_from_packed<D>(
     layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
+    dst_index: usize,
     dst: &mut [MaybeUninit<D>],
     packed: &[D],
     packed_offset: usize,
@@ -2513,6 +2590,21 @@ fn write_uninit_layout_from_packed<D>(
 where
     D: Copy + Mul<D, Output = D>,
 {
+    let layout = layouts.entry(dst_index);
+    if let Some(baked) = layouts.fused_baked(dst_index) {
+        // The scatter role bakes src = packed (column-major) strides, so the
+        // fused walk over `packed` starting at `packed_offset` reproduces the
+        // odometer's `packed[packed_offset + linear]` column-major gather.
+        write_fused_uninit(
+            baked,
+            dst,
+            packed,
+            layout.offset,
+            offset_to_isize(packed_offset)?,
+            move |value| alpha * value,
+        );
+        return Ok(());
+    }
     for linear in 0..layout.element_count {
         let dst_index = layout_linear_offset(
             linear,
@@ -2756,8 +2848,8 @@ where
                 kernels,
                 &mut workspace.zero_strides,
                 layouts,
-                layouts.entry(dst_layout),
-                layouts.entry(src_layout),
+                dst_layout,
+                src_layout,
                 structure.coefficient(coefficient),
                 structure.storage_conjugate(),
                 dst_data,
@@ -2813,8 +2905,8 @@ where
             kernels,
             &mut workspace.zero_strides,
             layouts,
-            layouts.entry(dst_layout),
-            layouts.entry(src_layout),
+            dst_layout,
+            src_layout,
             structure.coefficient(coefficient),
             structure.storage_conjugate(),
             dst_data,
@@ -2844,11 +2936,10 @@ where
         debug_assert_eq!(job.contracted, src_count);
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         for src_index in 0..src_count {
-            let layout = layouts.entry(src_layout_start + src_index);
             pack_layout_into_column(
                 kernels,
                 layouts,
-                layout,
+                src_layout_start + src_index,
                 src_data,
                 workspace.packed.source_mut().as_mut_slice(),
                 job.lhs_offset + src_index * element_count,
@@ -2896,12 +2987,11 @@ where
             debug_assert_eq!(job.rows, element_count);
             debug_assert_eq!(job.cols, dst_count);
             for dst_index in 0..dst_count {
-                let layout = layouts.entry(dst_layout_start + dst_index);
                 scatter_column_into_layout(
                     kernels,
                     &mut workspace.zero_strides,
                     layouts,
-                    layout,
+                    dst_layout_start + dst_index,
                     workspace.packed.destination().as_slice(),
                     job.dst_offset + dst_index * element_count,
                     dst_data,
@@ -2950,7 +3040,7 @@ where
             pack_layout_into_column(
                 &mut kernels,
                 layouts,
-                layouts.entry(item.src_layout),
+                item.src_layout,
                 src_data,
                 packed_source,
                 item.packed_offset - packed_start,
@@ -3022,9 +3112,10 @@ where
         for item in items {
             let dst_layout = structure.layouts().entry(item.dst_layout);
             let src_layout = structure.layouts().entry(item.src_layout);
+            let baked = structure.layouts().fused_baked(item.dst_layout);
             let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
             match mode {
-                DestinationMode::Axpby(beta) => kernels.add_strided(
+                DestinationMode::Axpby(beta) => kernels.add_strided_baked(
                     &mut zero_strides,
                     dst_data,
                     src_data,
@@ -3036,8 +3127,9 @@ where
                     structure.storage_conjugate(),
                     scale,
                     beta,
+                    baked,
                 )?,
-                DestinationMode::Overwrite => kernels.copy_scale_strided(
+                DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
                     dst_data,
                     src_data,
                     structure.layouts().shape(dst_layout),
@@ -3047,6 +3139,7 @@ where
                     src_layout.offset,
                     structure.storage_conjugate(),
                     scale,
+                    baked,
                 )?,
             }
         }
@@ -3116,8 +3209,9 @@ where
     if threads <= 1 || items.len() == 1 {
         for item in items {
             let layout = layouts.entry(item.dst_layout);
+            let baked = layouts.fused_baked(item.dst_layout);
             match mode {
-                DestinationMode::Axpby(beta) => kernels.axpby_strided(
+                DestinationMode::Axpby(beta) => kernels.axpby_strided_baked(
                     dst_data,
                     packed_destination,
                     layouts.shape(layout),
@@ -3127,8 +3221,9 @@ where
                     offset_to_isize(item.packed_offset)?,
                     alpha,
                     beta,
+                    baked,
                 )?,
-                DestinationMode::Overwrite => kernels.copy_scale_strided(
+                DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
                     dst_data,
                     packed_destination,
                     layouts.shape(layout),
@@ -3138,6 +3233,7 @@ where
                     offset_to_isize(item.packed_offset)?,
                     false,
                     alpha,
+                    baked,
                 )?,
             }
         }
@@ -3304,8 +3400,8 @@ where
                     kernels,
                     &mut zero_strides,
                     layouts,
-                    layouts.entry(item.dst_layout),
-                    layouts.entry(item.src_layout),
+                    item.dst_layout,
+                    item.src_layout,
                     structure.coefficient(item.coefficient),
                     storage_conjugate,
                     dst_data,
@@ -3366,7 +3462,7 @@ where
                     kernels,
                     &mut zero_strides,
                     layouts,
-                    layouts.entry(item.dst_layout),
+                    item.dst_layout,
                     packed_destination,
                     item.packed_offset,
                     dst_data,
@@ -3519,12 +3615,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn tree_transform_single_with_strided_kernel<A, D, C>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
-    dst_layout: &TreeTransformLayout,
-    src_layout: &TreeTransformLayout,
+    dst_index: usize,
+    src_index: usize,
     coefficient: C,
     source_conjugate: bool,
     dst_data: &mut [D],
@@ -3537,10 +3634,13 @@ where
     D: Copy + RecouplingCoefficientAction<C>,
     C: Copy,
 {
+    let dst_layout = layouts.entry(dst_index);
+    let src_layout = layouts.entry(src_index);
     let shape = layouts.shape(dst_layout);
+    let baked = layouts.fused_baked(dst_index);
     let scale = alpha.scale_by_coefficient(coefficient);
     match mode {
-        DestinationMode::Axpby(beta) => kernels.add_strided(
+        DestinationMode::Axpby(beta) => kernels.add_strided_baked(
             zero_strides,
             dst_data,
             src_data,
@@ -3552,8 +3652,9 @@ where
             source_conjugate,
             scale,
             beta,
+            baked,
         ),
-        DestinationMode::Overwrite => kernels.copy_scale_strided(
+        DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
             dst_data,
             src_data,
             shape,
@@ -3563,6 +3664,7 @@ where
             src_layout.offset,
             source_conjugate,
             scale,
+            baked,
         ),
     }
 }
@@ -3701,11 +3803,10 @@ where
     DestinationScratch: HostWritableStorage<D>,
 {
     for src_index in 0..src_count {
-        let layout = layouts.entry(src_layout_start + src_index);
         pack_layout_into_column(
             kernels,
             layouts,
-            layout,
+            src_layout_start + src_index,
             src_data,
             scratch.source_mut().as_mut_slice(),
             src_index * element_count,
@@ -3727,12 +3828,11 @@ where
     }
 
     for dst_index in 0..dst_count {
-        let layout = layouts.entry(dst_layout_start + dst_index);
         scatter_column_into_layout(
             kernels,
             zero_strides,
             layouts,
-            layout,
+            dst_layout_start + dst_index,
             scratch.destination().as_slice(),
             dst_index * element_count,
             dst_data,
@@ -3746,7 +3846,7 @@ where
 fn pack_layout_into_column<A, T>(
     kernels: &mut A,
     layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
+    entry_index: usize,
     src_data: &[T],
     packed: &mut [T],
     packed_offset: usize,
@@ -3756,9 +3856,11 @@ where
     A: HostKernelAdapter<T>,
     T: Copy + One,
 {
+    let layout = layouts.entry(entry_index);
     let shape = layouts.shape(layout);
+    let baked = layouts.fused_baked(entry_index);
     let packed_offset = offset_to_isize(packed_offset)?;
-    kernels.copy_scale_strided(
+    kernels.copy_scale_strided_baked(
         packed,
         src_data,
         shape,
@@ -3768,6 +3870,7 @@ where
         layout.offset,
         source_conjugate,
         T::one(),
+        baked,
     )
 }
 
@@ -3776,7 +3879,7 @@ fn scatter_column_into_layout<A, T>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
     layouts: &TreeTransformLayoutTable,
-    layout: &TreeTransformLayout,
+    entry_index: usize,
     packed: &[T],
     packed_offset: usize,
     dst_data: &mut [T],
@@ -3787,11 +3890,13 @@ where
     A: HostKernelAdapter<T>,
     T: Copy,
 {
+    let layout = layouts.entry(entry_index);
     let shape = layouts.shape(layout);
+    let baked = layouts.fused_baked(entry_index);
     match mode {
         DestinationMode::Axpby(beta) => {
             zero_strides.clear();
-            kernels.axpby_strided(
+            kernels.axpby_strided_baked(
                 dst_data,
                 packed,
                 shape,
@@ -3801,9 +3906,10 @@ where
                 offset_to_isize(packed_offset)?,
                 alpha,
                 beta,
+                baked,
             )
         }
-        DestinationMode::Overwrite => kernels.copy_scale_strided(
+        DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
             dst_data,
             packed,
             shape,
@@ -3813,6 +3919,7 @@ where
             offset_to_isize(packed_offset)?,
             false,
             alpha,
+            baked,
         ),
     }
 }

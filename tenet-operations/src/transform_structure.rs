@@ -5,6 +5,7 @@ use smallvec::SmallVec;
 use tenet_core::{BlockStructure, TensorMap, TensorStorage};
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
+use crate::kernel_adapter::{fuse_pair_layout, BakedFusedLayout};
 use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
 use crate::transform_plan::{
@@ -471,6 +472,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             tree_transform_block_weight(rhs, &layouts)
                 .cmp(&tree_transform_block_weight(lhs, &layouts))
         });
+        layouts.bake_fused_layouts(&blocks);
         let recoupling_plan = compile_recoupling_plan(&blocks)?;
         let parallel_schedule = compile_parallel_schedule(&blocks, &layouts, &recoupling_plan)?;
         let physical_overwrite_len = compile_physical_overwrite_coverage(
@@ -518,6 +520,14 @@ impl<T: Copy> TreeTransformStructure<T> {
     #[inline]
     pub fn layouts(&self) -> &TreeTransformLayoutTable {
         &self.layouts
+    }
+
+    /// Differential self-check (issue #232): every baked fused layout matches a
+    /// fresh `fuse_pair_layout` recompute of its (block, role) stride pair.
+    /// Test-only.
+    #[doc(hidden)]
+    pub fn baked_layouts_match_recomputed(&self) -> bool {
+        self.layouts.baked_matches_recomputed(&self.blocks)
     }
 
     /// Immutable destination-by-source recoupling coefficients.
@@ -1163,17 +1173,224 @@ pub enum TreeTransformBlock {
     },
 }
 
+/// One prebaked fused layout's location in the arena (issue #232).
+///
+/// `rank == 0` is the "absent" sentinel: `fuse_pair_layout` always yields
+/// rank >= 1, so a zero-rank slot means the entry was never baked (a
+/// Single-block source layout — looked up only via its destination twin — an
+/// inactive destination, or a rank above `FUSED_RANK_LIMIT` that never fuses).
+/// `u32` fields keep the per-entry index at 8 bytes (Phase-0 "8 + 24·rank")
+/// rather than the fixed 200-byte stack array; a real arena overflow past
+/// `u32::MAX` axes just leaves the slot absent and replay recomputes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FusedSlot {
+    start: u32,
+    rank: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TreeTransformLayoutTable {
     entries: Vec<TreeTransformLayout>,
     shapes: Vec<usize>,
     strides: Vec<isize>,
     packed_strides: Vec<isize>,
+    // Baked fused loop layouts (issue #232): SoA arena mirroring shapes/strides
+    // above, indexed per (entry, role) through `fused_slots`. Populated once at
+    // compile time so replay skips `fuse_pair_layout`.
+    fused_dims: Vec<usize>,
+    fused_dst_strides: Vec<isize>,
+    fused_src_strides: Vec<isize>,
+    fused_slots: Vec<FusedSlot>,
 }
 
 impl TreeTransformLayoutTable {
     fn entry_count(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Prebaked fused layout for `entry_index`, or `None` when the entry was
+    /// not baked (see [`FusedSlot`]) and the caller must recompute. Returned
+    /// slices are the exact normalized `(dims, dst_strides, src_strides)` that
+    /// `fuse_pair_layout` produced for that entry's role.
+    pub(crate) fn fused_baked(&self, entry_index: usize) -> Option<BakedFusedLayout<'_>> {
+        let slot = self.fused_slots.get(entry_index).copied()?;
+        if slot.rank == 0 {
+            return None;
+        }
+        let start = slot.start as usize;
+        let end = start + slot.rank as usize;
+        Some(BakedFusedLayout {
+            dims: &self.fused_dims[start..end],
+            dst_strides: &self.fused_dst_strides[start..end],
+            src_strides: &self.fused_src_strides[start..end],
+        })
+    }
+
+    /// Heap bytes of the pre-#232 layout metadata (entries + shape/stride/packed
+    /// arenas), the denominator of the plan-size growth measurement. Test/diag.
+    #[doc(hidden)]
+    pub fn layout_table_bytes(&self) -> usize {
+        self.entries.len() * core::mem::size_of::<TreeTransformLayout>()
+            + self.shapes.len() * core::mem::size_of::<usize>()
+            + (self.strides.len() + self.packed_strides.len()) * core::mem::size_of::<isize>()
+    }
+
+    /// Heap bytes of the baked fused-layout arena added by #232 (the compact
+    /// SoA arena plus the per-entry slot index), the numerator of the plan-size
+    /// growth measurement. Test/diag.
+    #[doc(hidden)]
+    pub fn baked_arena_bytes(&self) -> usize {
+        self.fused_dims.len() * core::mem::size_of::<usize>()
+            + (self.fused_dst_strides.len() + self.fused_src_strides.len())
+                * core::mem::size_of::<isize>()
+            + self.fused_slots.len() * core::mem::size_of::<FusedSlot>()
+    }
+
+    /// Bakes the fused layout of `entry_index` for the `dst_strides`/`src_strides`
+    /// pair of its role (single/pack/scatter). Absent (unrepresentable rank, or
+    /// arena index past `u32::MAX`) leaves the slot at its zero-rank default so
+    /// replay recomputes. The stride slices are copied into stack buffers first
+    /// because they alias `self.strides`/`self.packed_strides` while we push into
+    /// the sibling `fused_*` arenas.
+    fn bake_entry(&mut self, entry_index: usize, dst_is_packed: bool, src_is_packed: bool) {
+        let layout = &self.entries[entry_index];
+        let (start, rank) = (layout.layout_start, layout.rank);
+        let range = start..start + rank;
+        let mut shape: SmallVec<[usize; 8]> = SmallVec::new();
+        shape.extend_from_slice(&self.shapes[range.clone()]);
+        let pick = |packed: bool, this: &Self| -> SmallVec<[isize; 8]> {
+            let mut out: SmallVec<[isize; 8]> = SmallVec::new();
+            let src = if packed {
+                &this.packed_strides[range.clone()]
+            } else {
+                &this.strides[range.clone()]
+            };
+            out.extend_from_slice(src);
+            out
+        };
+        let dst_strides = pick(dst_is_packed, self);
+        let src_strides = pick(src_is_packed, self);
+        self.push_baked(entry_index, &shape, &dst_strides, &src_strides);
+    }
+
+    /// Bakes a Single block's fused layout at its destination entry, combining
+    /// the destination entry's strides with the source entry's strides (both
+    /// share the same shape, validated at compile). Looked up via the
+    /// destination index only.
+    fn bake_single(&mut self, dst_entry: usize, src_entry: usize) {
+        let dst = &self.entries[dst_entry];
+        let (ds, dr) = (dst.layout_start, dst.rank);
+        let src = &self.entries[src_entry];
+        let (ss, _sr) = (src.layout_start, src.rank);
+        let mut shape: SmallVec<[usize; 8]> = SmallVec::new();
+        shape.extend_from_slice(&self.shapes[ds..ds + dr]);
+        let mut dst_strides: SmallVec<[isize; 8]> = SmallVec::new();
+        dst_strides.extend_from_slice(&self.strides[ds..ds + dr]);
+        let mut src_strides: SmallVec<[isize; 8]> = SmallVec::new();
+        src_strides.extend_from_slice(&self.strides[ss..ss + dr]);
+        self.push_baked(dst_entry, &shape, &dst_strides, &src_strides);
+    }
+
+    fn push_baked(
+        &mut self,
+        entry_index: usize,
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+    ) {
+        let Some(fused) = fuse_pair_layout(shape, dst_strides, src_strides) else {
+            return;
+        };
+        let Ok(start) = u32::try_from(self.fused_dims.len()) else {
+            return;
+        };
+        let Ok(rank) = u32::try_from(fused.rank) else {
+            return;
+        };
+        if rank == 0 {
+            return;
+        }
+        for axis in 0..fused.rank {
+            self.fused_dims.push(fused.dims[axis]);
+            self.fused_dst_strides.push(fused.dst_strides[axis]);
+            self.fused_src_strides.push(fused.src_strides[axis]);
+        }
+        if entry_index >= self.fused_slots.len() {
+            self.fused_slots
+                .resize(entry_index + 1, FusedSlot::default());
+        }
+        self.fused_slots[entry_index] = FusedSlot { start, rank };
+    }
+
+    /// Differential self-check for issue #232: every baked (entry, role) layout
+    /// equals a freshly recomputed `fuse_pair_layout` of that role's stride pair,
+    /// byte-identical, and the presence/absence of a baked slot agrees with
+    /// whether the recompute produced one. Used only by tests.
+    #[doc(hidden)]
+    pub fn baked_matches_recomputed(&self, blocks: &[TreeTransformBlock]) -> bool {
+        let matches = |entry_index: usize, shape: &[usize], dst: &[isize], src: &[isize]| match (
+            self.fused_baked(entry_index),
+            fuse_pair_layout(shape, dst, src),
+        ) {
+            (Some(baked), Some(recomputed)) => {
+                baked.dims == &recomputed.dims[..recomputed.rank]
+                    && baked.dst_strides == &recomputed.dst_strides[..recomputed.rank]
+                    && baked.src_strides == &recomputed.src_strides[..recomputed.rank]
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        for block in blocks {
+            match *block {
+                TreeTransformBlock::Single {
+                    dst_layout,
+                    src_layout,
+                    ..
+                } => {
+                    let dst = self.entry(dst_layout);
+                    let src = self.entry(src_layout);
+                    if !matches(
+                        dst_layout,
+                        self.shape(dst),
+                        self.strides(dst),
+                        self.strides(src),
+                    ) {
+                        return false;
+                    }
+                }
+                TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    ..
+                } => {
+                    for index in src_layout_start..src_layout_start + src_count {
+                        let entry = self.entry(index);
+                        if !matches(
+                            index,
+                            self.shape(entry),
+                            self.packed_strides(entry),
+                            self.strides(entry),
+                        ) {
+                            return false;
+                        }
+                    }
+                    for index in dst_layout_start..dst_layout_start + dst_count {
+                        let entry = self.entry(index);
+                        if !matches(
+                            index,
+                            self.shape(entry),
+                            self.strides(entry),
+                            self.packed_strides(entry),
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     pub fn entry(&self, index: usize) -> &TreeTransformLayout {
@@ -1190,6 +1407,49 @@ impl TreeTransformLayoutTable {
 
     pub fn packed_strides(&self, layout: &TreeTransformLayout) -> &[isize] {
         &self.packed_strides[layout.layout_start..layout.layout_start + layout.rank]
+    }
+
+    /// Populates the baked arena for every replayed (entry, role): each Single
+    /// block's fused single layout at its destination entry, each Multi source
+    /// entry's pack layout (dst = packed column, src = block strides), each Multi
+    /// destination entry's scatter layout (dst = block strides, src = packed
+    /// column). Inactive destinations and Single source entries are intentionally
+    /// unbaked — the former never fuse-copy from a source, the latter are only
+    /// reached through their destination twin. Block order after the replay sort
+    /// is irrelevant: baking is keyed by stable entry index.
+    fn bake_fused_layouts(&mut self, blocks: &[TreeTransformBlock]) {
+        // Reserve the arena once so baking adds a bounded, block-count-independent
+        // number of allocations rather than growing per push: fused rank never
+        // exceeds an entry's rank, so `shapes.len()` upper-bounds each arena, and
+        // one slot per entry covers `fused_slots`.
+        self.fused_slots
+            .resize(self.entries.len(), FusedSlot::default());
+        self.fused_dims.reserve(self.shapes.len());
+        self.fused_dst_strides.reserve(self.shapes.len());
+        self.fused_src_strides.reserve(self.shapes.len());
+        for block in blocks {
+            match *block {
+                TreeTransformBlock::Single {
+                    dst_layout,
+                    src_layout,
+                    ..
+                } => self.bake_single(dst_layout, src_layout),
+                TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    ..
+                } => {
+                    for index in src_layout_start..src_layout_start + src_count {
+                        self.bake_entry(index, true, false);
+                    }
+                    for index in dst_layout_start..dst_layout_start + dst_count {
+                        self.bake_entry(index, false, true);
+                    }
+                }
+            }
+        }
     }
 
     fn push_block(
@@ -1327,6 +1587,80 @@ mod tests {
     }
 
     #[test]
+    fn baked_fused_layouts_match_recompute_for_u1_deg2_permute() {
+        // What: every compiled (block, single-role) baked layout equals a fresh
+        // fuse_pair_layout of the same stride pair, byte-identical, across a
+        // multi-charge degeneracy-2 permute — the U(1)-deg2 regime issue #232
+        // targets. Distinct one-leg sectors stand in for U(1) charges; the
+        // fusion is group-agnostic (it sees only shapes and strides), so charge
+        // labels do not change the baked normalization.
+        let block = |sector, offset| {
+            BlockSpec::with_key(
+                BlockKey::sector_ids([sector]),
+                vec![2, 2],
+                vec![1, 2],
+                offset,
+            )
+            .unwrap()
+        };
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![block(0, 0), block(1, 4), block(2, 8), block(3, 12)],
+        )
+        .unwrap();
+        let specs = (0..4)
+            .map(|block| {
+                TreeTransformBlockSpec::single(block, block, 1.0_f64).with_source_axes([1, 0])
+            })
+            .collect::<Vec<_>>();
+        let compiled =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        assert!(!compiled.has_pack_gemm_scatter_blocks());
+        assert!(compiled.baked_layouts_match_recomputed());
+    }
+
+    #[test]
+    fn baked_arena_uses_compact_real_rank_representation() {
+        // What: the compact real-rank arena (8 + 24·rank per baked entry) stays
+        // well below the fixed 200-byte FusedPairLayout stack array it replaces
+        // — the #232 GO condition that keeps the many-charge U(1) plan bounded
+        // (Phase-0: compact halves the +78% fixed-array cost to ~+40%). A deg2
+        // c21-shaped permute: 21 distinct one-leg sectors, degeneracy-2 rank-4
+        // blocks that never fuse (stay rank 4). Measured growth is reported for
+        // the plan-size table.
+        let block = |sector, offset| {
+            BlockSpec::with_key(
+                BlockKey::sector_ids([sector]),
+                vec![2, 2, 2, 2],
+                vec![1, 2, 4, 8],
+                offset,
+            )
+            .unwrap()
+        };
+        let blocks = (0..21).map(|charge| block(charge, charge * 16)).collect();
+        let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
+        let specs = (0..21)
+            .map(|b| TreeTransformBlockSpec::single(b, b, 1.0_f64).with_source_axes([1, 0, 3, 2]))
+            .collect::<Vec<_>>();
+        let compiled =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        let base = compiled.layouts().layout_table_bytes();
+        let baked = compiled.layouts().baked_arena_bytes();
+        let growth = baked as f64 / base as f64;
+        // 21 baked single-role entries at rank 4; the fixed FusedPairLayout stack
+        // array is 200 B each (rank + 3×[_; 8]) vs the compact 8 + 24·4 = 104 B.
+        let fixed_array_equivalent = 21 * 200;
+        eprintln!(
+            "u1_deg2_c21: base={base}B baked={baked}B growth={:.1}% (fixed-array baked ~{fixed_array_equivalent}B)",
+            growth * 100.0
+        );
+        assert!(
+            baked < fixed_array_equivalent,
+            "compact arena {baked}B must beat the fixed 200-byte array {fixed_array_equivalent}B"
+        );
+    }
+
+    #[test]
     fn recoupling_plan_bakes_run_partition() {
         // Two same-shape Multi blocks fold into one length-2 constant-stride
         // run; a third differently-shaped block is a singleton. The compiled
@@ -1370,6 +1704,10 @@ mod tests {
             shapes: vec![3],
             strides: vec![-2],
             packed_strides: vec![1],
+            fused_dims: Vec::new(),
+            fused_dst_strides: Vec::new(),
+            fused_src_strides: Vec::new(),
+            fused_slots: Vec::new(),
         };
 
         assert_eq!(layout_index_range(&layouts, 0).unwrap(), Some((1, 5)));

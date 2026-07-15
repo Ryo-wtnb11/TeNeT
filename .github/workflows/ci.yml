@@ -400,3 +400,6 @@ jobs:
       - name: strided-combine microbench (informational, not a gate)
         run: cargo bench -p tenet-operations --bench strided_combine
         working-directory: tenet
+      - name: permute U(1) many-charge microbench (informational, not a gate)
+        run: cargo bench -p tenet-operations --bench permute_u1_many
+        working-directory: tenet
