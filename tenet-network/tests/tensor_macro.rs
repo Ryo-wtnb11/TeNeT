@@ -399,8 +399,7 @@ fn split_changing_intermediate_keeps_sequential_orientation_replay() {
         1
     );
     assert_eq!(
-        after_warm.orientation_layout_preparations
-            - after_cold.orientation_layout_preparations,
+        after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
         1
     );
 }
@@ -414,7 +413,11 @@ fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
     let c = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_813).unwrap();
     let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
     let network = Network::new(
-        vec![labels(&["i", "j"]), labels(&["j", "k"]), labels(&["k", "l"])],
+        vec![
+            labels(&["i", "j"]),
+            labels(&["j", "k"]),
+            labels(&["k", "l"]),
+        ],
         vec![false; 3],
         vec![Some(1); 3],
         labels(&["l", "i"]),
@@ -441,8 +444,7 @@ fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
         1
     );
     assert_eq!(
-        after_warm.orientation_layout_preparations
-            - after_cold.orientation_layout_preparations,
+        after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
         1
     );
 }
