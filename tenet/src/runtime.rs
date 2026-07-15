@@ -293,7 +293,7 @@ struct RuntimeInner {
     /// executor would carry non-`Sync` device state — a pool of owned
     /// executors is the share strategy that survives that, a `&`-shared one is
     /// not.
-    context_pool: Mutex<Vec<crate::tensor::TensorExecutionContext>>,
+    context_pool: Mutex<Vec<PooledContext>>,
     executor_pool: Mutex<Vec<Box<dyn tenet_dense::DenseExecutor + Send>>>,
     /// `false` when a caller injected a custom (non-mintable) executor via
     /// `with_dense_executor`: the pool cannot reproduce it, so factorizations
@@ -308,6 +308,14 @@ struct RuntimeInner {
     /// never contends with standalone ops on the `state` mutex (#155).
     plan_cache: Mutex<PlanCacheHome>,
 }
+
+/// Pool entry for `RuntimeInner::context_pool`. Boxed: the context is a
+/// ~66 KB by-value struct (7 rules x 2 dtypes of inline `Ctx` state), and
+/// `Vec::pop`/`push` move entries wholesale — profiling showed those two
+/// memmoves were ~70% of a small standalone op's cost (issue #228). Boxing
+/// makes pool traffic an 8-byte pointer move; the pointer-size canary test
+/// below fails if this ever reverts to by-value pooling.
+type PooledContext = Box<crate::tensor::TensorExecutionContext>;
 
 /// Mints a dense executor identical to the one `RuntimeBuilder::build` created
 /// from the same config. Only called when no custom executor was injected
@@ -328,9 +336,9 @@ fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExec
 /// pool on drop; on panic it is dropped instead of returned (quarantine —
 /// mirrors `tenet_network`'s `WorkspaceLease`).
 pub(crate) struct ContextLease<'a> {
-    pool: &'a Mutex<Vec<crate::tensor::TensorExecutionContext>>,
+    pool: &'a Mutex<Vec<PooledContext>>,
     max_idle: usize,
-    context: Option<crate::tensor::TensorExecutionContext>,
+    context: Option<PooledContext>,
 }
 
 impl ContextLease<'_> {
@@ -496,9 +504,9 @@ impl Runtime {
             .pop();
         let context = match pooled {
             Some(context) => context,
-            None => {
-                crate::tensor::TensorExecutionContext::for_config(&self.inner.execution_config)?
-            }
+            None => Box::new(crate::tensor::TensorExecutionContext::for_config(
+                &self.inner.execution_config,
+            )?),
         };
         Ok(ContextLease {
             pool: &self.inner.context_pool,
@@ -970,6 +978,19 @@ macro_rules! default {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What: the context pool must hold pointer-sized entries. The context
+    // struct itself is ~66 KB; pooling it by value made Vec pop/push memmoves
+    // ~70% of a small standalone op's cost (issue #228). Reverting
+    // `PooledContext` to a by-value alias fails here instead of silently
+    // reintroducing that tax.
+    #[test]
+    fn pooled_context_is_pointer_sized() {
+        assert_eq!(
+            std::mem::size_of::<PooledContext>(),
+            std::mem::size_of::<usize>()
+        );
+    }
 
     // All context/provider combinations of the contraction-backend builder
     // must construct on faer (always compiled), and each must land on the
