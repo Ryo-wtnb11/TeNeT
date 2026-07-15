@@ -514,7 +514,7 @@ where
 {
     fn new(src_count: usize) -> Self {
         Self {
-            coefficients: Vec::with_capacity(src_count.saturating_mul(src_count)),
+            coefficients: Vec::with_capacity(src_count),
             src_count,
         }
     }
