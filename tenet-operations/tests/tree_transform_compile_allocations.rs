@@ -9,6 +9,7 @@ struct CountingAllocator;
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -16,6 +17,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
         }
         pointer
     }
@@ -28,9 +30,32 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.realloc(ptr, layout, new_size) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
         }
         pointer
     }
+}
+
+#[test]
+fn overwrite_proof_allocation_is_bounded_by_layout_metadata() {
+    let logical_elements = 1_000_000;
+    let structure = BlockStructure::packed_column_major(1, [vec![logical_elements]]).unwrap();
+    let specs = [TreeTransformBlockSpec::single(0, 0, 1.0_f64)];
+
+    ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
+    COUNTING.set(true);
+    let compiled = TreeTransformStructure::compile_structures(&structure, &structure, &specs);
+    COUNTING.set(false);
+
+    // What: compile-time overwrite proof memory scales with block/layout
+    // metadata, not with the number of physical scalar destinations.
+    assert_eq!(compiled.unwrap().block_count(), 1);
+    assert!(
+        ALLOCATED_BYTES.get() < 64 * 1024,
+        "bytes={}",
+        ALLOCATED_BYTES.get()
+    );
 }
 
 #[global_allocator]

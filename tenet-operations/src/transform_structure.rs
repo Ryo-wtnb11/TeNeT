@@ -1345,4 +1345,73 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn physical_overwrite_coverage_includes_active_and_inactive_layouts() {
+        // What: the compiled overwrite proof covers each destination byte once,
+        // including blocks with no numerical source contribution.
+        let dst = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
+        let src = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+        let transform = TreeTransformStructure::compile_structures(
+            &dst,
+            &src,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+
+        assert_eq!(transform.physical_overwrite_len(), Some(4));
+    }
+
+    #[test]
+    fn physical_overwrite_coverage_rejects_holes() {
+        // What: storage padding that belongs to no destination block cannot be
+        // exposed as initialized owned tensor data.
+        let block = |sector, offset| {
+            BlockSpec::with_key(BlockKey::sector_ids([sector]), vec![2], vec![1], offset).unwrap()
+        };
+        let dst =
+            BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 3)]).unwrap();
+        let src = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
+        let transform = TreeTransformStructure::compile_structures(
+            &dst,
+            &src,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 1.0),
+                TreeTransformBlockSpec::single(1, 1, 1.0),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(transform.physical_overwrite_len(), None);
+    }
+
+    #[test]
+    fn physical_overwrite_coverage_handles_rank_zero_and_zero_extent() {
+        // What: scalar blocks each own one physical slot, while an empty
+        // destination proves the empty range without manufacturing a write.
+        let scalar = BlockStructure::packed_column_major(
+            0,
+            [Vec::<usize>::new(), Vec::<usize>::new()],
+        )
+        .unwrap();
+        let scalar_transform = TreeTransformStructure::compile_structures(
+            &scalar,
+            &scalar,
+            &[
+                TreeTransformBlockSpec::single(0, 0, 1.0),
+                TreeTransformBlockSpec::single(1, 1, 1.0),
+            ],
+        )
+        .unwrap();
+        assert_eq!(scalar_transform.physical_overwrite_len(), Some(2));
+
+        let empty = BlockStructure::packed_column_major(1, [vec![0]]).unwrap();
+        let empty_transform = TreeTransformStructure::compile_structures(
+            &empty,
+            &empty,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        assert_eq!(empty_transform.physical_overwrite_len(), Some(0));
+    }
 }
