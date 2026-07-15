@@ -346,6 +346,7 @@ fn record_dealloc_result(pointer: *mut u8) -> bool {
         .try_with(|slot| slot.borrow_mut().take())
         .ok()
         .flatten();
+    let observe_boundary = boundary_hook.is_some();
     if let Some(hook) = boundary_hook {
         // Why not leave the hook installed: synchronization may enter the allocator,
         // so the one-shot hook must be removed before crossing the test boundary.
@@ -353,6 +354,11 @@ fn record_dealloc_result(pointer: *mut u8) -> bool {
         hook.resume.recv().unwrap();
     }
     let count_event = ENABLED.load(Ordering::Relaxed);
+    if observe_boundary {
+        // Why not inspect the thread's aggregate deallocation counters: the
+        // synchronization hook may release its own tracked storage on this thread.
+        let _ = BOUNDARY_DEALLOC_COUNTED.try_with(|counted| counted.set(Some(count_event)));
+    }
     if count_event {
         DEALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         DEALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
