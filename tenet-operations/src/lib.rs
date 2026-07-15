@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 //! Symmetry-free execution layer for TeNeT (the TensorOperations.jl role):
 //! scalar contracts, strided kernels and the host kernel adapter, scratch and
@@ -73,3 +73,8 @@ pub use transform_plan::{
 pub use transform_replay::*;
 pub use transform_structure::*;
 pub use tree_profile::TreeTransformReplayProfile;
+// Why not retain crate-level `forbid`: Rust does not permit a narrower module
+// to override it. `deny` keeps every other module unsafe-free while this one
+// owns the audited Vec length transition.
+#[allow(unsafe_code)]
+mod owned_overwrite_buffer;

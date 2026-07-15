@@ -38,6 +38,7 @@ pub struct TreeTransformStructure<T> {
     layouts: TreeTransformLayoutTable,
     recoupling_coefficients_dst_src: Vec<T>,
     inactive_dst_layouts: Vec<usize>,
+    physical_overwrite_len: Option<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
     parallel_schedule: TreeTransformParallelSchedule,
     dst_structure: Arc<BlockStructure>,
@@ -472,6 +473,14 @@ impl<T: Copy> TreeTransformStructure<T> {
         });
         let recoupling_plan = compile_recoupling_plan(&blocks)?;
         let parallel_schedule = compile_parallel_schedule(&blocks, &layouts, &recoupling_plan)?;
+        let physical_overwrite_len = compile_physical_overwrite_coverage(
+            &blocks,
+            &inactive_dst_layouts,
+            &layouts,
+            &recoupling_plan,
+            dst_structure.block_count(),
+            dst_structure.required_len()?,
+        )?;
 
         Ok(Self {
             rank,
@@ -481,6 +490,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             layouts,
             recoupling_coefficients_dst_src,
             inactive_dst_layouts,
+            physical_overwrite_len,
             recoupling_plan,
             parallel_schedule,
             dst_structure,
@@ -573,6 +583,11 @@ impl<T: Copy> TreeTransformStructure<T> {
     #[inline]
     pub(crate) fn inactive_destination_layouts(&self) -> &[usize] {
         &self.inactive_dst_layouts
+    }
+
+    #[inline]
+    pub(crate) fn physical_overwrite_len(&self) -> Option<usize> {
+        self.physical_overwrite_len
     }
 
     #[inline]
@@ -1024,6 +1039,113 @@ fn tree_transform_block_weight(
     }
 }
 
+fn compile_physical_overwrite_coverage(
+    blocks: &[TreeTransformBlock],
+    inactive_dst_layouts: &[usize],
+    layouts: &TreeTransformLayoutTable,
+    recoupling_plan: &TreeTransformRecouplingPlan,
+    destination_block_count: usize,
+    required_len: usize,
+) -> Result<Option<usize>, OperationError> {
+    let multi_count = blocks
+        .iter()
+        .filter(|block| matches!(block, TreeTransformBlock::Multi { .. }))
+        .count();
+    let mut scheduled = vec![false; blocks.len()];
+    if recoupling_plan.block_indices().len() != multi_count
+        || recoupling_plan.block_indices().iter().any(|&index| {
+            let Some(slot) = scheduled.get_mut(index) else {
+                return true;
+            };
+            if *slot || !matches!(blocks[index], TreeTransformBlock::Multi { .. }) {
+                return true;
+            }
+            *slot = true;
+            false
+        })
+    {
+        return Ok(None);
+    }
+    let active_layout_count = blocks.iter().try_fold(0usize, |count, block| {
+        let destination_count = match *block {
+            TreeTransformBlock::Single { .. } => 1,
+            TreeTransformBlock::Multi { dst_count, .. } => dst_count,
+        };
+        count
+            .checked_add(destination_count)
+            .ok_or(OperationError::ElementCountOverflow)
+    })?;
+    let covered_layout_count = active_layout_count
+        .checked_add(inactive_dst_layouts.len())
+        .ok_or(OperationError::ElementCountOverflow)?;
+
+    if covered_layout_count != destination_block_count {
+        return Ok(None);
+    }
+
+    let mut intervals = Vec::with_capacity(covered_layout_count);
+    let mut record_layout = |layout_index: usize| -> Result<bool, OperationError> {
+        let layout = layouts.entry(layout_index);
+        let Some((lo, hi)) = layout_index_range(layouts, layout_index)? else {
+            return Ok(true);
+        };
+        let Ok(start) = usize::try_from(lo) else {
+            return Ok(false);
+        };
+        let Ok(hi) = usize::try_from(hi) else {
+            return Ok(false);
+        };
+        let Some(end) = hi.checked_add(1) else {
+            return Ok(false);
+        };
+        if end > required_len || end - start != layout.element_count {
+            return Ok(false);
+        }
+        intervals.push((start, end));
+        Ok(true)
+    };
+    for block in blocks {
+        match *block {
+            TreeTransformBlock::Single { dst_layout, .. } => {
+                if !record_layout(dst_layout)? {
+                    return Ok(None);
+                }
+            }
+            TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                ..
+            } => {
+                for layout in dst_layout_start..dst_layout_start + dst_count {
+                    if !record_layout(layout)? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+    for &layout in inactive_dst_layouts {
+        if !record_layout(layout)? {
+            return Ok(None);
+        }
+    }
+    intervals.sort_unstable_by_key(|&(start, _)| start);
+    let mut next = 0usize;
+    for (start, end) in intervals {
+        if start != next {
+            return Ok(None);
+        }
+        next = end;
+    }
+
+    // Why not enumerate physical scalar offsets: compile_shared_structures has
+    // already rejected aliased destination layouts and duplicate block owners.
+    // Contiguous layout intervals prove exact cover using only block metadata;
+    // PhysicalOverwriteProof additionally requires canonical coupled-sector
+    // regions to partition the same 0..required_len range before unsafe replay.
+    Ok((next == required_len).then_some(required_len))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum TreeTransformBlock {
     Single {
@@ -1369,8 +1491,7 @@ mod tests {
         let block = |sector, offset| {
             BlockSpec::with_key(BlockKey::sector_ids([sector]), vec![2], vec![1], offset).unwrap()
         };
-        let dst =
-            BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 3)]).unwrap();
+        let dst = BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 3)]).unwrap();
         let src = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
         let transform = TreeTransformStructure::compile_structures(
             &dst,
@@ -1389,11 +1510,9 @@ mod tests {
     fn physical_overwrite_coverage_handles_rank_zero_and_zero_extent() {
         // What: scalar blocks each own one physical slot, while an empty
         // destination proves the empty range without manufacturing a write.
-        let scalar = BlockStructure::packed_column_major(
-            0,
-            [Vec::<usize>::new(), Vec::<usize>::new()],
-        )
-        .unwrap();
+        let scalar =
+            BlockStructure::packed_column_major(0, [Vec::<usize>::new(), Vec::<usize>::new()])
+                .unwrap();
         let scalar_transform = TreeTransformStructure::compile_structures(
             &scalar,
             &scalar,

@@ -1,3 +1,4 @@
+use core::mem::MaybeUninit;
 use core::ops::{Add, Mul};
 use std::sync::{Arc, Weak};
 
@@ -6,9 +7,10 @@ use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
     ScratchStorage, SimilarStorage, TensorMap,
 };
-use tenet_dense::{DenseExecutor, DenseGemmBatchJob};
+use tenet_dense::{DefaultDenseExecutor, DenseExecutor, DenseGemmBatchJob};
 
 use crate::host_scratch::HostScratchBuffer;
+use crate::owned_overwrite_buffer::initialize_owned;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
@@ -29,6 +31,50 @@ enum DestinationMode<D> {
     // Why not use Axpby(D::zero()): IEEE arithmetic still reads NaN destination
     // values, whereas assignment APIs promise destination-independent output.
     Overwrite,
+}
+
+struct PhysicalOverwriteProof<'a, C> {
+    structure: &'a TreeTransformStructure<C>,
+    dst_structure: &'a Arc<BlockStructure>,
+    required_len: usize,
+    nout: usize,
+}
+
+impl<'a, C: Copy> PhysicalOverwriteProof<'a, C> {
+    fn new(
+        structure: &'a TreeTransformStructure<C>,
+        dst_structure: &'a Arc<BlockStructure>,
+        src_structure: &Arc<BlockStructure>,
+        src_len: usize,
+        nout: usize,
+    ) -> Result<Option<Self>, OperationError> {
+        structure.validate_replay_structures(dst_structure, src_structure)?;
+        validate_replay_storage_len(src_structure, src_len)?;
+        let required_len = dst_structure.required_len()?;
+        if structure.physical_overwrite_len() != Some(required_len) || nout > dst_structure.rank() {
+            return Ok(None);
+        }
+        let Some(regions) = dst_structure.coupled_sector_regions(nout)? else {
+            return Ok(None);
+        };
+        let mut next = 0usize;
+        for region in regions.iter() {
+            let range = region.range();
+            if range.start != next || range.end > required_len {
+                return Ok(None);
+            }
+            next = range.end;
+        }
+        if next != required_len {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            structure,
+            dst_structure,
+            required_len,
+            nout,
+        }))
+    }
 }
 
 /// Host scratch/replay workspace backed by `Vec<T>`.
@@ -2046,6 +2092,437 @@ where
         DestinationMode::Overwrite,
         threads,
     )
+}
+
+/// Internal, unstable owned-output path for the serial built-in host executor.
+///
+/// Returns `Ok(None)` without allocating output when the destination does not
+/// have a proof of exact physical overwrite coverage.
+///
+/// Why public: `tenet-tensors` is a separate crate. This concrete-executor seam
+/// is not a general backend API; downstream callers must not rely on it.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn try_tree_transform_structure_overwrite_owned_raw<D, C>(
+    dense: &mut DefaultDenseExecutor,
+    workspace: &mut TreeTransformWorkspace<D>,
+    transpose_backend: crate::TransposeBackend,
+    structure: &TreeTransformStructure<C>,
+    dst_structure: &Arc<BlockStructure>,
+    src_structure: &Arc<BlockStructure>,
+    nout: usize,
+    src_data: &[D],
+    alpha: D,
+) -> Result<Option<Vec<D>>, OperationError>
+where
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<C> + ConjugateValue,
+    C: Copy + Sync,
+{
+    let Some(proof) = PhysicalOverwriteProof::new(
+        structure,
+        dst_structure,
+        src_structure,
+        src_data.len(),
+        nout,
+    )?
+    else {
+        return Ok(None);
+    };
+    debug_assert_eq!(proof.required_len, dst_structure.required_len()?);
+    debug_assert_eq!(proof.nout, nout);
+    debug_assert!(Arc::ptr_eq(proof.dst_structure, dst_structure));
+    debug_assert!(core::ptr::eq(proof.structure, structure));
+
+    initialize_owned(proof.required_len, |dst_data| {
+        let layouts = structure.layouts();
+        let recoupling_plan = structure.recoupling_plan();
+        let mut kernels =
+            crate::StridedHostKernelAdapter::with_transpose_backend(transpose_backend);
+
+        for &layout_index in structure.inactive_destination_layouts() {
+            write_uninit_layout_zero(layouts, layouts.entry(layout_index), dst_data)?;
+        }
+        for block in structure.blocks() {
+            let TreeTransformBlock::Single {
+                dst_layout,
+                src_layout,
+                coefficient,
+            } = *block
+            else {
+                continue;
+            };
+            write_uninit_layout_from_source(
+                layouts,
+                layouts.entry(dst_layout),
+                layouts.entry(src_layout),
+                dst_data,
+                src_data,
+                structure.storage_conjugate(),
+                alpha.scale_by_coefficient(structure.coefficient(coefficient)),
+            )?;
+        }
+
+        if recoupling_plan.is_empty() {
+            return Ok(());
+        }
+        workspace.prepare_packed_buffers(
+            recoupling_plan.source_len(),
+            recoupling_plan.destination_len(),
+            D::zero(),
+        );
+        ensure_recoupling_coefficients(workspace, structure)?;
+        for (block_index, job) in recoupling_plan.entries() {
+            let TreeTransformBlock::Multi {
+                src_layout_start,
+                src_count,
+                element_count,
+                ..
+            } = *recoupling_multi_block(structure, block_index)?
+            else {
+                unreachable!("recoupling_multi_block only returns Multi blocks");
+            };
+            for src_index in 0..src_count {
+                pack_layout_into_column(
+                    &mut kernels,
+                    layouts,
+                    layouts.entry(src_layout_start + src_index),
+                    src_data,
+                    workspace.packed.source_mut().as_mut_slice(),
+                    job.lhs_offset + src_index * element_count,
+                    structure.storage_conjugate(),
+                )?;
+            }
+        }
+        {
+            let (source, destination) = workspace.packed.source_and_destination_mut();
+            recoupling_gemm_batch(
+                dense,
+                destination.as_mut_slice(),
+                source.as_slice(),
+                &workspace.coefficient_scratch,
+                recoupling_plan.jobs(),
+                recoupling_plan.runs(),
+            )?;
+        }
+        for (block_index, job) in recoupling_plan.entries() {
+            let TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
+                element_count,
+                ..
+            } = *recoupling_multi_block(structure, block_index)?
+            else {
+                unreachable!("recoupling_multi_block only returns Multi blocks");
+            };
+            for dst_index in 0..dst_count {
+                write_uninit_layout_from_packed(
+                    layouts,
+                    layouts.entry(dst_layout_start + dst_index),
+                    dst_data,
+                    workspace.packed.destination().as_slice(),
+                    job.dst_offset + dst_index * element_count,
+                    alpha,
+                )?;
+            }
+        }
+        Ok(())
+    })
+    .map(Some)
+}
+
+#[cfg(test)]
+mod owned_overwrite_tests {
+    use super::*;
+    use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
+    use num_complex::Complex64;
+    use tenet_core::{
+        BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, FusionTreeBlockKey,
+        FusionTreeHomSpace, SectorLeg, TensorMapSpace, Z2FusionRule, Z2Irrep,
+    };
+
+    fn canonical_structure(offset: usize) -> Arc<BlockStructure> {
+        let key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        ));
+        Arc::new(
+            BlockStructure::from_blocks_with_rank(
+                2,
+                vec![BlockSpec::with_key(key, vec![2, 3], vec![1, 2], offset).unwrap()],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn owned_writer_matches_initialized_oracle_for_real_and_complex() {
+        // What: canonical serial owned replay writes every physical value and
+        // is byte-for-byte equal to the initialized overwrite oracle.
+        let structure = canonical_structure(0);
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, -2.0)],
+        )
+        .unwrap();
+
+        let mut expected = vec![f64::NAN; 6];
+        tree_transform_structure_overwrite_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            &mut expected,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            3.0,
+            1,
+        )
+        .unwrap();
+        let actual = try_tree_transform_structure_overwrite_owned_raw(
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            crate::TransposeBackend::FusedLoops,
+            &transform,
+            &structure,
+            &structure,
+            1,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            3.0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(actual, expected);
+
+        let complex_src = (1..=6)
+            .map(|value| Complex64::new(value as f64, -(value as f64)))
+            .collect::<Vec<_>>();
+        let complex = try_tree_transform_structure_overwrite_owned_raw(
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            crate::TransposeBackend::FusedLoops,
+            &transform,
+            &structure,
+            &structure,
+            1,
+            &complex_src,
+            Complex64::new(3.0, 1.0),
+        )
+        .unwrap()
+        .unwrap();
+        let scale = Complex64::new(3.0, 1.0) * -2.0;
+        assert_eq!(
+            complex,
+            complex_src.iter().map(|&v| scale * v).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn owned_writer_multi_matches_direct_matrix_oracle() {
+        // What: the uninitialized Multi writer applies every destination-by-source
+        // recoupling coefficient and writes the final owned payload exactly once.
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new(
+                    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+                    false,
+                )]),
+                FusionProductSpace::new([SectorLeg::new(
+                    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+                    false,
+                )]),
+            ),
+            &Z2FusionRule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let structure = Arc::clone(space.subblock_structure());
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::multi(
+                vec![0, 1],
+                vec![0, 1],
+                vec![2.0, 3.0, 5.0, 7.0],
+            )],
+        )
+        .unwrap();
+
+        let actual = try_tree_transform_structure_overwrite_owned_raw(
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            crate::TransposeBackend::FusedLoops,
+            &transform,
+            &structure,
+            &structure,
+            1,
+            &[11.0, 13.0],
+            2.0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            actual,
+            [
+                2.0 * (2.0 * 11.0 + 3.0 * 13.0),
+                2.0 * (5.0 * 11.0 + 7.0 * 13.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn owned_writer_rejects_padding_and_out_of_range_split_before_allocation() {
+        // What: a holey destination and an out-of-range split receive no owned
+        // result, leaving the caller on the initialized fallback path.
+        let canonical = canonical_structure(0);
+        let padded = canonical_structure(1);
+        let padded_transform = TreeTransformStructure::compile_structures(
+            &padded,
+            &canonical,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        let mut dense = DefaultDenseExecutor::new();
+        let mut workspace = TreeTransformWorkspace::default();
+        assert!(try_tree_transform_structure_overwrite_owned_raw(
+            &mut dense,
+            &mut workspace,
+            crate::TransposeBackend::FusedLoops,
+            &padded_transform,
+            &padded,
+            &canonical,
+            1,
+            &[1.0; 6],
+            1.0,
+        )
+        .unwrap()
+        .is_none());
+
+        let canonical_transform = TreeTransformStructure::compile_structures(
+            &canonical,
+            &canonical,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        assert!(try_tree_transform_structure_overwrite_owned_raw(
+            &mut dense,
+            &mut workspace,
+            crate::TransposeBackend::FusedLoops,
+            &canonical_transform,
+            &canonical,
+            &canonical,
+            3,
+            &[1.0; 6],
+            1.0,
+        )
+        .unwrap()
+        .is_none());
+    }
+}
+
+fn layout_linear_offset(
+    mut linear: usize,
+    shape: &[usize],
+    strides: &[isize],
+    base: isize,
+) -> Result<usize, OperationError> {
+    let mut offset = base;
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        let coordinate = if dim == 0 { 0 } else { linear % dim };
+        if dim != 0 {
+            linear /= dim;
+        }
+        let coordinate =
+            isize::try_from(coordinate).map_err(|_| OperationError::ElementCountOverflow)?;
+        offset = offset
+            .checked_add(
+                coordinate
+                    .checked_mul(stride)
+                    .ok_or(OperationError::ElementCountOverflow)?,
+            )
+            .ok_or(OperationError::ElementCountOverflow)?;
+    }
+    usize::try_from(offset).map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })
+}
+
+fn write_uninit_layout_zero<D: Zero + Copy>(
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    dst: &mut [MaybeUninit<D>],
+) -> Result<(), OperationError> {
+    for linear in 0..layout.element_count {
+        let index = layout_linear_offset(
+            linear,
+            layouts.shape(layout),
+            layouts.strides(layout),
+            layout.offset,
+        )?;
+        dst[index].write(D::zero());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_uninit_layout_from_source<D>(
+    layouts: &TreeTransformLayoutTable,
+    dst_layout: &TreeTransformLayout,
+    src_layout: &TreeTransformLayout,
+    dst: &mut [MaybeUninit<D>],
+    src: &[D],
+    conjugate: bool,
+    scale: D,
+) -> Result<(), OperationError>
+where
+    D: Copy + Mul<D, Output = D> + ConjugateValue,
+{
+    for linear in 0..dst_layout.element_count {
+        let dst_index = layout_linear_offset(
+            linear,
+            layouts.shape(dst_layout),
+            layouts.strides(dst_layout),
+            dst_layout.offset,
+        )?;
+        let src_index = layout_linear_offset(
+            linear,
+            layouts.shape(src_layout),
+            layouts.strides(src_layout),
+            src_layout.offset,
+        )?;
+        dst[dst_index].write(scale * src[src_index].maybe_conj(conjugate));
+    }
+    Ok(())
+}
+
+fn write_uninit_layout_from_packed<D>(
+    layouts: &TreeTransformLayoutTable,
+    layout: &TreeTransformLayout,
+    dst: &mut [MaybeUninit<D>],
+    packed: &[D],
+    packed_offset: usize,
+    alpha: D,
+) -> Result<(), OperationError>
+where
+    D: Copy + Mul<D, Output = D>,
+{
+    for linear in 0..layout.element_count {
+        let dst_index = layout_linear_offset(
+            linear,
+            layouts.shape(layout),
+            layouts.strides(layout),
+            layout.offset,
+        )?;
+        dst[dst_index].write(alpha * packed[packed_offset + linear]);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
