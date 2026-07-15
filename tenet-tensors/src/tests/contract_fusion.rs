@@ -359,6 +359,18 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     .unwrap();
     let candidates = crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]);
     assert!(candidates.len() >= 2);
+    let dst_dyn = DynamicFusionMapSpace::from_typed(&space);
+    let lhs_dyn = DynamicFusionMapSpace::from_typed(&space);
+    let rhs_dyn = DynamicFusionMapSpace::from_typed(&space);
+    let _prepared = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
+        &rule,
+        &dst_dyn,
+        &lhs_dyn,
+        &rhs_dyn,
+        TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        &candidates[1],
+    )
+    .unwrap();
     let mut outputs = Vec::new();
     for candidate in candidates.iter().take(2) {
         let mut dst =
