@@ -522,6 +522,14 @@ impl<T: Copy> TreeTransformStructure<T> {
         &self.layouts
     }
 
+    /// Differential self-check (issue #232): every baked fused layout matches a
+    /// fresh `fuse_pair_layout` recompute of its (block, role) stride pair.
+    /// Test-only.
+    #[doc(hidden)]
+    pub fn baked_layouts_match_recomputed(&self) -> bool {
+        self.layouts.baked_matches_recomputed(&self.blocks)
+    }
+
     /// Immutable destination-by-source recoupling coefficients.
     #[inline]
     pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
@@ -1294,6 +1302,77 @@ impl TreeTransformLayoutTable {
         self.fused_slots[entry_index] = FusedSlot { start, rank };
     }
 
+    /// Differential self-check for issue #232: every baked (entry, role) layout
+    /// equals a freshly recomputed `fuse_pair_layout` of that role's stride pair,
+    /// byte-identical, and the presence/absence of a baked slot agrees with
+    /// whether the recompute produced one. Used only by tests.
+    #[doc(hidden)]
+    pub fn baked_matches_recomputed(&self, blocks: &[TreeTransformBlock]) -> bool {
+        let matches = |entry_index: usize, shape: &[usize], dst: &[isize], src: &[isize]| match (
+            self.fused_baked(entry_index),
+            fuse_pair_layout(shape, dst, src),
+        ) {
+            (Some(baked), Some(recomputed)) => {
+                baked.dims == &recomputed.dims[..recomputed.rank]
+                    && baked.dst_strides == &recomputed.dst_strides[..recomputed.rank]
+                    && baked.src_strides == &recomputed.src_strides[..recomputed.rank]
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        for block in blocks {
+            match *block {
+                TreeTransformBlock::Single {
+                    dst_layout,
+                    src_layout,
+                    ..
+                } => {
+                    let dst = self.entry(dst_layout);
+                    let src = self.entry(src_layout);
+                    if !matches(
+                        dst_layout,
+                        self.shape(dst),
+                        self.strides(dst),
+                        self.strides(src),
+                    ) {
+                        return false;
+                    }
+                }
+                TreeTransformBlock::Multi {
+                    dst_layout_start,
+                    dst_count,
+                    src_layout_start,
+                    src_count,
+                    ..
+                } => {
+                    for index in src_layout_start..src_layout_start + src_count {
+                        let entry = self.entry(index);
+                        if !matches(
+                            index,
+                            self.shape(entry),
+                            self.packed_strides(entry),
+                            self.strides(entry),
+                        ) {
+                            return false;
+                        }
+                    }
+                    for index in dst_layout_start..dst_layout_start + dst_count {
+                        let entry = self.entry(index);
+                        if !matches(
+                            index,
+                            self.shape(entry),
+                            self.strides(entry),
+                            self.packed_strides(entry),
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     pub fn entry(&self, index: usize) -> &TreeTransformLayout {
         &self.entries[index]
     }
@@ -1485,6 +1564,39 @@ mod tests {
             coefficient_start: 0,
             element_count,
         }
+    }
+
+    #[test]
+    fn baked_fused_layouts_match_recompute_for_u1_deg2_permute() {
+        // What: every compiled (block, single-role) baked layout equals a fresh
+        // fuse_pair_layout of the same stride pair, byte-identical, across a
+        // multi-charge degeneracy-2 permute — the U(1)-deg2 regime issue #232
+        // targets. Distinct one-leg sectors stand in for U(1) charges; the
+        // fusion is group-agnostic (it sees only shapes and strides), so charge
+        // labels do not change the baked normalization.
+        let block = |sector, offset| {
+            BlockSpec::with_key(
+                BlockKey::sector_ids([sector]),
+                vec![2, 2],
+                vec![1, 2],
+                offset,
+            )
+            .unwrap()
+        };
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![block(0, 0), block(1, 4), block(2, 8), block(3, 12)],
+        )
+        .unwrap();
+        let specs = (0..4)
+            .map(|block| {
+                TreeTransformBlockSpec::single(block, block, 1.0_f64).with_source_axes([1, 0])
+            })
+            .collect::<Vec<_>>();
+        let compiled =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        assert!(!compiled.has_pack_gemm_scatter_blocks());
+        assert!(compiled.baked_layouts_match_recomputed());
     }
 
     #[test]
