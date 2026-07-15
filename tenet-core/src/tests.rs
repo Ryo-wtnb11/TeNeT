@@ -623,6 +623,46 @@ mod tests {
         }
     }
 
+    fn legacy_split_only_tree_pair_route<R>(
+        rule: &R,
+        source: &FusionTreeBlockKey,
+        target_codomain_rank: usize,
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    {
+        // What: freeze the pre-shortcut composition as an independent oracle:
+        // repartition to all-codomain, apply the identity tree braid, then
+        // repartition back to the requested split.
+        let total_rank =
+            source.codomain_tree().uncoupled().len() + source.domain_tree().uncoupled().len();
+        let identity = (0..total_rank).collect::<Vec<_>>();
+        let levels = identity.clone();
+        let all_codomain =
+            multiplicity_free_repartition_tree_pair(rule, source, total_rank)?;
+        let braided = compose_tree_pair_terms(rule, all_codomain, |rule, key| {
+            multiplicity_free_braid_tree(
+                rule,
+                key.codomain_tree(),
+                &identity,
+                &levels,
+            )
+            .map(|terms| {
+                terms
+                    .into_iter()
+                    .map(|(tree, coefficient)| {
+                        (
+                            FusionTreeBlockKey::pair(tree, key.domain_tree().clone()),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })?;
+        multiplicity_free_repartition_terms(rule, braided, target_codomain_rank)
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct AsymmetricAnyonicRule;
 
@@ -1685,9 +1725,9 @@ mod tests {
     }
 
     #[test]
-    fn split_only_su2_braid_matches_direct_repartition_in_both_directions() {
+    fn split_only_su2_braid_matches_legacy_composition_in_both_directions() {
         // What: SU(2) 2|2 -> 3|1 and 2|2 -> 1|3 retain the exact tree keys,
-        // dual flags, and bend coefficients of the direct repartition oracle.
+        // dual flags, and bend coefficients of the old all-codomain route.
         let source = FusionTreeBlockKey::pair_from_sector_ids(
             [1, 2],
             [2, 1],
@@ -1713,8 +1753,7 @@ mod tests {
             )
             .unwrap();
             let expected =
-                multiplicity_free_repartition_tree_pair(&SU2FusionRule, &source, target_rank)
-                    .unwrap();
+                legacy_split_only_tree_pair_route(&SU2FusionRule, &source, target_rank).unwrap();
             assert_eq!(actual.len(), expected.len());
             for ((actual_key, actual_coefficient), (expected_key, expected_coefficient)) in
                 actual.iter().zip(&expected)
@@ -1770,9 +1809,10 @@ mod tests {
     }
 
     #[test]
-    fn split_only_nested_product_braid_matches_direct_repartition() {
+    fn split_only_nested_product_braid_matches_legacy_composition() {
         // What: a non-Abelian fZ2 x U(1) x SU(2) tree preserves the product
-        // bend phase and duality bookkeeping when only its 1|2 split changes.
+        // bend sign and duality bookkeeping of the old all-codomain route in
+        // both split directions.
         type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
         type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
         let left_rule = FpU1Rule::default();
@@ -1810,7 +1850,7 @@ mod tests {
             .unwrap(),
         );
 
-        let actual = multiplicity_free_braid_tree_pair(
+        let forward = multiplicity_free_braid_tree_pair(
             &rule,
             &source,
             &[0, 2],
@@ -1819,10 +1859,32 @@ mod tests {
             &[1, 2],
         )
         .unwrap();
-        let expected = multiplicity_free_repartition_tree_pair(&rule, &source, 2).unwrap();
-        assert_eq!(actual.len(), expected.len());
+        let expected = legacy_split_only_tree_pair_route(&rule, &source, 2).unwrap();
+        assert_eq!(forward.len(), expected.len());
+        assert!(forward[0].1 < 0.0);
         for ((actual_key, actual_coefficient), (expected_key, expected_coefficient)) in
-            actual.iter().zip(&expected)
+            forward.iter().zip(&expected)
+        {
+            assert_eq!(actual_key, expected_key);
+            assert!((actual_coefficient - expected_coefficient).abs() < 1.0e-12);
+        }
+
+        let reverse_source = &forward[0].0;
+        let reverse = multiplicity_free_braid_tree_pair(
+            &rule,
+            reverse_source,
+            &[0],
+            &[2, 1],
+            &[0, 1],
+            &[2],
+        )
+        .unwrap();
+        let reverse_expected =
+            legacy_split_only_tree_pair_route(&rule, reverse_source, 1).unwrap();
+        assert_eq!(reverse.len(), reverse_expected.len());
+        assert!(reverse[0].1 < 0.0);
+        for ((actual_key, actual_coefficient), (expected_key, expected_coefficient)) in
+            reverse.iter().zip(&reverse_expected)
         {
             assert_eq!(actual_key, expected_key);
             assert!((actual_coefficient - expected_coefficient).abs() < 1.0e-12);
