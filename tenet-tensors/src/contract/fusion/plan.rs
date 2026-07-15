@@ -42,7 +42,11 @@ pub(crate) fn contracted_axis_order_candidates(
     lhs: &[usize],
     rhs: &[usize],
 ) -> Vec<ContractAxisOrderCandidate> {
-    assert_eq!(lhs.len(), rhs.len(), "paired contraction axes must have equal length");
+    assert_eq!(
+        lhs.len(),
+        rhs.len(),
+        "paired contraction axes must have equal length"
+    );
     let canonical = ContractAxisOrderCandidate {
         lhs: lhs.to_vec(),
         rhs: rhs.to_vec(),
