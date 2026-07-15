@@ -110,3 +110,36 @@ fn ordered_contract_does_not_allocate_the_default_order_owned_payload() {
          default owned payload={owned_payload_bytes} B"
     );
 }
+
+#[test]
+fn identity_output_order_adds_no_axis_validation_allocation() {
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .recoupling_threads(1)
+        .build()
+        .unwrap();
+    let space = Space::su2([(0, 2), (1, 3), (2, 2)]);
+    let lhs =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 224_701).unwrap();
+    let rhs =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space, &space], 224_702).unwrap();
+
+    black_box(lhs.contract(&rhs, &[2], &[0]).unwrap());
+    black_box(
+        lhs.contract_ordered(&rhs, &[2], &[0], &[0, 1, 2, 3])
+            .unwrap(),
+    );
+    let direct = measure_allocated_bytes(|| {
+        black_box(lhs.contract(&rhs, &[2], &[0]).unwrap());
+    });
+    let identity = measure_allocated_bytes(|| {
+        black_box(
+            lhs.contract_ordered(&rhs, &[2], &[0], &[0, 1, 2, 3])
+                .unwrap(),
+        );
+    });
+
+    // What: the identity pAB wrapper performs the same owned contraction and
+    // does not allocate two temporary open-axis validation vectors first.
+    assert_eq!(identity, direct);
+}

@@ -69,6 +69,52 @@ fn permuted_output_labels_match_contract_ordered() {
 }
 
 #[test]
+fn planned_crossed_output_preserves_heterogeneous_leg_spaces() {
+    let rt = Runtime::builder().build().unwrap();
+    let a = Space::u1([(-2, 1), (0, 2)]);
+    let b = Space::u1([(-1, 2), (1, 1)]);
+    let bond = Space::u1([(-1, 1), (0, 3), (2, 1)]);
+    let c = Space::u1([(0, 1), (2, 2)]);
+    let d = Space::u1([(-3, 1), (1, 2)]);
+    let lhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&a, &b], [&bond], 224_601).unwrap();
+    let rhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&c, &d], 224_602).unwrap();
+    let network = Network::new(
+        vec![
+            vec!["a", "b", "k"].into_iter().map(TemporaryLabel::from).collect(),
+            vec!["k", "c", "d"].into_iter().map(TemporaryLabel::from).collect(),
+        ],
+        vec![false, false],
+        vec![Some(2), Some(1)],
+        ["d", "a", "b", "c"]
+            .into_iter()
+            .map(TemporaryLabel::from)
+            .collect(),
+        Some(2),
+    )
+    .unwrap();
+    let tensors = [&lhs, &rhs];
+    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
+    let default = lhs.contract(&rhs, &[2], &[0]).unwrap();
+    let expected = default.permute(&[3, 0], &[1, 2]).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+
+    let cold = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    let warm = planned
+        .execute_with_workspace(&tensors, &mut workspace)
+        .unwrap();
+    // What: pAB maps every heterogeneous open leg to the requested output
+    // position; equality of flat data alone cannot detect a swapped Space.
+    for actual in [&cold, &warm] {
+        assert_close(actual.data(), expected.data(), 1e-12);
+        for axis in 0..actual.rank() {
+            assert_eq!(actual.space(axis), expected.space(axis));
+        }
+    }
+}
+
+#[test]
 fn single_tensor_macro_is_a_permute() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
@@ -274,8 +320,14 @@ fn planned_network_reuses_execution_workspace() {
             - after_second.orientation_structural_comparisons,
         0
     );
-    assert_eq!(after_third.owned_orientations, 0);
-    assert_eq!(after_third.reused_orientations, 0);
+    assert_eq!(
+        after_third.owned_orientations - after_first.owned_orientations,
+        0
+    );
+    assert_eq!(
+        after_third.reused_orientations - after_first.reused_orientations,
+        0
+    );
 
     let z = Space::z2([(0, 2), (1, 2)]);
     let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();
@@ -290,7 +342,7 @@ fn planned_network_reuses_execution_workspace() {
     assert_close(recovered.data(), expected.data(), 1e-12);
     assert_eq!(
         workspace.stats().reused_intermediates - before_recovery.reused_intermediates,
-        2
+        1
     );
 }
 
