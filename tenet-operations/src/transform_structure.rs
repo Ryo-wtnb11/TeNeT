@@ -1323,4 +1323,23 @@ mod tests {
         assert_eq!(count, 0);
         assert_eq!(layouts.shape(layouts.entry(0)), &[0, usize::MAX, 2]);
     }
+
+    #[test]
+    fn high_rank_axis_validation_accepts_reverse_and_rejects_late_duplicate() {
+        let rank = 257;
+        let reverse = (0..rank).rev().collect::<Vec<_>>();
+        let mut duplicate = reverse.clone();
+        duplicate[rank - 1] = duplicate[rank - 2];
+
+        // What: validation remains correct when rank exceeds inline metadata
+        // capacity, including a duplicate discovered only at the final axis.
+        assert_eq!(validate_axis_permutation(&reverse, rank), Ok(()));
+        assert_eq!(
+            validate_axis_permutation(&duplicate, rank),
+            Err(OperationError::InvalidPermutation {
+                axes: duplicate,
+                rank,
+            })
+        );
+    }
 }

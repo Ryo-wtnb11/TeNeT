@@ -5,7 +5,10 @@ use tenet_core::{
     BlockKey, BlockStructure, DegeneracyStructure, FusionTreeBlockKey, FusionTreeKey,
     SU2FusionRule, SectorId, SectorStructure,
 };
-use tenet_tensors::{build_all_codomain_tree_transform_group_plan, TreeTransformOperation};
+use tenet_tensors::{
+    build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
+    TreeTransformOperation,
+};
 
 struct CountingAllocator;
 
@@ -81,4 +84,23 @@ fn su2_f_move_compile_has_no_per_destination_coefficient_rows() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src().len(), 4);
     assert!(ALLOCATIONS.get() <= 32, "allocations={}", ALLOCATIONS.get());
+}
+
+#[test]
+fn su2_tree_pair_f_move_compile_has_no_per_destination_coefficient_rows() {
+    let structure = su2_f_move_structure();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let _ = build_tree_pair_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
+        .unwrap();
+
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let plan = build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
+    COUNTING.set(false);
+
+    // What: the tree-pair assembler owns one row-major coefficient matrix for
+    // the same two-channel F move, independently of the all-codomain builder.
+    assert_eq!(plan.specs().len(), 1);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src().len(), 4);
+    assert!(ALLOCATIONS.get() <= 52, "allocations={}", ALLOCATIONS.get());
 }
