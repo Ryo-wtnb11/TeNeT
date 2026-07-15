@@ -450,6 +450,16 @@ impl NetworkExecutionWorkspace {
         self.stats
     }
 
+    #[doc(hidden)]
+    pub fn retained_intermediate_buffer_count(&self) -> usize {
+        self.intermediates
+            .iter()
+            .map(|buffers| {
+                usize::from(buffers.contracted.is_some()) + usize::from(buffers.oriented.is_some())
+            })
+            .sum()
+    }
+
     #[cfg(test)]
     pub(crate) fn reserve_slots(&mut self, count: usize) {
         self.slots.reserve(count);
@@ -555,9 +565,9 @@ impl PlannedNetwork {
                 .ok_or_else(|| invalid("rhs operand already consumed"))?;
             let rhs_producer = workspace.slot_producers[step.rhs_slot].take();
 
-            // Replay a crossed pAB directly into its retained oriented slot.
-            // Incompatible storage falls through to the established two-stage
-            // contract-and-permute path below.
+            // Replay a same-split pAB directly into its retained oriented slot.
+            // Compile-time filtering leaves boundary-moving orientations on the
+            // established two-stage path; incompatible storage also falls through.
             if let Some(output_axes) = &step.result_output_axes {
                 if let Some(mut destination) = workspace.intermediates[step_index].oriented.take() {
                     let preparations = workspace.intermediates[step_index]
@@ -592,6 +602,7 @@ impl PlannedNetwork {
                         - structural_comparisons;
                     match overwrite {
                         Ok(OverwriteOutcome::Written) => {
+                            drop(workspace.intermediates[step_index].contracted.take());
                             workspace.stats.reused_intermediates += 1;
                             workspace.stats.reused_contractions += 1;
                             return_intermediate(workspace, lhs, lhs_producer);
@@ -863,9 +874,10 @@ fn compile_schedule(
                 .map(|(_, label)| label.clone()),
         );
 
+        let lhs_open_count = lhs_labels.len() - lhs_contract_axes.len();
         let result_permutation = compiled_intermediate_permutation(
             &result_labels,
-            lhs_labels.len() - lhs_contract_axes.len(),
+            lhs_open_count,
             step.result(),
             plan.steps(),
             &consumers,
@@ -891,8 +903,11 @@ fn compile_schedule(
             result_slot,
             lhs_contract_axes,
             rhs_contract_axes,
+            // pAB reorders axes inside the existing split. Moving the split is
+            // a repartition and remains an explicit orientation operation.
             result_output_axes: result_permutation
                 .as_ref()
+                .filter(|(codomain, _)| codomain.len() == lhs_open_count)
                 .map(|(codomain, domain)| codomain.iter().chain(domain).copied().collect()),
             result_permutation,
         });

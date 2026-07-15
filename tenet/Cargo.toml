@@ -28,6 +28,7 @@ cotengra-python = []
 [dependencies]
 num-complex = "0.4"
 rayon = "1.10"
+smallvec = { version = "1", features = ["const_generics", "union"] }
 tenet-core = { path = "../tenet-core" }
 tenet-dense = { path = "../tenet-dense", default-features = false }
 tenet-matrixalgebra = { path = "../tenet-matrixalgebra", default-features = false }

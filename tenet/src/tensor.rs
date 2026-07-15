@@ -14,6 +14,7 @@ use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
 use num_complex::Complex64;
+use smallvec::SmallVec;
 use tenet_core::{
     BlockKey, BlockStructure, CoupledSectorRegion, FusionProductSpace, FusionRule,
     FusionTreeHomSpace, MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
@@ -1182,14 +1183,28 @@ enum TransformKind<'a> {
 }
 
 fn validate_contracted_axes(contracted: &[usize], rank: usize) -> Result<(), Error> {
-    for (position, &axis) in contracted.iter().enumerate() {
-        if axis >= rank || contracted[..position].contains(&axis) {
+    let mut seen = SmallVec::<[bool; 16]>::new();
+    seen.resize(rank, false);
+    for &axis in contracted {
+        if axis >= rank || seen[axis] {
             return Err(Error::InvalidArgument(format!(
                 "invalid contracted axis list {contracted:?} for rank {rank}"
             )));
         }
+        seen[axis] = true;
     }
     Ok(())
+}
+
+fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
+    if axes.len() != rank {
+        return Err(Error::InvalidArgument(format!(
+            "invalid output axis list {axes:?} for rank {rank}"
+        )));
+    }
+    validate_contracted_axes(axes, rank).map_err(|_| {
+        Error::InvalidArgument(format!("invalid output axis list {axes:?} for rank {rank}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1350,6 +1365,7 @@ impl UserBoundSpace {
         let OutputAxisOrder::Axes(output_axes) = output_order else {
             return Ok(default);
         };
+        validate_axis_permutation(output_axes, default.raw().rank())?;
         let split = default.raw().nout();
         default.transformed(&TreeTransformOperation::permute(
             output_axes[..split].iter().copied(),
@@ -5295,6 +5311,12 @@ impl TensorExecutionContext {
         output_axes: &[usize],
         alpha: Scalar,
     ) -> Result<OverwriteOutcome, Error> {
+        if lhs.rule_kind() == RuleKind::Su3
+            || rhs.rule_kind() == RuleKind::Su3
+            || dst.rule_kind() == RuleKind::Su3
+        {
+            return Ok(OverwriteOutcome::Incompatible);
+        }
         self.try_contract_overwrite_with_order(
             cache,
             dst,
