@@ -343,13 +343,9 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     );
     let dense = TensorMapSpace::<2, 2>::from_dims([3, 3], [3, 3]).unwrap();
     let blocks = hom.fusion_tree_keys(&rule).len();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes(
-        dense,
-        hom,
-        &rule,
-        vec![vec![1; 4]; blocks],
-    )
-    .unwrap();
+    let space =
+        FusionTensorMapSpace::from_degeneracy_shapes(dense, hom, &rule, vec![vec![1; 4]; blocks])
+            .unwrap();
     let len = space.subblock_structure().required_len().unwrap();
     let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         (0..len).map(|i| i as f64 + 1.0).collect(),
@@ -361,18 +357,13 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
         space.clone(),
     )
     .unwrap();
-    let candidates = crate::contract::contracted_axis_order_candidates(
-        &[3, 2],
-        &[0, 1],
-    );
+    let candidates = crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]);
     assert!(candidates.len() >= 2);
     let mut outputs = Vec::new();
     for candidate in candidates.iter().take(2) {
-        let mut dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
-            vec![0.0; len],
-            space.clone(),
-        )
-        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone())
+                .unwrap();
         tensorcontract_fusion_into(
             &rule,
             &mut dst,
