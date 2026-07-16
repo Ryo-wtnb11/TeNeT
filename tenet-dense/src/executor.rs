@@ -21,6 +21,15 @@ pub struct DenseGemmBatchJob {
     pub cols: usize,
 }
 
+/// Matrix interpretation for one operand of a rank-2 batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MatrixOp {
+    #[default]
+    Identity,
+    Transpose,
+    Adjoint,
+}
+
 pub trait DenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
@@ -258,6 +267,31 @@ pub trait DenseExecutor {
                 message: "batched matmul requires matching f32/f64/c32/c64 operands".to_string(),
             }),
         }
+    }
+
+    /// Batched rank-2 multiplication with one matrix interpretation shared by
+    /// every job for each operand.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_batch_axpby_with_ops_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+    ) -> Result<(), DenseError> {
+        if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
+            return self.matmul_batch_axpby_into(output, lhs, rhs, jobs, runs, alpha, beta);
+        }
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "matmul_batch_axpby_with_ops_into",
+            message: "executor does not implement transpose/adjoint rank-2 batches".to_string(),
+        })
     }
 }
 

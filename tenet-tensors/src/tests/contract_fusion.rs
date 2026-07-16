@@ -4511,8 +4511,8 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
 // equals its dual, so a sector-dualization mislabel is invisible; here charge +1
 // and -1 are distinct duals. The Structure route mislabels the output coupled
 // sector for this case, so it declines (`all_sectors_self_dual`) to the
-// DynamicTree route, where logical adjoint geometry stays separate from parent
-// storage and only referenced blocks are mapped and conjugated.
+// DynamicTree route for non-core shapes. This rank-(1,1) compose is core form,
+// so the parent-storage matrix is consumed through the op-bearing Core batch.
 #[test]
 fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     use num_complex::Complex64;
@@ -4602,8 +4602,8 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         OperationCachePolicy::default(),
         OperationCachePolicy::NoCache,
     ] {
+        let mut ctx = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
         ctx.set_cache_policy(policy);
-        crate::reset_global_operation_caches();
         crate::lowering::reset_adjoint_view_build_count();
         for _ in 0..2 {
             let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
@@ -4619,6 +4619,10 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
                 Complex64::new(0.0, 0.0),
             )
             .unwrap();
+            assert!(
+                ctx.last_resolution_is_core(),
+                "core-form prelowered adjoint must resolve to Core"
+            );
             let max = oracle
                 .iter()
                 .zip(&fold)
@@ -4626,8 +4630,136 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
                 .fold(0.0f64, f64::max);
             assert!(max < 1e-10, "fold vs eager oracle: max diff {max}");
         }
+        if policy == OperationCachePolicy::default() {
+            assert!(ctx.contraction_resolution_cache_fast_hits() >= 1);
+            let prelowered_entries = ctx.contraction_resolution_cache_len();
+            let mut ordinary = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+            ctx.tensorcontract_fusion_dyn_into(
+                &dst_bound,
+                &mut ordinary,
+                &lhs_bound,
+                &lhs_data,
+                &rhs_bound,
+                &rhs_data,
+                TensorContractSpec::new_with_conjugation(
+                    &[0],
+                    &[0],
+                    crate::OutputAxisOrder::identity(),
+                    true,
+                    false,
+                ),
+                Complex64::new(1.0, 0.0),
+                Complex64::new(0.0, 0.0),
+            )
+            .unwrap();
+            assert_eq!(ordinary, oracle);
+            assert!(
+                !ctx.last_resolution_is_core(),
+                "ordinary conjugation must not alias the parent-storage Core resolution"
+            );
+            assert!(ctx.contraction_resolution_cache_len() > prelowered_entries);
+            crate::lowering::reset_adjoint_view_build_count();
+
+            let mut folded_again =
+                vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+            ctx.tensorcontract_fusion_dyn_prelowered_into(
+                &dst_bound,
+                &mut folded_again,
+                lhs_operand,
+                &lhs_data,
+                rhs_operand,
+                &rhs_data,
+                axes(),
+                Complex64::new(1.0, 0.0),
+                Complex64::new(0.0, 0.0),
+            )
+            .unwrap();
+            assert_eq!(folded_again, oracle);
+            assert!(ctx.last_resolution_is_core());
+        }
         // What: neither cold/reset execution nor NoCache may reconstruct the
         // full categorical adjoint view hidden behind the prelowered operand.
         assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
     }
+}
+
+#[test]
+fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eager() {
+    use num_complex::Complex64;
+
+    let rule = FermionParityFusionRule;
+    let odd = SectorId::new(1);
+    let make_space = |codomain_dual: bool, domain_dual: bool| {
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),
+            FusionProductSpace::new([SectorLeg::new([(odd, 1)], domain_dual)]),
+        );
+        crate::DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![1, 1]]).unwrap()
+    };
+    let lhs_space = make_space(true, false);
+    // The externally dual RHS codomain requires the fermionic supertrace twist.
+    let rhs_space = make_space(true, false);
+    let lhs_data = vec![Complex64::new(2.0, 3.0)];
+    let rhs_data = vec![Complex64::new(5.0, -1.0)];
+    let (adj_space, adj_data) = crate::adjoint::adjoint_dyn(&rule, &lhs_space, &lhs_data).unwrap();
+    let dst_space =
+        crate::DynamicFusionMapSpace::contracted(&rule, &adj_space, &rhs_space, &[1], &[0])
+            .unwrap();
+    let provider = Arc::new(rule);
+    let dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dst_space.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let adj_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(adj_space, Arc::clone(&provider))
+            .unwrap();
+    let lhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(lhs_space, Arc::clone(&provider))
+            .unwrap();
+    let rhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(rhs_space, Arc::clone(&provider))
+            .unwrap();
+    let mut context = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
+    let mut eager = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+    context
+        .tensorcontract_fusion_dyn_into(
+            &dst_bound,
+            &mut eager,
+            &adj_bound,
+            &adj_data,
+            &rhs_bound,
+            &rhs_data,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+
+    let mut lazy = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+    context
+        .tensorcontract_fusion_dyn_prelowered_into(
+            &dst_bound,
+            &mut lazy,
+            crate::FusionOperand::prelowered_adjoint(adj_bound.space(), lhs_bound.space()).unwrap(),
+            &lhs_data,
+            crate::FusionOperand::direct(rhs_bound.space()),
+            &rhs_data,
+            TensorContractSpec::new_with_conjugation(
+                &[1],
+                &[0],
+                crate::OutputAxisOrder::identity(),
+                true,
+                false,
+            ),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+
+    assert_eq!(lazy, eager);
+    assert!(
+        !context.last_resolution_is_core(),
+        "a nontrivial fermionic RHS twist must stay on a twist-aware fallback route"
+    );
 }

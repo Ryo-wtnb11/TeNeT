@@ -5,7 +5,9 @@ use tenet_core::{
     SimilarStorage, TensorMap,
 };
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
-use tenet_operations::fusion_replay::{direct_slice, direct_slice_mut, Rank2GemmBatchJob};
+use tenet_operations::fusion_replay::{
+    direct_slice, direct_slice_mut, MatrixOp, Rank2GemmBatchJob,
+};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -166,6 +168,30 @@ where
             )?;
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_rank2_batch_with_ops_axpby_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
+            return self.matmul_rank2_batch_axpby_into_raw(
+                workspace, dst_data, lhs_data, rhs_data, jobs, runs, alpha, beta,
+            );
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "contract backend does not implement transpose/adjoint rank-2 batches",
+        })
     }
 }
 
@@ -457,6 +483,56 @@ where
             )
             .map_err(OperationError::Dense)
     }
+
+    fn matmul_rank2_batch_with_ops_axpby_into_raw(
+        &mut self,
+        _workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        let dst_shape = [dst_data.len()];
+        let lhs_shape = [lhs_data.len()];
+        let rhs_shape = [rhs_data.len()];
+        let flat_strides = [1];
+        let lhs = D::dense_read(DenseView::new_trusted(
+            lhs_data,
+            &lhs_shape,
+            &flat_strides,
+            0,
+        ));
+        let rhs = D::dense_read(DenseView::new_trusted(
+            rhs_data,
+            &rhs_shape,
+            &flat_strides,
+            0,
+        ));
+        let output = D::dense_write(DenseViewMut::new_trusted(
+            dst_data,
+            &dst_shape,
+            &flat_strides,
+            0,
+        ));
+        self.dense_mut()
+            .matmul_batch_axpby_with_ops_into(
+                output,
+                lhs,
+                rhs,
+                jobs,
+                runs,
+                lhs_op,
+                rhs_op,
+                alpha.dense_scalar(),
+                beta.dense_scalar(),
+            )
+            .map_err(OperationError::Dense)
+    }
 }
 
 fn tensorcontract_structure_with_dense_executor<
@@ -691,6 +767,82 @@ where
 mod tests {
     use super::*;
 
+    struct DefaultBatchBackend;
+
+    impl TensorContractBackend<f64, f64> for DefaultBatchBackend {
+        type Workspace = usize;
+
+        fn tensorcontract_structure_into<
+            const DST_NOUT: usize,
+            const DST_NIN: usize,
+            const LHS_NOUT: usize,
+            const LHS_NIN: usize,
+            const RHS_NOUT: usize,
+            const RHS_NIN: usize,
+            SDst,
+            SLhs,
+            SRhs,
+            DDst,
+            DLhs,
+            DRhs,
+        >(
+            &mut self,
+            _workspace: &mut Self::Workspace,
+            _structure: &TensorContractStructure<f64>,
+            _dst: &mut TensorMap<f64, DST_NOUT, DST_NIN, SDst, DDst>,
+            _lhs: &TensorMap<f64, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
+            _rhs: &TensorMap<f64, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
+            _alpha: f64,
+            _beta: f64,
+        ) -> Result<(), OperationError>
+        where
+            DDst: HostWritableStorage<f64>,
+            DLhs: HostReadableStorage<f64>,
+            DRhs: HostReadableStorage<f64>,
+        {
+            unreachable!("default batch tests do not execute structure replay")
+        }
+
+        fn tensorcontract_structure_into_raw(
+            &mut self,
+            _workspace: &mut Self::Workspace,
+            _structure: &TensorContractStructure<f64>,
+            _dst_structure: &Arc<BlockStructure>,
+            _lhs_structure: &Arc<BlockStructure>,
+            _rhs_structure: &Arc<BlockStructure>,
+            _dst_data: &mut [f64],
+            _lhs_data: &[f64],
+            _rhs_data: &[f64],
+            _alpha: f64,
+            _beta: f64,
+        ) -> Result<(), OperationError> {
+            unreachable!("default batch tests do not execute structure replay")
+        }
+
+        fn matmul_rank2_into_raw(
+            &mut self,
+            workspace: &mut Self::Workspace,
+            dst_data: &mut [f64],
+            lhs_data: &[f64],
+            rhs_data: &[f64],
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+        ) -> Result<(), OperationError> {
+            *workspace += 1;
+            for col in 0..cols {
+                for row in 0..rows {
+                    dst_data[row + rows * col] = (0..contracted)
+                        .map(|inner| {
+                            lhs_data[row + rows * inner] * rhs_data[inner + contracted * col]
+                        })
+                        .sum();
+                }
+            }
+            Ok(())
+        }
+    }
+
     fn assert_tensor_contract_backend<B, D, C>()
     where
         B: TensorContractBackend<D, C>,
@@ -711,5 +863,92 @@ mod tests {
     fn dense_tree_transform_operations_keeps_contract_backend_names() {
         assert_tensor_contract_backend::<DenseTreeTransformOperations, f64, f64>();
         assert_host_tensor_contract_backend::<DenseTreeTransformOperations, f64, f64>();
+    }
+
+    #[test]
+    fn default_op_batch_delegates_identity_and_rejects_matrix_views() {
+        // What: the backend-neutral default preserves existing Identity batches
+        // and declines transpose/adjoint unless a backend opts into them.
+        let jobs = [Rank2GemmBatchJob {
+            dst_offset: 0,
+            lhs_offset: 0,
+            rhs_offset: 0,
+            rows: 1,
+            contracted: 1,
+            cols: 1,
+        }];
+        let mut backend = DefaultBatchBackend;
+        let mut calls = 0;
+        let mut dst = [0.0];
+        backend
+            .matmul_rank2_batch_with_ops_axpby_into_raw(
+                &mut calls,
+                &mut dst,
+                &[2.0],
+                &[3.0],
+                &jobs,
+                &[1],
+                MatrixOp::Identity,
+                MatrixOp::Identity,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(dst, [6.0]);
+        assert_eq!(calls, 1);
+
+        let error = backend
+            .matmul_rank2_batch_with_ops_axpby_into_raw(
+                &mut calls,
+                &mut dst,
+                &[2.0],
+                &[3.0],
+                &jobs,
+                &[1],
+                MatrixOp::Adjoint,
+                MatrixOp::Identity,
+                1.0,
+                0.0,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "contract backend does not implement transpose/adjoint rank-2 batches"
+            }
+        ));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn dense_tree_backend_executes_op_bearing_batch() {
+        // What: the built-in backend forwards matrix operations to its dense
+        // executor instead of taking the backend-neutral rejection path.
+        let jobs = [Rank2GemmBatchJob {
+            dst_offset: 0,
+            lhs_offset: 0,
+            rhs_offset: 0,
+            rows: 1,
+            contracted: 1,
+            cols: 1,
+        }];
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TensorContractWorkspace::default();
+        let mut dst = [0.0];
+        <DenseTreeTransformOperations as TensorContractBackend<f64, f64>>::matmul_rank2_batch_with_ops_axpby_into_raw(
+                &mut backend,
+                &mut workspace,
+                &mut dst,
+                &[2.0],
+                &[3.0],
+                &jobs,
+                &[1],
+                MatrixOp::Adjoint,
+                MatrixOp::Identity,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(dst, [6.0]);
     }
 }

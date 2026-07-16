@@ -28,8 +28,8 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
 use super::fusion_block::{
-    compile_fusion_block_contract_plan_validated, is_core_form_fusion_block_contract,
-    validate_fusion_contract_rule,
+    compile_fusion_block_contract_plan_prelowered, compile_fusion_block_contract_plan_validated,
+    is_core_form_fusion_block_contract, validate_fusion_contract_rule,
 };
 use super::structure::TensorContractAxisPlan;
 
@@ -77,6 +77,20 @@ struct FullKey<RuleKey> {
     rhs: FullSpaceKey,
     axes: TensorContractSpecOwned,
     core_only: bool,
+    access: OperandAccess,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+struct OperandAccess {
+    lhs: OperandAccessMode,
+    rhs: OperandAccessMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+enum OperandAccessMode {
+    #[default]
+    Direct,
+    AdjointParent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -128,6 +142,7 @@ struct FastKey<RuleKey> {
     rhs: FastSpaceKey,
     axes: TensorContractSpecOwned,
     core_only: bool,
+    access: OperandAccess,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -155,6 +170,7 @@ struct LastEntry<RuleKey> {
     rhs: LastSpace,
     axes: RawAxes,
     core_only: bool,
+    access: OperandAccess,
     full_key: Option<FullKey<RuleKey>>,
     resolution: Resolution,
 }
@@ -342,17 +358,112 @@ where
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
         RuleKey: 'static + Send + Sync,
     {
-        self.get_or_resolve_with(rule, dst, lhs, rhs, axes, false, || {
-            resolve(
-                rule,
-                dst,
-                lhs,
-                rhs,
-                axes,
-                compile_structure,
-                compile_dynamic,
-            )
-        })
+        self.get_or_resolve_with(
+            rule,
+            dst,
+            lhs,
+            rhs,
+            axes,
+            false,
+            OperandAccess::default(),
+            || {
+                resolve(
+                    rule,
+                    dst,
+                    lhs,
+                    rhs,
+                    axes,
+                    compile_structure,
+                    compile_dynamic,
+                )
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_or_resolve_prelowered<R>(
+        &mut self,
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        lhs_logical: &DynamicFusionMapSpace,
+        lhs_storage: &DynamicFusionMapSpace,
+        rhs_logical: &DynamicFusionMapSpace,
+        rhs_storage: &DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+        compile_structure: impl FnOnce() -> Result<
+            Option<Arc<TensorContractStructure<f64>>>,
+            OperationError,
+        >,
+        compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+    ) -> Result<Resolution, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
+        RuleKey: 'static + Send + Sync,
+    {
+        let access = OperandAccess {
+            lhs: if axes.lhs_conjugate() {
+                OperandAccessMode::AdjointParent
+            } else {
+                OperandAccessMode::Direct
+            },
+            rhs: if axes.rhs_conjugate() {
+                OperandAccessMode::AdjointParent
+            } else {
+                OperandAccessMode::Direct
+            },
+        };
+        self.get_or_resolve_with(
+            rule,
+            dst,
+            lhs_logical,
+            rhs_logical,
+            axes,
+            false,
+            access,
+            || {
+                let logical_axes = TensorContractSpec::new(
+                    axes.lhs_contracting_axes(),
+                    axes.rhs_contracting_axes(),
+                    axes.output_permutation(),
+                );
+                if is_core_form_fusion_block_contract(
+                    rule,
+                    dst,
+                    lhs_logical,
+                    rhs_logical,
+                    logical_axes,
+                )? && !rhs_contract_requires_twist(rule, rhs_logical, logical_axes)?
+                {
+                    let plan = compile_fusion_block_contract_plan_prelowered(
+                        rule,
+                        dst,
+                        lhs_logical,
+                        lhs_storage,
+                        rhs_logical,
+                        rhs_storage,
+                        logical_axes,
+                        if axes.lhs_conjugate() {
+                            tenet_operations::fusion_replay::MatrixOp::Adjoint
+                        } else {
+                            tenet_operations::fusion_replay::MatrixOp::Identity
+                        },
+                        if axes.rhs_conjugate() {
+                            tenet_operations::fusion_replay::MatrixOp::Adjoint
+                        } else {
+                            tenet_operations::fusion_replay::MatrixOp::Identity
+                        },
+                    )?;
+                    if plan.is_fully_direct() {
+                        return Ok(Resolution::Core(Arc::new(plan)));
+                    }
+                }
+                if let Some(structure) = compile_structure()? {
+                    return Ok(Resolution::Structure(structure));
+                }
+                Ok(Resolution::DynamicTree(compile_dynamic()?))
+            },
+        )
     }
 
     /// Core-only entry for the dynamic route's internal scratch
@@ -371,10 +482,19 @@ where
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
         RuleKey: 'static + Send + Sync,
     {
-        let resolution = self.get_or_resolve_with(rule, dst, lhs, rhs, axes, true, || {
-            compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)
-                .map(|plan| Resolution::Core(Arc::new(plan)))
-        })?;
+        let resolution = self.get_or_resolve_with(
+            rule,
+            dst,
+            lhs,
+            rhs,
+            axes,
+            true,
+            OperandAccess::default(),
+            || {
+                compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)
+                    .map(|plan| Resolution::Core(Arc::new(plan)))
+            },
+        )?;
         match resolution {
             Resolution::Core(plan) => Ok(plan),
             _ => Err(OperationError::UnsupportedTensorContractScope {
@@ -392,6 +512,7 @@ where
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
         core_only: bool,
+        access: OperandAccess,
         resolve_cold: impl FnOnce() -> Result<Resolution, OperationError>,
     ) -> Result<Resolution, OperationError>
     where
@@ -405,6 +526,7 @@ where
             let position = self.last.iter().position(|last| {
                 last.rule == rule_key
                     && last.core_only == core_only
+                    && last.access == access
                     && last.dst.matches(dst)
                     && last.lhs.matches(lhs)
                     && last.rhs.matches(rhs)
@@ -450,12 +572,23 @@ where
                 rhs: FastSpaceKey::from_space(rhs),
                 axes: axes_key.clone(),
                 core_only,
+                access,
             };
             if let Some(resolution) = self.fast.get(&fast_key) {
                 self.stats.hits += 1;
                 self.stats.fast_hits += 1;
                 let resolution = resolution.clone();
-                self.remember_last(&rule_key, dst, lhs, rhs, axes, core_only, None, &resolution);
+                self.remember_last(
+                    &rule_key,
+                    dst,
+                    lhs,
+                    rhs,
+                    axes,
+                    core_only,
+                    access,
+                    None,
+                    &resolution,
+                );
                 return Ok(resolution);
             }
 
@@ -466,6 +599,7 @@ where
                 rhs: FullSpaceKey::from_space(rhs)?,
                 axes: axes_key.clone(),
                 core_only,
+                access,
             };
             if let Some(resolution) = self.resolved.get(&full_key) {
                 self.stats.hits += 1;
@@ -479,6 +613,7 @@ where
                     rhs,
                     axes,
                     core_only,
+                    access,
                     Some(full_key),
                     &resolution,
                 );
@@ -506,6 +641,7 @@ where
                     rhs,
                     axes,
                     core_only,
+                    access,
                     Some(full_key),
                     &resolution,
                 );
@@ -530,6 +666,7 @@ where
                 rhs,
                 axes,
                 core_only,
+                access,
                 Some(full_key),
                 &resolution,
             );
@@ -549,6 +686,7 @@ where
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
         core_only: bool,
+        access: OperandAccess,
         full_key: Option<FullKey<RuleKey>>,
         resolution: &Resolution,
     ) {
@@ -561,6 +699,7 @@ where
                 rhs: LastSpace::from_space(rhs),
                 axes: RawAxes::from_axes(axes),
                 core_only,
+                access,
                 full_key,
                 resolution: resolution.clone(),
             },
