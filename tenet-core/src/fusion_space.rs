@@ -137,40 +137,146 @@ struct FusionTreeCoupledSectorLayout {
 
 #[derive(Clone, Debug)]
 struct FusionTreeHomSpaceLayout {
+    id: FusionTreeLayoutId,
     keys: Arc<[FusionTreeBlockKey]>,
     sectors: Vec<FusionTreeCoupledSectorLayout>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+struct FusionTreeLayoutId(usize);
+
+static FUSION_TREE_LAYOUT_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
+    let id = FUSION_TREE_LAYOUT_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("fusion-tree layout identity space exhausted");
+    FusionTreeLayoutId(id)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct CoupledBlockStructureCacheKey {
-    // `layout_ptr` is a raw-pointer key into `fusion_tree_layout_cache`. It is
-    // sound only because that cache is insert-only (`or_insert_with`, never
-    // evicted): a layout Arc, once interned, lives forever, so its address is a
-    // stable identity. Adding eviction to `fusion_tree_layout_cache` would make
-    // this key unsound (freed address recycled by an unrelated layout → ABA).
-    // Re-key on the layout's content identity first if that cache ever bounds.
-    layout_ptr: usize,
+    // Why-not `Arc::as_ptr`: eviction/reset may recycle an address while a
+    // coupled structure keyed by that address is still alive. This monotonic
+    // process-local id is never recycled, including across cache reset.
+    layout: FusionTreeLayoutId,
     nout: usize,
     rank: usize,
     shapes: Arc<[DimVec]>,
 }
 
-/// Layout cache for fusion-tree hom spaces.
-///
-/// MUST remain insert-only — do NOT add an LRU cap here. `coupled_block_structure_cache`
-/// keys its entries by `layout_ptr = Arc::as_ptr(layout)` (below), so evicting a
-/// layout would let its `Arc` be freed and its address recycled by a later layout,
-/// aliasing two distinct layouts under one pointer key. Keeping every layout `Arc`
-/// resident forever is what makes that pointer key sound (the insert-only safety
-/// condition). The table is bounded in practice by the finite set of hom-space
-/// shapes a workload constructs; reclaiming it would first require moving the
-/// coupled-cache key off the raw pointer onto a content id.
-fn fusion_tree_layout_cache(
-) -> &'static RwLock<FxHashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>> {
-    static CACHE: OnceLock<
-        RwLock<FxHashMap<FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>>>,
-    > = OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+struct FusionTreeLayoutCache {
+    entries: lru::LruCache<
+        FusionTreeHomSpaceCacheKey,
+        Arc<FusionTreeHomSpaceLayout>,
+        rustc_hash::FxBuildHasher,
+    >,
+    // Why-not route every hit through LruCache: its linked-list/hash wrapper
+    // regressed the repeated small-layout path past the 3% gate. This bounded
+    // one-entry semantic front avoids pointer authority and preserves that path.
+    last: Option<(FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>)>,
+}
+
+const FUSION_TREE_LAYOUT_CACHE_CAP: usize = 8192;
+
+static FUSION_TREE_LAYOUT_CACHE_MISSES: AtomicUsize = AtomicUsize::new(0);
+static FUSION_TREE_LAYOUT_CACHE_EVICTIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FusionTreeLayoutCacheInfo {
+    entries: usize,
+    capacity: usize,
+    estimated_payload_bytes: usize,
+    misses: usize,
+    evictions: usize,
+}
+
+impl FusionTreeLayoutCacheInfo {
+    pub fn entries(self) -> usize {
+        self.entries
+    }
+
+    pub fn capacity(self) -> usize {
+        self.capacity
+    }
+
+    /// Approximate heap payload owned by keys and layouts.
+    ///
+    /// Hash-table buckets and allocator bookkeeping are excluded because their
+    /// byte cost is allocator-specific and cannot be reported portably here.
+    pub fn estimated_payload_bytes(self) -> usize {
+        self.estimated_payload_bytes
+    }
+
+    pub fn misses(self) -> usize {
+        self.misses
+    }
+
+    pub fn evictions(self) -> usize {
+        self.evictions
+    }
+}
+
+fn fusion_tree_layout_cache() -> &'static RwLock<FusionTreeLayoutCache> {
+    static CACHE: OnceLock<RwLock<FusionTreeLayoutCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        RwLock::new(FusionTreeLayoutCache {
+            entries: lru::LruCache::with_hasher(
+                std::num::NonZeroUsize::new(FUSION_TREE_LAYOUT_CACHE_CAP).unwrap(),
+                rustc_hash::FxBuildHasher,
+            ),
+            last: None,
+        })
+    })
+}
+
+pub fn fusion_tree_layout_cache_info() -> FusionTreeLayoutCacheInfo {
+    let cache = fusion_tree_layout_cache()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let estimated_payload_bytes = cache
+        .entries
+        .iter()
+        .map(|(identity, layout)| {
+            let layout_bytes = std::mem::size_of::<FusionTreeHomSpaceLayout>()
+                + layout.keys.len() * std::mem::size_of::<FusionTreeBlockKey>()
+                + layout.sectors.len() * std::mem::size_of::<FusionTreeCoupledSectorLayout>()
+                + layout
+                    .sectors
+                    .iter()
+                    .map(|sector| {
+                        sector.entries.len() * std::mem::size_of::<FusionTreeBlockLayoutEntry>()
+                    })
+                    .sum::<usize>();
+            estimated_fusion_tree_layout_key_bytes(identity) + layout_bytes
+        })
+        .sum::<usize>()
+        + cache.last.as_ref().map_or(0, |(identity, _)| {
+            std::mem::size_of::<Arc<FusionTreeHomSpaceLayout>>()
+                + estimated_fusion_tree_layout_key_bytes(identity)
+        });
+    FusionTreeLayoutCacheInfo {
+        entries: cache.entries.len(),
+        capacity: FUSION_TREE_LAYOUT_CACHE_CAP,
+        estimated_payload_bytes,
+        misses: FUSION_TREE_LAYOUT_CACHE_MISSES.load(Ordering::Relaxed),
+        evictions: FUSION_TREE_LAYOUT_CACHE_EVICTIONS.load(Ordering::Relaxed),
+    }
+}
+
+fn estimated_fusion_tree_layout_key_bytes(identity: &FusionTreeHomSpaceCacheKey) -> usize {
+    std::mem::size_of::<FusionTreeHomSpaceCacheKey>()
+        + identity
+            .codomain
+            .iter()
+            .chain(identity.domain.iter())
+            .map(|leg| {
+                std::mem::size_of::<FusionTreeLegSetSignature>()
+                    + leg.sectors.len() * std::mem::size_of::<SectorId>()
+            })
+            .sum::<usize>()
 }
 
 type CoupledBlockStructureCache =
@@ -186,13 +292,19 @@ fn coupled_block_structure_cache() -> &'static RwLock<CoupledBlockStructureCache
     })
 }
 
-/// Clears the coupled subblock-structure cache. Part of `reset_core_intern_tables`.
-/// Safe to cap/clear (unlike `fusion_tree_layout_cache`): its entries are `Weak`
-/// values keyed by data, not by a live pointer anything else depends on.
-fn reset_coupled_block_structure_cache() {
-    if let Ok(mut cache) = coupled_block_structure_cache().write() {
-        cache.clear();
-    }
+fn reset_fusion_tree_layout_caches() {
+    let mut layouts = fusion_tree_layout_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    layouts.entries.clear();
+    layouts.last = None;
+    drop(layouts);
+    coupled_block_structure_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    FUSION_TREE_LAYOUT_CACHE_MISSES.store(0, Ordering::Relaxed);
+    FUSION_TREE_LAYOUT_CACHE_EVICTIONS.store(0, Ordering::Relaxed);
 }
 
 /// Process-global intern id for a fusion hom space. [`FusionTreeHomSpace::id`]
@@ -282,6 +394,7 @@ fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) 
 
 fn fusion_tree_layout_from_keys<R>(
     rule: &R,
+    id: FusionTreeLayoutId,
     keys: Vec<FusionTreeBlockKey>,
 ) -> FusionTreeHomSpaceLayout
 where
@@ -326,7 +439,11 @@ where
         });
         run_start = run_end;
     }
-    FusionTreeHomSpaceLayout { keys, sectors }
+    FusionTreeHomSpaceLayout {
+        id,
+        keys,
+        sectors,
+    }
 }
 
 impl FusionTreeHomSpace {
@@ -585,19 +702,35 @@ impl FusionTreeHomSpace {
     {
         let key = FusionTreeHomSpaceCacheKey::new(rule, self);
         let cache = fusion_tree_layout_cache();
-        if let Ok(read) = cache.read() {
-            if let Some(layout) = read.get(&key) {
-                return Arc::clone(layout);
-            }
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, layout)) = read.last.as_ref().filter(|(last, _)| last == &key) {
+            return Arc::clone(layout);
         }
+        if let Some(layout) = read.entries.peek(&key) {
+            return Arc::clone(layout);
+        }
+        drop(read);
 
         let computed = Arc::new(fusion_tree_layout_from_keys(
             rule,
+            next_fusion_tree_layout_id(),
             self.fusion_tree_keys_uncached(rule),
         ));
-        if let Ok(mut write) = cache.write() {
-            return Arc::clone(write.entry(key).or_insert_with(|| Arc::clone(&computed)));
+        let mut write = cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(layout) = write.entries.get(&key).map(Arc::clone) {
+            write.last = Some((key, Arc::clone(&layout)));
+            return layout;
         }
+        FUSION_TREE_LAYOUT_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+        if write.entries.len() == FUSION_TREE_LAYOUT_CACHE_CAP {
+            FUSION_TREE_LAYOUT_CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        write.last = Some((key.clone(), Arc::clone(&computed)));
+        write.entries.put(key, Arc::clone(&computed));
         computed
     }
 
@@ -627,18 +760,20 @@ impl FusionTreeHomSpace {
         self.validate_degeneracy_shapes(layout.keys.as_ref(), &shapes)?;
 
         let cache_key = CoupledBlockStructureCacheKey {
-            layout_ptr: Arc::as_ptr(&layout) as usize,
+            layout: layout.id,
             nout,
             rank,
             shapes: Arc::<[DimVec]>::from(shapes),
         };
         let cache = coupled_block_structure_cache();
         // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
-        if let Ok(read) = cache.read() {
-            if let Some(structure) = read.peek(&cache_key).and_then(Weak::upgrade) {
-                return Ok(structure);
-            }
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(structure) = read.peek(&cache_key).and_then(Weak::upgrade) {
+            return Ok(structure);
         }
+        drop(read);
 
         let specs = coupled_sector_matrix_block_specs_from_layout(
             nout,
@@ -650,7 +785,7 @@ impl FusionTreeHomSpace {
 
         let mut write = cache
             .write()
-            .expect("coupled block structure cache poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(existing) = write.get(&cache_key).and_then(Weak::upgrade) {
             return Ok(existing);
         }
