@@ -22,6 +22,7 @@ include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");
 include!("fusion_space.rs");
+mod su2_exact;
 include!("fusion_rule.rs");
 include!("su3.rs");
 include!("fusion_tree.rs");

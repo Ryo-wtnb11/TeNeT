@@ -1115,6 +1115,7 @@ pub fn reset_core_intern_tables() {
         table.clear();
     }
     reset_fusion_tree_layout_caches();
+    crate::su2_exact::reset_publication_cache();
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
