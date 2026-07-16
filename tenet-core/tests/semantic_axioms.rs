@@ -33,9 +33,10 @@
 //! (output: `benchmarks/tensorkit_semantic_oracle.out`).
 
 use tenet_core::{
-    FermionParityFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    ProductFusionRule, ProductSectorCodec, SU2FusionRule, SU2Irrep, SectorId,
-    TensorKitProductCodec, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    FermionParityFusionRule, Fz2SectorLayout, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
+    ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, Su2SectorLayout, TensorKitProductCodec,
+    U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 
 const TOL: f64 = 1e-12;
@@ -242,9 +243,61 @@ fn su2_sectors(max_twice_spin: usize) -> Vec<SectorId> {
 }
 
 /// `U1 ⊠ fZ2`, sector encoding as `Space::product` (U1 left, fZ2 right).
-type U1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule>;
+type U1Fz2Codec = PackedProductCodec<U1SectorLayout, Fz2SectorLayout>;
+type U1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule, U1Fz2Codec>;
 
 fn u1_fz2_sectors(window: i32) -> Vec<SectorId> {
+    let mut sectors = Vec::new();
+    for q in -window..=window {
+        for p in 0..2usize {
+            sectors.push(U1Fz2Codec::encode(
+                U1Irrep::new(q).sector_id(),
+                SectorId::new(p),
+            ));
+        }
+    }
+    sectors
+}
+
+/// `fZ2 ⊠ U1 ⊠ SU2`, left-associated as in `Space::fz2_u1_su2`.
+type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+
+fn triple_rule() -> TripleRule {
+    ProductFusionRule::new(
+        ProductFusionRule::new(FermionParityFusionRule, U1FusionRule),
+        SU2FusionRule,
+    )
+}
+
+fn triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
+    let inner = Fz2U1Codec::encode(
+        SectorId::new(usize::from(parity & 1)),
+        U1Irrep::new(charge).sector_id(),
+    );
+    TripleCodec::encode(inner, SU2Irrep::from_twice_spin(twice_spin).sector_id())
+}
+
+fn triple_sectors(charge_window: i32, max_twice_spin: usize) -> Vec<SectorId> {
+    let mut sectors = Vec::new();
+    for p in 0..2u8 {
+        for q in -charge_window..=charge_window {
+            for j in 0..=max_twice_spin {
+                sectors.push(triple_sector(p, q, j));
+            }
+        }
+    }
+    sectors
+}
+
+type LegacyU1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule>;
+type LegacyFz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+type LegacyTripleRule = ProductFusionRule<LegacyFz2U1Rule, SU2FusionRule>;
+
+fn legacy_u1_fz2_sectors(window: i32) -> Vec<SectorId> {
     let mut sectors = Vec::new();
     for q in -window..=window {
         for p in 0..2usize {
@@ -257,18 +310,14 @@ fn u1_fz2_sectors(window: i32) -> Vec<SectorId> {
     sectors
 }
 
-/// `fZ2 ⊠ U1 ⊠ SU2`, left-associated as in `Space::fz2_u1_su2`.
-type TripleRule =
-    ProductFusionRule<ProductFusionRule<FermionParityFusionRule, U1FusionRule>, SU2FusionRule>;
-
-fn triple_rule() -> TripleRule {
+fn legacy_triple_rule() -> LegacyTripleRule {
     ProductFusionRule::new(
         ProductFusionRule::new(FermionParityFusionRule, U1FusionRule),
         SU2FusionRule,
     )
 }
 
-fn triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
+fn legacy_triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
     let inner = TensorKitProductCodec::encode(
         SectorId::new(usize::from(parity & 1)),
         U1Irrep::new(charge).sector_id(),
@@ -276,12 +325,12 @@ fn triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
     TensorKitProductCodec::encode(inner, SU2Irrep::from_twice_spin(twice_spin).sector_id())
 }
 
-fn triple_sectors(charge_window: i32, max_twice_spin: usize) -> Vec<SectorId> {
+fn legacy_triple_sectors(charge_window: i32, max_twice_spin: usize) -> Vec<SectorId> {
     let mut sectors = Vec::new();
     for p in 0..2u8 {
         for q in -charge_window..=charge_window {
             for j in 0..=max_twice_spin {
-                sectors.push(triple_sector(p, q, j));
+                sectors.push(legacy_triple_sector(p, q, j));
             }
         }
     }
@@ -326,19 +375,34 @@ fn axioms_su2_exhaustive() {
     check_all("SU2 (2j<=6)", &SU2FusionRule, &su2_sectors(6));
 }
 
+#[cfg(target_pointer_width = "64")]
 #[test]
 fn axioms_u1_fz2() {
     let rule = U1Fz2Rule::new(U1FusionRule, FermionParityFusionRule);
     check_all("U1xfZ2", &rule, &u1_fz2_sectors(2));
 }
 
+#[cfg(target_pointer_width = "64")]
 #[test]
 fn axioms_fz2_u1_su2() {
     check_all("fZ2xU1xSU2", &triple_rule(), &triple_sectors(1, 1));
 }
 
-/// Exhaustive triple-product sweep (|q| <= 2, 2j <= 2).
+/// Historical Cantor codecs remain a coherent expert compatibility option.
+#[test]
+fn axioms_legacy_cantor_product_compatibility() {
+    let pair = LegacyU1Fz2Rule::new(U1FusionRule, FermionParityFusionRule);
+    check_all("legacy Cantor U1xfZ2", &pair, &legacy_u1_fz2_sectors(1));
+    check_all(
+        "legacy Cantor fZ2xU1xSU2",
+        &legacy_triple_rule(),
+        &legacy_triple_sectors(1, 1),
+    );
+}
+
+/// Exhaustive packed triple-product sweep (|q| <= 2, 2j <= 2).
 /// Run with: `cargo test -p tenet-core --release -- --ignored triple_exhaustive`
+#[cfg(target_pointer_width = "64")]
 #[test]
 #[ignore = "exhaustive sweep, run explicitly in release"]
 fn axioms_fz2_u1_su2_triple_exhaustive() {
@@ -430,6 +494,7 @@ fn tensorkit_symbol_values_su2() {
     }
 }
 
+#[cfg(target_pointer_width = "64")]
 #[test]
 fn tensorkit_symbol_values_fz2_u1_su2() {
     let rule = triple_rule();

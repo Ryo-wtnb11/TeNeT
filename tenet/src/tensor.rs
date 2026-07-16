@@ -2126,6 +2126,12 @@ impl Tensor {
 
     /// Random tensor with an explicit seed (splitmix64 stream, entries
     /// uniform in `[-1, 1)`).
+    ///
+    /// Reproducibility is defined for the same TeNeT version and tensor
+    /// layout. The stream fills internal storage order, so a sector codec or
+    /// block-layout migration can produce a different semantic tensor from
+    /// the same seed. Cross-version fixtures should use
+    /// [`Self::from_block_fn`] with semantic [`BlockKey`] labels.
     pub fn rand_with_seed<'a, C, D>(
         rt: &Runtime,
         dtype: Dtype,
@@ -8389,6 +8395,307 @@ mod bound_provider_tests {
 #[cfg(test)]
 mod tk_user_api_tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+    use tenet_core::{
+        Fz2SectorLayout, PackedProductCodec, ProductSectorCodec, ProductSectorLayout,
+        Su2SectorLayout, U1Irrep, U1SectorLayout,
+    };
+
+    type NestedLabel = (usize, i32, usize);
+    type NestedInnerCodec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+    type NestedInnerLayout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+    type NestedOuterCodec = PackedProductCodec<NestedInnerLayout, Su2SectorLayout>;
+
+    const E: NestedLabel = (0, 0, 0);
+    const O: NestedLabel = (1, 0, 1);
+    const T: NestedLabel = (0, 0, 2);
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct NestedSemanticElement {
+        codomain: Vec<NestedLabel>,
+        domain: Vec<NestedLabel>,
+        codomain_inner: Vec<NestedLabel>,
+        domain_inner: Vec<NestedLabel>,
+        codomain_is_dual: Vec<bool>,
+        domain_is_dual: Vec<bool>,
+        coupled: Option<NestedLabel>,
+        indices: Vec<usize>,
+    }
+
+    fn nested_element(
+        codomain: &[NestedLabel],
+        domain: &[NestedLabel],
+        codomain_inner: &[NestedLabel],
+        domain_inner: &[NestedLabel],
+        coupled: NestedLabel,
+        indices: &[usize],
+    ) -> NestedSemanticElement {
+        NestedSemanticElement {
+            codomain: codomain.to_vec(),
+            domain: domain.to_vec(),
+            codomain_inner: codomain_inner.to_vec(),
+            domain_inner: domain_inner.to_vec(),
+            codomain_is_dual: vec![false; codomain.len()],
+            domain_is_dual: vec![false; domain.len()],
+            coupled: Some(coupled),
+            indices: indices.to_vec(),
+        }
+    }
+
+    fn nested_label(sector: SectorId) -> NestedLabel {
+        let (inner, spin) = NestedOuterCodec::decode(sector).unwrap();
+        let (parity, charge) = NestedInnerCodec::decode(inner).unwrap();
+        (
+            parity.id(),
+            U1Irrep::from_sector_id(charge).unwrap().charge(),
+            spin.id(),
+        )
+    }
+
+    fn normalized_nested_element(key: &BlockKey, indices: &[usize]) -> NestedSemanticElement {
+        let BlockKey::FusionTree(key) = key else {
+            panic!("nested product fixture must use fusion-tree blocks");
+        };
+        let labels = |sectors: &[SectorId]| {
+            sectors
+                .iter()
+                .copied()
+                .map(nested_label)
+                .collect::<Vec<_>>()
+        };
+        NestedSemanticElement {
+            codomain: labels(key.codomain_uncoupled()),
+            domain: labels(key.domain_uncoupled()),
+            codomain_inner: labels(key.codomain_innerlines()),
+            domain_inner: labels(key.domain_innerlines()),
+            codomain_is_dual: key.codomain_is_dual().to_vec(),
+            domain_is_dual: key.domain_is_dual().to_vec(),
+            coupled: key.coupled().map(nested_label),
+            indices: indices.to_vec(),
+        }
+    }
+
+    // Why not derive these orders through the legacy Cantor codec: the
+    // coefficient oracle must survive another internal SectorId encoding
+    // change. These normalized keys are copied from the TensorKit oracle.
+    fn nested_source_order() -> Vec<NestedSemanticElement> {
+        vec![
+            nested_element(&[E, E], &[E, E], &[], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, O], &[E, E], &[], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, E], &[O, O], &[], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, O], &[O, O], &[], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, E], &[O, O], &[], &[], E, &[0, 0, 0, 1]),
+            nested_element(&[O, O], &[O, O], &[], &[], E, &[0, 0, 0, 1]),
+            nested_element(&[O, O], &[O, O], &[], &[], T, &[0, 0, 0, 0]),
+            nested_element(&[O, O], &[O, O], &[], &[], T, &[0, 0, 0, 1]),
+            nested_element(&[O, E], &[O, E], &[], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[E, O], &[O, E], &[], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[O, E], &[E, O], &[], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[E, O], &[E, O], &[], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[O, E], &[E, O], &[], &[], O, &[0, 0, 0, 1]),
+            nested_element(&[E, O], &[E, O], &[], &[], O, &[0, 0, 0, 1]),
+        ]
+    }
+
+    fn nested_repartition_3_order() -> Vec<NestedSemanticElement> {
+        let mut order = vec![
+            nested_element(&[E, E, E], &[E], &[E], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, O, E], &[E], &[E], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, E, O], &[E], &[O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, E, O], &[E], &[O], &[], E, &[0, 0, 1, 0]),
+            nested_element(&[E, O, O], &[E], &[O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, O, O], &[E], &[O], &[], E, &[0, 0, 1, 0]),
+            nested_element(&[O, E, E], &[O], &[O], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[E, O, E], &[O], &[O], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[E, E, O], &[O], &[E], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[E, E, O], &[O], &[E], &[], O, &[0, 0, 1, 0]),
+            nested_element(&[O, O, O], &[O], &[E], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[O, O, O], &[O], &[E], &[], O, &[0, 0, 1, 0]),
+            nested_element(&[O, O, O], &[O], &[T], &[], O, &[0, 0, 0, 0]),
+            nested_element(&[O, O, O], &[O], &[T], &[], O, &[0, 0, 1, 0]),
+        ];
+        for element in &mut order {
+            element.codomain_is_dual = vec![false, false, true];
+        }
+        order
+    }
+
+    fn nested_repartition_1_order() -> Vec<NestedSemanticElement> {
+        let mut order = vec![
+            nested_element(&[E], &[E, E, E], &[], &[E], E, &[0, 0, 0, 0]),
+            nested_element(&[E], &[O, O, E], &[], &[E], E, &[0, 0, 0, 0]),
+            nested_element(&[E], &[O, O, E], &[], &[E], E, &[0, 0, 1, 0]),
+            nested_element(&[E], &[O, E, O], &[], &[O], E, &[0, 0, 0, 0]),
+            nested_element(&[E], &[E, O, O], &[], &[O], E, &[0, 0, 0, 0]),
+            nested_element(&[E], &[E, O, O], &[], &[O], E, &[0, 0, 1, 0]),
+            nested_element(&[O], &[O, E, E], &[], &[O], O, &[0, 0, 0, 0]),
+            nested_element(&[O], &[E, O, E], &[], &[O], O, &[0, 0, 0, 0]),
+            nested_element(&[O], &[E, O, E], &[], &[O], O, &[0, 0, 1, 0]),
+            nested_element(&[O], &[E, E, O], &[], &[E], O, &[0, 0, 0, 0]),
+            nested_element(&[O], &[O, O, O], &[], &[E], O, &[0, 0, 0, 0]),
+            nested_element(&[O], &[O, O, O], &[], &[E], O, &[0, 0, 1, 0]),
+            nested_element(&[O], &[O, O, O], &[], &[T], O, &[0, 0, 0, 0]),
+            nested_element(&[O], &[O, O, O], &[], &[T], O, &[0, 0, 1, 0]),
+        ];
+        for element in &mut order {
+            element.domain_is_dual = vec![false, false, true];
+        }
+        order
+    }
+
+    fn nested_repartition_0_order() -> Vec<NestedSemanticElement> {
+        let mut order = vec![
+            nested_element(&[], &[E, E, E, E], &[], &[E, E], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[O, O, E, E], &[], &[E, E], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[O, O, E, E], &[], &[E, E], E, &[0, 1, 0, 0]),
+            nested_element(&[], &[O, E, O, E], &[], &[O, E], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[E, O, O, E], &[], &[O, E], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[E, O, O, E], &[], &[O, E], E, &[0, 1, 0, 0]),
+            nested_element(&[], &[O, E, E, O], &[], &[O, O], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[E, O, E, O], &[], &[O, O], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[E, O, E, O], &[], &[O, O], E, &[0, 1, 0, 0]),
+            nested_element(&[], &[E, E, O, O], &[], &[E, O], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[O, O, O, O], &[], &[E, O], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[O, O, O, O], &[], &[E, O], E, &[0, 1, 0, 0]),
+            nested_element(&[], &[O, O, O, O], &[], &[T, O], E, &[0, 0, 0, 0]),
+            nested_element(&[], &[O, O, O, O], &[], &[T, O], E, &[0, 1, 0, 0]),
+        ];
+        for element in &mut order {
+            element.domain_is_dual = vec![false, false, true, true];
+        }
+        order
+    }
+
+    fn nested_repartition_4_order() -> Vec<NestedSemanticElement> {
+        let mut order = vec![
+            nested_element(&[E, E, E, E], &[], &[E, E], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, O, E, E], &[], &[E, E], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, E, O, E], &[], &[O, E], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, E, O, E], &[], &[O, E], &[], E, &[0, 0, 1, 0]),
+            nested_element(&[E, O, O, E], &[], &[O, E], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, O, O, E], &[], &[O, E], &[], E, &[0, 0, 1, 0]),
+            nested_element(&[O, E, E, O], &[], &[O, O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, O, E, O], &[], &[O, O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, E, O, O], &[], &[E, O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[E, E, O, O], &[], &[E, O], &[], E, &[0, 0, 1, 0]),
+            nested_element(&[O, O, O, O], &[], &[E, O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, O, O, O], &[], &[E, O], &[], E, &[0, 0, 1, 0]),
+            nested_element(&[O, O, O, O], &[], &[T, O], &[], E, &[0, 0, 0, 0]),
+            nested_element(&[O, O, O, O], &[], &[T, O], &[], E, &[0, 0, 1, 0]),
+        ];
+        for element in &mut order {
+            element.codomain_is_dual = vec![false, false, true, true];
+        }
+        order
+    }
+
+    fn nested_semantic_sequence_tensor(
+        rt: &Runtime,
+        codomain: &[&Space],
+        domain: &[&Space],
+    ) -> Tensor {
+        // What: TensorKit's sequential fixture values are attached to
+        // normalized fusion-tree elements rather than TeNeT storage offsets.
+        let order = nested_source_order();
+        let assignments = order
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, semantic)| (semantic, (index + 1) as f64))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            assignments.len(),
+            order.len(),
+            "TensorKit source oracle contains duplicate elements"
+        );
+        let mut visited = BTreeSet::new();
+        let tensor = Tensor::from_block_fn(
+            rt,
+            codomain.iter().copied(),
+            domain.iter().copied(),
+            |key, indices| {
+                let element = normalized_nested_element(key, indices);
+                assert!(
+                    visited.insert(element.clone()),
+                    "TeNeT enumerated a duplicate source semantic element"
+                );
+                assignments
+                    .get(&element)
+                    .copied()
+                    .expect("TensorKit source oracle covers every semantic element")
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            visited,
+            assignments.keys().cloned().collect(),
+            "TensorKit and TeNeT source semantic element sets differ"
+        );
+        tensor
+    }
+
+    fn assert_nested_semantic_fixture(
+        actual: &Tensor,
+        order: &[NestedSemanticElement],
+        expected: &[f64],
+    ) {
+        // What: each expected coefficient/sign is selected by normalized
+        // fusion-tree labels, dual flags, and local degeneracy indices, with
+        // exact coverage and no duplicate or extra elements.
+        assert_eq!(order.len(), expected.len());
+        let expected = order
+            .iter()
+            .cloned()
+            .zip(expected.iter().copied())
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            expected.len(),
+            order.len(),
+            "TensorKit semantic oracle contains duplicate elements"
+        );
+
+        let structure = actual.ordinary_body().space.structure();
+        let mut observed = BTreeMap::new();
+        for block_index in 0..structure.block_count() {
+            let block = structure.block(block_index).unwrap();
+            let mut indices = vec![0usize; block.shape().len()];
+            let count: usize = block.shape().iter().product();
+            for _ in 0..count {
+                let position = block.offset()
+                    + indices
+                        .iter()
+                        .zip(block.strides())
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>();
+                let semantic = normalized_nested_element(block.key(), &indices);
+                assert!(
+                    observed.insert(semantic, actual.data()[position]).is_none(),
+                    "TeNeT produced a duplicate normalized semantic element"
+                );
+                for (axis, index) in indices.iter_mut().enumerate() {
+                    *index += 1;
+                    if *index < block.shape()[axis] {
+                        break;
+                    }
+                    *index = 0;
+                }
+            }
+        }
+        assert_eq!(observed.len(), actual.data().len());
+        assert_eq!(
+            observed.keys().collect::<Vec<_>>(),
+            expected.keys().collect::<Vec<_>>(),
+            "TensorKit and TeNeT semantic element sets differ"
+        );
+        for (semantic, expected) in expected {
+            let actual = observed[&semantic];
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "TensorKit semantic fixture mismatch for {semantic:?}: \
+                 actual={actual}, expected={expected}"
+            );
+        }
+    }
 
     fn sequential_f64_tensor(rt: &Runtime, codomain: &[&Space], domain: &[&Space]) -> Tensor {
         let mut tensor = Tensor::zeros(
@@ -8660,13 +8967,14 @@ mod tk_user_api_tests {
         let b = Space::fz2_u1_su2(base).unwrap();
         let c = Space::fz2_u1_su2(base).unwrap();
         let d = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 0, 1), 2)]).unwrap();
-        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+        let source = nested_semantic_sequence_tensor(&rt, &[&a, &b], &[&c, &d]);
 
         let output = source.repartition(3).unwrap();
 
         assert_external_axis_order(&output, &source, &[0, 1, 3, 2]);
-        assert_tensorkit_fixture(
-            output.data(),
+        assert_nested_semantic_fixture(
+            &output,
+            &nested_repartition_3_order(),
             &[
                 1.0,
                 2.0,
@@ -8767,14 +9075,15 @@ mod tk_user_api_tests {
         let b = Space::fz2_u1_su2(base).unwrap();
         let c = Space::fz2_u1_su2(base).unwrap();
         let d = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 0, 1), 2)]).unwrap();
-        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+        let source = nested_semantic_sequence_tensor(&rt, &[&a, &b], &[&c, &d]);
 
         let output = source.repartition(1).unwrap();
 
         assert_eq!((output.codomain_rank(), output.domain_rank()), (1, 3));
         assert_external_axis_order(&output, &source, &[0, 2, 3, 1]);
-        assert_tensorkit_fixture(
-            output.data(),
+        assert_nested_semantic_fixture(
+            &output,
+            &nested_repartition_1_order(),
             &[
                 1.0,
                 3.0,
@@ -8785,9 +9094,9 @@ mod tk_user_api_tests {
                 9.000_000_000_000_002,
                 11.0,
                 13.0,
-                -1.414_213_562_373_095,
-                -2.828_427_124_746_190,
-                -4.242_640_687_119_286,
+                -std::f64::consts::SQRT_2,
+                -2.0 * std::f64::consts::SQRT_2,
+                -3.0 * std::f64::consts::SQRT_2,
                 8.573_214_099_741_124,
                 9.797_958_971_132_713,
             ],
@@ -8824,12 +9133,13 @@ mod tk_user_api_tests {
         let nb = Space::fz2_u1_su2(base).unwrap();
         let nc = Space::fz2_u1_su2(base).unwrap();
         let nd = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 0, 1), 2)]).unwrap();
-        let nested = sequential_f64_tensor(&rt, &[&na, &nb], &[&nc, &nd]);
+        let nested = nested_semantic_sequence_tensor(&rt, &[&na, &nb], &[&nc, &nd]);
 
         let nested_all_domain = nested.repartition(0).unwrap();
         assert_external_axis_order(&nested_all_domain, &nested, &[2, 3, 1, 0]);
-        assert_tensorkit_fixture(
-            nested_all_domain.data(),
+        assert_nested_semantic_fixture(
+            &nested_all_domain,
+            &nested_repartition_0_order(),
             &[
                 1.0,
                 3.0,
@@ -8850,8 +9160,9 @@ mod tk_user_api_tests {
 
         let nested_all_codomain = nested.repartition(nested.rank()).unwrap();
         assert_external_axis_order(&nested_all_codomain, &nested, &[0, 1, 3, 2]);
-        assert_tensorkit_fixture(
-            nested_all_codomain.data(),
+        assert_nested_semantic_fixture(
+            &nested_all_codomain,
+            &nested_repartition_4_order(),
             &[
                 1.0,
                 2.0,

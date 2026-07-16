@@ -2623,6 +2623,177 @@ mod tests {
         }
     }
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn packed_product_codec_is_association_independent() {
+        // What: fixed-width product IDs flatten numerically regardless of the
+        // source-level association used to build the same ordered leaves.
+        type FpU1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type FpU1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+        type LeftAssociated = PackedProductCodec<FpU1Layout, Su2SectorLayout>;
+        type U1Su2Codec = PackedProductCodec<U1SectorLayout, Su2SectorLayout>;
+        type U1Su2Layout = ProductSectorLayout<U1SectorLayout, Su2SectorLayout>;
+        type RightAssociated = PackedProductCodec<Fz2SectorLayout, U1Su2Layout>;
+
+        for (parity, charge, twice_spin) in [
+            (z2_even(), i32::MIN, 0),
+            (z2_odd(), -1, 1),
+            (z2_even(), 0, 2),
+            (z2_odd(), i32::MAX, 254),
+        ] {
+            let left = FpU1Codec::encode(parity, u1(charge));
+            let left_associated = LeftAssociated::encode(left, su2(twice_spin));
+            let right = U1Su2Codec::encode(u1(charge), su2(twice_spin));
+            let right_associated = RightAssociated::encode(parity, right);
+            assert_eq!(left_associated, right_associated);
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn packed_product_codec_covers_the_builtin_leaf_domains() {
+        // What: the codec represents the complete i32 U1 label domain
+        // together with every currently supported SU2 label; algebraic
+        // overflow behavior is tracked separately in issue #274.
+        type FpU1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type FpU1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+        type TripleCodec = PackedProductCodec<FpU1Layout, Su2SectorLayout>;
+
+        for charge in [i32::MIN, -1, 0, 1, i32::MAX] {
+            for twice_spin in [0, 1, 127, 254] {
+                let inner = FpU1Codec::encode(z2_odd(), u1(charge));
+                let encoded = TripleCodec::encode(inner, su2(twice_spin));
+                let (decoded_inner, decoded_spin) = TripleCodec::decode(encoded).unwrap();
+                let (decoded_parity, decoded_charge) =
+                    FpU1Codec::decode(decoded_inner).unwrap();
+                assert_eq!(decoded_parity, z2_odd());
+                assert_eq!(decoded_charge, u1(charge));
+                assert_eq!(decoded_spin, su2(twice_spin));
+            }
+        }
+    }
+
+    struct PermissiveOneBitLayout;
+
+    impl PackedSectorLayout for PermissiveOneBitLayout {
+        const BITS: u32 = 1;
+
+        fn validate(_sector: SectorId) -> Result<(), ProductSectorCodecError> {
+            Ok(())
+        }
+    }
+
+    struct ZeroBitLayout;
+
+    impl PackedSectorLayout for ZeroBitLayout {
+        const BITS: u32 = 0;
+
+        fn validate(sector: SectorId) -> Result<(), ProductSectorCodecError> {
+            (sector.id() == 0)
+                .then_some(())
+                .ok_or(ProductSectorCodecError::InvalidHighBits {
+                    sector,
+                    total_bits: 0,
+                })
+        }
+    }
+
+    struct FullWidthLayout;
+
+    impl PackedSectorLayout for FullWidthLayout {
+        const BITS: u32 = usize::BITS;
+
+        fn validate(_sector: SectorId) -> Result<(), ProductSectorCodecError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn packed_product_codec_reports_invalid_components_and_widths() {
+        // What: malformed packed IDs and layouts wider than usize fail with a
+        // typed reason instead of panicking, wrapping, or silently truncating.
+        type FpU1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        let invalid_parity = FpU1Codec::encode_checked(SectorId::new(2), u1(0));
+        assert!(matches!(
+            invalid_parity,
+            Err(ProductSectorCodecError::ComponentOutOfRange {
+                component: ProductSectorComponent::Left,
+                ..
+            })
+        ));
+
+        type MaliciousCodec = PackedProductCodec<PermissiveOneBitLayout, Fz2SectorLayout>;
+        assert!(matches!(
+            MaliciousCodec::encode_checked(SectorId::new(2), SectorId::new(0)),
+            Err(ProductSectorCodecError::ComponentOutOfRange {
+                component: ProductSectorComponent::Left,
+                ..
+            })
+        ));
+
+        type TripleLayout =
+            ProductSectorLayout<ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>, Su2SectorLayout>;
+        assert_eq!(TripleLayout::BITS, 41);
+        #[cfg(target_pointer_width = "64")]
+        {
+            let invalid_high_bits = SectorId::new(1usize << TripleLayout::BITS);
+            assert!(matches!(
+                TripleLayout::validate(invalid_high_bits),
+                Err(ProductSectorCodecError::InvalidHighBits { .. })
+            ));
+        }
+
+        type TooWide = PackedProductCodec<
+            ProductSectorLayout<U1SectorLayout, U1SectorLayout>,
+            U1SectorLayout,
+        >;
+        assert!(matches!(
+            TooWide::encode_checked(SectorId::new(0), SectorId::new(0)),
+            Err(ProductSectorCodecError::WidthOverflow { .. })
+        ));
+
+        type FullThenZero = PackedProductCodec<FullWidthLayout, ZeroBitLayout>;
+        let full = FullThenZero::encode_checked(SectorId::new(usize::MAX), SectorId::new(0))
+            .unwrap();
+        assert_eq!(full, SectorId::new(usize::MAX));
+        assert_eq!(
+            FullThenZero::decode_checked(full).unwrap(),
+            (SectorId::new(usize::MAX), SectorId::new(0))
+        );
+
+        type ZeroThenParity = PackedProductCodec<ZeroBitLayout, Fz2SectorLayout>;
+        assert_eq!(
+            ZeroThenParity::encode_checked(SectorId::new(0), SectorId::new(1)).unwrap(),
+            SectorId::new(1)
+        );
+    }
+
+    #[test]
+    fn packed_and_tensorkit_codecs_remain_distinct_compatible_options() {
+        // What: the expert Cantor codec keeps its historical IDs while the
+        // packed codec has a distinct rule identity and round-trips the same
+        // semantic components.
+        type PackedCodec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type PackedRule =
+            ProductFusionRule<FermionParityFusionRule, U1FusionRule, PackedCodec>;
+        type CantorRule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+
+        let parity = z2_odd();
+        let charge = u1(2);
+        let packed = PackedCodec::encode(parity, charge);
+        let cantor = TensorKitProductCodec::encode(parity, charge);
+        assert_ne!(packed, cantor);
+        assert_eq!(PackedCodec::decode(packed), Some((parity, charge)));
+        assert_eq!(
+            TensorKitProductCodec::decode(cantor),
+            Some((parity, charge))
+        );
+        assert_ne!(
+            PackedRule::default().rule_identity(),
+            CantorRule::default().rule_identity()
+        );
+    }
+
     #[test]
     fn product_sector_api_exposes_only_generic_composition() {
         let pair = product_sector(z2_odd(), u1(2));
