@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock};
 
 use tenet_core::{
     BlockStructure, CoreError, FusionRule, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
-    TensorStorage,
+    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement, ScratchStorage,
+    SimilarStorage, TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -28,7 +28,10 @@ use super::backend::{
 use super::dynamic::{
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
-use super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand};
+use super::dynamic_space::{
+    encoded_layout_primer, lowered_layout_primer, BoundDynamicFusionMapSpace,
+    DynamicFusionMapSpace, FusionOperand, LayoutPrimer,
+};
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
     tensorcontract_fusion_structure, tensorcontract_fusion_structure_dyn_prelowered,
@@ -995,6 +998,43 @@ where
         )
     }
 
+    /// Built-in multiplicity-free sibling that carries typed sectors through
+    /// cold layout enumeration before encoding the persistent block keys.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_into_lowered<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + LoweredMultiplicityFreeAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_into_raw_with_primer(
+            lhs_space.provider(),
+            dst_space.space(),
+            dst_data,
+            lhs_space.space(),
+            lhs_data,
+            rhs_space.space(),
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            lowered_layout_primer::<R>,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tensorcontract_fusion_dyn_into_raw<R>(
         &mut self,
@@ -1008,6 +1048,40 @@ where
         axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_into_raw_with_primer(
+            rule,
+            dst_space,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            encoded_layout_primer::<R>,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tensorcontract_fusion_dyn_into_raw_with_primer<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: &mut [D],
+        lhs_space: &DynamicFusionMapSpace,
+        lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+        layout_primer: LayoutPrimer<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1061,6 +1135,7 @@ where
             rhs_data,
             alpha,
             beta,
+            layout_primer,
         )
     }
 
@@ -1082,6 +1157,73 @@ where
         axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_prelowered_into_with_primer(
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            encoded_layout_primer::<R>,
+        )
+    }
+
+    /// Built-in multiplicity-free sibling of the validated prelowered seam.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_prelowered_into_lowered<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + LoweredMultiplicityFreeAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_prelowered_into_with_primer(
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            lowered_layout_primer::<R>,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tensorcontract_fusion_dyn_prelowered_into_with_primer<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+        layout_primer: LayoutPrimer<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1159,6 +1301,7 @@ where
             rhs_data,
             alpha,
             beta,
+            layout_primer,
         )
     }
 
@@ -1383,6 +1526,7 @@ where
         rhs_data: &[D],
         alpha: D,
         beta: D,
+        layout_primer: LayoutPrimer<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1441,6 +1585,7 @@ where
                     fusion_block_workspace,
                     fusion_scratch,
                     rule,
+                    layout_primer,
                     plan.as_ref(),
                     dst_space,
                     dst_structure,
@@ -1536,6 +1681,7 @@ where
             rhs.data(),
             alpha,
             beta,
+            encoded_layout_primer::<R>,
         )
     }
 

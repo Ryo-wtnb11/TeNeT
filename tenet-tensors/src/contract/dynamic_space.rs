@@ -987,7 +987,7 @@ impl DynamicFusionMapSpace {
         self.transformed_with_primer(rule, operation, lowered_layout_primer::<R>)
     }
 
-    fn transformed_with_primer<R>(
+    pub(crate) fn transformed_with_primer<R>(
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
@@ -1262,27 +1262,18 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        let nout = plan.core_dst_open_lhs_rank();
-        let nin = plan.core_dst_open_rhs_rank();
-        Self::contracted_space(
-            rule,
-            lhs,
-            rhs,
-            plan.core_axes().as_spec(),
-            nout,
-            nin,
-            encoded_layout_primer::<R>,
-        )
+        Self::core_dst_with_primer(rule, lhs, rhs, plan, encoded_layout_primer::<R>)
     }
 
-    pub(crate) fn core_dst_lowered<R>(
+    pub(crate) fn core_dst_with_primer<R>(
         rule: &R,
         lhs: &Self,
         rhs: &Self,
         plan: &FusionContractPlan,
+        primer: LayoutPrimer<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         let nout = plan.core_dst_open_lhs_rank();
         let nin = plan.core_dst_open_rhs_rank();
@@ -1293,7 +1284,7 @@ impl DynamicFusionMapSpace {
             plan.core_axes().as_spec(),
             nout,
             nin,
-            lowered_layout_primer::<R>,
+            primer,
         )
     }
 
@@ -1680,6 +1671,8 @@ mod lowered_metadata_tests {
         )
         .unwrap();
         assert_eq!(primer_calls(), 1);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
         let encoded_final = DynamicFusionMapSpace::from_final_homspace(&rule, homspace()).unwrap();
         assert_eq!(final_space, encoded_final);
 
@@ -1694,7 +1687,10 @@ mod lowered_metadata_tests {
             .unwrap();
         assert_eq!(primer_calls(), 1);
         assert_eq!(transformed, warm);
-        assert_eq!(transformed, source.transformed(&rule, &operation).unwrap());
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let encoded_transformed = source.transformed(&rule, &operation).unwrap();
+        assert_eq!(transformed, encoded_transformed);
 
         crate::reset_global_operation_caches();
         reset_primer_calls();
@@ -1721,10 +1717,11 @@ mod lowered_metadata_tests {
         .unwrap();
         assert_eq!(primer_calls(), 1);
         assert_eq!(contracted, warm);
-        assert_eq!(
-            contracted,
-            DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap()
-        );
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let encoded_contracted =
+            DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
+        assert_eq!(contracted, encoded_contracted);
     }
 
     #[test]

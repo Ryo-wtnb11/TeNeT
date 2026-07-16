@@ -800,14 +800,21 @@ mod cache_tests {
         let warm = adjoint_space_dyn_with_primer(&rule, &source, counting_primer).unwrap();
         assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 1);
         assert_eq!(lowered, warm);
-        assert_eq!(lowered, adjoint_space_dyn(&rule, &source).unwrap());
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let encoded_lazy = adjoint_space_dyn(&rule, &source).unwrap();
+        assert_eq!(lowered, encoded_lazy);
 
         let data = (0..source.required_len().unwrap())
             .map(|index| index as f64 + 0.25)
             .collect::<Vec<_>>();
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
         let (lowered_space, lowered_data) =
             adjoint_dyn_with_primer(&rule, &source, &data, lowered_layout_primer::<TripleRule>)
                 .unwrap();
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
         let (encoded_space, encoded_data) = adjoint_dyn(&rule, &source, &data).unwrap();
         assert_eq!(lowered_space, encoded_space);
         assert_eq!(lowered_data, encoded_data);

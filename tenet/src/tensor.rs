@@ -3734,7 +3734,7 @@ impl Tensor {
                 // order and bitwise output; only lazy operands need categorical
                 // geometry separated from their parent storage.
                 if !lhs_conj && !rhs_conj {
-                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into(
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into_lowered(
                         $dst,
                         &mut data,
                         $lhs_logical,
@@ -3762,7 +3762,7 @@ impl Tensor {
                     } else {
                         tenet_tensors::FusionOperand::direct($rhs_logical.space())
                     };
-                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into(
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into_lowered(
                         $dst,
                         &mut data,
                         lhs,
@@ -6548,12 +6548,14 @@ fn contract_into_bound<R, D, Key>(
     beta: D,
 ) -> Result<(), Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = Key>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + TreeTransformRuleCacheKey<Key = Key>,
     D: UserScalar,
     Key: Clone + Eq + Hash + Send + Sync + 'static,
 {
     D::ctx_of(contexts)
-        .tensorcontract_fusion_dyn_into(
+        .tensorcontract_fusion_dyn_into_lowered(
             dst_space,
             dst_data,
             lhs_space,
