@@ -642,7 +642,9 @@ mod cache_tests {
         };
         assert_ne!(
             make(TreeTransformBuiltinRuleCacheKey::U1),
-            make(TreeTransformBuiltinRuleCacheKey::SU2)
+            make(TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            })
         );
     }
 }
