@@ -15,10 +15,9 @@ use tenet_core::{
 };
 
 use crate::cache::registered_operation_cache;
-use crate::contract::{
-    encoded_layout_primer, lowered_layout_primer, BoundDynamicFusionMapSpace,
-    DynamicFusionMapSpace, LayoutPrimer,
-};
+#[cfg(test)]
+use crate::contract::{encoded_layout_primer, lowered_layout_primer};
+use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutPrimer};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
 
@@ -96,6 +95,7 @@ where
 /// and even this metadata build pays per-key shape lookups plus
 /// `from_degeneracy_shapes`/`scratch_subblock_structure`/content interning, so
 /// an equal source resolves the already-built space instead (#118).
+#[cfg(test)]
 pub(crate) fn adjoint_space_dyn<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
@@ -104,18 +104,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
     adjoint_space_dyn_with_primer(rule, space, encoded_layout_primer::<R>)
-}
-
-pub(crate) fn adjoint_space_dyn_lowered<R>(
-    rule: &R,
-    space: &DynamicFusionMapSpace,
-) -> Result<DynamicFusionMapSpace, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey
-        + LoweredMultiplicityFreeAlgebra,
-{
-    adjoint_space_dyn_with_primer(rule, space, lowered_layout_primer::<R>)
 }
 
 fn adjoint_space_dyn_with_primer<R>(
@@ -203,6 +191,7 @@ where
 /// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
 /// domain swapped) together with freshly allocated coupled-layout data whose
 /// blocks are the conjugate transposes of the source blocks.
+#[cfg(test)]
 pub(crate) fn adjoint_dyn<R, D>(
     rule: &R,
     space: &DynamicFusionMapSpace,
@@ -213,18 +202,6 @@ where
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
     adjoint_dyn_with_primer(rule, space, data, encoded_layout_primer::<R>)
-}
-
-fn adjoint_dyn_lowered<R, D>(
-    rule: &R,
-    space: &DynamicFusionMapSpace,
-    data: &[D],
-) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
-{
-    adjoint_dyn_with_primer(rule, space, data, lowered_layout_primer::<R>)
 }
 
 fn adjoint_dyn_with_primer<R, D>(
@@ -321,9 +298,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
-    let (output, data) = adjoint_dyn(space.provider(), space.space(), data)?;
-    let output =
-        BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)?;
+    let (output, data) =
+        adjoint_dyn_with_primer(space.provider(), space.space(), data, space.layout_primer())?;
+    let output = BoundDynamicFusionMapSpace::from_derived_like(space, output)?;
     Ok((output, data))
 }
 
@@ -336,9 +313,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
-    let (output, data) = adjoint_dyn_lowered(space.provider(), space.space(), data)?;
-    let output =
-        BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)?;
+    let (output, data) =
+        adjoint_dyn_with_primer(space.provider(), space.space(), data, space.layout_primer())?;
+    let output = BoundDynamicFusionMapSpace::from_derived_like(space, output)?;
     Ok((output, data))
 }
 
@@ -366,8 +343,9 @@ pub fn adjoint_bound_space_dyn<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
-    let output = adjoint_space_dyn(space.provider(), space.space())?;
-    BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
+    let output =
+        adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;
+    BoundDynamicFusionMapSpace::from_derived_like(space, output)
 }
 
 #[doc(hidden)]
@@ -379,8 +357,9 @@ where
         + TreeTransformRuleCacheKey
         + LoweredMultiplicityFreeAlgebra,
 {
-    let output = adjoint_space_dyn_lowered(space.provider(), space.space())?;
-    BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
+    let output =
+        adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;
+    BoundDynamicFusionMapSpace::from_derived_like(space, output)
 }
 
 /// Generic lazy-adjoint metadata retaining the exact provider allocation of

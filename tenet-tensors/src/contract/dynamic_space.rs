@@ -15,6 +15,45 @@ use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 pub(crate) type LayoutPrimer<R> = fn(&R, &FusionTreeHomSpace) -> Result<(), OperationError>;
 
+struct LayoutBuildCapability<R> {
+    prime: LayoutPrimer<R>,
+}
+
+impl<R> Copy for LayoutBuildCapability<R> {}
+
+impl<R> Clone for LayoutBuildCapability<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> LayoutBuildCapability<R> {
+    const fn encoded() -> Self {
+        Self {
+            prime: encoded_layout_primer::<R>,
+        }
+    }
+
+    fn same_as(self, other: Self) -> bool {
+        self.prime as usize == other.prime as usize
+    }
+
+    fn prime(self, rule: &R, homspace: &FusionTreeHomSpace) -> Result<(), OperationError> {
+        (self.prime)(rule, homspace)
+    }
+}
+
+impl<R> LayoutBuildCapability<R>
+where
+    R: LoweredMultiplicityFreeAlgebra,
+{
+    const fn lowered() -> Self {
+        Self {
+            prime: lowered_layout_primer::<R>,
+        }
+    }
+}
+
 pub(crate) fn encoded_layout_primer<R>(
     _rule: &R,
     _homspace: &FusionTreeHomSpace,
@@ -317,6 +356,7 @@ fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), 
 pub struct BoundDynamicFusionMapSpace<R> {
     space: DynamicFusionMapSpace,
     provider: Arc<R>,
+    layout_build: LayoutBuildCapability<R>,
 }
 
 #[derive(Clone, Debug)]
@@ -364,6 +404,7 @@ impl<R> Clone for BoundDynamicFusionMapSpace<R> {
         Self {
             space: self.space.clone(),
             provider: Arc::clone(&self.provider),
+            layout_build: self.layout_build,
         }
     }
 }
@@ -381,9 +422,10 @@ impl<R> BoundDynamicFusionMapSpace<R>
 where
     R: FusionRule,
 {
-    pub(crate) fn from_derived(
+    fn from_derived_with_capability(
         provider: Arc<R>,
         space: DynamicFusionMapSpace,
+        layout_build: LayoutBuildCapability<R>,
     ) -> Result<Self, OperationError> {
         // Why not enumerate the tree grid again: callers in this crate create
         // `space` through checked structural operations from an already-bound
@@ -391,7 +433,25 @@ where
         // new trust boundary; the rule identity remains cheap to verify.
         validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
-        Ok(Self { space, provider })
+        Ok(Self {
+            space,
+            provider,
+            layout_build,
+        })
+    }
+
+    pub(crate) fn from_derived(
+        provider: Arc<R>,
+        space: DynamicFusionMapSpace,
+    ) -> Result<Self, OperationError> {
+        Self::from_derived_with_capability(provider, space, LayoutBuildCapability::encoded())
+    }
+
+    pub(crate) fn from_derived_like(
+        source: &Self,
+        space: DynamicFusionMapSpace,
+    ) -> Result<Self, OperationError> {
+        Self::from_derived_with_capability(Arc::clone(&source.provider), space, source.layout_build)
     }
 
     /// Builds and binds a multiplicity-free space in one checked pass.
@@ -408,6 +468,25 @@ where
         let space =
             DynamicFusionMapSpace::from_degeneracy_shapes(provider.as_ref(), homspace, shapes)?;
         Self::from_derived(provider, space)
+    }
+
+    /// Builds the ordinary TeNeT multiplicity-free root with lowered metadata.
+    #[doc(hidden)]
+    pub fn from_degeneracy_shapes_lowered<Shapes>(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let layout_build = LayoutBuildCapability::lowered();
+        layout_build.prime(provider.as_ref(), &homspace)?;
+        let space =
+            DynamicFusionMapSpace::from_degeneracy_shapes(provider.as_ref(), homspace, shapes)?;
+        Self::from_derived_with_capability(provider, space, layout_build)
     }
 
     /// Builds and binds a multiplicity-aware space in one checked pass.
@@ -436,7 +515,11 @@ where
         validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
         space.validate_complete_tree_grid(&keys)?;
-        Ok(Self { space, provider })
+        Ok(Self {
+            space,
+            provider,
+            layout_build: LayoutBuildCapability::encoded(),
+        })
     }
 
     /// Binds a space using multiplicity-free tree enumeration.
@@ -476,14 +559,15 @@ where
         // The lhs is the authority for a result of two independently-built but
         // semantically identical tensors. Why not require Arc::ptr_eq: public
         // tensors may own distinct provider allocations with one RuleIdentity.
-        let space = DynamicFusionMapSpace::contracted(
+        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
+        let space = DynamicFusionMapSpace::contracted_with_spec_and_primer(
             lhs.provider.as_ref(),
             &lhs.space,
             &rhs.space,
-            lhs_axes,
-            rhs_axes,
+            axes,
+            lhs.layout_build.prime,
         )?;
-        Self::from_derived(Arc::clone(&lhs.provider), space)
+        Self::from_derived_like(lhs, space)
     }
 
     #[doc(hidden)]
@@ -496,15 +580,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     {
-        Self::validate_shared_provider(lhs, rhs)?;
-        let space = DynamicFusionMapSpace::contracted_lowered(
-            lhs.provider.as_ref(),
-            &lhs.space,
-            &rhs.space,
-            lhs_axes,
-            rhs_axes,
-        )?;
-        Self::from_derived(Arc::clone(&lhs.provider), space)
+        Self::contracted_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes)
     }
 
     /// Builds a checked contraction result directly in the requested output
@@ -525,13 +601,14 @@ where
     {
         Self::validate_shared_provider(lhs, rhs)?;
         let axes = TensorContractSpec::new(lhs_axes, rhs_axes, output_order);
-        let space = DynamicFusionMapSpace::contracted_with_spec(
+        let space = DynamicFusionMapSpace::contracted_with_spec_and_primer(
             lhs.provider.as_ref(),
             &lhs.space,
             &rhs.space,
             axes,
+            lhs.layout_build.prime,
         )?;
-        Self::from_derived(Arc::clone(&lhs.provider), space)
+        Self::from_derived_like(lhs, space)
     }
 
     #[doc(hidden)]
@@ -545,15 +622,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     {
-        Self::validate_shared_provider(lhs, rhs)?;
-        let axes = TensorContractSpec::new(lhs_axes, rhs_axes, output_order);
-        let space = DynamicFusionMapSpace::contracted_with_spec_lowered(
-            lhs.provider.as_ref(),
-            &lhs.space,
-            &rhs.space,
-            axes,
-        )?;
-        Self::from_derived(Arc::clone(&lhs.provider), space)
+        Self::contracted_multiplicity_free_ordered(lhs, rhs, lhs_axes, rhs_axes, output_order)
     }
 
     /// Validates contraction compatibility without building a coupled result
@@ -610,9 +679,13 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     {
-        let space =
-            DynamicFusionMapSpace::from_final_homspace_lowered(provider.as_ref(), homspace)?;
-        Self::from_derived(provider, space)
+        let layout_build = LayoutBuildCapability::lowered();
+        let space = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            provider.as_ref(),
+            homspace,
+            layout_build.prime,
+        )?;
+        Self::from_derived_with_capability(provider, space, layout_build)
     }
 
     /// Builds a multiplicity-aware contraction result and normalizes its
@@ -638,7 +711,7 @@ where
             lhs_axes,
             rhs_axes,
         )?;
-        Self::from_derived(Arc::clone(&lhs.provider), space)
+        Self::from_derived_like(lhs, space)
     }
 
     /// Generic sibling of [`Self::from_final_homspace_multiplicity_free`].
@@ -659,8 +732,12 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        let space = self.space.transformed(self.provider.as_ref(), operation)?;
-        Self::from_derived(Arc::clone(&self.provider), space)
+        let space = self.space.transformed_with_primer(
+            self.provider.as_ref(),
+            operation,
+            self.layout_build.prime,
+        )?;
+        Self::from_derived_like(self, space)
     }
 
     #[doc(hidden)]
@@ -671,10 +748,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     {
-        let space = self
-            .space
-            .transformed_lowered(self.provider.as_ref(), operation)?;
-        Self::from_derived(Arc::clone(&self.provider), space)
+        self.transformed_multiplicity_free(operation)
     }
 
     /// Generic tree-transform result retaining the source provider proof.
@@ -685,14 +759,14 @@ where
         let space = self
             .space
             .transformed_generic(self.provider.as_ref(), operation)?;
-        Self::from_derived(Arc::clone(&self.provider), space)
+        Self::from_derived_like(self, space)
     }
 
     /// Creates the zero-copy adjoint replay view while retaining the exact
     /// provider allocation of the source binding.
     pub fn adjoint_view(&self) -> Result<Self, OperationError> {
         let space = self.space.adjoint_view()?;
-        Self::from_derived(Arc::clone(&self.provider), space)
+        Self::from_derived_like(self, space)
     }
 
     /// Binds a space using multiplicity-aware generic tree enumeration.
@@ -724,6 +798,63 @@ where
         &self.provider
     }
 
+    pub(crate) fn layout_primer(&self) -> LayoutPrimer<R> {
+        self.layout_build.prime
+    }
+
+    /// Primes a derived HomSpace with this binding's opaque build strategy.
+    #[doc(hidden)]
+    pub fn prime_derived_homspace(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<(), OperationError> {
+        self.layout_build.prime(self.provider.as_ref(), homspace)
+    }
+
+    /// Reports whether two bindings derive layouts through the same opaque strategy.
+    #[doc(hidden)]
+    pub fn has_same_layout_build_strategy(&self, other: &Self) -> bool {
+        self.layout_build.same_as(other.layout_build)
+    }
+
+    /// Builds a derived layout while preserving this binding's build strategy.
+    #[doc(hidden)]
+    pub fn derive_from_degeneracy_shapes<Shapes>(
+        &self,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        self.layout_build.prime(self.provider.as_ref(), &homspace)?;
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes(
+            self.provider.as_ref(),
+            homspace,
+            shapes,
+        )?;
+        Self::from_derived_like(self, space)
+    }
+
+    /// Builds a final derived layout from the HomSpace's leg degeneracies.
+    #[doc(hidden)]
+    pub fn derive_from_final_homspace(
+        &self,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let space = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            self.provider.as_ref(),
+            homspace,
+            self.layout_build.prime,
+        )?;
+        Self::from_derived_like(self, space)
+    }
+
     /// Erases only the provider allocation after preserving the checked layout proof.
     ///
     /// Why not return [`DynamicFusionMapSpace`]: a raw value does not carry the
@@ -752,6 +883,7 @@ where
         Ok(Self {
             space: layout.0.clone(),
             provider: Arc::clone(&self.provider),
+            layout_build: self.layout_build,
         })
     }
 }
@@ -765,16 +897,6 @@ impl DynamicFusionMapSpace {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         Self::from_final_homspace_with_primer(rule, homspace, encoded_layout_primer::<R>)
-    }
-
-    fn from_final_homspace_lowered<R>(
-        rule: &R,
-        homspace: FusionTreeHomSpace,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    {
-        Self::from_final_homspace_with_primer(rule, homspace, lowered_layout_primer::<R>)
     }
 
     fn from_final_homspace_with_primer<R>(
@@ -976,17 +1098,6 @@ impl DynamicFusionMapSpace {
         self.transformed_with_primer(rule, operation, encoded_layout_primer::<R>)
     }
 
-    pub(crate) fn transformed_lowered<R>(
-        &self,
-        rule: &R,
-        operation: &TreeTransformOperation,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    {
-        self.transformed_with_primer(rule, operation, lowered_layout_primer::<R>)
-    }
-
     pub(crate) fn transformed_with_primer<R>(
         &self,
         rule: &R,
@@ -1106,6 +1217,7 @@ impl DynamicFusionMapSpace {
     /// open axes ascending on the codomain side, `rhs` open axes ascending on
     /// the domain side). Mirrors the destination TensorKit's
     /// `tensorcontract!` with default `pAB` writes into.
+    #[cfg(test)]
     pub(crate) fn contracted<R>(
         rule: &R,
         lhs: &Self,
@@ -1120,20 +1232,7 @@ impl DynamicFusionMapSpace {
         Self::contracted_with_spec(rule, lhs, rhs, axes)
     }
 
-    pub(crate) fn contracted_lowered<R>(
-        rule: &R,
-        lhs: &Self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    {
-        let axes = TensorContractSpec::with_default_output_order(lhs_axes, rhs_axes);
-        Self::contracted_with_spec_lowered(rule, lhs, rhs, axes)
-    }
-
+    #[cfg(test)]
     fn contracted_with_spec<R>(
         rule: &R,
         lhs: &Self,
@@ -1144,18 +1243,6 @@ impl DynamicFusionMapSpace {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         Self::contracted_with_spec_and_primer(rule, lhs, rhs, axes, encoded_layout_primer::<R>)
-    }
-
-    fn contracted_with_spec_lowered<R>(
-        rule: &R,
-        lhs: &Self,
-        rhs: &Self,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    {
-        Self::contracted_with_spec_and_primer(rule, lhs, rhs, axes, lowered_layout_primer::<R>)
     }
 
     fn contracted_with_spec_and_primer<R>(
@@ -2600,5 +2687,53 @@ mod scratch_cache_tests {
         let rebuilt = u1_space(111, 5);
         let cached = u1_space(111, 5);
         assert!(Arc::ptr_eq(rebuilt.structure(), cached.structure()));
+    }
+
+    #[test]
+    fn bound_layout_strategy_propagates_without_heap_ownership() {
+        // What: clone, validated-layout rebind, derived construction, transform,
+        // and contraction retain one opaque lowered strategy, while an expert
+        // encoded root remains distinct and a mixed binary result follows lhs.
+        assert_eq!(
+            std::mem::size_of::<LayoutBuildCapability<tenet_core::SU2FusionRule>>(),
+            std::mem::size_of::<usize>()
+        );
+        let provider = Arc::new(tenet_core::SU2FusionRule);
+        let half = tenet_core::SU2Irrep::from_twice_spin(1).sector_id();
+        let leg = || FusionProductSpace::new([tenet_core::SectorLeg::new([(half, 1)], false)]);
+        let make_hom = || FusionTreeHomSpace::new(leg(), leg());
+        let hom = make_hom();
+        lowered_layout_primer(provider.as_ref(), &hom).unwrap();
+        let shapes = vec![vec![1; 2]; hom.fusion_tree_keys(provider.as_ref()).len()];
+        let lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::clone(&provider),
+            hom.clone(),
+            shapes.clone(),
+        )
+        .unwrap();
+        let encoded =
+            BoundDynamicFusionMapSpace::from_degeneracy_shapes(Arc::clone(&provider), hom, shapes)
+                .unwrap();
+
+        let cloned = lowered.clone();
+        let rebound = lowered
+            .rebind_validated(&lowered.validated_layout())
+            .unwrap();
+        let derived = lowered.derive_from_final_homspace(make_hom()).unwrap();
+        let transformed = lowered
+            .transformed_multiplicity_free(&TreeTransformOperation::permute([0], [1]))
+            .unwrap();
+        let contracted =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lowered, &cloned, &[], &[])
+                .unwrap();
+
+        for output in [&cloned, &rebound, &derived, &transformed, &contracted] {
+            assert!(lowered.has_same_layout_build_strategy(output));
+        }
+        assert!(!lowered.has_same_layout_build_strategy(&encoded));
+        let mixed =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lowered, &encoded, &[], &[])
+                .unwrap();
+        assert!(lowered.has_same_layout_build_strategy(&mixed));
     }
 }

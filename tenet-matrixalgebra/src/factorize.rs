@@ -713,7 +713,7 @@ impl<R, D> SvdCompactDyn<R, D> {
 }
 
 fn diagonal_bond_svd_factor<R, D, V>(
-    provider: Arc<R>,
+    authority: &BoundDynamicFusionMapSpace<R>,
     spectrum: &[SectorSpectrum<V>],
     to_scalar: &dyn Fn(V) -> D,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
@@ -732,9 +732,47 @@ where
             .sum::<usize>();
         probe.set(current);
     });
-    let space = diagonal_bond_bound_space(provider, spectrum)?;
+    let space = diagonal_bond_bound_space_like(authority, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
     BoundDynFactor::from_bound(space, data, 1, 1)
+}
+
+#[doc(hidden)]
+pub fn diagonal_bond_bound_space_like<R, V>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    spectrum: &[SectorSpectrum<V>],
+) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let rule = authority.provider();
+    let new_leg = SectorLeg::new(
+        spectrum
+            .iter()
+            .map(|entry| (entry.sector, entry.values.len())),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg.clone()]),
+        FusionProductSpace::new([new_leg]),
+    );
+    authority.prime_derived_homspace(&homspace)?;
+    let length_by_sector: HashMap<SectorId, usize> = spectrum
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
+    let shapes = homspace
+        .fusion_tree_keys(rule)
+        .iter()
+        .map(|key| {
+            let count = length_by_sector
+                .get(&coupled_of(rule, key.codomain_tree()))
+                .copied()
+                .unwrap_or(0);
+            vec![count, count]
+        })
+        .collect::<Vec<_>>();
+    authority.derive_from_degeneracy_shapes(homspace, shapes)
 }
 
 pub fn diagonal_bond_bound_space<R, V>(
@@ -1355,9 +1393,8 @@ where
             kept: matrix.rows.min(matrix.cols),
         })
         .collect::<Vec<_>>();
-    let provider = input.space().provider_arc();
     let (u_space, vt_space) =
-        build_left_right_bound_spaces(provider, space.homspace(), &matricizations, &ranks)?;
+        build_left_right_bound_spaces(input.space(), space.homspace(), &matricizations, &ranks)?;
     let u_len = u_space
         .space()
         .required_len()
@@ -1590,12 +1627,8 @@ where
         })
         .collect::<Vec<_>>();
     let layouts = region_matricization_skeletons::<R, f64>(input.provider(), &source.regions);
-    let (u_space, vh_space) = build_left_right_bound_spaces::<R, f64>(
-        input.provider_arc(),
-        space.homspace(),
-        &layouts,
-        &ranks,
-    )?;
+    let (u_space, vh_space) =
+        build_left_right_bound_spaces::<R, f64>(input, space.homspace(), &layouts, &ranks)?;
     let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact left factor is not a coupled-sector matrix layout",
@@ -1908,11 +1941,7 @@ where
     D: FactorScalar,
 {
     let (u, vh, singular_values) = svd_compact_factors_dyn(dense, input)?;
-    let s = diagonal_bond_svd_factor(
-        Arc::clone(input.space().provider_arc()),
-        &singular_values,
-        &D::from_real,
-    )?;
+    let s = diagonal_bond_svd_factor(input.space(), &singular_values, &D::from_real)?;
     Ok(SvdCompactDyn {
         u,
         s,
@@ -2055,11 +2084,7 @@ where
     {
         let s = match untruncated_s {
             Some(s) => s,
-            None => diagonal_bond_svd_factor(
-                Arc::clone(u.space().provider_arc()),
-                &singular_values,
-                &D::from_real,
-            )?,
+            None => diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?,
         };
         return Ok(SvdTruncDyn {
             u,
@@ -2082,10 +2107,8 @@ where
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
 
     let bond_axis = u.space().space().nout();
-    let provider = Arc::clone(u.space().provider_arc());
     let u_factor = sliced_bond_bound_factor(
-        Arc::clone(&provider),
-        u.space().space(),
+        u.space(),
         u.data(),
         bond_axis,
         &kept_of,
@@ -2093,15 +2116,14 @@ where
         1,
     )?;
     let vh_factor = sliced_bond_bound_factor(
-        Arc::clone(&provider),
-        vh.space().space(),
+        vh.space(),
         vh.data(),
         0,
         &kept_of,
         1,
         vh.space().space().nin(),
     )?;
-    let s_factor = diagonal_bond_svd_factor(provider, &singular_values, &D::from_real)?;
+    let s_factor = diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?;
     Ok(SvdTruncDyn {
         u: u_factor,
         s: s_factor,
@@ -2112,8 +2134,7 @@ where
 }
 
 fn sliced_bond_bound_factor<R, D>(
-    provider: Arc<R>,
-    source_space: &DynamicFusionMapSpace,
+    authority: &BoundDynamicFusionMapSpace<R>,
     source_data: &[D],
     axis: usize,
     kept_of: &dyn Fn(SectorId) -> usize,
@@ -2124,7 +2145,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = provider.as_ref();
+    let rule = authority.provider();
+    let source_space = authority.space();
     let nout = source_space.nout();
     let source_structure = Arc::clone(source_space.structure());
     let homspace = source_space.homspace();
@@ -2150,6 +2172,7 @@ where
         legs[axis - nout] = bond_leg;
         FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
     };
+    authority.prime_derived_homspace(&new_hom)?;
     let shapes = new_hom
         .fusion_tree_keys(rule)
         .iter()
@@ -2172,7 +2195,7 @@ where
             Ok(shape)
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
-    let space = BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, new_hom, shapes)?;
+    let space = authority.derive_from_degeneracy_shapes(new_hom, shapes)?;
     let mut data = vec![D::zero(); space.space().required_len()?];
     for index in 0..space.space().structure().block_count() {
         let new_block = space.space().structure().block(index)?;
@@ -2213,7 +2236,7 @@ struct SectorRank {
 }
 
 fn build_left_right_bound_spaces<R, D>(
-    provider: &Arc<R>,
+    authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     ranks: &[SectorRank],
@@ -2222,7 +2245,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = provider.as_ref();
+    let rule = authority.provider();
     let rank_by_sector: HashMap<SectorId, usize> =
         ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
     let matrix_by_sector = matricization_map(matricizations);
@@ -2234,6 +2257,7 @@ where
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg.clone()]),
     );
+    authority.prime_derived_homspace(&left_hom)?;
     let left_shapes = left_hom
         .fusion_tree_keys(rule)
         .iter()
@@ -2244,16 +2268,13 @@ where
             Ok(shape)
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
-    let left = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
-        Arc::clone(provider),
-        left_hom,
-        left_shapes,
-    )?;
+    let left = authority.derive_from_degeneracy_shapes(left_hom, left_shapes)?;
 
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
     );
+    authority.prime_derived_homspace(&right_hom)?;
     let right_shapes = right_hom
         .fusion_tree_keys(rule)
         .iter()
@@ -2264,16 +2285,12 @@ where
             Ok(shape)
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
-    let right = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
-        Arc::clone(provider),
-        right_hom,
-        right_shapes,
-    )?;
+    let right = authority.derive_from_degeneracy_shapes(right_hom, right_shapes)?;
     Ok((left, right))
 }
 
 fn build_left_bound_space<R, D>(
-    provider: &Arc<R>,
+    authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     ranks: &[SectorRank],
@@ -2282,7 +2299,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = provider.as_ref();
+    let rule = authority.provider();
     let rank_by_sector: HashMap<SectorId, usize> =
         ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
     let matrix_by_sector = matricization_map(matricizations);
@@ -2291,6 +2308,7 @@ where
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg]),
     );
+    authority.prime_derived_homspace(&hom)?;
     let shapes = hom
         .fusion_tree_keys(rule)
         .iter()
@@ -2301,13 +2319,13 @@ where
             Ok(shape)
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes(Arc::clone(provider), hom, shapes)
+    authority.derive_from_degeneracy_shapes(hom, shapes)
 }
 
 /// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
 /// the orthogonal factorizations, in the coupled-sector matrix layout.
 fn build_left_right_bound_pair<R, D>(
-    provider: &Arc<R>,
+    authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
@@ -2316,7 +2334,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = provider.as_ref();
+    let rule = authority.provider();
     let ranks = pairs
         .iter()
         .map(|pair| SectorRank {
@@ -2325,7 +2343,7 @@ where
         })
         .collect::<Vec<_>>();
     let (left_space, right_space) =
-        build_left_right_bound_spaces(provider, homspace, matricizations, &ranks)?;
+        build_left_right_bound_spaces(authority, homspace, matricizations, &ranks)?;
     let matrix_by_sector = matricization_map(matricizations);
     let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
         pairs.iter().map(|pair| (pair.sector, pair)).collect();
@@ -2380,7 +2398,7 @@ where
 }
 
 fn build_left_bound_factor<R, D>(
-    provider: &Arc<R>,
+    authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
     matricizations: &[SectorMatricization<D>],
     pairs: &[FactorPair<D>],
@@ -2396,14 +2414,14 @@ where
             kept: pair.kept,
         })
         .collect::<Vec<_>>();
-    let space = build_left_bound_space(provider, homspace, matricizations, &ranks)?;
+    let space = build_left_bound_space(authority, homspace, matricizations, &ranks)?;
     let mut data = vec![D::zero(); space.space().required_len()?];
     let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
         pairs.iter().map(|pair| (pair.sector, pair)).collect();
     for matrix in matricizations {
         let pair = pair_by_sector[&matrix.sector];
         scatter_left_sector_blocks(
-            provider.as_ref(),
+            authority.provider(),
             space.space(),
             &mut data,
             matrix,
@@ -2580,11 +2598,7 @@ where
     let out = eigh_full_dyn(dense, &dynamic)?;
     // Materialize the dense diagonal here (the typed API returns a `TensorMap`);
     // the dyn producer no longer builds it (#56 item N).
-    let d = diagonal_bond_svd_factor(
-        Arc::clone(dynamic.space().provider_arc()),
-        &out.eigenvalues,
-        &D::from_real,
-    )?;
+    let d = diagonal_bond_svd_factor(dynamic.space(), &out.eigenvalues, &D::from_real)?;
     Ok(EighFull {
         d: typed_from_bound_factor(d)?,
         v: typed_from_bound_factor(out.v)?,
@@ -2624,12 +2638,7 @@ where
             kept: matrix.rows,
         })
         .collect::<Vec<_>>();
-    let v_space = build_left_bound_space(
-        input.space().provider_arc(),
-        space.homspace(),
-        &matricizations,
-        &ranks,
-    )?;
+    let v_space = build_left_bound_space(input.space(), space.homspace(), &matricizations, &ranks)?;
     let v_len = v_space
         .space()
         .required_len()
@@ -2845,11 +2854,7 @@ where
 {
     let dynamic = input.dynamic();
     let out = eigh_trunc_dyn(dense, &dynamic, truncation)?;
-    let d = diagonal_bond_svd_factor(
-        Arc::clone(dynamic.space().provider_arc()),
-        &out.eigenvalues,
-        &D::from_real,
-    )?;
+    let d = diagonal_bond_svd_factor(dynamic.space(), &out.eigenvalues, &D::from_real)?;
     Ok(EighTrunc {
         d: typed_from_bound_factor(d)?,
         v: typed_from_bound_factor(out.v)?,
@@ -2903,8 +2908,7 @@ where
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
     let bond_axis = full.v.space().space().nout();
     let v_factor = sliced_bond_bound_factor(
-        Arc::clone(full.v.space().provider_arc()),
-        full.v.space().space(),
+        full.v.space(),
         full.v.data(),
         bond_axis,
         &kept_of,
@@ -3112,9 +3116,8 @@ where
     };
     // The left/right bond legs differ in the full SVD (rows vs columns), so
     // build the two factors with separate bond dimensions.
-    let provider = Arc::clone(input.space().provider_arc());
     let (u_factor, _) = build_left_right_bound_pair(
-        &provider,
+        input.space(),
         space.homspace(),
         &matricizations,
         &pairs
@@ -3131,7 +3134,7 @@ where
             .collect::<Vec<_>>(),
     )?;
     let (_, vh_factor) = build_left_right_bound_pair(
-        &provider,
+        input.space(),
         space.homspace(),
         &matricizations,
         &pairs
@@ -3153,7 +3156,7 @@ where
         .collect();
     let rows_of = |sector: SectorId| rows_by_sector.get(&sector).copied().unwrap_or(0);
     let s_factor =
-        rectangular_diagonal_bond_tensor(provider, &singular_values, &rows_of, &cols_of)?;
+        rectangular_diagonal_bond_tensor(input.space(), &singular_values, &rows_of, &cols_of)?;
     Ok(SvdFullDyn {
         u: u_factor,
         s: s_factor,
@@ -3209,7 +3212,7 @@ where
 /// Rectangular diagonal `W_row <- W_col` bond factor (the `S` of the full
 /// SVD): per sector shape `[rows, cols]` with the spectrum on the diagonal.
 fn rectangular_diagonal_bond_tensor<R, D>(
-    provider: Arc<R>,
+    authority: &BoundDynamicFusionMapSpace<R>,
     spectra: &[SectorSpectrum],
     rows_of: &dyn Fn(SectorId) -> usize,
     cols_of: &dyn Fn(SectorId) -> usize,
@@ -3218,7 +3221,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = provider.as_ref();
+    let rule = authority.provider();
     let row_leg = SectorLeg::new(
         spectra
             .iter()
@@ -3235,6 +3238,7 @@ where
         FusionProductSpace::new([row_leg]),
         FusionProductSpace::new([col_leg]),
     );
+    authority.prime_derived_homspace(&homspace)?;
     let keys = homspace.fusion_tree_keys(rule);
     let shapes = keys
         .iter()
@@ -3243,7 +3247,7 @@ where
             vec![rows_of(sector), cols_of(sector)]
         })
         .collect::<Vec<_>>();
-    let space = BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, homspace, shapes)?;
+    let space = authority.derive_from_degeneracy_shapes(homspace, shapes)?;
     let len = space
         .space()
         .required_len()
@@ -3549,7 +3553,7 @@ where
             right_leading: rows,
         });
     }
-    build_left_right_bound_pair(provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)
 }
 
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
@@ -3625,7 +3629,7 @@ where
             right_leading: cols,
         });
     }
-    build_left_right_bound_pair(provider, space.homspace(), &matrices, &pairs)
+    build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)
 }
 
 /// Full general eigendecomposition `t = V * D * V^-1` (MatrixAlgebraKit
@@ -3718,7 +3722,7 @@ where
     // Materialize the dense diagonal here (typed API returns a `TensorMap`); the
     // dyn producer no longer builds it (#56 item N).
     let d = diagonal_bond_svd_factor(
-        Arc::clone(dynamic.space().provider_arc()),
+        dynamic.space(),
         &out.eigenvalues,
         &<D::Eig as FactorScalar>::from_complex64,
     )?;
@@ -3818,7 +3822,7 @@ where
         })
         .collect();
     let v_factor = build_left_bound_factor(
-        input.space().provider_arc(),
+        input.space(),
         space.homspace(),
         &complex_matricizations,
         &pairs,
@@ -3844,7 +3848,7 @@ where
     let dynamic = input.dynamic();
     let out = eig_trunc_dyn::<E, R, D>(dense, &dynamic, truncation)?;
     let d = diagonal_bond_svd_factor(
-        Arc::clone(dynamic.space().provider_arc()),
+        dynamic.space(),
         &out.eigenvalues,
         &<D::Eig as FactorScalar>::from_complex64,
     )?;
@@ -3901,8 +3905,7 @@ where
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
     let bond_axis = full.v.space().space().nout();
     let v_factor = sliced_bond_bound_factor(
-        Arc::clone(full.v.space().provider_arc()),
-        full.v.space().space(),
+        full.v.space(),
         full.v.data(),
         bond_axis,
         &kept_of,
@@ -4096,7 +4099,8 @@ where
             right_leading: null_dim,
         });
     }
-    let (null, _) = build_left_right_bound_pair(provider, space.homspace(), &matrices, &pairs)?;
+    let (null, _) =
+        build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)?;
     Ok(null)
 }
 
@@ -4158,7 +4162,8 @@ where
             right_leading: null_dim,
         });
     }
-    let (_, null) = build_left_right_bound_pair(provider, space.homspace(), &matrices, &pairs)?;
+    let (_, null) =
+        build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)?;
     Ok(null)
 }
 
@@ -4415,7 +4420,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair(provider, space.homspace(), &matricizations, &pairs)
+    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &pairs)
 }
 
 fn qr_compact_direct_regions<E, R, D>(
@@ -4556,7 +4561,7 @@ where
             right_leading: rank,
         });
     }
-    build_left_right_bound_pair(provider, space.homspace(), &matricizations, &pairs)
+    build_left_right_bound_pair(input.space(), space.homspace(), &matricizations, &pairs)
 }
 
 fn lq_compact_direct_regions<E, R, D>(

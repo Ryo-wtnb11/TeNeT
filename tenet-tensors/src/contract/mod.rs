@@ -33,7 +33,9 @@ pub use context::{
     TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
     TensorContractPlanKey,
 };
-pub(crate) use dynamic_space::{encoded_layout_primer, lowered_layout_primer, LayoutPrimer};
+pub(crate) use dynamic_space::LayoutPrimer;
+#[cfg(test)]
+pub(crate) use dynamic_space::{encoded_layout_primer, lowered_layout_primer};
 pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, ValidatedDynamicFusionLayout,
 };

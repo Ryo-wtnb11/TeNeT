@@ -829,13 +829,36 @@ fn build_bound_space<
     provider: Arc<R>,
     hom: FusionTreeHomSpace,
 ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
+    let shapes = lowered_degeneracy_shapes(provider.as_ref(), &hom)?;
+    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(provider, hom, shapes)
+        .map_err(Into::into)
+}
+
+fn build_bound_space_like<
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    hom: FusionTreeHomSpace,
+) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
+    let shapes = lowered_degeneracy_shapes(authority.provider(), &hom)?;
+    authority
+        .derive_from_degeneracy_shapes(hom, shapes)
+        .map_err(Into::into)
+}
+
+fn lowered_degeneracy_shapes<
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+>(
+    provider: &R,
+    hom: &FusionTreeHomSpace,
+) -> Result<Vec<Vec<usize>>, Error> {
     let leg_deg = |leg: &tenet_core::SectorLeg, sector: SectorId| -> Result<usize, Error> {
         leg.degeneracy(sector).ok_or_else(|| {
             Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
         })
     };
     let keys = hom
-        .try_fusion_tree_keys_lowered(provider.as_ref())
+        .try_fusion_tree_keys_lowered(provider)
         .map_err(|error| Error::InvalidArgument(error.to_string()))?;
     let mut shapes = Vec::with_capacity(keys.len());
     for key in keys.iter() {
@@ -848,7 +871,7 @@ fn build_bound_space<
         }
         shapes.push(shape);
     }
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, hom, shapes).map_err(Into::into)
+    Ok(shapes)
 }
 
 fn build_bound_space_generic<R: FusionRule>(
@@ -1548,9 +1571,8 @@ impl UserBoundSpace {
     fn from_homspace(&self, homspace: FusionTreeHomSpace) -> Result<Self, Error> {
         macro_rules! build {
             ($space:expr, $variant:ident) => {
-                Ok(UserBoundSpace::$variant(build_bound_space(
-                    Arc::clone($space.provider_arc()),
-                    homspace,
+                Ok(UserBoundSpace::$variant(build_bound_space_like(
+                    $space, homspace,
                 )?))
             };
         }
@@ -1574,10 +1596,7 @@ impl UserBoundSpace {
         macro_rules! build {
             ($space:expr, $variant:ident) => {
                 Ok(UserBoundSpace::$variant(
-                    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
-                        Arc::clone($space.provider_arc()),
-                        homspace,
-                    )?,
+                    $space.derive_from_final_homspace(homspace)?,
                 ))
             };
         }
@@ -5084,10 +5103,7 @@ impl Tensor {
             UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)?
         } else {
             with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                let space = tenet_matrixalgebra::diagonal_bond_bound_space(
-                    Arc::clone(bound.provider_arc()),
-                    &spectrum,
-                )?;
+                let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(bound, &spectrum)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             })?
         };
@@ -5112,10 +5128,7 @@ impl Tensor {
     ) -> Result<Self, Error> {
         spectrum.sort_unstable_by_key(|entry| entry.sector);
         with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-            let space = tenet_matrixalgebra::diagonal_bond_bound_space(
-                Arc::clone(bound.provider_arc()),
-                &spectrum,
-            )?;
+            let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(bound, &spectrum)?;
             let space = UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)?;
             self.with_bound(space, Data::Diagonal(DiagonalData::C64(spectrum)))
         })
@@ -7304,7 +7317,7 @@ impl Tensor {
                 false,
             );
             let build_output_space = |hom| {
-                let space = build_bound_space(Arc::clone(bound.provider_arc()), hom)?;
+                let space = build_bound_space_like(bound, hom)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             };
             let u_space = build_output_space(FusionTreeHomSpace::new(
@@ -7429,7 +7442,7 @@ impl Tensor {
             let hom = self.ordinary_body().space.homspace();
             let bond_leg = SectorLeg::new(bond_pairs.iter().copied(), false);
             let build_output_space = |hom| {
-                let space = build_bound_space(Arc::clone(bound.provider_arc()), hom)?;
+                let space = build_bound_space_like(bound, hom)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             };
             let q_space = build_output_space(FusionTreeHomSpace::new(
@@ -7575,7 +7588,7 @@ impl Tensor {
                 false,
             );
             let build_output_space = |hom| {
-                let space = build_bound_space(Arc::clone(bound.provider_arc()), hom)?;
+                let space = build_bound_space_like(bound, hom)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             };
             let v_space = build_output_space(FusionTreeHomSpace::new(

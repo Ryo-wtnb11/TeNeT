@@ -3888,6 +3888,59 @@ fn default_context() -> TensorContractFusionExecutionContext<f64, TreeTransformB
     TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default()
 }
 
+fn lowered_z2_binding<const NOUT: usize, const NIN: usize>(
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> BoundDynamicFusionMapSpace<Z2FusionRule> {
+    let provider = Arc::new(Z2FusionRule);
+    let raw = dyn_space_of(tensor).unwrap();
+    let hom = raw.homspace().clone();
+    hom.try_fusion_tree_keys_lowered(provider.as_ref()).unwrap();
+    let shapes = hom
+        .fusion_tree_keys(provider.as_ref())
+        .iter()
+        .map(|key| {
+            let index = raw
+                .structure()
+                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+                .unwrap();
+            raw.structure().block(index).unwrap().shape().to_vec()
+        })
+        .collect::<Vec<_>>();
+    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(provider, hom, shapes).unwrap()
+}
+
+#[test]
+fn ordinary_factorizations_and_composition_inherit_lowered_layout_strategy() {
+    // What: cold compact SVD, compact QR, full EIGH, adjoint, and factor
+    // composition all retain the ordinary built-in layout-build strategy.
+    let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+    let bound = lowered_z2_binding(&tensor);
+    let expert = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dyn_space_of(&tensor).unwrap(),
+        Arc::new(Z2FusionRule),
+    )
+    .unwrap();
+    assert!(!bound.has_same_layout_build_strategy(&expert));
+    let input = BoundDynamicTensorRef::try_new(&bound, tensor.data()).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let svd = svd_compact_dyn(&mut dense, &input).unwrap();
+    for factor in [svd.u(), svd.s(), svd.vh()] {
+        assert!(bound.has_same_layout_build_strategy(factor.space()));
+    }
+    let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
+    assert!(bound.has_same_layout_build_strategy(q.space()));
+    assert!(bound.has_same_layout_build_strategy(r.space()));
+    let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
+    assert!(bound.has_same_layout_build_strategy(eigh.v().space()));
+
+    let adjoint = crate::factorize::adjoint_bound_factor(svd.u()).unwrap();
+    assert!(bound.has_same_layout_build_strategy(adjoint.space()));
+    let mut context = default_context();
+    let composed = crate::compose::compose_bound_dyn(&mut context, svd.u(), svd.s()).unwrap();
+    assert!(bound.has_same_layout_build_strategy(composed.space()));
+}
+
 #[test]
 fn derived_matrix_functions_inherit_the_exact_provider_arc() {
     // What: every migrated owned result retains the input authority allocation.
