@@ -4114,6 +4114,74 @@ mod tests {
     }
 
     #[test]
+    fn fusion_layout_global_cache_bypasses_oversized_rule_identity() {
+        #[derive(Clone)]
+        struct OversizedIdentityRule {
+            identity: RuleIdentity,
+        }
+
+        impl FusionRule for OversizedIdentityRule {
+            fn rule_identity(&self) -> RuleIdentity {
+                self.identity.clone()
+            }
+
+            fn fusion_style(&self) -> FusionStyleKind {
+                FusionStyleKind::Unique
+            }
+
+            fn braiding_style(&self) -> BraidingStyleKind {
+                BraidingStyleKind::Bosonic
+            }
+
+            fn vacuum(&self) -> SectorId {
+                SectorId::new(0)
+            }
+
+            fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+                smallvec![SectorId::new(left.id() ^ right.id())]
+            }
+        }
+
+        impl MultiplicityFreeFusionRule for OversizedIdentityRule {}
+
+        // What: canonical rule bytes participate in admission accounting, so
+        // an identity alone above the per-entry limit is computed but not retained.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let canonical_bytes = Arc::<[u8]>::from(vec![
+            0;
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
+                .saturating_add(1)
+        ]);
+        let rule = OversizedIdentityRule {
+            identity: RuleIdentity::from_canonical_bytes::<OversizedIdentityRule>(
+                0,
+                canonical_bytes,
+            ),
+        };
+        assert!(
+            rule.identity.charged_retained_bytes()
+                > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
+        );
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(SectorId::new(0), 1)],
+            Vec::<(SectorId, usize)>::new(),
+        );
+
+        assert_eq!(hom.fusion_tree_keys(&rule).len(), 1);
+        let info = fusion_tree_layout_cache_info();
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.admission_bypasses(), 1);
+
+        assert_eq!(hom.fusion_tree_keys(&rule).len(), 1);
+        let info = fusion_tree_layout_cache_info();
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.admission_bypasses(), 2);
+    }
+
+    #[test]
     fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
         // What: one sector layout may be shared across degeneracies, but concrete
         // shapes and bosonic/fermionic rule provenance select distinct structures/layouts.

@@ -140,6 +140,24 @@ impl RuleIdentity {
             right,
         })))
     }
+
+    pub(crate) fn charged_retained_bytes(&self) -> usize {
+        const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
+
+        // Why-not charge only `size_of::<RuleIdentity>()`: content and product
+        // identities retain heap allocations whose size can dominate the key.
+        // Shared descendants are deliberately charged recursively per entry;
+        // the admission budget is conservative rather than allocator-exact.
+        match &self.0 {
+            RuleIdentityNode::Type(_) | RuleIdentityNode::Unique(_, _) => 0,
+            RuleIdentityNode::Content { bytes, .. } => ARC_HEADER_BYTES
+                .saturating_add(bytes.len().saturating_mul(std::mem::size_of::<u8>())),
+            RuleIdentityNode::Product(identity) => ARC_HEADER_BYTES
+                .saturating_add(std::mem::size_of::<ProductRuleIdentity>())
+                .saturating_add(identity.left.charged_retained_bytes())
+                .saturating_add(identity.right.charged_retained_bytes()),
+        }
+    }
 }
 
 pub trait FusionRule: 'static {

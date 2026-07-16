@@ -390,7 +390,8 @@ fn charged_fusion_tree_layout_bytes(
                         .saturating_mul(std::mem::size_of::<SectorId>()),
                 )
             },
-        );
+        )
+        .saturating_add(identity.rule.charged_retained_bytes());
     let tree_bytes = layout
         .keys
         .iter()

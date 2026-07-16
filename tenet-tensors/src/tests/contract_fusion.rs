@@ -3796,8 +3796,8 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
 
     let lhs_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([
-            SectorLeg::new([(a, 1)], false),
-            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(a, 1)], true),
+            SectorLeg::new([(b, 1)], true),
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
@@ -3811,9 +3811,9 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     );
     let dst_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([
+            SectorLeg::new([(a, 1)], true),
             SectorLeg::new([(a, 1)], false),
-            SectorLeg::new([(a, 1)], false),
-            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(b, 1)], true),
             SectorLeg::new([(b, 1)], false),
         ]),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
@@ -3866,6 +3866,7 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
         );
     }
 
+    let expected_structure = std::sync::Arc::clone(dst.structure());
     let rebuild_and_contract = || {
         let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
             TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
@@ -3909,15 +3910,19 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
             beta,
         )
         .unwrap();
-        rebuilt_dst.data().to_vec()
+        rebuilt_dst
     };
 
     force_fusion_layout_eviction();
-    for (&actual, &expected) in rebuild_and_contract().iter().zip(&expected) {
+    let after_eviction = rebuild_and_contract();
+    assert_eq!(after_eviction.structure(), &expected_structure);
+    for (&actual, &expected) in after_eviction.data().iter().zip(&expected) {
         assert!((actual - expected).norm() < 1.0e-12);
     }
     reset_global_operation_caches();
-    for (&actual, &expected) in rebuild_and_contract().iter().zip(&expected) {
+    let after_reset = rebuild_and_contract();
+    assert_eq!(after_reset.structure(), &expected_structure);
+    for (&actual, &expected) in after_reset.data().iter().zip(&expected) {
         assert!((actual - expected).norm() < 1.0e-12);
     }
 }
