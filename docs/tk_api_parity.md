@@ -69,7 +69,7 @@ Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 | `dot` | has | `Tensor::dot` | |
 | `inner` | has | `Tensor::inner` | |
 | `normalize` | has | `Tensor::normalize` | Zero-norm not special-cased, as in TK. |
-| `tr` | has | `Tensor::tr` (+ `trace_pairs` for partial) | |
+| `tr` | has | `Tensor::tr` (+ `trace_pairs` for partial) | `tr` is the positive ordinary trace; fermionic `trace_pairs` follows TensorKit contraction supertrace semantics. |
 | `scale` | has | `Tensor::scale` / `scale_c64` | |
 | `add` | has | `Tensor::add` / `add_c64` | `α·self + β·other`. |
 | `axpy!` / `axpby!` | has-different-name | `Tensor::add` | Same `α`/`β` combination, out of place. |

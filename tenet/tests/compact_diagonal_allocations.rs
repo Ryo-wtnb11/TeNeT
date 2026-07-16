@@ -49,6 +49,42 @@ fn measured_product_bytes(degeneracy: usize) -> u64 {
     ALLOCATED.load(Ordering::Relaxed)
 }
 
+fn measured_trace_bytes(degeneracy: usize, compact: bool) -> u64 {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(0, degeneracy)]);
+    let dense = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 802).unwrap();
+    let diagonal;
+    let tensor = if compact {
+        diagonal = dense.svd_compact().unwrap().1;
+        &diagonal
+    } else {
+        &dense
+    };
+
+    black_box(tensor.tr().unwrap());
+    ALLOCATED.store(0, Ordering::Relaxed);
+    ENABLED.store(true, Ordering::Release);
+    let output = black_box(tensor.tr().unwrap());
+    ENABLED.store(false, Ordering::Release);
+    black_box(output);
+    ALLOCATED.load(Ordering::Relaxed)
+}
+
+fn measured_complex_diagonal_trace_bytes(degeneracy: usize) -> u64 {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(0, degeneracy)]);
+    let source = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 803).unwrap();
+    let diagonal = source.eig_full().unwrap().0;
+
+    black_box(diagonal.tr().unwrap());
+    ALLOCATED.store(0, Ordering::Relaxed);
+    ENABLED.store(true, Ordering::Release);
+    let output = black_box(diagonal.tr().unwrap());
+    ENABLED.store(false, Ordering::Release);
+    black_box(output);
+    ALLOCATED.load(Ordering::Relaxed)
+}
+
 /// A compact diagonal product stores one value per bond basis state. Comparing
 /// two sizes makes the gate insensitive to fixed cache/metadata allocations
 /// while rejecting the old dense d-by-d materialization.
@@ -64,4 +100,10 @@ fn diagonal_product_allocation_bytes_scale_linearly() {
         large < (256 * 256 * std::mem::size_of::<f64>()) as u64,
         "compact product allocated at least one dense payload: {large} bytes"
     );
+
+    // What: both stored-block and compact-spectrum trace are reductions with no
+    // destination or scratch allocation after warmup.
+    assert_eq!(measured_trace_bytes(256, false), 0);
+    assert_eq!(measured_trace_bytes(256, true), 0);
+    assert_eq!(measured_complex_diagonal_trace_bytes(16), 0);
 }
