@@ -1453,6 +1453,111 @@ mod tests {
         adapter.scale_strided(&mut dst, &[2], &[1], 0, 2.0).unwrap();
         assert_eq!(dst, [-4.0, -6.0]);
     }
+
+    // #41 deferral evidence (ignored; run explicitly):
+    //   cargo test --release -p tenet-operations -- --ignored --nocapture bench_41
+    //
+    // #41 proposed delegating this hand-rolled `fused_pair` to strided-rs #140
+    // `copy_scale_raw` / #142 `CopyPlan`. This A/B is why the delegation is
+    // DEFERRED: over 21 rank-4 d=4 transposed blocks (the SU(2) small-block
+    // replay regime) the raw kernels are ~30% slower per block because their
+    // checked `RawStrided::new` re-validates the bounding box on every call,
+    // which `fused_pair` skips. #142's compile-once `CopyPlan` still pays that
+    // per-execute validation. Measured (machine-quiet, single thread, release,
+    // median-of-5): fused_pair ~133 ns, copy_scale_raw ~173 ns (+30%),
+    // CopyPlan.execute ~156 ns (+18%). Separately, #140 falls back to the
+    // *allocating* strided view kernels above rank 8, which would break the
+    // rank>8 warm alloc-free property `FUSE_SCRATCH` guarantees (tenet-network
+    // `rank_nine_cached_permutation_has_no_caller_thread_operation_allocation`).
+    // Delegation waits on a strided-rs follow-up: a validation-free prepared
+    // execute (bounds proven once at compile) plus an alloc-free rank>8 path.
+    // `new_unchecked` would match the zero-validation cost but is blocked by this
+    // crate's `#![deny(unsafe_code)]`.
+    #[test]
+    #[ignore]
+    fn bench_41_fused_vs_raw_vs_plan() {
+        use std::time::Instant;
+        use strided_kernel::{copy_scale_raw, CopyPlan, RawStridedMut, RawStridedRef};
+
+        const BLOCKS: usize = 21;
+        let dims = [4usize, 4, 4, 4];
+        let src_strides = [1isize, 4, 16, 64]; // column-major src
+        let dst_strides = [64isize, 16, 4, 1]; // transposed dst (non-contiguous)
+        let elems = 256usize;
+        let src: Vec<f64> = (0..elems).map(|i| i as f64 * 0.5 - 3.0).collect();
+        let mut dst = vec![0.0f64; elems];
+        let iters = 20_000usize;
+
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+
+        // (a) hand-rolled fused_pair (the current production path, no bounds check)
+        let mut fused_ns = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BLOCKS {
+                    fused_pair(
+                        &mut dst,
+                        &src,
+                        &dims,
+                        &dst_strides,
+                        &src_strides,
+                        0,
+                        0,
+                        |d, v| *d = v,
+                        |v: f64| v,
+                    );
+                }
+            }
+            fused_ns.push(t.elapsed().as_nanos() as f64 / (iters * BLOCKS) as f64);
+        }
+
+        // (b) #140 copy_scale_raw, per-call (RawStrided::new bounds check + fuse)
+        let mut raw_ns = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BLOCKS {
+                    let s = RawStridedRef::new(&src, &dims, &src_strides, 0).unwrap();
+                    let mut d = RawStridedMut::new(&mut dst, &dims, &dst_strides, 0).unwrap();
+                    copy_scale_raw(&mut d, &s, 1.0).unwrap();
+                }
+            }
+            raw_ns.push(t.elapsed().as_nanos() as f64 / (iters * BLOCKS) as f64);
+        }
+
+        // (c) #142 CopyPlan, compile once then execute_scale per block
+        let plan = CopyPlan::compile(&dims, &dst_strides, &src_strides).unwrap();
+        let compile_t = Instant::now();
+        for _ in 0..iters {
+            let _ = CopyPlan::compile(&dims, &dst_strides, &src_strides).unwrap();
+        }
+        let compile_ns = compile_t.elapsed().as_nanos() as f64 / iters as f64;
+        let mut plan_ns = Vec::new();
+        for _ in 0..5 {
+            let t = Instant::now();
+            for _ in 0..iters {
+                for _ in 0..BLOCKS {
+                    let s = RawStridedRef::new(&src, &dims, &src_strides, 0).unwrap();
+                    let mut d = RawStridedMut::new(&mut dst, &dims, &dst_strides, 0).unwrap();
+                    plan.execute_scale(&mut d, &s, 1.0).unwrap();
+                }
+            }
+            plan_ns.push(t.elapsed().as_nanos() as f64 / (iters * BLOCKS) as f64);
+        }
+
+        println!("\n#41 small-block (21x rank4 d4 transposed) per-block ns, median-of-5:");
+        println!("  fused_pair (hand-rolled): {:.1}", median(fused_ns));
+        println!("  copy_scale_raw (#140):    {:.1}", median(raw_ns));
+        println!(
+            "  CopyPlan.execute (#142):  {:.1}  (compile once: {:.1} ns)",
+            median(plan_ns),
+            compile_ns
+        );
+    }
 }
 
 /// Parity tests for the strided-perm transpose route (ported from prototype
