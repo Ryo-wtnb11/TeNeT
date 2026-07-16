@@ -140,6 +140,24 @@ impl RuleIdentity {
             right,
         })))
     }
+
+    pub(crate) fn charged_retained_bytes(&self) -> usize {
+        const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
+
+        // Why-not charge only `size_of::<RuleIdentity>()`: content and product
+        // identities retain heap allocations whose size can dominate the key.
+        // Shared descendants are deliberately charged recursively per entry;
+        // the admission budget is conservative rather than allocator-exact.
+        match &self.0 {
+            RuleIdentityNode::Type(_) | RuleIdentityNode::Unique(_, _) => 0,
+            RuleIdentityNode::Content { bytes, .. } => ARC_HEADER_BYTES
+                .saturating_add(bytes.len().saturating_mul(std::mem::size_of::<u8>())),
+            RuleIdentityNode::Product(identity) => ARC_HEADER_BYTES
+                .saturating_add(std::mem::size_of::<ProductRuleIdentity>())
+                .saturating_add(identity.left.charged_retained_bytes())
+                .saturating_add(identity.right.charged_retained_bytes()),
+        }
+    }
 }
 
 pub trait FusionRule: 'static {
@@ -1420,9 +1438,24 @@ pub struct SU2Irrep {
     twice_spin: usize,
 }
 
+/// Why not admit larger labels: the exact authority's canonical Regge key
+/// reserves one `u8` value when sizing its complete key domain.
+pub const SU2_MAX_DOUBLED_SPIN: usize = (u8::MAX - 1) as usize;
+
 impl SU2Irrep {
+    pub const fn try_from_twice_spin(twice_spin: usize) -> Option<Self> {
+        if twice_spin <= SU2_MAX_DOUBLED_SPIN {
+            Some(Self { twice_spin })
+        } else {
+            None
+        }
+    }
+
     pub const fn from_twice_spin(twice_spin: usize) -> Self {
-        Self { twice_spin }
+        match Self::try_from_twice_spin(twice_spin) {
+            Some(irrep) => irrep,
+            None => panic!("SU(2) doubled spin exceeds the supported maximum 254"),
+        }
     }
 
     #[inline]
@@ -1435,8 +1468,15 @@ impl SU2Irrep {
         SectorId::new(self.twice_spin)
     }
 
+    pub const fn try_from_sector_id(sector: SectorId) -> Option<Self> {
+        Self::try_from_twice_spin(sector.id())
+    }
+
     pub const fn from_sector_id(sector: SectorId) -> Self {
-        Self::from_twice_spin(sector.id())
+        match Self::try_from_sector_id(sector) {
+            Some(irrep) => irrep,
+            None => panic!("SU(2) sector exceeds the supported maximum doubled spin 254"),
+        }
     }
 }
 
@@ -1449,8 +1489,23 @@ impl From<SU2Irrep> for SectorId {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct SU2FusionRule;
 
+#[doc(hidden)]
+pub const SU2_EXACT_AUTHORITY_VERSION: u8 = 1;
+
+const SU2_EXACT_AUTHORITY_IDENTITY_SCHEMA: u64 = 0x5355_3245_5841_4354;
+
 impl FusionRule for SU2FusionRule {
-    fn rule_identity(&self) -> RuleIdentity { RuleIdentity::of_type::<Self>() }
+    fn rule_identity(&self) -> RuleIdentity {
+        static IDENTITY: OnceLock<RuleIdentity> = OnceLock::new();
+        IDENTITY
+            .get_or_init(|| {
+                RuleIdentity::from_canonical_bytes::<SU2FusionRule>(
+                    SU2_EXACT_AUTHORITY_IDENTITY_SCHEMA,
+                    Arc::<[u8]>::from([SU2_EXACT_AUTHORITY_VERSION]),
+                )
+            })
+            .clone()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Simple
     }
@@ -1472,6 +1527,12 @@ impl FusionRule for SU2FusionRule {
         let right = SU2Irrep::from_sector_id(right).twice_spin();
         let min = left.abs_diff(right);
         let max = left + right;
+        // Why not return only the representable channels: truncating a fusion
+        // closure would define a different category while appearing to be SU(2).
+        assert!(
+            max <= SU2_MAX_DOUBLED_SPIN,
+            "SU(2) fusion closure exceeds the supported maximum doubled spin 254"
+        );
         (min..=max)
             .step_by(2)
             .map(|twice_spin| SU2Irrep::from_twice_spin(twice_spin).into())
@@ -1564,121 +1625,16 @@ fn su2_f_symbol_from_doubled_spins(
     j5: usize,
     j6: usize,
 ) -> f64 {
+    crate::su2_exact::validate_supported_spins([j1, j2, j3, j4, j5, j6]);
     if [j1, j2, j3, j4, j5, j6].iter().all(|&j| j == 0) {
         return 1.0;
     }
     let phase_exponent = (j1 + j2 + j3 + j4) / 2;
     let phase = if phase_exponent % 2 == 0 { 1.0 } else { -1.0 };
-    let dimension_factor = (((j5 + 1) * (j6 + 1)) as f64).sqrt();
-    phase * dimension_factor * wigner_6j_doubled(j1, j2, j5, j3, j4, j6)
-}
-
-/// SU(2) 6j symbol (arguments as doubled spins), memoized in a process-global
-/// cache keyed by the six doubled spins — the analogue of TensorKit's
-/// `WignerSymbols.Wigner6j` LRU. Each distinct symbol's exact summation is
-/// evaluated once; every later occurrence (across braids, permutes, and
-/// contractions) is a hash lookup. The cached value is bit-identical to the
-/// direct computation, so this changes cold compile cost only.
-fn wigner_6j_doubled(j1: usize, j2: usize, j3: usize, j4: usize, j5: usize, j6: usize) -> f64 {
-    static CACHE: std::sync::OnceLock<std::sync::RwLock<FxHashMap<[usize; 6], f64>>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(FxHashMap::default()));
-    let key = [j1, j2, j3, j4, j5, j6];
-    if let Ok(read) = cache.read() {
-        if let Some(&value) = read.get(&key) {
-            return value;
-        }
-    }
-    let value = wigner_6j_doubled_uncached(j1, j2, j3, j4, j5, j6);
-    if let Ok(mut write) = cache.write() {
-        write.insert(key, value);
-    }
-    value
-}
-
-fn wigner_6j_doubled_uncached(
-    j1: usize,
-    j2: usize,
-    j3: usize,
-    j4: usize,
-    j5: usize,
-    j6: usize,
-) -> f64 {
-    let Some(delta_ln) = su2_delta_ln(j1, j2, j3)
-        .and_then(|value| su2_delta_ln(j1, j5, j6).map(|next| value + next))
-        .and_then(|value| su2_delta_ln(j4, j2, j6).map(|next| value + next))
-        .and_then(|value| su2_delta_ln(j4, j5, j3).map(|next| value + next))
-    else {
-        return 0.0;
-    };
-
-    let x = [j1 + j2 + j3, j1 + j5 + j6, j4 + j2 + j6, j4 + j5 + j3];
-    let y = [j1 + j2 + j4 + j5, j1 + j3 + j4 + j6, j2 + j3 + j5 + j6];
-    let mut z_min = x.into_iter().max().unwrap_or(0);
-    let z_max = y.into_iter().min().unwrap_or(0);
-    if z_min > z_max {
-        return 0.0;
-    }
-    if z_min % 2 != 0 {
-        z_min += 1;
-    }
-
-    let mut sum = 0.0;
-    let mut z_doubled = z_min;
-    while z_doubled <= z_max {
-        let z = z_doubled / 2;
-        let mut term_ln = ln_factorial(z + 1);
-        for value in x {
-            term_ln -= ln_factorial((z_doubled - value) / 2);
-        }
-        for value in y {
-            term_ln -= ln_factorial((value - z_doubled) / 2);
-        }
-        let sign = if z % 2 == 0 { 1.0 } else { -1.0 };
-        sum += sign * term_ln.exp();
-        z_doubled += 2;
-    }
-
-    delta_ln.exp() * sum
-}
-
-fn su2_delta_ln(j1: usize, j2: usize, j3: usize) -> Option<f64> {
-    if (j1 + j2 + j3) % 2 != 0 {
-        return None;
-    }
-    if j1 + j2 < j3 || j1 + j3 < j2 || j2 + j3 < j1 {
-        return None;
-    }
-    Some(
-        0.5 * (ln_factorial((j1 + j2 - j3) / 2)
-            + ln_factorial((j1 + j3 - j2) / 2)
-            + ln_factorial((j2 + j3 - j1) / 2)
-            - ln_factorial((j1 + j2 + j3) / 2 + 1)),
-    )
-}
-
-/// `ln(n!)`, memoized in a process-global lazily-extended table.
-///
-/// `ln(n!) = ln((n-1)!) + ln(n)` is monotone, so the table is filled once and
-/// every later call is an O(1) lookup. Recoupling-coefficient evaluation
-/// (6j symbols) calls this ~7x per summation term, so cold structure compile
-/// dominated by the previous naive `(1..=n)` recomputation. The values are
-/// identical; this only removes the recomputation.
-fn ln_factorial(n: usize) -> f64 {
-    static TABLE: std::sync::OnceLock<std::sync::RwLock<Vec<f64>>> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| std::sync::RwLock::new(vec![0.0]));
-    if let Ok(read) = table.read() {
-        if let Some(&value) = read.get(n) {
-            return value;
-        }
-    }
-    let mut write = table.write().expect("ln_factorial table poisoned");
-    while write.len() <= n {
-        let previous = *write.last().expect("table seeded with ln(0!) = 0");
-        let next = write.len();
-        write.push(previous + (next as f64).ln());
-    }
-    write[n]
+    let dimension_factor = ((j5 + 1) as f64 * (j6 + 1) as f64).sqrt();
+    phase
+        * dimension_factor
+        * crate::su2_exact::wigner_6j_doubled([j1, j2, j5, j3, j4, j6])
 }
 
 // FibonacciAnyon: the simplest genuinely non-abelian anyon model (Simple

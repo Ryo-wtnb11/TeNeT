@@ -1096,10 +1096,10 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
     structure
 }
 
-/// Clears the LRU-capped tenet-core intern tables — block-structure content,
-/// block-structure `Arc` dedup, and coupled subblock structures. Chained from
-/// tenet-tensors' `reset_global_operation_caches` so a long-lived / multi-tenant
-/// process can release the tables between workloads.
+/// Clears the bounded tenet-core intern tables — block-structure content,
+/// block-structure `Arc` dedup, fusion-tree layouts, and coupled subblock
+/// structures. Chained from tenet-tensors' `reset_global_operation_caches` so a
+/// long-lived / multi-tenant process can release the tables between workloads.
 ///
 /// Why-safe (id coherence): block-structure content ids come from
 /// `BLOCK_STRUCTURE_CONTENT_ID`, a monotonic counter deliberately NOT reset here.
@@ -1107,8 +1107,6 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
 /// keyed by an old content id can only be re-hit by the same content `Arc` that
 /// minted it; content re-interned after this reset gets a fresh id and misses
 /// cleanly. Reset is thus safe to call on its own — no "all layers at once" API
-/// constraint is required. `fusion_tree_layout_cache` is intentionally left
-/// untouched (insert-only; see its guard comment).
 pub fn reset_core_intern_tables() {
     if let Ok(mut table) = block_structure_intern_table().write() {
         table.clear();
@@ -1116,7 +1114,8 @@ pub fn reset_core_intern_tables() {
     if let Ok(mut table) = block_structure_arc_table().write() {
         table.clear();
     }
-    reset_coupled_block_structure_cache();
+    reset_fusion_tree_layout_caches();
+    crate::su2_exact::reset_publication_cache();
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

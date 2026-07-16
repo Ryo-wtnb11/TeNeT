@@ -51,7 +51,7 @@ pub enum TreeTransformBuiltinRuleCacheKey {
     Z2,
     FermionParity,
     U1,
-    SU2,
+    SU2Exact { authority_version: u8 },
 }
 
 impl TreeTransformRuleCacheKey for Z2FusionRule {
@@ -82,7 +82,9 @@ impl TreeTransformRuleCacheKey for SU2FusionRule {
     type Key = TreeTransformBuiltinRuleCacheKey;
 
     fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformBuiltinRuleCacheKey::SU2
+        TreeTransformBuiltinRuleCacheKey::SU2Exact {
+            authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+        }
     }
 }
 

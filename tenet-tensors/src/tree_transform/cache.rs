@@ -304,8 +304,9 @@ where
 }
 
 const TREE_PLAN_CACHE_MAGIC: &[u8] = b"TENET_TREE_PLAN_CACHE";
-const TREE_PLAN_CACHE_VERSION: u64 = 1;
-const TREE_PLAN_CACHE_FILE: &str = "tree_transform_plans_v1.bin";
+const TREE_PLAN_CACHE_VERSION: u64 = 2;
+const TREE_PLAN_CACHE_FILE: &str = "tree_transform_plans_v2.bin";
+const LEGACY_TREE_PLAN_CACHE_FILE: &str = "tree_transform_plans_v1.bin";
 
 fn persistent_tree_plan_cache_path() -> Option<PathBuf> {
     let dir = std::env::var_os("TENET_OPERATION_CACHE_DIR")?;
@@ -313,6 +314,14 @@ fn persistent_tree_plan_cache_path() -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(dir).join(TREE_PLAN_CACHE_FILE))
+}
+
+fn legacy_persistent_tree_plan_cache_path() -> Option<PathBuf> {
+    let dir = std::env::var_os("TENET_OPERATION_CACHE_DIR")?;
+    if dir.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(dir).join(LEGACY_TREE_PLAN_CACHE_FILE))
 }
 
 fn persistent_tree_plan_loaded() -> &'static RwLock<bool> {
@@ -326,6 +335,9 @@ pub(crate) fn reset_tree_transform_persistent_cache_state() {
         .expect("persistent tree-plan cache state poisoned") = false;
     last_persisted_plan_count().store(0, std::sync::atomic::Ordering::Relaxed);
     if let Some(path) = persistent_tree_plan_cache_path() {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = legacy_persistent_tree_plan_cache_path() {
         let _ = fs::remove_file(path);
     }
 }
@@ -345,6 +357,9 @@ fn load_persistent_builtin_tree_plans_if_needed() {
         .expect("persistent tree-plan cache state poisoned");
     if *loaded {
         return;
+    }
+    if let Some(path) = legacy_persistent_tree_plan_cache_path() {
+        let _ = fs::remove_file(path);
     }
     let Some(path) = persistent_tree_plan_cache_path() else {
         *loaded = true;
@@ -568,8 +583,11 @@ fn encode_builtin_rule_key(out: &mut Vec<u8>, key: TreeTransformBuiltinRuleCache
         TreeTransformBuiltinRuleCacheKey::Z2 => 0,
         TreeTransformBuiltinRuleCacheKey::FermionParity => 1,
         TreeTransformBuiltinRuleCacheKey::U1 => 2,
-        TreeTransformBuiltinRuleCacheKey::SU2 => 3,
+        TreeTransformBuiltinRuleCacheKey::SU2Exact { .. } => 3,
     });
+    if let TreeTransformBuiltinRuleCacheKey::SU2Exact { authority_version } = key {
+        out.push(authority_version);
+    }
 }
 
 fn decode_builtin_rule_key(
@@ -579,7 +597,13 @@ fn decode_builtin_rule_key(
         0 => Ok(TreeTransformBuiltinRuleCacheKey::Z2),
         1 => Ok(TreeTransformBuiltinRuleCacheKey::FermionParity),
         2 => Ok(TreeTransformBuiltinRuleCacheKey::U1),
-        3 => Ok(TreeTransformBuiltinRuleCacheKey::SU2),
+        3 => {
+            let authority_version = input.read_u8()?;
+            if authority_version != tenet_core::SU2_EXACT_AUTHORITY_VERSION {
+                return Err(());
+            }
+            Ok(TreeTransformBuiltinRuleCacheKey::SU2Exact { authority_version })
+        }
         _ => Err(()),
     }
 }
@@ -848,7 +872,9 @@ mod persistence_tests {
     fn persistent_builtin_tree_plan_cache_round_trips_with_version_guard() {
         let group_key = FusionTreeGroupKey::from_sector_ids([1, 1], [], [false, false], []);
         let key = TreeTransformSectorPlanKey {
-            rule: TreeTransformBuiltinRuleCacheKey::SU2,
+            rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            },
             scope: TreeTransformPlanScope::TreePair,
             operation: TreeTransformOperation::braid([0, 1], [], [3, 5], []),
             source_groups: vec![TreeTransformSourceGroupKey {
@@ -872,7 +898,13 @@ mod persistence_tests {
         let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
         assert_eq!(decoded, vec![(key, (*plan).clone())]);
 
-        bytes[TREE_PLAN_CACHE_MAGIC.len()] = 99;
+        let version_offset = TREE_PLAN_CACHE_MAGIC.len();
+        bytes[version_offset..version_offset + 8].copy_from_slice(&1_u64.to_le_bytes());
+        assert!(decode_builtin_tree_plan_cache(&bytes).is_err());
+
+        let mut bytes = encode_builtin_tree_plan_cache(&plans);
+        let authority_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8 + 1;
+        bytes[authority_offset] = tenet_core::SU2_EXACT_AUTHORITY_VERSION + 1;
         assert!(decode_builtin_tree_plan_cache(&bytes).is_err());
     }
 }

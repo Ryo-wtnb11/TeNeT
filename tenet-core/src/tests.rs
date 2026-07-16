@@ -21,6 +21,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use smallvec::smallvec;
+    use std::hash::Hasher;
 
     /// Fixture layout: subblocks packed contiguously in key order. Not a product
     /// layout (the only one is the coupled sector matrix); fixtures use it to
@@ -3913,6 +3914,9 @@ mod tests {
 
     #[test]
     fn fusion_tree_key_cache_hits_across_degeneracy_and_keeps_dual_signature() {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rule = SU2FusionRule;
         let mk_leg = |degeneracy| {
             SectorLeg::new(
@@ -3944,6 +3948,346 @@ mod tests {
         let dual_layout = dual_hom.cached_fusion_tree_layout(&rule);
         assert!(!Arc::ptr_eq(&small_layout, &dual_layout));
         assert_ne!(small_layout.keys.as_ref(), dual_layout.keys.as_ref());
+    }
+
+    #[test]
+    fn fusion_layout_identity_hashes_inner_semantics_not_arc_address() {
+        // What: independently allocated identity Arcs compare and hash by their
+        // complete rule/sector/duality value, while distinct rules and splits do not alias.
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(z2_even(), 1), (z2_odd(), 1)], false),
+                SectorLeg::new([(z2_even(), 1)], true),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(z2_odd(), 1)], false)]),
+        );
+        let first = Arc::new(FusionTreeHomSpaceCacheKey::new(&Z2FusionRule, &hom));
+        let second = Arc::new(FusionTreeHomSpaceCacheKey::new(&Z2FusionRule, &hom));
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(first, second);
+
+        let mut first_hash = rustc_hash::FxHasher::default();
+        first.hash(&mut first_hash);
+        let mut second_hash = rustc_hash::FxHasher::default();
+        second.hash(&mut second_hash);
+        assert_eq!(first_hash.finish(), second_hash.finish());
+
+        let fermionic = Arc::new(FusionTreeHomSpaceCacheKey::new(
+            &FermionParityFusionRule,
+            &hom,
+        ));
+        assert_ne!(first, fermionic);
+
+        let repartitioned = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(
+                [(z2_even(), 1), (z2_odd(), 1)],
+                false,
+            )]),
+            FusionProductSpace::new([
+                SectorLeg::new([(z2_even(), 1)], true),
+                SectorLeg::new([(z2_odd(), 1)], false),
+            ]),
+        );
+        let repartitioned = Arc::new(FusionTreeHomSpaceCacheKey::new(
+            &Z2FusionRule,
+            &repartitioned,
+        ));
+        assert_ne!(first, repartitioned);
+    }
+
+    #[test]
+    fn fusion_layout_global_churn_and_reset_preserve_coupled_structure() {
+        // What: cap overflow gives the rebuilt layout a fresh non-recycling id;
+        // coupled content remains equal, and reset cannot stale-alias live old values.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let rule = U1FusionRule;
+        let hom = FusionTreeHomSpace::from_sectors([(U1Irrep::new(0), 2)], [(U1Irrep::new(0), 3)]);
+        let old_layout = hom.cached_fusion_tree_layout(&rule);
+        let old_id = old_layout.id;
+        let old_structure = hom
+            .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
+            .unwrap();
+        drop(old_layout);
+
+        for charge in 1..=(FUSION_TREE_LAYOUT_CACHE_CAP as i32 + 64) {
+            let distinct = FusionTreeHomSpace::from_sectors(
+                [(U1Irrep::new(charge), 1)],
+                [(U1Irrep::new(charge), 1)],
+            );
+            let _ = distinct.fusion_tree_keys(&rule);
+        }
+        let global_info = fusion_tree_layout_cache_info();
+        assert!(global_info.entries() <= global_info.entry_capacity());
+        assert!(global_info.charged_payload_bytes() <= global_info.byte_budget());
+
+        let rebuilt_layout = hom.cached_fusion_tree_layout(&rule);
+        assert!(rebuilt_layout.id > old_id);
+        let reused_structure = hom
+            .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
+            .unwrap();
+        assert_eq!(old_structure.as_ref(), reused_structure.as_ref());
+
+        reset_core_intern_tables();
+        let after_reset_layout = hom.cached_fusion_tree_layout(&rule);
+        let after_reset_structure = hom
+            .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
+            .unwrap();
+        assert!(!Arc::ptr_eq(&rebuilt_layout, &after_reset_layout));
+        assert!(after_reset_layout.id > rebuilt_layout.id);
+        assert!(!Arc::ptr_eq(&old_structure, &after_reset_structure));
+        assert_eq!(old_structure.as_ref(), after_reset_structure.as_ref());
+    }
+
+    fn local_u1_layout(
+        charge: i32,
+    ) -> (
+        Arc<FusionTreeHomSpaceCacheKey>,
+        Arc<FusionTreeHomSpaceLayout>,
+    ) {
+        let rule = U1FusionRule;
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(U1Irrep::new(charge), 1)],
+            [(U1Irrep::new(charge), 1)],
+        );
+        let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
+        let layout = Arc::new(fusion_tree_layout_from_keys(
+            &rule,
+            next_fusion_tree_layout_id(),
+            hom.fusion_tree_keys_uncached(&rule),
+        ));
+        (key, layout)
+    }
+
+    #[test]
+    fn fusion_layout_local_cache_is_strict_insertion_order_and_resets_exactly() {
+        // What: read hits do not promote FIFO order; entry eviction and reset
+        // update charged bytes and counters deterministically in isolated state.
+        let mut cache = FusionTreeLayoutCache::new(2, 100, 100);
+        let (key0, layout0) = local_u1_layout(40_000);
+        let (key1, layout1) = local_u1_layout(40_001);
+        let (key2, layout2) = local_u1_layout(40_002);
+        cache.admit(Arc::clone(&key0), layout0, 30);
+        cache.admit(Arc::clone(&key1), layout1, 30);
+        assert!(cache.lookup(&key0).is_some());
+        cache.admit(Arc::clone(&key2), layout2, 30);
+
+        assert!(cache.lookup(&key0).is_none());
+        assert!(cache.lookup(&key1).is_some());
+        assert!(cache.lookup(&key2).is_some());
+        assert_eq!(cache.info().entries(), 2);
+        assert_eq!(cache.info().charged_payload_bytes(), 60);
+        assert_eq!(cache.info().evictions(), 1);
+
+        cache.clear();
+        assert_eq!(cache.info().entries(), 0);
+        assert_eq!(cache.info().charged_payload_bytes(), 0);
+        assert_eq!(cache.info().misses(), 0);
+        assert_eq!(cache.info().evictions(), 0);
+        assert_eq!(cache.info().admission_bypasses(), 0);
+    }
+
+    #[test]
+    fn fusion_layout_local_cache_enforces_byte_and_max_entry_admission() {
+        // What: charged-byte pressure evicts oldest entries, while an oversized
+        // entry is returned to its caller but never retained by the cache.
+        let mut cache = FusionTreeLayoutCache::new(8, 50, 40);
+        let (key0, layout0) = local_u1_layout(50_000);
+        let (key1, layout1) = local_u1_layout(50_001);
+        let (oversized_key, oversized_layout) = local_u1_layout(50_002);
+        cache.admit(Arc::clone(&key0), layout0, 30);
+        cache.admit(Arc::clone(&key1), layout1, 30);
+
+        assert!(cache.lookup(&key0).is_none());
+        assert!(cache.lookup(&key1).is_some());
+        assert_eq!(cache.info().charged_payload_bytes(), 30);
+        assert_eq!(cache.info().evictions(), 1);
+
+        let returned = cache.admit(Arc::clone(&oversized_key), Arc::clone(&oversized_layout), 41);
+        assert!(Arc::ptr_eq(&returned, &oversized_layout));
+        assert!(cache.lookup(&oversized_key).is_none());
+        assert_eq!(cache.info().entries(), 1);
+        assert_eq!(cache.info().charged_payload_bytes(), 30);
+        assert_eq!(cache.info().admission_bypasses(), 1);
+    }
+
+    #[test]
+    fn fusion_layout_local_cache_bypasses_oversized_rule_identity() {
+        #[derive(Clone)]
+        struct OversizedIdentityRule {
+            identity: RuleIdentity,
+        }
+
+        impl FusionRule for OversizedIdentityRule {
+            fn rule_identity(&self) -> RuleIdentity {
+                self.identity.clone()
+            }
+
+            fn fusion_style(&self) -> FusionStyleKind {
+                FusionStyleKind::Unique
+            }
+
+            fn braiding_style(&self) -> BraidingStyleKind {
+                BraidingStyleKind::Bosonic
+            }
+
+            fn vacuum(&self) -> SectorId {
+                SectorId::new(0)
+            }
+
+            fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+                smallvec![SectorId::new(left.id() ^ right.id())]
+            }
+        }
+
+        impl MultiplicityFreeFusionRule for OversizedIdentityRule {}
+
+        // What: canonical rule bytes participate in admission accounting, so
+        // an identity alone above the per-entry limit is computed but not retained.
+        let canonical_bytes = Arc::<[u8]>::from(vec![
+            0;
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
+                .saturating_add(1)
+        ]);
+        let rule = OversizedIdentityRule {
+            identity: RuleIdentity::from_canonical_bytes::<OversizedIdentityRule>(
+                0,
+                canonical_bytes,
+            ),
+        };
+        assert!(
+            rule.identity.charged_retained_bytes()
+                > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
+        );
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(SectorId::new(0), 1)],
+            Vec::<(SectorId, usize)>::new(),
+        );
+        let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
+        let layout = Arc::new(fusion_tree_layout_from_keys(
+            &rule,
+            next_fusion_tree_layout_id(),
+            hom.fusion_tree_keys_uncached(&rule),
+        ));
+        let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+        assert!(charged_bytes > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
+
+        let mut cache = FusionTreeLayoutCache::new(
+            8,
+            FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET,
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
+        );
+        let returned = cache.admit(Arc::clone(&key), Arc::clone(&layout), charged_bytes);
+        assert!(Arc::ptr_eq(&returned, &layout));
+        assert!(cache.lookup(&key).is_none());
+        let info = cache.info();
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.admission_bypasses(), 1);
+    }
+
+    #[test]
+    fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
+        // What: one sector layout may be shared across degeneracies, but concrete
+        // shapes and bosonic/fermionic rule provenance select distinct structures/layouts.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(
+                [(z2_even(), 1), (z2_odd(), 1)],
+                false,
+            )]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(z2_even(), 1), (z2_odd(), 1)],
+                false,
+            )]),
+        );
+        let bosonic_layout = hom.cached_fusion_tree_layout(&Z2FusionRule);
+        let fermionic_layout = hom.cached_fusion_tree_layout(&FermionParityFusionRule);
+        assert_ne!(bosonic_layout.id, fermionic_layout.id);
+
+        let small = hom
+            .coupled_subblock_structure(&FermionParityFusionRule, 1, [vec![1, 1], vec![1, 1]])
+            .unwrap();
+        let large_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(
+                [(z2_even(), 2), (z2_odd(), 3)],
+                false,
+            )]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(z2_even(), 2), (z2_odd(), 3)],
+                false,
+            )]),
+        );
+        let large = large_hom
+            .coupled_subblock_structure(&FermionParityFusionRule, 1, [vec![2, 2], vec![3, 3]])
+            .unwrap();
+        assert!(!Arc::ptr_eq(&small, &large));
+        assert_ne!(small.as_ref(), large.as_ref());
+
+        let transient_hom = FusionTreeHomSpace::from_sectors(
+            [(U1Irrep::new(17), 4)],
+            [(U1Irrep::new(17), 5)],
+        );
+        let transient = transient_hom
+            .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
+            .unwrap();
+        let expired = Arc::downgrade(&transient);
+        drop(transient);
+        assert!(expired.upgrade().is_none());
+        let rebuilt = transient_hom
+            .coupled_subblock_structure(&U1FusionRule, 1, [vec![4, 5]])
+            .unwrap();
+        assert_eq!(rebuilt.block(0).unwrap().shape(), &[4, 5]);
+    }
+
+    #[test]
+    fn fusion_layout_lookup_and_reset_are_concurrent_safe_after_poison() {
+        // What: a poisoned layout lock and concurrent lookup/reset cannot publish
+        // partial layout content or return a structure with the wrong keys/shapes.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let poisoned = std::panic::catch_unwind(|| {
+            let _write = fusion_tree_layout_cache()
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("poison fusion layout cache for recovery test");
+        });
+        assert!(poisoned.is_err());
+
+        let workers = (0..4)
+            .map(|worker| {
+                std::thread::spawn(move || {
+                    let rule = U1FusionRule;
+                    for iteration in 0..64 {
+                        if worker == 0 && iteration % 8 == 0 {
+                            reset_core_intern_tables();
+                        }
+                        let charge = worker * 100 + iteration;
+                        let hom = FusionTreeHomSpace::from_sectors(
+                            [(U1Irrep::new(charge), 2)],
+                            [(U1Irrep::new(charge), 3)],
+                        );
+                        let keys = hom.fusion_tree_keys(&rule);
+                        assert_eq!(keys.len(), 1);
+                        assert_eq!(keys[0].coupled(), Some(U1Irrep::new(charge).sector_id()));
+                        let structure = hom
+                            .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
+                            .unwrap();
+                        assert_eq!(structure.block_count(), 1);
+                        assert_eq!(structure.block(0).unwrap().shape(), &[2, 3]);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 
     #[test]

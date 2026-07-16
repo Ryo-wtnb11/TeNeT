@@ -1465,6 +1465,9 @@ fn tree_row_memo_survives_structure_change() {
 
 #[test]
 fn process_global_tree_transform_cache_warms_independent_contexts() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let src_key0 = all_codomain_fusion_tree_test_key(
         [1, 1, 1, 1],
         Some(0),
@@ -2370,6 +2373,50 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
             "actual {actual} != expected {expected}"
         );
     }
+}
+
+#[test]
+fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live() {
+    // What: a reset may drop every semantic layout/transform artifact while old
+    // product-symmetry tensors remain live; rebuilding preserves the fZ2 swap sign.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    let src_hom = src_space.homspace().clone();
+    let dst_hom = dst_space.homspace().clone();
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+    let src_data = vec![10.0, 20.0];
+    let initial_dst = vec![1.0, 2.0];
+    let src =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(src_data.clone(), src_space).unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(initial_dst.clone(), dst_space).unwrap();
+    tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, 3.0).unwrap();
+    let expected = dst.data().to_vec();
+
+    reset_global_operation_caches();
+    let rebuilt_src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+        src_hom,
+        &rule,
+        [vec![1, 1, 1], vec![1, 1, 1]],
+    )
+    .unwrap();
+    let rebuilt_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+        dst_hom,
+        &rule,
+        [vec![1, 1, 1], vec![1, 1, 1]],
+    )
+    .unwrap();
+    let rebuilt_src =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(src_data, rebuilt_src_space).unwrap();
+    let mut rebuilt_dst =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(initial_dst, rebuilt_dst_space).unwrap();
+    tree_transform_into(&rule, operation, &mut rebuilt_dst, &rebuilt_src, 2.0, 3.0).unwrap();
+
+    assert_eq!(rebuilt_dst.data(), expected.as_slice());
 }
 
 #[test]

@@ -275,6 +275,19 @@ fn fz2_u1_su2_tree_pair_fixture() -> (
     (rule, src_space, dst_space, [c0, c1])
 }
 
+fn force_fusion_layout_eviction() {
+    // What: exceeds the production fusion-layout entry cap with equal-cost U(1)
+    // layouts, forcing any previously inserted layout out of FIFO residency.
+    let rule = U1FusionRule;
+    for charge in 100_000..108_256 {
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(U1Irrep::new(charge), 1)],
+            [(U1Irrep::new(charge), 1)],
+        );
+        let _ = hom.fusion_tree_keys(&rule);
+    }
+}
+
 fn single_transform_coefficient_for_coupled(
     plan: &TreeTransformGroupPlan<f64>,
     coupled: SectorId,

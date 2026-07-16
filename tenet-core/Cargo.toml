@@ -20,6 +20,11 @@ lru = "0.12"
 # `Scalar` for the recoupling engine's F/R symbols — version matches the
 # other workspace crates that already depend on it (tenet, tenet-dense, ...).
 num-complex = "0.4"
+# Why not caret ranges: these versions jointly define persisted SU(2)
+# coefficients and canonical keys, while this library does not track Cargo.lock.
+wigner-symbols = "=0.5.1"
+rug = { version = "=1.30.0", default-features = false, features = ["integer", "rational"] }
+gmp-mpfr-sys = { version = "=1.7.1", default-features = false }
 
 [dev-dependencies]
 # Zero-cost-claim canary (#153): a tiny hash/eq microbench for the

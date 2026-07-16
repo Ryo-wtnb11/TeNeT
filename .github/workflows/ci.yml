@@ -14,6 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  GMP_MPFR_SYS_CACHE: ${{ github.workspace }}/.cache/gmp-mpfr-sys
   # Why-not keep default DWARF: heavy Linux tests do not inspect it, while its
   # artifacts exhaust hosted-runner disk and linker memory.
   # Why-not delete more image paths: that treats the symptom and can destabilize
@@ -108,6 +109,7 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - name: Install Accelerate build toolchain
         if: matrix.name == 'accelerate'
         run: brew install gcc
@@ -154,6 +156,7 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -179,6 +182,7 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - name: Check the backend-selection diagnostic
         run: |
           set -euo pipefail
@@ -205,6 +209,7 @@ jobs:
         with:
           method: network
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -237,6 +242,7 @@ jobs:
           julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 3 10 /tmp/su3_om_table.bin
         working-directory: tenet
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - name: Load the generated artifact through TeNeT
         run: cargo test -p tenet-core generated_su4_artifact_passes_the_production_loader -- --ignored
         working-directory: tenet
@@ -260,6 +266,7 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -292,6 +299,7 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -322,6 +330,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -357,6 +366,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
@@ -396,6 +406,7 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
