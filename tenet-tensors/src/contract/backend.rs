@@ -5,7 +5,9 @@ use tenet_core::{
     SimilarStorage, TensorMap,
 };
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
-use tenet_operations::fusion_replay::{direct_slice, direct_slice_mut, Rank2GemmBatchJob};
+use tenet_operations::fusion_replay::{
+    direct_slice, direct_slice_mut, MatrixOp, Rank2GemmBatchJob,
+};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -166,6 +168,30 @@ where
             )?;
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_rank2_batch_with_ops_axpby_into_raw(
+        &mut self,
+        workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
+            return self.matmul_rank2_batch_axpby_into_raw(
+                workspace, dst_data, lhs_data, rhs_data, jobs, runs, alpha, beta,
+            );
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "contract backend does not implement transpose/adjoint rank-2 batches",
+        })
     }
 }
 
@@ -452,6 +478,56 @@ where
                 rhs,
                 jobs,
                 runs,
+                alpha.dense_scalar(),
+                beta.dense_scalar(),
+            )
+            .map_err(OperationError::Dense)
+    }
+
+    fn matmul_rank2_batch_with_ops_axpby_into_raw(
+        &mut self,
+        _workspace: &mut Self::Workspace,
+        dst_data: &mut [D],
+        lhs_data: &[D],
+        rhs_data: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError> {
+        let dst_shape = [dst_data.len()];
+        let lhs_shape = [lhs_data.len()];
+        let rhs_shape = [rhs_data.len()];
+        let flat_strides = [1];
+        let lhs = D::dense_read(DenseView::new_trusted(
+            lhs_data,
+            &lhs_shape,
+            &flat_strides,
+            0,
+        ));
+        let rhs = D::dense_read(DenseView::new_trusted(
+            rhs_data,
+            &rhs_shape,
+            &flat_strides,
+            0,
+        ));
+        let output = D::dense_write(DenseViewMut::new_trusted(
+            dst_data,
+            &dst_shape,
+            &flat_strides,
+            0,
+        ));
+        self.dense_mut()
+            .matmul_batch_axpby_with_ops_into(
+                output,
+                lhs,
+                rhs,
+                jobs,
+                runs,
+                lhs_op,
+                rhs_op,
                 alpha.dense_scalar(),
                 beta.dense_scalar(),
             )

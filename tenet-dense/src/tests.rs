@@ -27,6 +27,105 @@ fn assert_c64_close(actual: Complex64, expected: Complex64, tol: f64) {
     assert_f64_close(actual.im, expected.im, tol);
 }
 
+#[test]
+fn op_bearing_batch_applies_rectangular_adjoint_and_alpha_beta() {
+    // What: a batch-level Adjoint transposes rectangular parent matrices,
+    // conjugates C64 values, and preserves caller alpha/beta accumulation.
+    let rows = 2;
+    let contracted = 3;
+    let cols = 4;
+    let lhs = (0..contracted * rows)
+        .map(|i| Complex64::new(i as f64 + 1.0, 0.25 * i as f64 - 0.5))
+        .collect::<Vec<_>>();
+    let rhs = (0..cols * contracted)
+        .map(|i| Complex64::new(0.5 * i as f64 - 2.0, 0.75 - 0.1 * i as f64))
+        .collect::<Vec<_>>();
+    let mut output = vec![Complex64::new(0.5, -0.25); rows * cols];
+    let initial = output.clone();
+    let alpha = Complex64::new(0.75, -0.5);
+    let beta = Complex64::new(-0.25, 0.125);
+    let jobs = [DenseGemmBatchJob {
+        dst_offset: 0,
+        lhs_offset: 0,
+        rhs_offset: 0,
+        rows,
+        contracted,
+        cols,
+    }];
+    let flat_strides = [1];
+    let lhs_shape = [lhs.len()];
+    let rhs_shape = [rhs.len()];
+    let output_shape = [output.len()];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+    executor
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::C64(
+                DenseViewMut::new(&mut output, &output_shape, &flat_strides, 0).unwrap(),
+            ),
+            DenseRead::C64(DenseView::new(&lhs, &lhs_shape, &flat_strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&rhs, &rhs_shape, &flat_strides, 0).unwrap()),
+            &jobs,
+            &[1],
+            MatrixOp::Adjoint,
+            MatrixOp::Adjoint,
+            DenseScalar::C64(alpha),
+            DenseScalar::C64(beta),
+        )
+        .unwrap();
+
+    for col in 0..cols {
+        for row in 0..rows {
+            let mut sum = Complex64::new(0.0, 0.0);
+            for inner in 0..contracted {
+                let left = lhs[inner + contracted * row].conj();
+                let right = rhs[col + cols * inner].conj();
+                sum += left * right;
+            }
+            let index = row + rows * col;
+            assert_c64_close(output[index], alpha * sum + beta * initial[index], 1.0e-12);
+        }
+    }
+}
+
+#[test]
+fn op_bearing_batch_rejects_offset_overflow_before_view_construction() {
+    // What: malformed public batch jobs return a typed offset error instead of
+    // wrapping an operand base offset before the transposed view is validated.
+    let lhs = vec![1.0, 2.0];
+    let rhs = vec![3.0];
+    let mut output = vec![0.0];
+    let jobs = [DenseGemmBatchJob {
+        dst_offset: 0,
+        lhs_offset: usize::MAX,
+        rhs_offset: 0,
+        rows: 1,
+        contracted: 1,
+        cols: 1,
+    }];
+    let shape = [1];
+    let strides = [1];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    let error = executor
+        .matmul_batch_axpby_with_ops_into(
+            DenseWrite::F64(DenseViewMut::new(&mut output, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&lhs, &shape, &strides, 1).unwrap()),
+            DenseRead::F64(DenseView::new(&rhs, &shape, &strides, 0).unwrap()),
+            &jobs,
+            &[1],
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+            DenseScalar::F64(1.0),
+            DenseScalar::F64(0.0),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DenseError::OffsetOverflow { value: usize::MAX }
+    ));
+}
+
 // Regression guard for the conjugated-contraction fast path: a conj flag on
 // `dot_general_into` must fold conjugation into the kernel and produce exactly
 // what contracting an elementwise-conjugated operand would — and it must

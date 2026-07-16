@@ -8,6 +8,7 @@ use tenet_core::{
     HostWritableStorage, MultiplicityFreeRigidSymbols, SectorId,
 };
 
+use crate::lowering::prelowered_storage_block_index;
 use crate::strided::{
     column_major_strides_isize, column_major_strides_usize, element_count, offset_to_isize,
     strides_to_isize,
@@ -17,7 +18,7 @@ use tenet_operations::TensorContractSpec;
 
 use tenet_operations::fusion_replay::{
     direct_group_matrix_offset, fusion_scale_block_layouts_excluding, FusionBlockContractGroupPlan,
-    FusionBlockMatrixGroup, FusionStridedBlockLayout, FusionSubblockMatrixLayout,
+    FusionBlockMatrixGroup, FusionStridedBlockLayout, FusionSubblockMatrixLayout, MatrixOp,
     Rank2GemmBatchJob,
 };
 pub(crate) use tenet_operations::fusion_replay::{
@@ -105,6 +106,35 @@ where
             rhs,
             jobs,
             runs,
+            alpha,
+            beta,
+        )
+    }
+
+    fn matmul_rank2_batch_with_ops(
+        &mut self,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        D: Copy,
+    {
+        self.backend.matmul_rank2_batch_with_ops_axpby_into_raw(
+            self.workspace,
+            dst,
+            lhs,
+            rhs,
+            jobs,
+            runs,
+            lhs_op,
+            rhs_op,
             alpha,
             beta,
         )
@@ -573,6 +603,87 @@ mod tests {
         assert_eq!(direct, expected);
     }
 
+    fn z2_adjoint_mapping_spaces() -> (
+        DynamicFusionMapSpace,
+        DynamicFusionMapSpace,
+        FusionBlockMatrixLayout,
+        FusionBlockMatrixLayout,
+    ) {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 2)], false);
+        let storage = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![2, 2], vec![2, 2]],
+        )
+        .unwrap();
+        let logical = crate::lowering::adjoint_fusion_space_view(&storage).unwrap();
+        let logical = DynamicFusionMapSpace::from_typed(&logical);
+        let storage = DynamicFusionMapSpace::from_typed(&storage);
+        let logical_layout = FusionBlockMatrixLayout::compile(&rule, &logical).unwrap();
+        let storage_layout = FusionBlockMatrixLayout::compile(&rule, &storage).unwrap();
+        (logical, storage, logical_layout, storage_layout)
+    }
+
+    #[test]
+    fn prelowered_mapping_rejects_mismatched_tree_ordering() {
+        let (logical, storage, mut logical_layout, storage_layout) = z2_adjoint_mapping_spaces();
+        let logical_group = logical_layout.groups.first_mut().unwrap();
+        logical_group.subblocks[0].matrix_offset += 1;
+
+        let error = map_logical_group_to_storage(
+            logical_group,
+            &logical,
+            &storage,
+            &storage_layout,
+            MatrixOp::Adjoint,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::StructureMismatch {
+                tensor: "prelowered tree ordering"
+            }
+        ));
+    }
+
+    #[test]
+    fn prelowered_non_direct_physical_layout_yields_fallback_plan() {
+        let (logical, storage, logical_layout, mut storage_layout) = z2_adjoint_mapping_spaces();
+        let logical_group = logical_layout.groups[0].clone();
+        storage_layout.groups[0].direct_offset = None;
+        let physical = map_logical_group_to_storage(
+            &logical_group,
+            &logical,
+            &storage,
+            &storage_layout,
+            MatrixOp::Adjoint,
+        )
+        .unwrap();
+        assert_eq!(physical.direct_offset, None);
+
+        let group =
+            FusionBlockContractGroupPlan::new(physical.clone(), physical, logical_group).unwrap();
+        let plan = FusionBlockContractPlan::from_parts_with_ops(
+            Arc::clone(logical.structure()),
+            Arc::clone(storage.structure()),
+            Arc::clone(storage.structure()),
+            Vec::new(),
+            vec![group],
+            MatrixOp::Adjoint,
+            MatrixOp::Adjoint,
+        )
+        .unwrap();
+
+        // What: a valid but non-direct physical layout is a route decision,
+        // not a user-visible Core compilation error.
+        assert!(!plan.is_fully_direct());
+    }
+
     /// GPU vertical: the same core direct replay executed on CUDA
     /// storage must reproduce the host result bit-for-bit (same GEMM
     /// ordering, overwrite semantics). Requires a CUDA device; run with
@@ -776,6 +887,187 @@ where
         fusion_scale_block_layouts_excluding(dst_space.structure(), &active_dst_blocks)?,
         groups,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_fusion_block_contract_plan_prelowered<R>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_logical: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_logical: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+) -> Result<FusionBlockContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    validate_fusion_contract_rule(rule, dst_space, lhs_logical, rhs_logical)?;
+    lhs_storage.validate_rule(rule)?;
+    rhs_storage.validate_rule(rule)?;
+    validate_core_compose(rule, dst_space, lhs_logical, rhs_logical, axes)?;
+
+    let lhs_logical_layout = FusionBlockMatrixLayout::compile(rule, lhs_logical)?;
+    let lhs_storage_layout = FusionBlockMatrixLayout::compile(rule, lhs_storage)?;
+    let rhs_logical_layout = FusionBlockMatrixLayout::compile(rule, rhs_logical)?;
+    let rhs_storage_layout = FusionBlockMatrixLayout::compile(rule, rhs_storage)?;
+    let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space)?;
+
+    let mut groups = Vec::new();
+    let mut active_dst_blocks = HashSet::<usize>::new();
+    for lhs_group in lhs_logical_layout.groups {
+        let Some(rhs_group) = rhs_logical_layout.group(lhs_group.coupled) else {
+            continue;
+        };
+        let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
+            continue;
+        };
+        let lhs_physical = map_logical_group_to_storage(
+            &lhs_group,
+            lhs_logical,
+            lhs_storage,
+            &lhs_storage_layout,
+            lhs_op,
+        )?;
+        let rhs_physical = map_logical_group_to_storage(
+            rhs_group,
+            rhs_logical,
+            rhs_storage,
+            &rhs_storage_layout,
+            rhs_op,
+        )?;
+        for block_index in &dst_group.block_indices {
+            debug_assert!(
+                !active_dst_blocks.contains(block_index),
+                "core fusion-block dst subblock must be scattered exactly once"
+            );
+        }
+        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
+        groups.push(FusionBlockContractGroupPlan::new(
+            lhs_physical,
+            rhs_physical,
+            dst_group.clone(),
+        )?);
+    }
+    FusionBlockContractPlan::from_parts_with_ops(
+        Arc::clone(dst_space.structure()),
+        Arc::clone(lhs_storage.structure()),
+        Arc::clone(rhs_storage.structure()),
+        fusion_scale_block_layouts_excluding(dst_space.structure(), &active_dst_blocks)?,
+        groups,
+        lhs_op,
+        rhs_op,
+    )
+}
+
+fn map_logical_group_to_storage(
+    logical_group: &FusionBlockMatrixGroup,
+    logical_space: &DynamicFusionMapSpace,
+    storage_space: &DynamicFusionMapSpace,
+    storage_layout: &FusionBlockMatrixLayout,
+    op: MatrixOp,
+) -> Result<FusionBlockMatrixGroup, OperationError> {
+    let storage_conjugate = op != MatrixOp::Identity;
+    let map_block = prelowered_storage_block_index(logical_space, storage_space, storage_conjugate);
+    let mapped = logical_group
+        .block_indices
+        .iter()
+        .map(|&index| map_block(index))
+        .collect::<Result<HashSet<_>, _>>()?;
+    let storage_group = storage_layout
+        .groups
+        .iter()
+        .find(|group| {
+            group.block_indices.len() == mapped.len()
+                && group
+                    .block_indices
+                    .iter()
+                    .all(|index| mapped.contains(index))
+        })
+        .ok_or(OperationError::StructureMismatch {
+            tensor: "prelowered physical group",
+        })?;
+
+    let expected_dims = match op {
+        MatrixOp::Identity => (storage_group.rows, storage_group.cols),
+        MatrixOp::Transpose | MatrixOp::Adjoint => (storage_group.cols, storage_group.rows),
+    };
+    if (logical_group.rows, logical_group.cols) != expected_dims {
+        return Err(OperationError::ShapeMismatch {
+            dst: vec![logical_group.rows, logical_group.cols],
+            src: vec![expected_dims.0, expected_dims.1],
+        });
+    }
+    for &logical_index in &logical_group.block_indices {
+        let storage_index = map_block(logical_index)?;
+        let logical = logical_space.structure().block(logical_index)?;
+        let storage = storage_space.structure().block(storage_index)?;
+        let split = storage_space.nout();
+        let expected_shape = match op {
+            MatrixOp::Identity => storage.shape().to_vec(),
+            MatrixOp::Transpose | MatrixOp::Adjoint => storage.shape()[split..]
+                .iter()
+                .chain(&storage.shape()[..split])
+                .copied()
+                .collect(),
+        };
+        // Why not compare logical offsets/strides: the categorical adjoint
+        // space has its own canonical packed layout. Replay never addresses
+        // that layout; the checked parent group below is the physical authority.
+        if logical.shape() != expected_shape {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prelowered block layout",
+            });
+        }
+        let logical_position = logical_group
+            .block_indices
+            .iter()
+            .position(|&index| index == logical_index)
+            .expect("logical block belongs to its group");
+        let storage_position = storage_group
+            .block_indices
+            .iter()
+            .position(|&index| index == storage_index)
+            .expect("mapped storage block belongs to its group");
+        let logical_offset = usize::try_from(
+            logical_group.subblocks[logical_position].matrix_offset,
+        )
+        .map_err(|_| OperationError::StructureMismatch {
+            tensor: "prelowered logical tree offset",
+        })?;
+        let storage_offset = usize::try_from(
+            storage_group.subblocks[storage_position].matrix_offset,
+        )
+        .map_err(|_| OperationError::StructureMismatch {
+            tensor: "prelowered physical tree offset",
+        })?;
+        let logical_tree_offset = (
+            logical_offset % logical_group.rows,
+            logical_offset / logical_group.rows,
+        );
+        let storage_tree_offset = (
+            storage_offset % storage_group.rows,
+            storage_offset / storage_group.rows,
+        );
+        let expected_tree_offset = match op {
+            MatrixOp::Identity => storage_tree_offset,
+            MatrixOp::Transpose | MatrixOp::Adjoint => {
+                (storage_tree_offset.1, storage_tree_offset.0)
+            }
+        };
+        if logical_tree_offset != expected_tree_offset {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prelowered tree ordering",
+            });
+        }
+    }
+    let mut physical = logical_group.clone();
+    physical.direct_offset = storage_group.direct_offset;
+    physical.block_indices = storage_group.block_indices.clone();
+    physical.subblocks = storage_group.subblocks.clone();
+    Ok(physical)
 }
 
 /// Generic-fusion (Stage B3c-1) sibling of [`compile_fusion_block_contract_plan`]:

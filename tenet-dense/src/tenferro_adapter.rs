@@ -4,7 +4,7 @@ use crate::executor::batch_offset;
 use crate::layout::strides_to_isize;
 use crate::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
-    DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite,
+    DenseScalar, DenseTensor, DenseView, DenseViewMut, DenseWrite, MatrixOp,
 };
 
 use std::sync::Arc;
@@ -309,6 +309,81 @@ impl DefaultDenseExecutor {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn matmul_batch_axpby_ops_typed<T, W, R>(
+        &mut self,
+        output: &mut DenseViewMut<'_, T>,
+        lhs: DenseView<'_, T>,
+        rhs: DenseView<'_, T>,
+        jobs: &[DenseGemmBatchJob],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+        wrap_write: W,
+        wrap_read: R,
+    ) -> Result<(), DenseError>
+    where
+        T: 'static,
+        W: for<'x> Fn(DenseViewMut<'x, T>) -> DenseWrite<'x>,
+        R: for<'x> Fn(DenseView<'x, T>) -> DenseRead<'x>,
+    {
+        let output_base = output.offset();
+        for (cache_slot, job) in jobs.iter().enumerate() {
+            let lhs_shape = [job.rows, job.contracted];
+            let lhs_strides = match lhs_op {
+                MatrixOp::Identity => [1, job.rows],
+                MatrixOp::Transpose | MatrixOp::Adjoint => [job.contracted, 1],
+            };
+            let rhs_shape = [job.contracted, job.cols];
+            let rhs_strides = match rhs_op {
+                MatrixOp::Identity => [1, job.contracted],
+                MatrixOp::Transpose | MatrixOp::Adjoint => [job.cols, 1],
+            };
+            let output_shape = [job.rows, job.cols];
+            let output_strides = [1, job.rows];
+            let lhs_view = DenseView::new(
+                lhs.data(),
+                &lhs_shape,
+                &lhs_strides,
+                batch_offset(lhs.offset(), job.lhs_offset)?,
+            )?;
+            let rhs_view = DenseView::new(
+                rhs.data(),
+                &rhs_shape,
+                &rhs_strides,
+                batch_offset(rhs.offset(), job.rhs_offset)?,
+            )?;
+            let output_view = DenseViewMut::new(
+                output.data_mut(),
+                &output_shape,
+                &output_strides,
+                batch_offset(output_base, job.dst_offset)?,
+            )?;
+            let lhs = TensorRead::from_view(tenferro_view(wrap_read(lhs_view))?);
+            let rhs = TensorRead::from_view(tenferro_view(wrap_read(rhs_view))?);
+            let output = TensorWrite::from_view(tenferro_view_mut(wrap_write(output_view))?);
+            let accumulation = tenferro_tensor::DotGeneralAccumulation {
+                lhs_conj: lhs_op == MatrixOp::Adjoint,
+                rhs_conj: rhs_op == MatrixOp::Adjoint,
+                alpha: tenferro_scalar(alpha),
+                beta: tenferro_scalar(beta),
+            };
+            BackendCachedDot::dot_general_read_into_accum_cached(
+                &mut self.backend,
+                &mut self.grouped_cache,
+                Some(cache_slot),
+                lhs,
+                rhs,
+                &self.matmul_config,
+                accumulation,
+                output,
+            )
+            .map_err(|err| tenferro_error("matmul_batch_axpby_with_ops_into", err))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn matmul_strided_batch_run_typed<T, W, R>(
         &mut self,
         output: &mut DenseViewMut<'_, T>,
@@ -608,6 +683,85 @@ impl DenseExecutor for DefaultDenseExecutor {
                 backend: DenseBackend::Tenferro,
                 op: "matmul_batch_axpby_into",
                 message: "batched matmul requires matching f32/f64/c32/c64 operands".to_string(),
+            }),
+        }
+    }
+
+    #[allow(clippy::redundant_closure)]
+    fn matmul_batch_axpby_with_ops_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        jobs: &[DenseGemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: DenseScalar,
+        beta: DenseScalar,
+    ) -> Result<(), DenseError> {
+        if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
+            return self.matmul_batch_axpby_into(output, lhs, rhs, jobs, runs, alpha, beta);
+        }
+        match (output, lhs, rhs) {
+            (DenseWrite::F32(mut out), DenseRead::F32(lhs), DenseRead::F32(rhs)) => self
+                .matmul_batch_axpby_ops_typed(
+                    &mut out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    lhs_op,
+                    rhs_op,
+                    alpha,
+                    beta,
+                    // Constructor functions capture one concrete lifetime; closures
+                    // remain generic over each temporary view borrowed below.
+                    |view| DenseWrite::F32(view),
+                    |view| DenseRead::F32(view),
+                ),
+            (DenseWrite::F64(mut out), DenseRead::F64(lhs), DenseRead::F64(rhs)) => self
+                .matmul_batch_axpby_ops_typed(
+                    &mut out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    lhs_op,
+                    rhs_op,
+                    alpha,
+                    beta,
+                    |view| DenseWrite::F64(view),
+                    |view| DenseRead::F64(view),
+                ),
+            (DenseWrite::C32(mut out), DenseRead::C32(lhs), DenseRead::C32(rhs)) => self
+                .matmul_batch_axpby_ops_typed(
+                    &mut out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    lhs_op,
+                    rhs_op,
+                    alpha,
+                    beta,
+                    |view| DenseWrite::C32(view),
+                    |view| DenseRead::C32(view),
+                ),
+            (DenseWrite::C64(mut out), DenseRead::C64(lhs), DenseRead::C64(rhs)) => self
+                .matmul_batch_axpby_ops_typed(
+                    &mut out,
+                    lhs,
+                    rhs,
+                    jobs,
+                    lhs_op,
+                    rhs_op,
+                    alpha,
+                    beta,
+                    |view| DenseWrite::C64(view),
+                    |view| DenseRead::C64(view),
+                ),
+            _ => Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "matmul_batch_axpby_with_ops_into",
+                message: "op-bearing batch requires matching f32/f64/c32/c64 operands".to_string(),
             }),
         }
     }

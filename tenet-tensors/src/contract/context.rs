@@ -664,6 +664,8 @@ pub struct TensorContractFusionExecutionContext<
     contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
+    #[cfg(test)]
+    last_top_level_resolution_was_core: bool,
 }
 
 pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecutionContext<
@@ -695,6 +697,8 @@ where
             contract_cache,
             fusion_block_workspace: FusionBlockContractWorkspace::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
+            #[cfg(test)]
+            last_top_level_resolution_was_core: false,
         }
     }
 
@@ -768,6 +772,11 @@ where
     #[inline]
     pub fn contraction_resolution_cache_misses(&self) -> usize {
         self.resolution_cache.stats().misses
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_resolution_is_core(&self) -> bool {
+        self.last_top_level_resolution_was_core
     }
 
     pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
@@ -1032,6 +1041,10 @@ where
                 .map(Arc::new)
             },
         )?;
+        #[cfg(test)]
+        {
+            self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
+        }
         self.execute_resolution_dyn(
             &resolution,
             rule,
@@ -1090,11 +1103,13 @@ where
                 message: "prelowered operand flags must match the contraction cache key",
             });
         }
-        let resolution = self.resolution_cache.get_or_resolve(
+        let resolution = self.resolution_cache.get_or_resolve_prelowered(
             rule,
             dst_space.space(),
             lhs.logical_space(),
+            lhs.storage_space(),
             rhs.logical_space(),
+            rhs.storage_space(),
             axes,
             || match tensorcontract_fusion_structure_dyn_prelowered(
                 rule,
@@ -1124,6 +1139,10 @@ where
                 .map(Arc::new)
             },
         )?;
+        #[cfg(test)]
+        {
+            self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
+        }
         self.execute_resolution_dyn(
             &resolution,
             rule,

@@ -11,6 +11,7 @@ use tenet_core::{
     BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
     SimilarStorage, TensorStorage,
 };
+pub use tenet_dense::MatrixOp;
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
 use crate::placement::ReportsPlacement;
@@ -85,6 +86,30 @@ pub trait Rank2Gemm<D> {
         }
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_rank2_batch_with_ops(
+        &mut self,
+        dst: &mut [D],
+        lhs: &[D],
+        rhs: &[D],
+        jobs: &[Rank2GemmBatchJob],
+        runs: &[usize],
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        D: Copy,
+    {
+        if lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity {
+            return self.matmul_rank2_batch(dst, lhs, rhs, jobs, runs, alpha, beta);
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "rank-2 GEMM backend does not implement transpose/adjoint batches",
+        })
+    }
 }
 
 /// One GEMM of a fully-direct core batch. Offsets address coupled-sector
@@ -131,6 +156,8 @@ pub struct FusionBlockContractPlan {
     // this operations-layer plan struct while the route choice (strided seam vs
     // grouped) stays at the dense-executor boundary.
     direct_batch_runs: Vec<usize>,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
 }
 
 impl FusionBlockContractPlan {
@@ -153,6 +180,27 @@ impl FusionBlockContractPlan {
         inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
         groups: Vec<FusionBlockContractGroupPlan>,
     ) -> Result<Self, OperationError> {
+        Self::from_parts_with_ops(
+            dst_structure,
+            lhs_structure,
+            rhs_structure,
+            inactive_dst_scale_blocks,
+            groups,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_with_ops(
+        dst_structure: Arc<BlockStructure>,
+        lhs_structure: Arc<BlockStructure>,
+        rhs_structure: Arc<BlockStructure>,
+        inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
+        groups: Vec<FusionBlockContractGroupPlan>,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+    ) -> Result<Self, OperationError> {
         let direct_batch = compile_direct_batch(&groups)?;
         let direct_batch_runs = direct_batch
             .as_deref()
@@ -166,6 +214,8 @@ impl FusionBlockContractPlan {
             groups,
             direct_batch,
             direct_batch_runs,
+            lhs_op,
+            rhs_op,
         })
     }
 
@@ -200,15 +250,29 @@ impl FusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         let _ = fusion_workspace;
-        gemm.matmul_rank2_batch(
-            dst_data,
-            lhs_data,
-            rhs_data,
-            self.direct_batch()?,
-            self.direct_batch_runs(),
-            alpha,
-            beta,
-        )?;
+        if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
+            gemm.matmul_rank2_batch(
+                dst_data,
+                lhs_data,
+                rhs_data,
+                self.direct_batch()?,
+                self.direct_batch_runs(),
+                alpha,
+                beta,
+            )?;
+        } else {
+            gemm.matmul_rank2_batch_with_ops(
+                dst_data,
+                lhs_data,
+                rhs_data,
+                self.direct_batch()?,
+                self.direct_batch_runs(),
+                self.lhs_op,
+                self.rhs_op,
+                alpha,
+                beta,
+            )?;
+        }
         Ok(())
     }
 
@@ -255,7 +319,21 @@ impl FusionBlockContractPlan {
         let batch_runs = self.direct_batch_runs();
         profile.core_contract_groups += batch.len();
         let start = std::time::Instant::now();
-        gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, batch_runs, alpha, beta)?;
+        if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
+            gemm.matmul_rank2_batch(dst_data, lhs_data, rhs_data, batch, batch_runs, alpha, beta)?;
+        } else {
+            gemm.matmul_rank2_batch_with_ops(
+                dst_data,
+                lhs_data,
+                rhs_data,
+                batch,
+                batch_runs,
+                self.lhs_op,
+                self.rhs_op,
+                alpha,
+                beta,
+            )?;
+        }
         profile.core_direct_gemm_groups += batch.len();
         profile.core_matmul += start.elapsed();
 
@@ -328,6 +406,7 @@ impl FusionBlockContractPlan {
         let lhs_data = lhs.data();
         let rhs_data = rhs.data();
         let _ = fusion_workspace;
+        self.require_identity_storage_ops()?;
         gemm.matmul_rank2_batch(
             dst.data_mut(),
             lhs_data,
@@ -346,6 +425,15 @@ impl FusionBlockContractPlan {
             .ok_or(OperationError::UnsupportedTensorContractScope {
                 message: NON_COUPLED_OPERAND_MESSAGE,
             })
+    }
+
+    fn require_identity_storage_ops(&self) -> Result<(), OperationError> {
+        if self.lhs_op == MatrixOp::Identity && self.rhs_op == MatrixOp::Identity {
+            return Ok(());
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "storage-handle core replay does not expose transpose/adjoint matrix views",
+        })
     }
 
     /// Plan-time run partition of [`Self::direct_batch`]; handed to the backend
@@ -405,6 +493,7 @@ impl FusionBlockContractPlan {
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         let _ = fusion_workspace;
+        self.require_identity_storage_ops()?;
         gemm.matmul_rank2_batch(
             dst_data,
             lhs_data,
@@ -483,6 +572,7 @@ impl FusionBlockContractPlan {
         )?;
 
         let _ = fusion_workspace;
+        self.require_identity_storage_ops()?;
         gemm.matmul_rank2_batch(
             dst.data_mut(),
             lhs_data,
@@ -543,6 +633,7 @@ impl FusionBlockContractPlan {
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
     {
+        self.require_identity_storage_ops()?;
         for group in &self.groups {
             let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
                 group.lhs.direct_offset,
@@ -1045,6 +1136,54 @@ mod tests {
         )
         .unwrap();
         assert!(compile_direct_batch(&[plan]).unwrap().is_none());
+    }
+
+    struct RejectingStorageGemm;
+
+    impl StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>> for RejectingStorageGemm {
+        fn matmul_range_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+        ) -> Result<(), OperationError> {
+            panic!("op-bearing storage replay must reject before GEMM")
+        }
+    }
+
+    #[test]
+    fn op_bearing_plan_rejects_prezeroed_storage_replay() {
+        let structure = Arc::new(BlockStructure::trivial(&[4]).unwrap());
+        let plan = FusionBlockContractPlan::from_parts_with_ops(
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Arc::clone(&structure),
+            Vec::new(),
+            vec![group_plan((2, 2, 2), (0, 0, 0))],
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+        )
+        .unwrap();
+        let lhs = vec![0.0; 4];
+        let rhs = vec![0.0; 4];
+        let mut dst = vec![0.0; 4];
+
+        let error = plan
+            .execute_direct_on_storage_prezeroed(&mut RejectingStorageGemm, &mut dst, &lhs, &rhs)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message:
+                    "storage-handle core replay does not expose transpose/adjoint matrix views"
+            }
+        ));
     }
 
     #[derive(Default)]

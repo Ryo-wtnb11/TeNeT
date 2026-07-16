@@ -8025,6 +8025,48 @@ mod adjoint_parent_view_tests {
         }
     }
 
+    fn assert_lazy_core_adjoint_matches_eager(
+        rows: Space,
+        contracted: Space,
+        cols: Space,
+        dtype: Dtype,
+        seed: u64,
+    ) {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let lhs_parent =
+            Tensor::rand_with_seed(&runtime, dtype, [&contracted], [&rows], seed).unwrap();
+        let rhs_parent =
+            Tensor::rand_with_seed(&runtime, dtype, [&cols], [&contracted], seed + 1).unwrap();
+        let lhs_direct =
+            Tensor::rand_with_seed(&runtime, dtype, [&rows], [&contracted], seed + 2).unwrap();
+        let rhs_direct =
+            Tensor::rand_with_seed(&runtime, dtype, [&contracted], [&cols], seed + 3).unwrap();
+
+        let lhs_lazy = lhs_parent.adjoint().unwrap();
+        let rhs_lazy = rhs_parent.adjoint().unwrap();
+        let lhs_eager = lhs_lazy.materialized_tensor().unwrap();
+        let rhs_eager = rhs_lazy.materialized_tensor().unwrap();
+        for (lhs, rhs, eager_lhs, eager_rhs) in [
+            (
+                lhs_lazy.clone(),
+                rhs_direct.clone(),
+                lhs_eager.clone(),
+                rhs_direct.clone(),
+            ),
+            (
+                lhs_direct.clone(),
+                rhs_lazy.clone(),
+                lhs_direct.clone(),
+                rhs_eager.clone(),
+            ),
+            (lhs_lazy, rhs_lazy, lhs_eager, rhs_eager),
+        ] {
+            let expected = eager_lhs.compose(&eager_rhs).unwrap();
+            let actual = lhs.compose(&rhs).unwrap();
+            assert_close(&actual, &expected);
+        }
+    }
+
     #[test]
     fn repeated_and_parallel_host_contractions_do_not_materialize_adjoint_data() {
         // What: f64 and c64 contraction reuse one logical space and parent storage.
@@ -8053,6 +8095,42 @@ mod adjoint_parent_view_tests {
             Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 0, 1), 2), ((0, 0, 2), 1)]).unwrap(),
             261_241,
         );
+    }
+
+    #[test]
+    fn lazy_core_adjoint_handles_rectangular_real_and_complex_blocks() {
+        // What: lhs, rhs, and both-adjoint Core replay transposes rectangular
+        // parent matrices and conjugates complex values exactly once.
+        for (dtype, seed) in [(Dtype::F64, 272_100), (Dtype::C64, 272_200)] {
+            assert_lazy_core_adjoint_matches_eager(
+                Space::su2([(0, 2), (1, 1)]),
+                Space::su2([(0, 1), (1, 3)]),
+                Space::su2([(0, 3), (1, 2)]),
+                dtype,
+                seed,
+            );
+            assert_lazy_core_adjoint_matches_eager(
+                Space::u1([(-1, 2), (0, 1), (1, 1)]),
+                Space::u1([(-1, 1), (0, 2), (1, 3)]),
+                Space::u1([(-1, 3), (0, 1), (1, 2)]),
+                dtype,
+                seed + 20,
+            );
+            assert_lazy_core_adjoint_matches_eager(
+                Space::fz2([(0, 2), (1, 1)]),
+                Space::fz2([(0, 1), (1, 3)]),
+                Space::fz2([(0, 3), (1, 2)]),
+                dtype,
+                seed + 40,
+            );
+            assert_lazy_core_adjoint_matches_eager(
+                Space::fz2_u1_su2([((0, 0, 0), 2), ((1, -1, 1), 1), ((1, 1, 1), 1)]).unwrap(),
+                Space::fz2_u1_su2([((0, 0, 0), 1), ((1, -1, 1), 3), ((1, 1, 1), 2)]).unwrap(),
+                Space::fz2_u1_su2([((0, 0, 0), 3), ((1, -1, 1), 1), ((1, 1, 1), 2)]).unwrap(),
+                dtype,
+                seed + 60,
+            );
+        }
     }
 }
 
