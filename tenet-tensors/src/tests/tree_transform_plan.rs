@@ -4632,6 +4632,231 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
     assert_eq!(context.cache().structure_len(), 0);
 }
 
+// ======================================================================
+// Generic-fusion (outer-multiplicity) ALL-CODOMAIN lowering (#83/#249 delta).
+// Opens the last tree-transform surface that rejected Generic: the MF
+// all-codomain builders guard on `is_multiplicity_free()`; the new
+// `build_generic_all_codomain_tree_transform_group_plan` sibling reuses the same
+// representation-neutral group-spec assembly and differs only in the row source
+// (`generic_braid_tree` instead of `multiplicity_free_braid_tree`).
+// ======================================================================
+
+// Gate 1 (toy rule): the all-codomain generic plan reproduces the core
+// `generic_braid_tree` rows exactly (assembly adds no math) and enforces the same
+// style/scope guards as its mult-free siblings. Permute lowers to a braid with
+// identity levels, mirroring `multiplicity_free_permute_tree`.
+#[test]
+fn build_generic_all_codomain_plan_matches_core_rows_and_guards() {
+    use tenet_core::generic_braid_tree;
+
+    let rule = ToyGenericRule {
+        style: FusionStyleKind::Generic,
+    };
+    // cod [1,1]->0 with an empty domain: a valid all-codomain generic tree pair.
+    let src_pair = b2c_toy_src_pair();
+    let src_key = BlockKey::from(src_pair.clone());
+    let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
+    let cod = src_pair.codomain_tree();
+
+    let assert_matches = |operation: TreeTransformOperation,
+                          core_rows: Vec<(FusionTreeKey, f64)>| {
+        assert_eq!(core_rows.len(), 1);
+        let (core_dst_cod, core_coeff) = &core_rows[0];
+        let plan =
+            build_generic_all_codomain_tree_transform_group_plan(&rule, operation, &src_structure)
+                .unwrap();
+        assert_eq!(plan.specs().len(), 1);
+        let spec = &plan.specs()[0];
+        // all-codomain reconstructs the pair as (dst_codomain, src_domain).
+        let expected_dst = BlockKey::from(FusionTreeBlockKey::pair(
+            core_dst_cod.clone(),
+            src_pair.domain_tree().clone(),
+        ));
+        assert_eq!(spec.src_keys(), std::slice::from_ref(&src_key));
+        assert_eq!(spec.dst_keys(), std::slice::from_ref(&expected_dst));
+        assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
+        assert!((spec.recoupling_coefficients_dst_src()[0] - core_coeff).abs() < 1e-12);
+    };
+
+    let ident_levels: Vec<usize> = (0..cod.uncoupled().len()).collect();
+    assert_matches(
+        TreeTransformOperation::permute([1, 0], []),
+        generic_braid_tree(&rule, cod, &[1, 0], &ident_levels).unwrap(),
+    );
+    assert_matches(
+        TreeTransformOperation::braid([1, 0], [], [0, 1], []),
+        generic_braid_tree(&rule, cod, &[1, 0], &[0, 1]).unwrap(),
+    );
+
+    // Style guard: a multiplicity-free style is rejected before any compile,
+    // the runtime sibling of the trait-disjointness guarantee.
+    let mf = ToyGenericRule {
+        style: FusionStyleKind::Simple,
+    };
+    assert!(matches!(
+        build_generic_all_codomain_tree_transform_group_plan(
+            &mf,
+            TreeTransformOperation::permute([1, 0], []),
+            &src_structure,
+        )
+        .unwrap_err(),
+        OperationError::UnsupportedFusionStyle { .. }
+    ));
+    // Scope guard: an all-codomain builder rejects a domain-touching operation.
+    assert!(matches!(
+        build_generic_all_codomain_tree_transform_group_plan(
+            &rule,
+            TreeTransformOperation::permute([1, 0], [0]),
+            &src_structure,
+        )
+        .unwrap_err(),
+        OperationError::UnsupportedTreeTransformScope { .. }
+    ));
+    // Scope guard: transpose is out of all-codomain scope.
+    assert!(matches!(
+        build_generic_all_codomain_tree_transform_group_plan(
+            &rule,
+            TreeTransformOperation::transpose([1, 0], []),
+            &src_structure,
+        )
+        .unwrap_err(),
+        OperationError::UnsupportedTreeTransformScope { .. }
+    ));
+}
+
+// Gate 2 (SU(3) OM=2 differential + oracle): the differential core. A rank-3
+// codomain [8,8,8]->vac with an outer-multiplicity first vertex (N(8,8,8)=2) and
+// an empty domain is a genuine all-codomain OM=2 fixture. Swapping the first two
+// legs recouples through the 2x2 R-matrix, mixing the two multiplicity blocks.
+// The all-codomain path must produce byte-identical executed data to the
+// already-proven tree-pair path (`build_generic_tree_pair_transform_group_plan`),
+// and a self-inverse permutation applied twice must round-trip to the source
+// (gauge-invariant unitarity oracle over the SU(3) table).
+#[test]
+fn generic_all_codomain_su3_om2_matches_tree_pair_and_round_trips() {
+    use tenet_core::Su3FusionRule;
+
+    let rule = Su3FusionRule::new();
+    let eight = rule.sector_of(1, 1).unwrap();
+    let vac = SectorId::new(0);
+    assert_eq!(rule.nsymbol(eight, eight, eight), 2, "8x8->8 must be OM=2");
+
+    // Two source blocks distinguished only by the first (OM=2) vertex label.
+    // Generic vertex labels are 1-based, so the OM=2 first vertex is 1 or 2 and
+    // the N=1 second vertex (8x8->vac) is 1.
+    let make = |v0: [f64; 2]| {
+        let block = |vertex0: usize| {
+            let cod = FusionTreeKey::try_new_for_rule(
+                &rule,
+                [eight, eight, eight],
+                Some(vac),
+                [false, false, false],
+                [eight],
+                [SectorId::new(vertex0), SectorId::new(1)],
+            )
+            .unwrap();
+            let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
+            BlockKey::from(FusionTreeBlockKey::pair(cod, dom))
+        };
+        let key0 = block(1);
+        let key1 = block(2);
+        // Distinct vertex labels must key distinct blocks (no multiplicity alias).
+        assert_ne!(key0, key1);
+        let structure =
+            packed_fixture_structure(3, [(key0, vec![1, 1, 1]), (key1, vec![1, 1, 1])]).unwrap();
+        let space = TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap();
+        let tensor =
+            TensorMap::<f64, 3, 0>::from_vec_with_structure(v0.to_vec(), space, structure.clone())
+                .unwrap();
+        (structure, tensor)
+    };
+
+    // Self-inverse codomain permutation: swap the two OM legs, leave the third.
+    let perm = [1usize, 0, 2];
+
+    let (structure, src) = make([5.0, 7.0]);
+
+    let execute = |plan: TreeTransformGroupPlan<f64>, src: &TensorMap<f64, 3, 0>| -> Vec<f64> {
+        let (_, mut dst) = make([0.0, 0.0]);
+        let compiled = plan.compile(&dst, src).unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &compiled,
+            &mut dst,
+            src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        dst.data().to_vec()
+    };
+
+    // All-codomain path vs. the already-proven tree-pair path, same operation.
+    let all_codomain_plan = build_generic_all_codomain_tree_transform_group_plan(
+        &rule,
+        TreeTransformOperation::permute(perm, []),
+        &structure,
+    )
+    .unwrap();
+    let tree_pair_plan = build_generic_tree_pair_transform_group_plan(
+        &rule,
+        TreeTransformOperation::permute(perm, []),
+        &structure,
+    )
+    .unwrap();
+
+    let all_codomain_out = execute(all_codomain_plan, &src);
+    let tree_pair_out = execute(tree_pair_plan.clone(), &src);
+    // The OM legs must actually mix (else the fixture is not exercising OM).
+    assert_ne!(all_codomain_out, src.data().to_vec());
+    // Differential: identical transform, byte-for-byte.
+    assert_eq!(all_codomain_out, tree_pair_out);
+
+    // Round-trip oracle: applying the self-inverse permutation twice via the
+    // all-codomain path returns the source (SU(3) R is unitary).
+    let (_, once) = {
+        let (s, mut dst) = make([0.0, 0.0]);
+        let plan = build_generic_all_codomain_tree_transform_group_plan(
+            &rule,
+            TreeTransformOperation::permute(perm, []),
+            &structure,
+        )
+        .unwrap();
+        let compiled = plan.compile(&dst, &src).unwrap();
+        let mut backend = DenseTreeTransformOperations::default();
+        let mut workspace = TreeTransformWorkspace::default();
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &compiled,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+        (s, dst)
+    };
+    let twice = execute(
+        build_generic_all_codomain_tree_transform_group_plan(
+            &rule,
+            TreeTransformOperation::permute(perm, []),
+            &structure,
+        )
+        .unwrap(),
+        &once,
+    );
+    for (got, want) in twice.iter().zip(src.data()) {
+        assert!(
+            (got - want).abs() < 1e-10,
+            "round-trip drift: {got} vs {want}"
+        );
+    }
+}
+
 // ===================== Stage B3c-1: SU(4) DATA-ONLY smoke ==================
 //
 // The identical Generic pipeline — the `R: FusionRule` / `GenericRigidSymbols`
