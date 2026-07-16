@@ -6921,6 +6921,25 @@ mod runtime_detached_tests {
     }
 
     #[test]
+    fn runtime_detached_roundtrip_keeps_lazy_adjoint_unmaterialized_until_read() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 247_004).unwrap();
+        let expected = source.adjoint().unwrap().data_c64().to_vec();
+        let lazy = source.adjoint().unwrap();
+        assert!(lazy.adjoint_source.is_some());
+        assert!(lazy.materialized.get().is_none());
+
+        let restored = lazy.detach_runtime().attach_runtime(&runtime).unwrap();
+        assert!(restored.adjoint_source.is_some());
+        assert!(restored.materialized.get().is_none());
+
+        assert_eq!(restored.data_c64(), expected);
+        assert!(restored.materialized.get().is_some());
+    }
+
+    #[test]
     fn runtime_detached_authority_rejects_a_different_runtime() {
         let runtime = Runtime::builder().build().unwrap();
         let other = Runtime::builder().build().unwrap();
