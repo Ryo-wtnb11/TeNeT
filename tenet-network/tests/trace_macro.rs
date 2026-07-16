@@ -123,13 +123,13 @@ fn full_trace_of_identity_is_quantum_dimension() {
     }
 }
 
-/// fZ2 full trace is the SUPERTRACE (even block trace minus odd block
-/// trace), matching the expert-path TensorKit oracle test
+/// What: an fZ2 full tensor-macro trace is the SUPERTRACE (even block trace
+/// minus odd block trace), matching the expert-path TensorKit oracle test
 /// `tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace`.
 /// Diagonal entries here: even block diag(2, 3), odd block diag(5, 6, 7),
-/// so tr = (2 + 3) - (5 + 6 + 7) = -13.
+/// so the macro gives -13 while ordinary `Tensor::tr` gives 23.
 #[test]
-fn fz2_full_trace_is_supertrace() {
+fn fz2_macro_trace_is_supertrace_while_tensor_tr_is_ordinary() {
     let rt = Runtime::builder().build().unwrap();
     let v = fz2_space();
     let t = Tensor::from_block_fn(&rt, [&v], [&v], |key, idx| {
@@ -153,7 +153,7 @@ fn fz2_full_trace_is_supertrace() {
         .unwrap();
     assert!((trace - (-13.0)).abs() <= 1e-12, "supertrace = {trace}");
     let tr = t.tr().unwrap().to_c64();
-    assert!((tr - Complex64::new(-13.0, 0.0)).norm() <= 1e-12);
+    assert!((tr - Complex64::new(23.0, 0.0)).norm() <= 1e-12);
 }
 
 /// Trace and pairwise contraction combined in one expression, against the

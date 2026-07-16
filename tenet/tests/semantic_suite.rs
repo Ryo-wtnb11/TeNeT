@@ -199,9 +199,7 @@ fn adjoint_involution_and_antihomomorphism() {
     }
 }
 
-/// tr(a∘b) == tr(b∘a). For fermionic rules `tr` is the supertrace
-/// (TensorKit semantics, see `Tensor::tr` and the braid/twist oracle tests
-/// in `user_api.rs`), which is exactly what makes cyclicity hold there.
+/// The ordinary matrix trace is cyclic for every supported rule.
 #[test]
 fn trace_cyclicity() {
     let rt = Runtime::builder().build().unwrap();
@@ -220,14 +218,15 @@ fn trace_cyclicity() {
     }
 }
 
-/// The block-local `tr()` (#50, TensorKit's weighted block trace) agrees with
-/// the generic partial-trace engine it replaced (`trace_pairs` over every
-/// codomain/domain leg pair) across all rule types, ranks, and both dtypes.
-/// Pins the fast path to the engine oracle.
+/// For bosonic rules, ordinary trace and full tensor trace coincide. Fermionic
+/// rules are intentionally covered by fixed trace-vs-supertrace oracles.
 #[test]
-fn trace_matches_partial_trace_engine() {
+fn bosonic_trace_matches_partial_trace_engine() {
     let rt = Runtime::builder().build().unwrap();
-    for (name, v, _) in spaces() {
+    for (name, v, fermionic) in spaces() {
+        if fermionic {
+            continue;
+        }
         for dtype in [Dtype::F64, Dtype::C64] {
             for (ncod, seed) in [(1usize, 71u64), (2, 72)] {
                 let cod: Vec<&Space> = std::iter::repeat(&v).take(ncod).collect();
@@ -239,6 +238,23 @@ fn trace_matches_partial_trace_engine() {
                 assert_scalar_close(fast.im(), engine.im(), 1e-12);
                 let _ = name;
             }
+        }
+    }
+}
+
+/// `tr(id(V)) = dim(V)` in both dtypes for Abelian, non-Abelian, fermionic,
+/// and product rules. This independently pins the positive dimension weight.
+#[test]
+fn ordinary_trace_of_identity_is_positive_dimension() {
+    let rt = Runtime::builder().build().unwrap();
+    for (name, v, _) in spaces() {
+        for dtype in [Dtype::F64, Dtype::C64] {
+            let identity = Tensor::id(&rt, dtype, [&v]).unwrap();
+            let actual = identity.tr().unwrap().to_c64();
+            let expected = v.dim() as f64;
+            assert_scalar_close(actual.re, expected, 1e-12);
+            assert_scalar_close(actual.im, 0.0, 1e-12);
+            let _ = name;
         }
     }
 }
@@ -309,7 +325,7 @@ fn isometry_and_unitary_are_isometric() {
 fn contraction_order_independence() {
     let rt = Runtime::builder().build().unwrap();
     for (name, v, _) in spaces() {
-        // Closed ring of four matrices: tr(x1 x2 x3 x4).
+        // Closed ring of four matrices: full tensor trace of x1 x2 x3 x4.
         let x1 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 81).unwrap();
         let x2 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 82).unwrap();
         let x3 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 83).unwrap();
@@ -327,18 +343,24 @@ fn contraction_order_independence() {
             .unwrap()
             .compose(&x4)
             .unwrap()
-            .tr()
+            .trace_pairs(&[(0, 1)])
             .unwrap()
-            .re();
+            .scalar()
+            .unwrap()
+            .try_f64()
+            .unwrap();
         let inner = x2.compose(&x3).unwrap();
         let middle = x1
             .compose(&inner)
             .unwrap()
             .compose(&x4)
             .unwrap()
-            .tr()
+            .trace_pairs(&[(0, 1)])
             .unwrap()
-            .re();
+            .scalar()
+            .unwrap()
+            .try_f64()
+            .unwrap();
         assert_scalar_close(ring, left, 1e-12);
         assert_scalar_close(ring, middle, 1e-12);
 

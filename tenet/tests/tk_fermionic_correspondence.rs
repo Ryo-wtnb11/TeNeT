@@ -52,6 +52,57 @@ fn fz2_contractions_match_tensorkit() {
         );
     }
 
+    // What: TensorKit `tr` is the positive ordinary trace, while an explicit
+    // parity twist (or a closed `@tensor` loop) is the fermionic supertrace.
+    let d = fz2_map(&rt, 2.0, 3.0);
+    let ordinary = d.tr().unwrap().try_f64().unwrap();
+    let twisted = d.twist(&[0]).unwrap().tr().unwrap().try_f64().unwrap();
+    assert!((ordinary - 5.0).abs() < 1e-12, "ordinary = {ordinary}");
+    assert!((twisted - (-1.0)).abs() < 1e-12, "twisted = {twisted}");
+
+    // The SVD factor uses compact diagonal storage and must keep the same
+    // ordinary trace without materializing its dense block matrices.
+    let (_, compact_d, _) = d.svd_compact().unwrap();
+    let compact_ordinary = compact_d.tr().unwrap().try_f64().unwrap();
+    assert!(
+        (compact_ordinary - 5.0).abs() < 1e-12,
+        "compact ordinary = {compact_ordinary}"
+    );
+    let (_, compact_c64, _) = d.to_c64().svd_compact().unwrap();
+    let compact_c64_ordinary = compact_c64.tr().unwrap().to_c64();
+    assert!(
+        (compact_c64_ordinary - Complex64::new(5.0, 0.0)).norm() < 1e-12,
+        "compact c64 ordinary = {compact_c64_ordinary}"
+    );
+
+    // What: `eig_full().d` uses genuine complex diagonal storage. Its ordinary
+    // trace sums both sectors without the odd parity twist.
+    let v = Space::fz2([(0, 1), (1, 1)]);
+    let complex_source = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| {
+        let BlockKey::FusionTree(key) = key else {
+            return Complex64::new(0.0, 0.0);
+        };
+        if key.codomain_uncoupled()[0].id() == 0 {
+            Complex64::new(2.0, 1.0)
+        } else {
+            Complex64::new(3.0, 4.0)
+        }
+    })
+    .unwrap();
+    let (complex_d, _) = complex_source.eig_full().unwrap();
+    let complex_trace = complex_d.tr().unwrap().to_c64();
+    let expected_complex_trace = Complex64::new(5.0, 5.0);
+    assert!(
+        (complex_trace - expected_complex_trace).norm() < 1e-12,
+        "complex ordinary = {complex_trace}"
+    );
+
+    let ordinary_ab = a.compose(&b).unwrap().tr().unwrap().try_f64().unwrap();
+    assert!(
+        (ordinary_ab - 8.0).abs() < 1e-12,
+        "ordinary_ab = {ordinary_ab}"
+    );
+
     // (1) dense supertrace loop tr(A B) = 2 - 6 = -4.
     let s1 = scalar(tensor!([] = a[i; j] * b[j; i]).unwrap());
     assert!((s1 - (-4.0)).abs() < 1e-12, "s1 = {s1}");

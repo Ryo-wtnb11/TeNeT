@@ -174,6 +174,31 @@ impl DiagonalData {
         }
     }
 
+    /// TensorKit `tr` on compact diagonal storage: sum the reduced diagonal
+    /// values with their quantum dimensions. Why not reuse `trace_pairs`: that
+    /// contraction API intentionally inserts orientation-dependent fermionic
+    /// twists, while matrix trace uses TensorKit's positive trace formalism.
+    fn ordinary_trace<R>(&self, rule: &R) -> Complex64
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let trace_real = |spectra: &[SectorSpectrum<f64>]| {
+            spectra
+                .iter()
+                .map(|entry| entry.values.iter().sum::<f64>() * rule.dim_scalar(entry.sector))
+                .sum::<f64>()
+        };
+        match self {
+            Self::RealF64(spectra) | Self::RealC64(spectra) => {
+                Complex64::new(trace_real(spectra), 0.0)
+            }
+            Self::C64(spectra) => spectra
+                .iter()
+                .map(|entry| entry.values.iter().sum::<Complex64>() * rule.dim_scalar(entry.sector))
+                .sum(),
+        }
+    }
+
     fn elementwise_product(&self, rhs: &Self) -> Option<Self> {
         fn multiply<V: Copy>(
             lhs: &[SectorSpectrum<V>],
@@ -1063,9 +1088,7 @@ where
 
 /// Generic-fusion (Stage B3c-2) sibling of [`weighted_trace`] for an
 /// outer-multiplicity rule (SU(N)): identical diagonal-block walk; the weight
-/// is `dim(c) = sqrt_dim(c)²` and the twist is 1 (SU(N) is bosonic —
-/// `GenericRigidSymbols` deliberately carries no twist because no non-bosonic
-/// Generic rule ships; the contraction engine guards the same assumption).
+/// is `dim(c) = sqrt_dim(c)²`.
 /// A vertex-labelled (OM) block contributes only when its codomain and domain
 /// trees coincide INCLUDING the vertex labels — off-diagonal vertex pairs are
 /// off the coupled-block diagonal exactly like any other tree mismatch.
@@ -1103,23 +1126,16 @@ where
         let strides = block.strides();
         let offset = block.offset();
         let count: usize = shape[..nout].iter().product();
-        let mut indices = vec![0usize; nout];
         let mut partial = D::from_real(0.0);
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .enumerate()
-                    .map(|(axis, &i)| i * strides[axis] + i * strides[nout + axis])
-                    .sum::<usize>();
-            partial = partial + data[position];
+        for linear in 0..count {
+            let mut remainder = linear;
+            let mut position = offset;
             for axis in 0..nout {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
+                let coordinate = remainder % shape[axis];
+                remainder /= shape[axis];
+                position += coordinate * (strides[axis] + strides[nout + axis]);
             }
+            partial = partial + data[position];
         }
         total += partial.widen_complex() * weight;
     }
@@ -1133,8 +1149,8 @@ where
 /// block is off-diagonal in `b_c` and contributes nothing. Within a diagonal
 /// block the trace pairs codomain degeneracy axis `i` with domain axis
 /// `nout + i` (equal degeneracies, since the spaces match). Real tensors give
-/// an exactly-real result. Fermionic rules fold their supertrace sign into the
-/// coupled blocks, so the same sum yields the supertrace.
+/// an exactly-real result. Fermionic twists belong to `trace_pairs` / tensor
+/// contractions and are not part of this matrix trace.
 fn weighted_trace<R, D>(
     rule: &R,
     structure: &BlockStructure,
@@ -1165,12 +1181,7 @@ where
             .codomain_tree()
             .coupled()
             .unwrap_or_else(|| rule.vacuum());
-        // Closing codomain leg i onto domain leg i bends the coupled loop, so
-        // each block picks up its coupled charge's twist theta_c. For symmetric
-        // (bosonic) categories theta == 1; for fermionic ones it is -1 on odd
-        // sectors, which turns this sum into the supertrace — exactly matching
-        // TensorKit's `tr` (and the partial-trace engine this replaces).
-        let weight = rule.twist_scalar(coupled) * rule.dim_scalar(coupled);
+        let weight = rule.dim_scalar(coupled);
         let shape = block.shape();
         let strides = block.strides();
         let offset = block.offset();
@@ -1178,23 +1189,16 @@ where
         // diagonally (axis i and axis nout+i share the index) — the degeneracy
         // trace of this coupled sub-block.
         let count: usize = shape[..nout].iter().product();
-        let mut indices = vec![0usize; nout];
         let mut partial = D::from_real(0.0);
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .enumerate()
-                    .map(|(axis, &i)| i * strides[axis] + i * strides[nout + axis])
-                    .sum::<usize>();
-            partial = partial + data[position];
+        for linear in 0..count {
+            let mut remainder = linear;
+            let mut position = offset;
             for axis in 0..nout {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
+                let coordinate = remainder % shape[axis];
+                remainder /= shape[axis];
+                position += coordinate * (strides[axis] + strides[nout + axis]);
             }
+            partial = partial + data[position];
         }
         total += partial.widen_complex() * weight;
     }
@@ -3853,8 +3857,9 @@ impl Tensor {
 
     /// TensorKit `tr`: full trace of an endomorphism (`domain == codomain`)
     /// to a scalar, pairing codomain leg `i` with domain leg `i`. The
-    /// returned [`Scalar`] variant matches [`Self::dtype`]. Fermionic rules
-    /// give the supertrace, matching TensorKit.
+    /// returned [`Scalar`] variant matches [`Self::dtype`]. This is TensorKit's
+    /// positive/ordinary trace; [`Self::trace_pairs`] retains the fermionic
+    /// supertrace semantics used by tensor contractions.
     pub fn tr(&self) -> Result<Scalar, Error> {
         let hom = self.space.homspace();
         if hom.codomain().legs() != hom.domain().legs() {
@@ -3881,6 +3886,15 @@ impl Tensor {
                 #[cfg(feature = "cuda")]
                 Data::CudaF64(_) => Err(device_unsupported("tr()")),
             };
+        }
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return with_user_rule!(self.space, rule, {
+                let value = diagonal.ordinary_trace(rule);
+                Ok(match diagonal {
+                    DiagonalData::RealF64(_) => Scalar::F64(value.re),
+                    DiagonalData::RealC64(_) | DiagonalData::C64(_) => Scalar::C64(value),
+                })
+            });
         }
         match self.coupled_data() {
             Data::F64(data) => with_user_rule!(self.space, rule, {
