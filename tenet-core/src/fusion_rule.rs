@@ -278,6 +278,19 @@ impl LoweredFusionTreeBuildError {
             kind: LoweredFusionTreeBuildErrorKind::AlgebraClosure(message),
         }
     }
+
+    #[doc(hidden)]
+    pub const fn static_message(&self) -> &'static str {
+        match &self.kind {
+            LoweredFusionTreeBuildErrorKind::InvalidSector(_) => {
+                "built-in fusion-tree layout contains an invalid sector"
+            }
+            LoweredFusionTreeBuildErrorKind::Codec(_) => {
+                "built-in fusion-tree layout contains an invalid product sector"
+            }
+            LoweredFusionTreeBuildErrorKind::AlgebraClosure(message) => message,
+        }
+    }
 }
 
 impl fmt::Display for LoweredFusionTreeBuildError {

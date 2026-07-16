@@ -10,11 +10,15 @@ use std::sync::{Arc, RwLock};
 
 use tenet_core::{
     BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace,
-    HomSpaceId, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
+    HomSpaceId, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, TensorMap,
+    TensorMapSpace,
 };
 
 use crate::cache::registered_operation_cache;
-use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+use crate::contract::{
+    encoded_layout_primer, lowered_layout_primer, BoundDynamicFusionMapSpace,
+    DynamicFusionMapSpace, LayoutPrimer,
+};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
 
@@ -99,6 +103,29 @@ pub(crate) fn adjoint_space_dyn<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
+    adjoint_space_dyn_with_primer(rule, space, encoded_layout_primer::<R>)
+}
+
+pub(crate) fn adjoint_space_dyn_lowered<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey
+        + LoweredMultiplicityFreeAlgebra,
+{
+    adjoint_space_dyn_with_primer(rule, space, lowered_layout_primer::<R>)
+}
+
+fn adjoint_space_dyn_with_primer<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    primer: LayoutPrimer<R>,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+{
     space.validate_rule(rule)?;
     let key = AdjointSpaceKey {
         rule_key: rule.tree_transform_rule_cache_key(),
@@ -114,7 +141,7 @@ where
             return Ok((*hit).clone());
         }
     }
-    let built = Arc::new(build_adjoint_space_dyn(rule, space)?);
+    let built = Arc::new(build_adjoint_space_dyn_with_primer(rule, space, primer)?);
     if let Ok(mut guard) = cache.write() {
         guard.entries.put(key, Arc::clone(&built));
     }
@@ -123,9 +150,10 @@ where
 
 /// Uncached build of the adjoint (dagger) space; [`adjoint_space_dyn`] memoizes
 /// it.
-fn build_adjoint_space_dyn<R>(
+fn build_adjoint_space_dyn_with_primer<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
+    primer: LayoutPrimer<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -136,6 +164,7 @@ where
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
 
     let structure = Arc::clone(space.structure());
+    primer(rule, &adjoint_hom)?;
     let keys = adjoint_hom.fusion_tree_keys(rule);
     let shapes = keys
         .iter()
@@ -183,6 +212,31 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
+    adjoint_dyn_with_primer(rule, space, data, encoded_layout_primer::<R>)
+}
+
+fn adjoint_dyn_lowered<R, D>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    adjoint_dyn_with_primer(rule, space, data, lowered_layout_primer::<R>)
+}
+
+fn adjoint_dyn_with_primer<R, D>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &[D],
+    primer: LayoutPrimer<R>,
+) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
     space.validate_rule(rule)?;
     let nout = space.nout();
     let nin = space.nin();
@@ -190,7 +244,7 @@ where
     // Uncached build: the eager adjoint (SVD/eigh consumers) is a separate,
     // out-of-scope path from the cached lazy `adjoint_space_dyn` (#118 PR-1),
     // and routing it here keeps the replay-cache-key bound off matrix algebra.
-    let adjoint_space = build_adjoint_space_dyn(rule, space)?;
+    let adjoint_space = build_adjoint_space_dyn_with_primer(rule, space, primer)?;
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
@@ -273,6 +327,21 @@ where
     Ok((output, data))
 }
 
+#[doc(hidden)]
+pub fn adjoint_bound_dyn_lowered<R, D>(
+    space: &BoundDynamicFusionMapSpace<R>,
+    data: &[D],
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    let (output, data) = adjoint_dyn_lowered(space.provider(), space.space(), data)?;
+    let output =
+        BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)?;
+    Ok((output, data))
+}
+
 /// Generic dynamic-rank adjoint that retains the exact provider allocation of
 /// its checked source space.
 pub fn adjoint_bound_dyn_generic<R, D>(
@@ -298,6 +367,19 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
     let output = adjoint_space_dyn(space.provider(), space.space())?;
+    BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
+}
+
+#[doc(hidden)]
+pub fn adjoint_bound_space_dyn_lowered<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey
+        + LoweredMultiplicityFreeAlgebra,
+{
+    let output = adjoint_space_dyn_lowered(space.provider(), space.space())?;
     BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
 }
 
@@ -589,7 +671,60 @@ where
 mod cache_tests {
     use super::*;
     use crate::tree_transform::TreeTransformBuiltinRuleCacheKey;
-    use tenet_core::{FusionProductSpace, SectorLeg, U1FusionRule, U1Irrep};
+    use std::cell::Cell;
+    use tenet_core::{
+        FermionParityFusionRule, FusionProductSpace, Fz2SectorLayout, PackedProductCodec,
+        ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
+        SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+    };
+
+    type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+    type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+    type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+    type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+    type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+
+    thread_local! {
+        static LOWERED_PRIMER_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn triple_rule() -> TripleRule {
+        TripleRule::new(
+            Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule),
+            SU2FusionRule,
+        )
+    }
+
+    fn triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
+        TripleCodec::encode(
+            Fz2U1Codec::encode(
+                Z2Irrep::new(parity).sector_id(),
+                U1Irrep::new(charge).sector_id(),
+            ),
+            SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+        )
+    }
+
+    fn triple_source(rule: &TripleRule) -> DynamicFusionMapSpace {
+        let vacuum = triple_sector(0, 0, 0);
+        let charged = triple_sector(1, 1, 1);
+        let leg = |dual| SectorLeg::new([(vacuum, 1), (charged, 1)], dual);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(false), leg(true)]),
+            FusionProductSpace::new([leg(true), leg(false)]),
+        );
+        lowered_layout_primer(rule, &hom).unwrap();
+        let count = hom.fusion_tree_keys(rule).len();
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![1; 4]; count]).unwrap()
+    }
+
+    fn counting_primer(
+        rule: &TripleRule,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<(), OperationError> {
+        LOWERED_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
+        lowered_layout_primer(rule, homspace)
+    }
 
     // Single-charge U(1) source: one coupled sector, block shape [deg, deg].
     fn u1_source(charge: i32, deg: usize) -> DynamicFusionMapSpace {
@@ -646,5 +781,35 @@ mod cache_tests {
                 authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
             })
         );
+    }
+
+    #[test]
+    fn lowered_adjoint_metadata_primes_once_and_eager_data_matches_encoded() {
+        // What: lazy adjoint metadata primes only on its operation-cache miss,
+        // while eager materialization preserves the encoded oracle's layout and data.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = triple_rule();
+        let source = triple_source(&rule);
+
+        LOWERED_PRIMER_CALLS.with(|calls| calls.set(0));
+        let lowered = adjoint_space_dyn_with_primer(&rule, &source, counting_primer).unwrap();
+        let warm = adjoint_space_dyn_with_primer(&rule, &source, counting_primer).unwrap();
+        assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 1);
+        assert_eq!(lowered, warm);
+        assert_eq!(lowered, adjoint_space_dyn(&rule, &source).unwrap());
+
+        let data = (0..source.required_len().unwrap())
+            .map(|index| index as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let (lowered_space, lowered_data) =
+            adjoint_dyn_with_primer(&rule, &source, &data, lowered_layout_primer::<TripleRule>)
+                .unwrap();
+        let (encoded_space, encoded_data) = adjoint_dyn(&rule, &source, &data).unwrap();
+        assert_eq!(lowered_space, encoded_space);
+        assert_eq!(lowered_data, encoded_data);
     }
 }
