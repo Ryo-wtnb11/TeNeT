@@ -1,0 +1,32 @@
+name: Cache cargo fingerprints and build-script outputs
+description: >
+  Persist target/<profile>/{.fingerprint,build} across runs, layered on top of
+  Swatinem/rust-cache. rust-cache keeps dependency rlibs under target/*/deps but
+  drops the matching .fingerprint files and native/codegen build-script outputs.
+  Without the fingerprint cargo cannot verify a cached rlib and recompiles it
+  from scratch, so every warm run rebuilt the gemm-*/pulp/faer SIMD-codegen
+  stack and openblas-src's 6.5-min C library despite a full cache hit. These two
+  dirs are tiny next to deps/, so restoring them reunites cargo with the rlibs
+  rust-cache already cached. cargo's fingerprint check still gates reuse, so a
+  stale restore only ever costs a rebuild -- never a wrong artifact.
+inputs:
+  key:
+    description: Per-job key discriminator; must be unique per build profile.
+    required: true
+runs:
+  using: composite
+  steps:
+    # Why-not fold into rust-cache's key: rust-cache owns the lockfile hash and
+    # its own pruning; a separate cache with a coarser (Cargo.toml) key lets
+    # these dirs survive rust-cache's prune without fighting its restore. The
+    # llvm-cov-target paths cover the coverage job, which builds one level deeper.
+    - uses: actions/cache@v4
+      with:
+        path: |
+          tenet/target/*/.fingerprint
+          tenet/target/*/build
+          tenet/target/llvm-cov-target/*/.fingerprint
+          tenet/target/llvm-cov-target/*/build
+        key: cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml', 'tenferro-rs/**/Cargo.toml') }}
+        restore-keys: |
+          cargo-fp-v2-${{ inputs.key }}-${{ runner.os }}-
