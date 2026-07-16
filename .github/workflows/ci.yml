@@ -272,7 +272,7 @@ jobs:
         working-directory: tenet
       - name: Run workspace tests
         if: needs.changes.outputs.light_rust != 'true'
-        run: CARGO_LOG=cargo::core::compiler::fingerprint=info cargo test --workspace 2>fp.log; grep -iE "dirty|fingerprint.*(faer|gemm|pulp|bitflags)" fp.log | head -40; true
+        run: cargo test --workspace
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
