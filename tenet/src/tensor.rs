@@ -17,7 +17,8 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
     BlockKey, BlockStructure, CoupledSectorRegion, FusionProductSpace, FusionRule,
-    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
+    FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement,
+    SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -822,7 +823,9 @@ fn rand_unit(state: &mut u64) -> f64 {
     ((splitmix64(state) >> 11) as f64) / ((1u64 << 52) as f64) - 1.0
 }
 
-fn build_bound_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+fn build_bound_space<
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+>(
     provider: Arc<R>,
     hom: FusionTreeHomSpace,
 ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
@@ -831,7 +834,9 @@ fn build_bound_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
             Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
         })
     };
-    let keys = hom.fusion_tree_keys(provider.as_ref());
+    let keys = hom
+        .try_fusion_tree_keys_lowered(provider.as_ref())
+        .map_err(|error| Error::InvalidArgument(error.to_string()))?;
     let mut shapes = Vec::with_capacity(keys.len());
     for key in keys.iter() {
         let mut shape = Vec::with_capacity(hom.rank());

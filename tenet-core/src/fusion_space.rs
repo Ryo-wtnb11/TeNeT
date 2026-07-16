@@ -974,6 +974,19 @@ impl FusionTreeHomSpace {
         Arc::clone(&self.cached_fusion_tree_layout(rule).keys)
     }
 
+    #[doc(hidden)]
+    pub fn try_fusion_tree_keys_lowered<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Arc<[FusionTreeBlockKey]>, LoweredFusionTreeBuildError>
+    where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        Ok(Arc::clone(
+            &self.try_cached_fusion_tree_layout_lowered(rule)?.keys,
+        ))
+    }
+
     pub fn try_for_each_fusion_tree_key<R, F, E>(&self, rule: &R, mut f: F) -> Result<(), E>
     where
         R: MultiplicityFreeFusionRule,
@@ -999,13 +1012,40 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
+        self.try_cached_fusion_tree_layout_with(rule, || {
+            Ok::<_, std::convert::Infallible>(self.fusion_tree_keys_uncached(rule))
+        })
+        .unwrap_or_else(|error| match error {})
+    }
+
+    fn try_cached_fusion_tree_layout_lowered<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Arc<FusionTreeHomSpaceLayout>, LoweredFusionTreeBuildError>
+    where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        self.try_cached_fusion_tree_layout_with(rule, || {
+            self.try_fusion_tree_keys_uncached_lowered(rule)
+        })
+    }
+
+    fn try_cached_fusion_tree_layout_with<R, E, F>(
+        &self,
+        rule: &R,
+        build: F,
+    ) -> Result<Arc<FusionTreeHomSpaceLayout>, E>
+    where
+        R: MultiplicityFreeFusionRule,
+        F: FnOnce() -> Result<Vec<FusionTreeBlockKey>, E>,
+    {
         let key = FusionTreeHomSpaceCacheKey::new(rule, self);
         let cache = fusion_tree_layout_cache();
         let read = cache
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(layout) = read.lookup(&key) {
-            return layout;
+            return Ok(layout);
         }
         drop(read);
 
@@ -1013,13 +1053,13 @@ impl FusionTreeHomSpace {
         let computed = Arc::new(fusion_tree_layout_from_keys(
             rule,
             next_fusion_tree_layout_id(),
-            self.fusion_tree_keys_uncached(rule),
+            build()?,
         ));
         let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
         let mut write = cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        write.admit(key, computed, charged_bytes)
+        Ok(write.admit(key, computed, charged_bytes))
     }
 
     pub fn coupled_subblock_structure<R, Shapes>(
@@ -1193,6 +1233,18 @@ impl FusionTreeHomSpace {
             }
         }
         keys
+    }
+
+    fn try_fusion_tree_keys_uncached_lowered<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Vec<FusionTreeBlockKey>, LoweredFusionTreeBuildError>
+    where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, &self.codomain)?;
+        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, &self.domain)?;
+        Ok(merge_generic_tree_groups(&codomain, &domain))
     }
 
     /// Generic-fusion (outer-multiplicity) sibling of [`Self::fusion_tree_keys`]:
