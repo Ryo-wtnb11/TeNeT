@@ -7,3 +7,18 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://example.invalid/tensornetworks"
 
+# strided-rs #140 (raw copy/scale/axpy kernels) and #142 (CopyPlan) are merged
+# to tensor4all/strided-rs main but NOT yet released to crates.io (published
+# 0.3.0 predates them). tenet #41 delegates the hand-rolled fused_pair copy path
+# to those kernels, so pin every strided-* crate to the merge commit until a
+# release ships. All five are pinned to the SAME rev so exactly one copy of each
+# resolves in the graph (a lone strided-kernel patch would leave a second,
+# crates.io strided-view/traits and break the shared MaybeSendSync/ElementOpApply
+# trait identity). Drop this whole block once strided-rs publishes the release.
+[patch.crates-io]
+strided-kernel = { git = "https://github.com/tensor4all/strided-rs", rev = "cda309230a6c861d864ef27fd3affde3fb9456c6" }
+strided-view = { git = "https://github.com/tensor4all/strided-rs", rev = "cda309230a6c861d864ef27fd3affde3fb9456c6" }
+strided-traits = { git = "https://github.com/tensor4all/strided-rs", rev = "cda309230a6c861d864ef27fd3affde3fb9456c6" }
+strided-perm = { git = "https://github.com/tensor4all/strided-rs", rev = "cda309230a6c861d864ef27fd3affde3fb9456c6" }
+strided-einsum2 = { git = "https://github.com/tensor4all/strided-rs", rev = "cda309230a6c861d864ef27fd3affde3fb9456c6" }
+
