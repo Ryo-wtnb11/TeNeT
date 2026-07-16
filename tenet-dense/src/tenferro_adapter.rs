@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
 use tenferro_linalg::LinalgBackend;
-use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
+use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob, TensorStructural};
 use tenferro_tensor::{
     BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, Tensor, TensorDot, TensorRead,
     TensorView, TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
@@ -519,9 +519,10 @@ impl DenseExecutor for DefaultDenseExecutor {
     // borrowed view is materialized to a contiguous tensor first — one cheap
     // copy of the input matrix versus the discarded O(n^2) vector work.
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        let owned = tenferro_view(input)?
-            .to_tensor()
-            .map_err(|err| tenferro_error("svd_vals", err))?;
+        let owned = self
+            .backend
+            .to_contiguous_read(TensorRead::from_view(tenferro_view(input)?))
+            .map_err(|err| tenferro_error("svd_vals", err.into()))?;
         self.backend
             .svd_values(&owned)
             .map(DenseTensor::from_tenferro)
@@ -529,9 +530,10 @@ impl DenseExecutor for DefaultDenseExecutor {
     }
 
     fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        let owned = tenferro_view(input)?
-            .to_tensor()
-            .map_err(|err| tenferro_error("eigh_vals", err))?;
+        let owned = self
+            .backend
+            .to_contiguous_read(TensorRead::from_view(tenferro_view(input)?))
+            .map_err(|err| tenferro_error("eigh_vals", err.into()))?;
         self.backend
             .eigh_values(&owned)
             .map(DenseTensor::from_tenferro)
@@ -539,9 +541,10 @@ impl DenseExecutor for DefaultDenseExecutor {
     }
 
     fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        let owned = tenferro_view(input)?
-            .to_tensor()
-            .map_err(|err| tenferro_error("eig_vals", err))?;
+        let owned = self
+            .backend
+            .to_contiguous_read(TensorRead::from_view(tenferro_view(input)?))
+            .map_err(|err| tenferro_error("eig_vals", err.into()))?;
         self.backend
             .eig_values(&owned)
             .map(DenseTensor::from_tenferro)
