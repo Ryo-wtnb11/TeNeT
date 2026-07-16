@@ -3718,33 +3718,51 @@ impl Tensor {
         );
         macro_rules! contract_bound {
             ($contexts:expr, $dst:expr, $lhs_logical:expr, $lhs_storage:expr, $rhs_logical:expr, $rhs_storage:expr) => {{
-                let lhs = if lhs_conj {
-                    tenet_tensors::FusionOperand::prelowered_adjoint(
-                        $lhs_logical.space(),
-                        $lhs_storage.space(),
-                    )?
+                // Why not use the generalized prelowered route unconditionally:
+                // ordinary operands must retain the established accumulation
+                // order and bitwise output; only lazy operands need categorical
+                // geometry separated from their parent storage.
+                if !lhs_conj && !rhs_conj {
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into(
+                        $dst,
+                        &mut data,
+                        $lhs_logical,
+                        lhs_data,
+                        $rhs_logical,
+                        rhs_data,
+                        TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
+                        D::from_real(1.0),
+                        D::from_real(0.0),
+                    )
                 } else {
-                    tenet_tensors::FusionOperand::direct($lhs_logical.space())
-                };
-                let rhs = if rhs_conj {
-                    tenet_tensors::FusionOperand::prelowered_adjoint(
-                        $rhs_logical.space(),
-                        $rhs_storage.space(),
-                    )?
-                } else {
-                    tenet_tensors::FusionOperand::direct($rhs_logical.space())
-                };
-                D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into(
-                    $dst,
-                    &mut data,
-                    lhs,
-                    lhs_data,
-                    rhs,
-                    rhs_data,
-                    spec,
-                    D::from_real(1.0),
-                    D::from_real(0.0),
-                )
+                    let lhs = if lhs_conj {
+                        tenet_tensors::FusionOperand::prelowered_adjoint(
+                            $lhs_logical.space(),
+                            $lhs_storage.space(),
+                        )?
+                    } else {
+                        tenet_tensors::FusionOperand::direct($lhs_logical.space())
+                    };
+                    let rhs = if rhs_conj {
+                        tenet_tensors::FusionOperand::prelowered_adjoint(
+                            $rhs_logical.space(),
+                            $rhs_storage.space(),
+                        )?
+                    } else {
+                        tenet_tensors::FusionOperand::direct($rhs_logical.space())
+                    };
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into(
+                        $dst,
+                        &mut data,
+                        lhs,
+                        lhs_data,
+                        rhs,
+                        rhs_data,
+                        spec,
+                        D::from_real(1.0),
+                        D::from_real(0.0),
+                    )
+                }
             }};
         }
         match (

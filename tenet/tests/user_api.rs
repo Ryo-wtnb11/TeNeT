@@ -2,7 +2,7 @@
 //! including elementwise cross-checks against the expert layer.
 
 use tenet::core::{
-    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMap,
+    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorId, SectorLeg, TensorMap,
     TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet::operations::{
@@ -209,6 +209,166 @@ fn contract_cross_checks_against_expert_layer() {
             .unwrap();
         assert_close(user.data(), dst.data(), 1e-12);
     }
+}
+
+#[test]
+fn ordinary_nonabelian_contracts_match_legacy_lowering_bitwise() {
+    macro_rules! check_rule {
+        ($rule:expr, $space:expr, $sectors:expr, $seed:expr) => {{
+            let rule = $rule;
+            let sectors: Vec<(SectorId, usize)> = $sectors;
+            let leg_dim = sectors.iter().map(|(_, degeneracy)| degeneracy).sum();
+            let leg = || SectorLeg::new(sectors.iter().copied(), false);
+            let homspace = || {
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([leg(), leg()]),
+                    FusionProductSpace::new([leg(), leg()]),
+                )
+            };
+            let fusion_space = |hom: FusionTreeHomSpace| {
+                let shapes: Vec<Vec<usize>> = hom
+                    .fusion_tree_keys(&rule)
+                    .iter()
+                    .map(|key| {
+                        key.codomain_uncoupled()
+                            .iter()
+                            .chain(key.domain_uncoupled())
+                            .map(|sector| {
+                                sectors
+                                    .iter()
+                                    .find_map(|(candidate, degeneracy)| {
+                                        (candidate == sector).then_some(*degeneracy)
+                                    })
+                                    .unwrap()
+                            })
+                            .collect()
+                    })
+                    .collect();
+                FusionTensorMapSpace::from_degeneracy_shapes(
+                    TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim])
+                        .unwrap(),
+                    hom,
+                    &rule,
+                    shapes,
+                )
+                .unwrap()
+            };
+
+            let runtime = Runtime::builder().build().unwrap();
+            let space = $space;
+            let lhs = Tensor::rand_with_seed(
+                &runtime,
+                Dtype::F64,
+                [&space, &space],
+                [&space, &space],
+                $seed,
+            )
+            .unwrap();
+            let rhs = Tensor::rand_with_seed(
+                &runtime,
+                Dtype::F64,
+                [&space, &space],
+                [&space, &space],
+                $seed + 1,
+            )
+            .unwrap();
+            let lower_lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                lhs.data().to_vec(),
+                fusion_space(homspace()),
+            )
+            .unwrap();
+            let lower_rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                rhs.data().to_vec(),
+                fusion_space(homspace()),
+            )
+            .unwrap();
+
+            let lower_contract = |lhs_axes: &[usize], rhs_axes: &[usize], output_axes: &[usize]| {
+                let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+                    &rule,
+                    lower_lhs.fusion_space().unwrap().homspace(),
+                    lower_rhs.fusion_space().unwrap().homspace(),
+                    lhs_axes,
+                    rhs_axes,
+                    output_axes,
+                    2,
+                )
+                .unwrap();
+                let dst_space = fusion_space(dst_hom);
+                let mut dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                    vec![0.0; dst_space.required_len().unwrap()],
+                    dst_space,
+                )
+                .unwrap();
+                TensorContractFusionExecutionContext::<f64, _>::default()
+                    .tensorcontract_fusion_into(
+                        &rule,
+                        &mut dst,
+                        &lower_lhs,
+                        &lower_rhs,
+                        TensorContractSpec::new(
+                            lhs_axes,
+                            rhs_axes,
+                            OutputAxisOrder::from_axes(output_axes),
+                        ),
+                        1.0,
+                        0.0,
+                    )
+                    .unwrap();
+                dst.data().to_vec()
+            };
+
+            let default = lower_contract(&[2, 3], &[0, 1], &[0, 1, 2, 3]);
+            let ordered = lower_contract(&[3, 2], &[0, 1], &[1, 0, 2, 3]);
+            // What: ordinary facade dispatch preserves the exact legacy
+            // accumulation order for contract, ordered contract, and compose.
+            assert_eq!(
+                lhs.contract(&rhs, &[2, 3], &[0, 1]).unwrap().data(),
+                default
+            );
+            assert_eq!(lhs.compose(&rhs).unwrap().data(), default);
+            assert_eq!(
+                lhs.contract_ordered(&rhs, &[3, 2], &[0, 1], &[1, 0, 2, 3])
+                    .unwrap()
+                    .data(),
+                ordered
+            );
+        }};
+    }
+
+    check_rule!(
+        FermionParityFusionRule,
+        Space::fz2([(0, 2), (1, 3)]),
+        vec![(SectorId::new(0), 2), (SectorId::new(1), 3)],
+        261_801
+    );
+    check_rule!(
+        SU2FusionRule,
+        Space::su2([(0, 2), (1, 2), (2, 1)]),
+        vec![
+            (SU2Irrep::from_twice_spin(0).sector_id(), 2),
+            (SU2Irrep::from_twice_spin(1).sector_id(), 2),
+            (SU2Irrep::from_twice_spin(2).sector_id(), 1),
+        ],
+        261_811
+    );
+    check_rule!(
+        triple_rule(),
+        Space::fz2_u1_su2([
+            ((0, 0, 0), 2),
+            ((1, 1, 1), 2),
+            ((0, -1, 2), 1),
+            ((1, 0, 1), 1),
+        ])
+        .unwrap(),
+        vec![
+            (triple_sector(0, 0, 0), 2),
+            (triple_sector(1, 1, 1), 2),
+            (triple_sector(0, -1, 2), 1),
+            (triple_sector(1, 0, 1), 1),
+        ],
+        261_821
+    );
 }
 
 #[test]
