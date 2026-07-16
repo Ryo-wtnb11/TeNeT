@@ -2,6 +2,9 @@ use core::ops::{Add, Mul};
 use std::cell::RefCell;
 
 use num_traits::{One, Zero};
+use strided_kernel::{
+    axpy_conj_raw, axpy_raw, copy_scale_conj_raw, copy_scale_raw, RawStridedMut, RawStridedRef,
+};
 
 use crate::{
     axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted,
@@ -94,36 +97,6 @@ fn strided_perm_copy<T: Copy + strided_kernel::MaybeSendSync>(
     Ok(true)
 }
 
-thread_local! {
-    /// Reused fused-loop scratch for the rank > FUSED_RANK_LIMIT tail only.
-    /// Those high-rank contraction intermediates dominate warm replay, and
-    /// reusing one buffer per thread keeps them alloc-free after warmup (warm
-    /// chi16 -58%, chi32 -64%; commit 12748cf), beating the old rank>8
-    /// per-call StridedView allocation. Low-rank (<= FUSED_RANK_LIMIT) copies
-    /// never reach this path — they use the stack-array layout below, which is
-    /// faster per call and dominates the d=4 microbench (see issue #103).
-    static FUSE_SCRATCH: RefCell<FuseScratch> = const { RefCell::new(FuseScratch::new()) };
-}
-
-#[derive(Default)]
-struct FuseScratch {
-    dims: Vec<usize>,
-    dst_strides: Vec<isize>,
-    src_strides: Vec<isize>,
-    index: Vec<usize>,
-}
-
-impl FuseScratch {
-    const fn new() -> Self {
-        Self {
-            dims: Vec::new(),
-            dst_strides: Vec::new(),
-            src_strides: Vec::new(),
-            index: Vec::new(),
-        }
-    }
-}
-
 /// Allocation-free fused loop layout for one (destination, source) view pair.
 ///
 /// Axes with extent 1 are dropped, the rest are ordered by destination stride
@@ -214,9 +187,11 @@ pub(crate) fn fuse_pair_layout(
 }
 
 /// Applies `dst = apply(dst, op(src))` over a fixed-capacity stack layout with a
-/// plain loop nest; safe indexing keeps out-of-bounds layouts a panic rather
-/// than undefined behavior. Zero heap, zero indirection — the fast path for
-/// rank <= FUSED_RANK_LIMIT.
+/// plain loop nest. Test-only since #41 moved the non-baked replay onto the
+/// strided-rs raw kernels; retained as the byte-identical reference the fused /
+/// strided-perm parity tests compare against (it drives the same
+/// `apply_fused_pair_slices` loop the baked #232 replay uses in production).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn apply_fused_pair<T, Apply, ElementOp>(
     dst_data: &mut [T],
@@ -312,20 +287,48 @@ fn apply_fused_pair_slices<T, Apply, ElementOp>(
     }
 }
 
-/// Runs `dst = apply(dst, op(src))` over one (destination, source) strided view
-/// pair with a plain loop nest and NO per-call allocation, for any rank.
-///
-/// Hybrid dispatch (see issue #103): rank <= FUSED_RANK_LIMIT takes the
-/// stack-array layout (`apply_fused_pair`), which has zero heap and zero
-/// indirection and recovers the d=4 per-call regression that commit 12748cf
-/// introduced when it routed every rank through the thread_local scratch. Rank
-/// > FUSED_RANK_LIMIT keeps 12748cf's reused thread_local scratch, preserving
-/// its large-chi warm-alloc win. Both paths run the identical layout algorithm
-/// (extent-1 axes dropped, axes ordered by destination stride, adjacent
-/// contiguous axes fused), so the produced values are byte-identical; only the
-/// dispatch differs.
+thread_local! {
+    /// Reused fused-loop scratch for the rank > FUSED_RANK_LIMIT tail only.
+    /// Those high-rank contraction intermediates dominate warm replay, and
+    /// reusing one buffer per thread keeps them alloc-free after warmup (warm
+    /// chi16 -58%, chi32 -64%; commit 12748cf). Rank <= FUSED_RANK_LIMIT never
+    /// reaches this path — it delegates to the strided-rs #140 raw kernels.
+    ///
+    /// Why-not delegate rank > 8 too (issue #41): strided-rs's raw kernels fall
+    /// back to the *allocating* view kernels above RAW_FUSED_RANK_LIMIT, which
+    /// would break the warm zero-alloc contract pinned by tenet-network's
+    /// rank_nine_cached_permutation_has_no_caller_thread_operation_allocation.
+    /// This path goes away when strided-rs grows an alloc-free rank>8 route.
+    static FUSE_SCRATCH: RefCell<FuseScratch> = const { RefCell::new(FuseScratch::new()) };
+}
+
+#[derive(Default)]
+struct FuseScratch {
+    dims: Vec<usize>,
+    dst_strides: Vec<isize>,
+    src_strides: Vec<isize>,
+    index: Vec<usize>,
+}
+
+impl FuseScratch {
+    const fn new() -> Self {
+        Self {
+            dims: Vec::new(),
+            dst_strides: Vec::new(),
+            src_strides: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+}
+
+/// Hand-rolled rank > FUSED_RANK_LIMIT strided walk over the reused
+/// thread_local scratch (the pre-#41 `fused_pair` scratch branch, kept only for
+/// this tail; see [`FUSE_SCRATCH`] for why it cannot delegate yet). Runs the
+/// identical layout algorithm as the delegated rank <= 8 path (extent-1 axes
+/// dropped, axes ordered by destination stride, adjacent contiguous axes
+/// fused), so the produced values are byte-identical across the rank split.
 #[allow(clippy::too_many_arguments)]
-fn fused_pair<T, Apply, ElementOp>(
+fn fused_pair_high_rank<T, Apply, ElementOp>(
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
@@ -340,15 +343,6 @@ fn fused_pair<T, Apply, ElementOp>(
     Apply: Fn(&mut T, T),
     ElementOp: Fn(T) -> T,
 {
-    if shape.iter().any(|&dim| dim == 0) {
-        return;
-    }
-    if let Some(layout) = fuse_pair_layout(shape, dst_strides, src_strides) {
-        apply_fused_pair(
-            dst_data, src_data, &layout, dst_offset, src_offset, apply, op,
-        );
-        return;
-    }
     FUSE_SCRATCH.with(|cell| {
         let mut scratch = cell.borrow_mut();
         let FuseScratch {
@@ -442,14 +436,80 @@ fn fused_pair<T, Apply, ElementOp>(
     });
 }
 
-/// [`fused_pair`] with an optional prebaked layout (issue #232). When `baked`
-/// is `Some`, the compile-time-normalized slices drive the loop directly and
-/// `fuse_pair_layout` is skipped entirely; when `None` (unbaked entry, or a
-/// rank above `FUSED_RANK_LIMIT` that never bakes) it falls back to recomputing.
-/// The zero-extent short-circuit is kept ahead of both so a baked empty marker
-/// and an unbaked empty shape behave identically.
+/// Non-baked rank <= FUSED_RANK_LIMIT strided copy/scale/axpy, delegated to
+/// strided-rs #140 raw kernels (issue #41). The four
+/// `(assign | accumulate) x (plain | conj)` combinations map 1:1 onto
+/// `copy_scale_raw` / `copy_scale_conj_raw` / `axpy_raw` / `axpy_conj_raw`,
+/// which run the *identical* fuse-order-odometer walk TeNeT used to hand-roll
+/// (strided-rs #139 ported this crate's `fuse_pair_layout` /
+/// `apply_fused_pair` verbatim), so results are byte-identical — pinned by the
+/// differential tests below — and allocation-free for rank <= 8. Callers route
+/// rank > FUSED_RANK_LIMIT to [`fused_pair_high_rank`] instead (see
+/// [`FUSE_SCRATCH`] for why that tail cannot delegate yet).
+///
+/// Accepted constant-factor cost (issue #41, measured in
+/// `bench_41_fused_vs_raw_vs_plan`): the checked `RawStrided::new` re-validates
+/// the bounding box per call, ~+30% on 21x rank-4 d=4 blocks vs the removed
+/// hand-rolled loop. Same complexity order; the duplicated kernel code it
+/// deletes is worth the constant. The warm hot path is unaffected (it takes the
+/// #232 baked route).
+///
+/// Why `new` (checked) and not `new_unchecked`: the removed hand-rolled loop
+/// relied on safe slice indexing to turn an out-of-bounds layout into a *panic*
+/// rather than UB. `RawStrided{Ref,Mut}::new` runs the same O(rank) bounding-box
+/// test the trusted axpby path already runs in debug and returns a clean `Err`
+/// on OOB, which the adapter propagates — strictly safer than a panic and never
+/// reached by a valid replay layout. (Observable change vs the old panic is
+/// documented at the one probe test that pinned it.)
 #[allow(clippy::too_many_arguments)]
-fn fused_pair_baked<T, Apply, ElementOp>(
+fn delegate_raw_copy<T>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+    dst_offset: isize,
+    src_offset: isize,
+    assign: bool,
+    source_conjugate: bool,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
+{
+    let src = RawStridedRef::new(src_data, shape, src_strides, src_offset)
+        .map_err(crate::strided::error)?;
+    let mut dst = RawStridedMut::new(dst_data, shape, dst_strides, dst_offset)
+        .map_err(crate::strided::error)?;
+    // ConjugateValue::maybe_conj(true) is exactly ElementOpApply::conj for the
+    // scalar types (real = identity, complex = num-complex conj), so branching
+    // on source_conjugate onto the plain/conj raw kernels reproduces the old
+    // `alpha * value.maybe_conj(source_conjugate)` element op.
+    match (assign, source_conjugate) {
+        (true, false) => copy_scale_raw(&mut dst, &src, alpha),
+        (true, true) => copy_scale_conj_raw(&mut dst, &src, alpha),
+        (false, false) => axpy_raw(&mut dst, &src, alpha),
+        (false, true) => axpy_conj_raw(&mut dst, &src, alpha),
+    }
+    .map_err(crate::strided::error)
+}
+
+/// `dst = alpha * op(src)` (assign) or `dst += alpha * op(src)` (accumulate)
+/// over one strided pair, taking the issue-#232 prebaked layout when present.
+///
+/// `Some(baked)`: the compile-time-normalized arena slices drive
+/// `apply_fused_pair_slices` directly — strided-rs keeps its `fuse_pair_layout`
+/// / `apply_fused_pair` `pub(crate)`, so the baked replay cannot delegate and
+/// stays hand-rolled here (that is why `fuse_pair_layout` / `FusedPairLayout`
+/// remain in this module). `None`: delegate to the #140 raw kernels via
+/// [`delegate_raw_copy`]. The zero-extent short-circuit stays ahead of both so a
+/// baked empty marker and an unbaked empty shape are both no-ops.
+#[allow(clippy::too_many_arguments)]
+fn copy_or_axpy<T>(
     baked: Option<BakedFusedLayout<'_>>,
     dst_data: &mut [T],
     src_data: &[T],
@@ -458,29 +518,65 @@ fn fused_pair_baked<T, Apply, ElementOp>(
     src_strides: &[isize],
     dst_offset: isize,
     src_offset: isize,
-    apply: Apply,
-    op: ElementOp,
-) where
-    T: Copy,
-    Apply: Fn(&mut T, T),
-    ElementOp: Fn(T) -> T,
+    assign: bool,
+    source_conjugate: bool,
+    alpha: T,
+) -> Result<(), OperationError>
+where
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
 {
-    if shape.iter().any(|&dim| dim == 0) {
-        return;
+    if shape.contains(&0) {
+        return Ok(());
     }
     match baked {
-        Some(baked) => apply_fused_pair_slices(
-            dst_data,
-            src_data,
-            baked.dims,
-            baked.dst_strides,
-            baked.src_strides,
-            dst_offset,
-            src_offset,
-            apply,
-            op,
-        ),
-        None => fused_pair(
+        Some(baked) => {
+            apply_fused_pair_slices(
+                dst_data,
+                src_data,
+                baked.dims,
+                baked.dst_strides,
+                baked.src_strides,
+                dst_offset,
+                src_offset,
+                move |dst: &mut T, value: T| {
+                    if assign {
+                        *dst = value;
+                    } else {
+                        *dst = *dst + value;
+                    }
+                },
+                move |value: T| alpha * value.maybe_conj(source_conjugate),
+            );
+            Ok(())
+        }
+        None if shape.len() > FUSED_RANK_LIMIT => {
+            // Rank > 8 stays hand-rolled: the #140 raw kernels would fall back
+            // to allocating view kernels here, breaking the warm zero-alloc
+            // contract (see FUSE_SCRATCH).
+            fused_pair_high_rank(
+                dst_data,
+                src_data,
+                shape,
+                dst_strides,
+                src_strides,
+                dst_offset,
+                src_offset,
+                move |dst: &mut T, value: T| {
+                    if assign {
+                        *dst = value;
+                    } else {
+                        *dst = *dst + value;
+                    }
+                },
+                move |value: T| alpha * value.maybe_conj(source_conjugate),
+            );
+            Ok(())
+        }
+        None => delegate_raw_copy(
             dst_data,
             src_data,
             shape,
@@ -488,8 +584,9 @@ fn fused_pair_baked<T, Apply, ElementOp>(
             src_strides,
             dst_offset,
             src_offset,
-            apply,
-            op,
+            assign,
+            source_conjugate,
+            alpha,
         ),
     }
 }
@@ -768,7 +865,7 @@ where
     ) -> Result<(), OperationError> {
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
-            fused_pair_baked(
+            copy_or_axpy(
                 baked,
                 dst_data,
                 src_data,
@@ -777,15 +874,10 @@ where
                 src_strides,
                 dst_offset,
                 src_offset,
-                move |dst, value| {
-                    if assign {
-                        *dst = value;
-                    } else {
-                        *dst = *dst + value;
-                    }
-                },
-                move |value: T| alpha * value.maybe_conj(source_conjugate),
-            );
+                assign,
+                source_conjugate,
+                alpha,
+            )?;
             zero_strides.clear();
             return Ok(());
         }
@@ -869,7 +961,9 @@ where
         }
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
-            fused_pair_baked(
+            // axpby_strided carries no conjugation (scatter primitive), so pass
+            // source_conjugate = false onto the shared copy/axpy path.
+            return copy_or_axpy(
                 baked,
                 dst_data,
                 src_data,
@@ -878,16 +972,10 @@ where
                 src_strides,
                 dst_offset,
                 src_offset,
-                move |dst, value| {
-                    if assign {
-                        *dst = value;
-                    } else {
-                        *dst = *dst + value;
-                    }
-                },
-                move |value: T| alpha * value,
+                assign,
+                false,
+                alpha,
             );
-            return Ok(());
         }
         axpby_raw_strided_kernel_trusted(
             dst_data,
@@ -964,7 +1052,8 @@ where
         {
             return Ok(());
         }
-        fused_pair_baked(
+        // Pack always assigns (dst = alpha * op(src)).
+        copy_or_axpy(
             baked,
             dst_data,
             src_data,
@@ -973,10 +1062,10 @@ where
             src_strides,
             dst_offset,
             src_offset,
-            |dst, value| *dst = value,
-            move |value: T| alpha * value.maybe_conj(source_conjugate),
-        );
-        Ok(())
+            true,
+            source_conjugate,
+            alpha,
+        )
     }
 
     fn scale_strided(
@@ -1283,51 +1372,29 @@ mod tests {
     }
 
     #[test]
-    fn fused_pair_stack_and_scratch_paths_produce_identical_values() {
-        // Differential pin for the hybrid dispatch: the same logical copy
-        // expressed at rank 8 (stack-array path) and at rank 9 via an inserted
-        // extent-1 axis (fuse_pair_layout bails on shape.len() > 8, forcing the
-        // thread_local scratch path) must produce identical values, and both
-        // must match a naive reference loop.
+    fn delegate_raw_copy_rank8_stack_matches_reference() {
+        // #41: the non-baked assign path now runs strided-rs copy_scale_raw. At
+        // rank 8 it stays on the stack fuse path; the produced values must match
+        // the naive odometer reference (byte-identical delegation).
         let shape8 = [2usize; 8];
         let src_strides8 = row_major(&shape8);
         let dst_strides8: Vec<isize> = src_strides8.iter().rev().copied().collect();
         let src: Vec<f64> = (0..256).map(|value| value as f64 * 0.5 + 1.0).collect();
 
-        let mut dst_stack = vec![0.0_f64; 256];
-        assert!(fuse_pair_layout(&shape8, &dst_strides8, &src_strides8).is_some());
-        fused_pair(
-            &mut dst_stack,
+        let mut dst = vec![0.0_f64; 256];
+        delegate_raw_copy(
+            &mut dst,
             &src,
             &shape8,
             &dst_strides8,
             &src_strides8,
             0,
             0,
-            |dst, value| *dst = value,
-            |value| value,
-        );
-
-        // Same copy with an extent-1 axis spliced into the middle: rank 9.
-        let mut shape9 = shape8.to_vec();
-        let mut dst_strides9 = dst_strides8.clone();
-        let mut src_strides9 = src_strides8.clone();
-        shape9.insert(4, 1);
-        dst_strides9.insert(4, 0);
-        src_strides9.insert(4, 0);
-        assert!(fuse_pair_layout(&shape9, &dst_strides9, &src_strides9).is_none());
-        let mut dst_scratch = vec![0.0_f64; 256];
-        fused_pair(
-            &mut dst_scratch,
-            &src,
-            &shape9,
-            &dst_strides9,
-            &src_strides9,
-            0,
-            0,
-            |dst, value| *dst = value,
-            |value| value,
-        );
+            true,
+            false,
+            1.0,
+        )
+        .unwrap();
 
         let mut dst_reference = vec![0.0_f64; 256];
         reference_copy(
@@ -1337,23 +1404,23 @@ mod tests {
             &dst_strides8,
             &src_strides8,
         );
-
-        assert_eq!(dst_stack, dst_reference);
-        assert_eq!(dst_stack, dst_scratch);
+        assert_eq!(dst, dst_reference);
     }
 
     #[test]
-    fn fused_pair_scratch_path_matches_reference_for_genuine_rank_nine() {
-        // All nine axes have extent 2, so this can only run through the
-        // thread_local scratch path; compare against the naive reference.
+    fn rank9_routes_to_scratch_path_and_matches_reference() {
+        // Rank 9 is above FUSED_RANK_LIMIT, so copy_or_axpy routes to the kept
+        // hand-rolled fused_pair_high_rank (thread_local scratch, alloc-free
+        // warm) instead of delegating — the #140 raw kernels would allocate
+        // through the view fallback here. Values must match the naive reference.
         let shape = [2usize; 9];
         let src_strides = row_major(&shape);
         let dst_strides: Vec<isize> = src_strides.iter().rev().copied().collect();
-        assert!(fuse_pair_layout(&shape, &dst_strides, &src_strides).is_none());
         let src: Vec<f64> = (0..512).map(|value| value as f64 - 100.0).collect();
 
         let mut dst = vec![0.0_f64; 512];
-        fused_pair(
+        copy_or_axpy(
+            None,
             &mut dst,
             &src,
             &shape,
@@ -1361,9 +1428,11 @@ mod tests {
             &src_strides,
             0,
             0,
-            |dst, value| *dst = value,
-            |value| value,
-        );
+            true,
+            false,
+            1.0,
+        )
+        .unwrap();
 
         let mut dst_reference = vec![0.0_f64; 512];
         reference_copy(&mut dst_reference, &src, &shape, &dst_strides, &src_strides);
@@ -1371,10 +1440,17 @@ mod tests {
     }
 
     #[test]
-    fn fused_pair_zero_extent_shape_is_a_noop() {
+    fn delegate_raw_copy_preserves_enumerated_contracts() {
+        // #41 contract pin: the delegated raw path reproduces the old fused_pair
+        // behavior for every enumerated edge case — zero extent (no-op),
+        // negative source stride, broadcast (stride-0) source, and a
+        // non-injective destination (last write wins, per-call raw kernels do
+        // NOT reject it — only CopyPlan.compile would).
+
+        // Zero extent: no-op, no bounds error.
         let src = [1.0_f64; 4];
         let mut dst = [9.0_f64; 4];
-        fused_pair(
+        delegate_raw_copy(
             &mut dst,
             &src,
             &[2, 0],
@@ -1382,10 +1458,89 @@ mod tests {
             &[1, 2],
             0,
             0,
-            |dst, value| *dst = value,
-            |value| value,
-        );
+            true,
+            false,
+            1.0,
+        )
+        .unwrap();
         assert_eq!(dst, [9.0; 4]);
+
+        // Negative source stride: reversed read.
+        let src = [1.0_f64, 2.0, 3.0, 4.0];
+        let mut dst = [0.0_f64; 4];
+        delegate_raw_copy(&mut dst, &src, &[4], &[1], &[-1], 0, 3, true, false, 1.0).unwrap();
+        assert_eq!(dst, [4.0, 3.0, 2.0, 1.0]);
+
+        // Broadcast (stride-0) source: every logical index reads src[0].
+        let src = [7.0_f64];
+        let mut dst = [0.0_f64; 3];
+        delegate_raw_copy(&mut dst, &src, &[3], &[1], &[0], 0, 0, true, false, 2.0).unwrap();
+        assert_eq!(dst, [14.0, 14.0, 14.0]);
+
+        // Non-injective destination (dst stride 0): allowed, last write wins.
+        let src = [1.0_f64, 2.0, 3.0];
+        let mut dst = [0.0_f64];
+        delegate_raw_copy(&mut dst, &src, &[3], &[0], &[1], 0, 0, true, false, 1.0).unwrap();
+        assert_eq!(dst, [3.0]);
+    }
+
+    #[test]
+    fn delegate_raw_copy_accumulate_and_conjugate_match_reference() {
+        use num_complex::Complex64;
+        // Accumulate (axpy_raw): dst += alpha * src.
+        let src = [1.0_f64, 2.0];
+        let mut dst = [10.0_f64, 20.0];
+        delegate_raw_copy(&mut dst, &src, &[2], &[1], &[1], 0, 0, false, false, 3.0).unwrap();
+        assert_eq!(dst, [13.0, 26.0]);
+
+        // Conjugating assign (copy_scale_conj_raw): dst = alpha * conj(src).
+        let src = [Complex64::new(1.0, 2.0), Complex64::new(-3.0, 4.0)];
+        let mut dst = [Complex64::default(); 2];
+        delegate_raw_copy(
+            &mut dst,
+            &src,
+            &[2],
+            &[1],
+            &[1],
+            0,
+            0,
+            true,
+            true,
+            Complex64::new(2.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(dst[0], Complex64::new(2.0, -4.0));
+        assert_eq!(dst[1], Complex64::new(-6.0, -8.0));
+
+        // Conjugating accumulate (axpy_conj_raw): dst += alpha * conj(src).
+        let src = [Complex64::new(1.0, 1.0)];
+        let mut dst = [Complex64::new(5.0, 5.0)];
+        delegate_raw_copy(
+            &mut dst,
+            &src,
+            &[1],
+            &[1],
+            &[1],
+            0,
+            0,
+            false,
+            true,
+            Complex64::new(1.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(dst[0], Complex64::new(6.0, 4.0));
+    }
+
+    #[test]
+    fn delegate_raw_copy_rejects_out_of_bounds_as_clean_error() {
+        // #41 observable-behavior note: the removed hand-rolled loop panicked on
+        // an out-of-bounds layout (safe indexing); the checked RawStrided::new
+        // now returns a clean Err instead. Pinned so the panic->Err change is
+        // deliberate, not accidental.
+        let src = [1.0_f64; 4];
+        let mut dst = [0.0_f64; 3]; // one element too short for shape [4]
+        let err = delegate_raw_copy(&mut dst, &src, &[4], &[1], &[1], 0, 0, true, false, 1.0);
+        assert!(err.is_err());
     }
 
     #[test]
@@ -1454,25 +1609,18 @@ mod tests {
         assert_eq!(dst, [-4.0, -6.0]);
     }
 
-    // #41 deferral evidence (ignored; run explicitly):
+    // #41 perf probe (ignored; run explicitly):
     //   cargo test --release -p tenet-operations -- --ignored --nocapture bench_41
-    //
-    // #41 proposed delegating this hand-rolled `fused_pair` to strided-rs #140
-    // `copy_scale_raw` / #142 `CopyPlan`. This A/B is why the delegation is
-    // DEFERRED: over 21 rank-4 d=4 transposed blocks (the SU(2) small-block
-    // replay regime) the raw kernels are ~30% slower per block because their
-    // checked `RawStrided::new` re-validates the bounding box on every call,
-    // which `fused_pair` skips. #142's compile-once `CopyPlan` still pays that
-    // per-execute validation. Measured (machine-quiet, single thread, release,
-    // median-of-5): fused_pair ~133 ns, copy_scale_raw ~173 ns (+30%),
-    // CopyPlan.execute ~156 ns (+18%). Separately, #140 falls back to the
-    // *allocating* strided view kernels above rank 8, which would break the
-    // rank>8 warm alloc-free property `FUSE_SCRATCH` guarantees (tenet-network
-    // `rank_nine_cached_permutation_has_no_caller_thread_operation_allocation`).
-    // Delegation waits on a strided-rs follow-up: a validation-free prepared
-    // execute (bounds proven once at compile) plus an alloc-free rank>8 path.
-    // `new_unchecked` would match the zero-validation cost but is blocked by this
-    // crate's `#![deny(unsafe_code)]`.
+    // Small-block repeated copy at the SU(2) replay regime (21 rank-4 d=4
+    // transposed blocks): the pre-#41 hand-rolled rank<=8 path (fuse_pair_layout
+    // + apply_fused_pair_slices, NO bounds check) vs #140 `copy_scale_raw`
+    // (per-call fuse + 2x validate_bounds) vs #142 `CopyPlan` (compile once,
+    // execute many; still validates bounds per execute). Documents that the
+    // delegation trades ~30% on this NON-baked path for the per-call
+    // RawStrided::new bounds validation — the warm hot replay path is unaffected
+    // because it takes the #232 baked route (apply_fused_pair_slices, unchanged).
+    // Reaching baseline would need a validation-free prepared execute in
+    // strided-rs; new_unchecked is blocked by this crate's #![deny(unsafe_code)].
     #[test]
     #[ignore]
     fn bench_41_fused_vs_raw_vs_plan() {
@@ -1493,21 +1641,24 @@ mod tests {
             v[v.len() / 2]
         };
 
-        // (a) hand-rolled fused_pair (the current production path, no bounds check)
+        // (a) hand-rolled baseline: the exact pre-#41 rank<=8 path
+        // (fuse_pair_layout + apply_fused_pair_slices), with NO bounds check —
+        // this is what `fused_pair` ran for rank <= FUSED_RANK_LIMIT.
         let mut fused_ns = Vec::new();
         for _ in 0..5 {
             let t = Instant::now();
             for _ in 0..iters {
                 for _ in 0..BLOCKS {
-                    fused_pair(
+                    let layout = fuse_pair_layout(&dims, &dst_strides, &src_strides).unwrap();
+                    apply_fused_pair_slices(
                         &mut dst,
                         &src,
-                        &dims,
-                        &dst_strides,
-                        &src_strides,
+                        &layout.dims[..layout.rank],
+                        &layout.dst_strides[..layout.rank],
+                        &layout.src_strides[..layout.rank],
                         0,
                         0,
-                        |d, v| *d = v,
+                        |d: &mut f64, v: f64| *d = v,
                         |v: f64| v,
                     );
                 }
@@ -1515,7 +1666,7 @@ mod tests {
             fused_ns.push(t.elapsed().as_nanos() as f64 / (iters * BLOCKS) as f64);
         }
 
-        // (b) #140 copy_scale_raw, per-call (RawStrided::new bounds check + fuse)
+        // (b) #140 copy_scale_raw, per-call (RawStrided::new + fuse each block)
         let mut raw_ns = Vec::new();
         for _ in 0..5 {
             let t = Instant::now();
@@ -1567,8 +1718,38 @@ mod tests {
 /// [`TransposeBackend`] value.
 #[cfg(test)]
 mod strided_perm_probe {
-    use super::{fused_pair, strided_perm_copy, StridedHostKernelAdapter, TransposeBackend};
+    use super::{
+        apply_fused_pair, fuse_pair_layout, strided_perm_copy, StridedHostKernelAdapter,
+        TransposeBackend,
+    };
     use crate::kernel_adapter::HostKernelAdapter;
+
+    /// Byte-identical reference for the fused assign copy `dst = src`, built from
+    /// the kept `fuse_pair_layout` + `apply_fused_pair` (the same normalization
+    /// the production baked replay and the strided-rs raw kernels both run). Used
+    /// in place of the removed hand-rolled `fused_pair` (#41). Only covers the
+    /// rank <= FUSED_RANK_LIMIT layouts these probes exercise.
+    fn reference_fused(
+        dst: &mut [f64],
+        src: &[f64],
+        shape: &[usize],
+        dst_strides: &[isize],
+        src_strides: &[isize],
+        dst_off: isize,
+        src_off: isize,
+    ) {
+        let layout = fuse_pair_layout(shape, dst_strides, src_strides)
+            .expect("probe layouts stay within FUSED_RANK_LIMIT");
+        apply_fused_pair(
+            dst,
+            src,
+            &layout,
+            dst_off,
+            src_off,
+            |d, v| *d = v,
+            |v: f64| v,
+        );
+    }
 
     /// Inclusive max linear index a positive-stride layout reaches.
     fn span(shape: &[usize], strides: &[isize], offset: isize) -> usize {
@@ -1608,7 +1789,7 @@ mod strided_perm_probe {
             handled,
             "expected strided-perm to handle shape={shape:?} ds={dst_strides:?} ss={src_strides:?}"
         );
-        fused_pair(
+        reference_fused(
             &mut fused,
             &src,
             shape,
@@ -1616,8 +1797,6 @@ mod strided_perm_probe {
             src_strides,
             dst_off,
             src_off,
-            |d, v| *d = v,
-            |v: f64| v,
         );
         assert_eq!(
             route, fused,
@@ -1743,54 +1922,31 @@ mod strided_perm_probe {
         }
     }
 
-    /// Observes which route the adapter's `transpose_backend` field actually
-    /// selects. Routed copies are byte-identical by design, so the routes are
-    /// distinguished at the error boundary instead: on an eligible layout whose
-    /// destination is one element too short, the strided-perm route returns a
-    /// clean `Err` (StridedView bounding-box validation) while the fused loop
-    /// panics on its safe indexing. Each behavior is unique to its route, so
-    /// this pins that the adapter field — not an env var, not a global —
-    /// switches the dispatch.
+    /// #41 observable-behavior pin. Before delegation the default (FusedLoops)
+    /// route *panicked* on an out-of-bounds destination (safe indexing) while the
+    /// StridedPerm route returned a clean `Err` (StridedView validation). Now the
+    /// FusedLoops route delegates to strided-rs `copy_scale_raw`, whose checked
+    /// `RawStridedMut::new` also rejects OOB with a clean `Err` — so both backends
+    /// now reject the same out-of-bounds layout uniformly, with no panic. This
+    /// pins that the panic->Err change is deliberate and that neither route
+    /// aborts the process on a malformed layout.
     #[test]
-    fn transpose_backend_field_switches_the_route() {
+    fn both_backends_reject_out_of_bounds_without_panic() {
         let shape = [4usize, 4];
         let ss = [4isize, 1];
         let ds = [1isize, 4]; // eligible transpose layout
         let src: Vec<f64> = (0..16).map(|i| i as f64).collect();
 
-        // StridedPerm: view validation rejects the short destination cleanly.
-        let mut perm_adapter =
-            StridedHostKernelAdapter::with_transpose_backend(TransposeBackend::StridedPerm);
-        let mut short_dst = vec![0.0f64; 15];
-        assert!(
-            perm_adapter
-                .copy_scale_strided(&mut short_dst, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
-                .is_err(),
-            "StridedPerm route must reject the out-of-bounds layout as an error"
-        );
-
-        // FusedLoops (default): the same call reaches the fused loop, whose
-        // safe indexing panics on the out-of-bounds destination instead.
-        let panicked = std::panic::catch_unwind(move || {
-            let mut fused_adapter = StridedHostKernelAdapter::default();
-            let mut short_dst = vec![0.0f64; 15];
-            let _ = fused_adapter.copy_scale_strided(
-                &mut short_dst,
-                &src,
-                &shape,
-                &ds,
-                &ss,
-                0,
-                0,
-                false,
-                1.0,
+        for backend in [TransposeBackend::FusedLoops, TransposeBackend::StridedPerm] {
+            let mut adapter = StridedHostKernelAdapter::with_transpose_backend(backend);
+            let mut short_dst = vec![0.0f64; 15]; // one element too short for [4,4]
+            assert!(
+                adapter
+                    .copy_scale_strided(&mut short_dst, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
+                    .is_err(),
+                "{backend:?} route must reject the out-of-bounds layout as a clean Err"
             );
-        })
-        .is_err();
-        assert!(
-            panicked,
-            "FusedLoops route must take the fused (panicking) path"
-        );
+        }
     }
 
     // Crossover micro-bench (ignored; run explicitly):
@@ -1811,31 +1967,11 @@ mod strided_perm_probe {
             let mut dst = vec![0.0f64; n * n];
             let iters = (1usize << 24 >> (2 * (n as f64).log2() as usize)).max(50);
             // warm caches
-            fused_pair(
-                &mut dst,
-                &src,
-                &shape,
-                &ds,
-                &ss,
-                0,
-                0,
-                |d, v| *d = v,
-                |v: f64| v,
-            );
+            reference_fused(&mut dst, &src, &shape, &ds, &ss, 0, 0);
             let _ = strided_perm_copy(&mut dst, &src, &shape, &ds, &ss, 0, 0);
             let t = Instant::now();
             for _ in 0..iters {
-                fused_pair(
-                    &mut dst,
-                    &src,
-                    &shape,
-                    &ds,
-                    &ss,
-                    0,
-                    0,
-                    |d, v| *d = v,
-                    |v: f64| v,
-                );
+                reference_fused(&mut dst, &src, &shape, &ds, &ss, 0, 0);
             }
             let fused_ns = t.elapsed().as_nanos() as f64 / iters as f64;
             let t = Instant::now();
