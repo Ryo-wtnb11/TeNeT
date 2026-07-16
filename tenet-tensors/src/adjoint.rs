@@ -17,7 +17,7 @@ use tenet_core::{
 use crate::cache::registered_operation_cache;
 #[cfg(test)]
 use crate::contract::{encoded_layout_primer, lowered_layout_primer};
-use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutPrimer};
+use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
 
@@ -109,7 +109,7 @@ where
 fn adjoint_space_dyn_with_primer<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
-    primer: LayoutPrimer<R>,
+    primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
@@ -141,7 +141,7 @@ where
 fn build_adjoint_space_dyn_with_primer<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
-    primer: LayoutPrimer<R>,
+    primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -208,7 +208,7 @@ fn adjoint_dyn_with_primer<R, D>(
     rule: &R,
     space: &DynamicFusionMapSpace,
     data: &[D],
-    primer: LayoutPrimer<R>,
+    primer: LayoutKeyBuilder<R>,
 ) -> Result<(DynamicFusionMapSpace, Vec<D>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -700,7 +700,7 @@ mod cache_tests {
     fn counting_primer(
         rule: &TripleRule,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<(), OperationError> {
+    ) -> Result<Option<Arc<[tenet_core::FusionTreeBlockKey]>>, OperationError> {
         LOWERED_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
         lowered_layout_primer(rule, homspace)
     }

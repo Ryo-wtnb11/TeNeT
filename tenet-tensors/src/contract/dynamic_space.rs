@@ -13,10 +13,11 @@ use crate::cache::registered_operation_cache;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
-pub(crate) type LayoutPrimer<R> = fn(&R, &FusionTreeHomSpace) -> Result<(), OperationError>;
+pub(crate) type LayoutKeyBuilder<R> =
+    fn(&R, &FusionTreeHomSpace) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError>;
 
 struct LayoutBuildCapability<R> {
-    prime: LayoutPrimer<R>,
+    prime: LayoutKeyBuilder<R>,
 }
 
 impl<R> Copy for LayoutBuildCapability<R> {}
@@ -35,7 +36,21 @@ impl<R> LayoutBuildCapability<R> {
     }
 
     fn prime(self, rule: &R, homspace: &FusionTreeHomSpace) -> Result<(), OperationError> {
-        (self.prime)(rule, homspace)
+        (self.prime)(rule, homspace).map(|_| ())
+    }
+
+    fn keys(
+        self,
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<[FusionTreeBlockKey]>, OperationError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        match (self.prime)(rule, homspace)? {
+            Some(keys) => Ok(keys),
+            None => Ok(homspace.fusion_tree_keys(rule)),
+        }
     }
 }
 
@@ -53,20 +68,20 @@ where
 pub(crate) fn encoded_layout_primer<R>(
     _rule: &R,
     _homspace: &FusionTreeHomSpace,
-) -> Result<(), OperationError> {
-    Ok(())
+) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError> {
+    Ok(None)
 }
 
 pub(crate) fn lowered_layout_primer<R>(
     rule: &R,
     homspace: &FusionTreeHomSpace,
-) -> Result<(), OperationError>
+) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError>
 where
     R: LoweredMultiplicityFreeAlgebra,
 {
     homspace
         .try_fusion_tree_keys_lowered(rule)
-        .map(|_| ())
+        .map(Some)
         .map_err(|error| OperationError::InvalidArgument {
             message: error.static_message(),
         })
@@ -803,12 +818,12 @@ where
         &self.provider
     }
 
-    pub(crate) fn layout_primer(&self) -> LayoutPrimer<R> {
+    pub(crate) fn layout_primer(&self) -> LayoutKeyBuilder<R> {
         self.layout_build.prime
     }
 
     #[cfg(test)]
-    pub(crate) fn with_test_layout_primer(mut self, primer: LayoutPrimer<R>) -> Self {
+    pub(crate) fn with_test_layout_primer(mut self, primer: LayoutKeyBuilder<R>) -> Self {
         self.layout_build = LayoutBuildCapability { prime: primer };
         self
     }
@@ -820,6 +835,31 @@ where
         homspace: &FusionTreeHomSpace,
     ) -> Result<(), OperationError> {
         self.layout_build.prime(self.provider.as_ref(), homspace)
+    }
+
+    /// Builds caller-defined per-tree shapes from this binding's authoritative
+    /// key order, then consumes those same keys for the storage layout.
+    #[doc(hidden)]
+    pub fn derive_from_fusion_tree_shapes<BuildShapes, Shapes>(
+        &self,
+        homspace: FusionTreeHomSpace,
+        build_shapes: BuildShapes,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        BuildShapes: FnOnce(&[FusionTreeBlockKey]) -> Result<Shapes, OperationError>,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+    {
+        let keys = self.layout_build.keys(self.provider.as_ref(), &homspace)?;
+        let shapes = build_shapes(keys.as_ref())?;
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            self.provider.as_ref(),
+            homspace,
+            shapes,
+            move |_, _| Ok(keys),
+        )?;
+        Self::from_derived_like(self, space)
     }
 
     /// Builds a derived layout while preserving this binding's build strategy.
@@ -834,11 +874,12 @@ where
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
-        self.layout_build.prime(self.provider.as_ref(), &homspace)?;
-        let space = DynamicFusionMapSpace::from_degeneracy_shapes(
+        let layout_build = self.layout_build;
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
             self.provider.as_ref(),
             homspace,
             shapes,
+            move |rule, homspace| layout_build.keys(rule, homspace),
         )?;
         Self::from_derived_like(self, space)
     }
@@ -907,7 +948,7 @@ impl DynamicFusionMapSpace {
     fn from_final_homspace_with_primer<R>(
         rule: &R,
         homspace: FusionTreeHomSpace,
-        primer: LayoutPrimer<R>,
+        primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1128,7 +1169,7 @@ impl DynamicFusionMapSpace {
         &self,
         rule: &R,
         operation: &TreeTransformOperation,
-        primer: LayoutPrimer<R>,
+        primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1276,7 +1317,7 @@ impl DynamicFusionMapSpace {
         lhs: &Self,
         rhs: &Self,
         axes: TensorContractSpec<'_>,
-        primer: LayoutPrimer<R>,
+        primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1383,7 +1424,7 @@ impl DynamicFusionMapSpace {
         lhs: &Self,
         rhs: &Self,
         plan: &FusionContractPlan,
-        primer: LayoutPrimer<R>,
+        primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1408,7 +1449,7 @@ impl DynamicFusionMapSpace {
         axes: TensorContractSpec<'_>,
         nout: usize,
         nin: usize,
-        primer: LayoutPrimer<R>,
+        primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1425,7 +1466,7 @@ impl DynamicFusionMapSpace {
         axis_plan: &TensorContractAxisPlan,
         nout: usize,
         nin: usize,
-        primer: LayoutPrimer<R>,
+        primer: LayoutKeyBuilder<R>,
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1743,7 +1784,7 @@ mod lowered_metadata_tests {
     fn counting_primer(
         rule: &TripleRule,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<(), OperationError> {
+    ) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError> {
         PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
         lowered_layout_primer(rule, homspace)
     }
@@ -1762,6 +1803,36 @@ mod lowered_metadata_tests {
         let count = homspace.fusion_tree_keys(rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, vec![vec![1; 4]; count])
             .unwrap()
+    }
+
+    #[test]
+    fn derived_factor_shapes_use_one_authority_key_build() {
+        // What: each cold SVD/QR/EIGH-style output derives its shapes and
+        // storage grid from one authority-selected fusion-tree key set.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = Arc::new(rule());
+        let source = source(rule.as_ref());
+        let authority = BoundDynamicFusionMapSpace::bind_multiplicity_free(source, rule)
+            .unwrap()
+            .with_test_layout_primer(counting_primer);
+
+        for _operation in ["svd_compact", "qr_compact", "eigh_full"] {
+            reset_primer_calls();
+            let shape_builds = Cell::new(0usize);
+            let derived = authority
+                .derive_from_fusion_tree_shapes(homspace(), |keys| {
+                    shape_builds.set(shape_builds.get() + 1);
+                    Ok(keys.iter().map(|_| vec![1; 4]).collect::<Vec<_>>())
+                })
+                .unwrap();
+            assert_eq!(primer_calls(), 1);
+            assert_eq!(shape_builds.get(), 1);
+            assert!(derived.space().structure().block_count() > 0);
+        }
     }
 
     #[test]

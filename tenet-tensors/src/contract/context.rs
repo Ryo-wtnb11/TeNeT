@@ -30,7 +30,7 @@ use super::dynamic::{
 };
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
-    LayoutPrimer,
+    LayoutKeyBuilder,
 };
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
@@ -1073,7 +1073,7 @@ where
         axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
-        layout_primer: LayoutPrimer<R>,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1206,7 +1206,7 @@ where
         axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
-        layout_primer: LayoutPrimer<R>,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1509,7 +1509,7 @@ where
         rhs_data: &[D],
         alpha: D,
         beta: D,
-        layout_primer: LayoutPrimer<R>,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,

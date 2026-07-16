@@ -23,7 +23,7 @@ use crate::{
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
-use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutPrimer};
+use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
 use super::fusion::{prepare_tensorcontract_fusion_plan, FusionContractPlan};
 use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
@@ -504,7 +504,7 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
-    layout_primer: LayoutPrimer<R>,
+    layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
     dst_space: &DynamicFusionMapSpace,
     dst_structure: &Arc<BlockStructure>,
@@ -1571,7 +1571,7 @@ where
         src_storage_structure: &Arc<BlockStructure>,
         operation: &TreeTransformOperation,
         source_conjugate: bool,
-        layout_primer: LayoutPrimer<R>,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1795,7 +1795,7 @@ where
         storage_structure: &Arc<BlockStructure>,
         operation: &TreeTransformOperation,
         storage_conjugate: bool,
-        layout_primer: LayoutPrimer<R>,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1870,7 +1870,7 @@ where
         rhs: &DynamicFusionMapSpace,
         plan: &FusionContractPlan,
         output_dst: &DynamicFusionMapSpace,
-        layout_primer: LayoutPrimer<R>,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<DynamicFusionCoreDstEntry, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -2339,7 +2339,7 @@ mod tests {
     fn counting_su2_primer(
         rule: &SU2FusionRule,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<(), OperationError> {
+    ) -> Result<Option<Arc<[tenet_core::FusionTreeBlockKey]>>, OperationError> {
         EXECUTION_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
         lowered_layout_primer(rule, homspace)
     }

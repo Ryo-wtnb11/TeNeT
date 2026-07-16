@@ -756,23 +756,22 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
-    authority.prime_derived_homspace(&homspace)?;
     let length_by_sector: HashMap<SectorId, usize> = spectrum
         .iter()
         .map(|entry| (entry.sector, entry.values.len()))
         .collect();
-    let shapes = homspace
-        .fusion_tree_keys(rule)
-        .iter()
-        .map(|key| {
-            let count = length_by_sector
-                .get(&coupled_of(rule, key.codomain_tree()))
-                .copied()
-                .unwrap_or(0);
-            vec![count, count]
-        })
-        .collect::<Vec<_>>();
-    authority.derive_from_degeneracy_shapes(homspace, shapes)
+    authority.derive_from_fusion_tree_shapes(homspace, |keys| {
+        Ok(keys
+            .iter()
+            .map(|key| {
+                let count = length_by_sector
+                    .get(&coupled_of(rule, key.codomain_tree()))
+                    .copied()
+                    .unwrap_or(0);
+                vec![count, count]
+            })
+            .collect::<Vec<_>>())
+    })
 }
 
 pub fn diagonal_bond_bound_space<R, V>(
@@ -2172,30 +2171,28 @@ where
         legs[axis - nout] = bond_leg;
         FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
     };
-    authority.prime_derived_homspace(&new_hom)?;
-    let shapes = new_hom
-        .fusion_tree_keys(rule)
-        .iter()
-        .map(|key| {
-            let old_index = source_structure
-                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
-                .ok_or(OperationError::UnsupportedTensorContractScope {
-                    message: "truncated factor tree must exist in the full factor",
-                })?;
-            let old_block = source_structure
-                .block(old_index)
-                .map_err(OperationError::from_core_preserving_context)?;
-            let mut shape = old_block.shape().to_vec();
-            let bond_tree = if axis < nout {
-                key.codomain_tree()
-            } else {
-                key.domain_tree()
-            };
-            shape[axis] = kept_of(coupled_of(rule, bond_tree));
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let space = authority.derive_from_degeneracy_shapes(new_hom, shapes)?;
+    let space = authority.derive_from_fusion_tree_shapes(new_hom, |keys| {
+        keys.iter()
+            .map(|key| {
+                let old_index = source_structure
+                    .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+                    .ok_or(OperationError::UnsupportedTensorContractScope {
+                        message: "truncated factor tree must exist in the full factor",
+                    })?;
+                let old_block = source_structure
+                    .block(old_index)
+                    .map_err(OperationError::from_core_preserving_context)?;
+                let mut shape = old_block.shape().to_vec();
+                let bond_tree = if axis < nout {
+                    key.codomain_tree()
+                } else {
+                    key.domain_tree()
+                };
+                shape[axis] = kept_of(coupled_of(rule, bond_tree));
+                Ok(shape)
+            })
+            .collect::<Result<Vec<_>, OperationError>>()
+    })?;
     let mut data = vec![D::zero(); space.space().required_len()?];
     for index in 0..space.space().structure().block_count() {
         let new_block = space.space().structure().block(index)?;
@@ -2257,35 +2254,31 @@ where
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg.clone()]),
     );
-    authority.prime_derived_homspace(&left_hom)?;
-    let left_shapes = left_hom
-        .fusion_tree_keys(rule)
-        .iter()
-        .map(|key| {
-            let sector = coupled_of(rule, key.codomain_tree());
-            let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
-            shape.push(sector_rank(sector));
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let left = authority.derive_from_degeneracy_shapes(left_hom, left_shapes)?;
+    let left = authority.derive_from_fusion_tree_shapes(left_hom, |keys| {
+        keys.iter()
+            .map(|key| {
+                let sector = coupled_of(rule, key.codomain_tree());
+                let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
+                shape.push(sector_rank(sector));
+                Ok(shape)
+            })
+            .collect::<Result<Vec<_>, OperationError>>()
+    })?;
 
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
     );
-    authority.prime_derived_homspace(&right_hom)?;
-    let right_shapes = right_hom
-        .fusion_tree_keys(rule)
-        .iter()
-        .map(|key| {
-            let sector = coupled_of(rule, key.domain_tree());
-            let mut shape = vec![sector_rank(sector)];
-            shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let right = authority.derive_from_degeneracy_shapes(right_hom, right_shapes)?;
+    let right = authority.derive_from_fusion_tree_shapes(right_hom, |keys| {
+        keys.iter()
+            .map(|key| {
+                let sector = coupled_of(rule, key.domain_tree());
+                let mut shape = vec![sector_rank(sector)];
+                shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
+                Ok(shape)
+            })
+            .collect::<Result<Vec<_>, OperationError>>()
+    })?;
     Ok((left, right))
 }
 
@@ -2308,18 +2301,16 @@ where
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg]),
     );
-    authority.prime_derived_homspace(&hom)?;
-    let shapes = hom
-        .fusion_tree_keys(rule)
-        .iter()
-        .map(|key| {
-            let sector = coupled_of(rule, key.codomain_tree());
-            let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
-            shape.push(rank_by_sector.get(&sector).copied().unwrap_or(0));
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    authority.derive_from_degeneracy_shapes(hom, shapes)
+    authority.derive_from_fusion_tree_shapes(hom, |keys| {
+        keys.iter()
+            .map(|key| {
+                let sector = coupled_of(rule, key.codomain_tree());
+                let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
+                shape.push(rank_by_sector.get(&sector).copied().unwrap_or(0));
+                Ok(shape)
+            })
+            .collect::<Result<Vec<_>, OperationError>>()
+    })
 }
 
 /// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
@@ -3238,16 +3229,15 @@ where
         FusionProductSpace::new([row_leg]),
         FusionProductSpace::new([col_leg]),
     );
-    authority.prime_derived_homspace(&homspace)?;
-    let keys = homspace.fusion_tree_keys(rule);
-    let shapes = keys
-        .iter()
-        .map(|key| {
-            let sector = coupled_of(rule, key.codomain_tree());
-            vec![rows_of(sector), cols_of(sector)]
-        })
-        .collect::<Vec<_>>();
-    let space = authority.derive_from_degeneracy_shapes(homspace, shapes)?;
+    let space = authority.derive_from_fusion_tree_shapes(homspace, |keys| {
+        Ok(keys
+            .iter()
+            .map(|key| {
+                let sector = coupled_of(rule, key.codomain_tree());
+                vec![rows_of(sector), cols_of(sector)]
+            })
+            .collect::<Vec<_>>())
+    })?;
     let len = space
         .space()
         .required_len()
