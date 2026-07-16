@@ -84,14 +84,19 @@ impl BraidingStyleKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct SectorLeg {
+#[derive(Debug, Eq, PartialEq, Hash)]
+struct SectorLegData {
     sectors: SectorVec,
     /// Per-sector degeneracy, parallel to `sectors`. The leg is the single
     /// source of truth for the sector -> degeneracy map of one tensor axis
     /// (TensorKit `GradedSpace` parity: the space stores the complete map
     /// independent of which fusion trees are populated).
     degeneracies: DimVec,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct SectorLeg {
+    data: Arc<SectorLegData>,
     is_dual: bool,
 }
 
@@ -123,7 +128,7 @@ impl SectorLeg {
         let mut pairs = pairs
             .into_iter()
             .map(|(sector, degeneracy)| (sector.into(), degeneracy))
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[(SectorId, usize); 8]>>();
         pairs.sort_unstable();
         pairs.dedup();
         for window in pairs.windows(2) {
@@ -133,10 +138,19 @@ impl SectorLeg {
                 window[0].0, window[0].1, window[1].1
             );
         }
-        let (sectors, degeneracies) = pairs.into_iter().unzip();
+        let mut sectors = SectorVec::new();
+        let mut degeneracies = DimVec::new();
+        sectors.reserve(pairs.len());
+        degeneracies.reserve(pairs.len());
+        for (sector, degeneracy) in pairs {
+            sectors.push(sector);
+            degeneracies.push(degeneracy);
+        }
         Self {
-            sectors,
-            degeneracies,
+            data: Arc::new(SectorLegData {
+                sectors,
+                degeneracies,
+            }),
             is_dual,
         }
     }
@@ -147,30 +161,32 @@ impl SectorLeg {
 
     #[inline]
     pub fn sectors(&self) -> &[SectorId] {
-        &self.sectors
+        &self.data.sectors
     }
 
     /// Per-sector degeneracies, parallel to [`Self::sectors`].
     #[inline]
     pub fn degeneracies(&self) -> &[usize] {
-        &self.degeneracies
+        &self.data.degeneracies
     }
 
     /// Degeneracy of `sector` on this leg, `None` when the sector is not
     /// part of the leg.
     pub fn degeneracy(&self, sector: SectorId) -> Option<usize> {
-        self.sectors
+        self.data
+            .sectors
             .binary_search(&sector)
             .ok()
-            .map(|index| self.degeneracies[index])
+            .map(|index| self.data.degeneracies[index])
     }
 
     /// `(sector, degeneracy)` pairs in sorted sector order.
     pub fn iter(&self) -> impl Iterator<Item = (SectorId, usize)> + '_ {
-        self.sectors
+        self.data
+            .sectors
             .iter()
             .copied()
-            .zip(self.degeneracies.iter().copied())
+            .zip(self.data.degeneracies.iter().copied())
     }
 
     /// The dual leg: every sector is replaced by its dual (degeneracies

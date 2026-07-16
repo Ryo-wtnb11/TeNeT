@@ -1,6 +1,6 @@
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FusionProductSpace {
-    legs: Vec<SectorLeg>,
+    legs: SmallVec<[SectorLeg; 8]>,
 }
 
 impl FusionProductSpace {
@@ -66,7 +66,7 @@ impl FusionProductSpace {
 pub struct FusionTreeHomSpace {
     codomain: FusionProductSpace,
     domain: FusionProductSpace,
-    id: HomSpaceId,
+    id: OnceLock<HomSpaceId>,
 }
 
 impl PartialEq for FusionTreeHomSpace {
@@ -475,11 +475,11 @@ fn reset_fusion_tree_layout_caches() {
 }
 
 /// Process-global intern id for a fusion hom space. [`FusionTreeHomSpace::id`]
-/// deep-hashes the space at construction (the full generic key: every codomain
+/// deep-hashes the space on first demand (the full generic key: every codomain
 /// and domain leg's sectors and dual flag — never a multiplicity-free subset)
-/// and stores a collision-safe semantic identity. Downstream hashing reads its
-/// cached prehash in O(1); equality falls back to the full immutable key only
-/// for matching prehashes. Mirrors the block-structure content intern.
+/// and stores the collision-safe semantic identity in the hom space's lazy
+/// cell. Downstream hashing reads its cached prehash in O(1); equality falls
+/// back to the full immutable key only for matching prehashes.
 ///
 /// Why-not (persist to disk): the cached prehash is an implementation detail,
 /// so a loaded operation cache reconstructs identity from the semantic space
@@ -515,6 +515,103 @@ impl std::hash::Hash for HomSpaceId {
 struct HomSpaceInternKey {
     codomain: FusionProductSpace,
     domain: FusionProductSpace,
+}
+
+#[derive(Clone, Copy)]
+struct OrientedLegView<'a> {
+    source: &'a SectorLeg,
+    dualize: bool,
+}
+
+impl<'a> OrientedLegView<'a> {
+    fn borrowed(source: &'a SectorLeg) -> Self {
+        Self {
+            source,
+            dualize: false,
+        }
+    }
+
+    fn toggled(self) -> Self {
+        Self {
+            source: self.source,
+            dualize: !self.dualize,
+        }
+    }
+
+    fn is_dual(self) -> bool {
+        self.source.is_dual() ^ self.dualize
+    }
+
+    fn mapped_sector<R>(self, rule: &R, sector: SectorId) -> SectorId
+    where
+        R: FusionRule,
+    {
+        if self.dualize {
+            rule.dual(sector)
+        } else {
+            sector
+        }
+    }
+
+    fn materialize<R>(self, rule: &R) -> SectorLeg
+    where
+        R: FusionRule,
+    {
+        if self.dualize {
+            self.source.dual(rule)
+        } else {
+            self.source.clone()
+        }
+    }
+}
+
+struct HomSpaceDescriptor<'a> {
+    // Why one vector instead of one per side: rank, not side rank, is the
+    // natural inline bound. PEPS/MPS metadata up to rank 8 stays entirely on
+    // the stack and `nout` splits the stored-orientation views.
+    legs: SmallVec<[OrientedLegView<'a>; 8]>,
+    nout: usize,
+}
+
+impl<'a> HomSpaceDescriptor<'a> {
+    fn new(
+        codomain: impl IntoIterator<Item = OrientedLegView<'a>>,
+        domain: impl IntoIterator<Item = OrientedLegView<'a>>,
+    ) -> Self {
+        let mut legs = SmallVec::new();
+        legs.extend(codomain);
+        let nout = legs.len();
+        legs.extend(domain);
+        Self { legs, nout }
+    }
+
+    fn codomain(&self) -> &[OrientedLegView<'a>] {
+        &self.legs[..self.nout]
+    }
+
+    fn domain(&self) -> &[OrientedLegView<'a>] {
+        &self.legs[self.nout..]
+    }
+
+    fn materialize<R>(&self, rule: &R) -> FusionTreeHomSpace
+    where
+        R: FusionRule,
+    {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                self.codomain()
+                    .iter()
+                    .copied()
+                    .map(|view| view.materialize(rule)),
+            ),
+            FusionProductSpace::new(
+                self.domain()
+                    .iter()
+                    .copied()
+                    .map(|view| view.materialize(rule)),
+            ),
+        )
+    }
 }
 
 struct HomSpaceInternTable {
@@ -556,6 +653,12 @@ fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) 
     HomSpaceId {
         prehash,
         key: canonical,
+    }
+}
+
+fn reset_hom_space_intern_table() {
+    if let Ok(mut table) = hom_space_intern_table().write() {
+        table.entries.clear();
     }
 }
 
@@ -629,11 +732,10 @@ impl FusionTreeHomSpace {
     /// assert_eq!(hom.domain().len(), 1);
     /// ```
     pub fn new(codomain: FusionProductSpace, domain: FusionProductSpace) -> Self {
-        let id = intern_hom_space(&codomain, &domain);
         Self {
             codomain,
             domain,
-            id,
+            id: OnceLock::new(),
         }
     }
 
@@ -714,11 +816,13 @@ impl FusionTreeHomSpace {
         self.codomain.len() + self.domain.len()
     }
 
-    /// Collision-safe process-local semantic identity assigned at construction.
+    /// Lazily assigned collision-safe process-local semantic identity.
     /// Hashing is O(1), and equal spaces compare equal across intern eviction.
     #[inline]
     pub fn id(&self) -> HomSpaceId {
-        self.id.clone()
+        self.id
+            .get_or_init(|| intern_hom_space(&self.codomain, &self.domain))
+            .clone()
     }
 
     pub fn select<R>(
@@ -732,18 +836,15 @@ impl FusionTreeHomSpace {
     {
         validate_axis_selection(codomain_axes, domain_axes, self.rank())?;
 
-        let codomain = codomain_axes
-            .iter()
-            .map(|&axis| self.external_axis_leg(rule, axis))
-            .collect::<Vec<_>>();
-        let domain = domain_axes
-            .iter()
-            .map(|&axis| dual_sector_leg(rule, &self.external_axis_leg(rule, axis)))
-            .collect::<Vec<_>>();
-        Ok(Self::new(
-            FusionProductSpace::new(codomain),
-            FusionProductSpace::new(domain),
-        ))
+        let descriptor = HomSpaceDescriptor::new(
+            codomain_axes
+                .iter()
+                .map(|&axis| self.external_axis_leg_view(axis)),
+            domain_axes
+                .iter()
+                .map(|&axis| self.external_axis_leg_view(axis).toggled()),
+        );
+        Ok(descriptor.materialize(rule))
     }
 
     pub fn permute<R>(
@@ -755,14 +856,14 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        let mut axes = Vec::with_capacity(codomain_axes.len() + domain_axes.len());
+        let mut axes = SmallVec::<[usize; 8]>::new();
         axes.extend_from_slice(codomain_axes);
         axes.extend_from_slice(domain_axes);
-        validate_permutation(&axes, self.rank())?;
+        validate_permutation_inline(&axes, self.rank())?;
         self.select(rule, codomain_axes, domain_axes)
     }
 
-    pub fn compose<R>(_rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
+    pub fn compose<R>(rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
     where
         R: FusionRule,
     {
@@ -775,7 +876,14 @@ impl FusionTreeHomSpace {
         for (lhs_domain, rhs_codomain) in lhs.domain.legs().iter().zip(rhs.codomain.legs()) {
             validate_composed_leg(lhs_domain, rhs_codomain)?;
         }
-        Ok(Self::new(lhs.codomain.clone(), rhs.domain.clone()))
+        let descriptor = HomSpaceDescriptor::new(
+            lhs.codomain
+                .legs()
+                .iter()
+                .map(OrientedLegView::borrowed),
+            rhs.domain.legs().iter().map(OrientedLegView::borrowed),
+        );
+        Ok(descriptor.materialize(rule))
     }
 
     /// Structural lowering of a general axis contraction, the homspace-level
@@ -801,16 +909,16 @@ impl FusionTreeHomSpace {
             });
         }
 
-        let lhs_seen = validate_axis_subset(lhs_contracting_axes, lhs.rank())?;
-        let rhs_seen = validate_axis_subset(rhs_contracting_axes, rhs.rank())?;
+        let lhs_seen = validate_axis_subset_inline(lhs_contracting_axes, lhs.rank())?;
+        let rhs_seen = validate_axis_subset_inline(rhs_contracting_axes, rhs.rank())?;
         let lhs_open_axes = (0..lhs.rank())
             .filter(|&axis| !lhs_seen[axis])
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[usize; 8]>>();
         let rhs_open_axes = (0..rhs.rank())
             .filter(|&axis| !rhs_seen[axis])
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[usize; 8]>>();
         let output_rank = lhs_open_axes.len() + rhs_open_axes.len();
-        validate_permutation(output_axes, output_rank)?;
+        validate_permutation_inline(output_axes, output_rank)?;
         if dst_codomain_rank > output_rank {
             return Err(CoreError::StructureRankMismatch {
                 expected: output_rank,
@@ -818,14 +926,38 @@ impl FusionTreeHomSpace {
             });
         }
 
-        let lhs = lhs.permute(rule, &lhs_open_axes, lhs_contracting_axes)?;
-        let rhs = rhs.permute(rule, rhs_contracting_axes, &rhs_open_axes)?;
-        let composed = Self::compose(rule, &lhs, &rhs)?;
-        composed.permute(
-            rule,
-            &output_axes[..dst_codomain_rank],
-            &output_axes[dst_codomain_rank..],
-        )
+        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
+            validate_oriented_composed_leg(
+                rule,
+                lhs.external_axis_leg_view(lhs_axis).toggled(),
+                rhs.external_axis_leg_view(rhs_axis),
+            )?;
+        }
+
+        let mut open_legs = SmallVec::<[OrientedLegView<'_>; 8]>::new();
+        open_legs.extend(
+            lhs_open_axes
+                .iter()
+                .map(|&axis| lhs.external_axis_leg_view(axis)),
+        );
+        open_legs.extend(
+            rhs_open_axes
+                .iter()
+                .map(|&axis| rhs.external_axis_leg_view(axis)),
+        );
+        // Why not materialize `(lhs open <- contracted)`, `(contracted <-
+        // rhs open)`, and their composition: pAB only observes the final open
+        // external legs. Selecting those views directly preserves the old
+        // sequence while materializing one final lightweight HomSpace.
+        let descriptor = HomSpaceDescriptor::new(
+            output_axes[..dst_codomain_rank]
+                .iter()
+                .map(|&axis| open_legs[axis]),
+            output_axes[dst_codomain_rank..]
+                .iter()
+                .map(|&axis| open_legs[axis].toggled()),
+        );
+        Ok(descriptor.materialize(rule))
     }
 
     /// The cached fusion-tree block keys, shared in O(1) (`Arc::clone`): the
@@ -1221,6 +1353,14 @@ impl FusionTreeHomSpace {
         }
     }
 
+    fn external_axis_leg_view(&self, axis: usize) -> OrientedLegView<'_> {
+        if axis < self.codomain.len() {
+            OrientedLegView::borrowed(&self.codomain.legs()[axis])
+        } else {
+            OrientedLegView::borrowed(&self.domain.legs()[axis - self.codomain.len()]).toggled()
+        }
+    }
+
     /// Returns the duality flag in the external-axis convention. Why not read
     /// a domain leg verbatim: external domain axes are duals of their stored
     /// hom-space legs, matching [`Self::external_axis_leg`].
@@ -1242,8 +1382,12 @@ where
     leg.dual(rule)
 }
 
-fn validate_axis_subset(axes: &[usize], rank: usize) -> Result<Vec<bool>, CoreError> {
-    let mut seen = vec![false; rank];
+fn validate_axis_subset_inline(
+    axes: &[usize],
+    rank: usize,
+) -> Result<SmallVec<[bool; 8]>, CoreError> {
+    let mut seen = SmallVec::<[bool; 8]>::new();
+    seen.resize(rank, false);
     for &axis in axes {
         if axis >= rank || seen[axis] {
             return Err(CoreError::InvalidPermutation {
@@ -1254,6 +1398,16 @@ fn validate_axis_subset(axes: &[usize], rank: usize) -> Result<Vec<bool>, CoreEr
         seen[axis] = true;
     }
     Ok(seen)
+}
+
+fn validate_permutation_inline(permutation: &[usize], rank: usize) -> Result<(), CoreError> {
+    if permutation.len() != rank {
+        return Err(CoreError::InvalidPermutation {
+            permutation: permutation.to_vec(),
+            rank,
+        });
+    }
+    validate_axis_subset_inline(permutation, rank).map(|_| ())
 }
 
 fn validate_axis_selection(
@@ -1311,6 +1465,36 @@ fn validate_composed_leg(
         }
     }
     Ok(())
+}
+
+fn validate_oriented_composed_leg<R>(
+    rule: &R,
+    lhs_domain: OrientedLegView<'_>,
+    rhs_codomain: OrientedLegView<'_>,
+) -> Result<(), CoreError>
+where
+    R: FusionRule,
+{
+    let valid = lhs_domain.is_dual() == rhs_codomain.is_dual()
+        && lhs_domain.source.sectors().len() == rhs_codomain.source.sectors().len()
+        && lhs_domain.source.iter().all(|(sector, degeneracy)| {
+            let expected = lhs_domain.mapped_sector(rule, sector);
+            let rhs_source_sector = if rhs_codomain.dualize {
+                rule.dual(expected)
+            } else {
+                expected
+            };
+            rhs_codomain.source.degeneracy(rhs_source_sector) == Some(degeneracy)
+        });
+    if valid {
+        return Ok(());
+    }
+    // Preserve the historical error variant and first mismatching sector only
+    // on an invalid request. The valid hot path never sorts or rebuilds a leg.
+    validate_composed_leg(
+        &lhs_domain.materialize(rule),
+        &rhs_codomain.materialize(rule),
+    )
 }
 
 /// Computes coupled-sector matrix block specs for fusion-tree subblocks.

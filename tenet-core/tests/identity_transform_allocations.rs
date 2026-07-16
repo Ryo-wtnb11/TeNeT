@@ -1,9 +1,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::hint::black_box;
 
 use tenet_core::{
-    multiplicity_free_permute_tree_pair_block, unique_permute_tree, FusionTreeBlockKey,
-    FusionTreeKey, Z2FusionRule, Z2Irrep,
+    multiplicity_free_permute_tree_pair_block, unique_permute_tree, FusionProductSpace,
+    FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey, SectorLeg, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -90,4 +92,136 @@ fn block_identity_permute_allocates_only_owned_output() {
     // outer result and its one owned row, with no level-vector temporaries.
     assert_eq!(transformed, vec![vec![(source, 1.0)]]);
     assert_eq!(ALLOCATIONS.get(), 2);
+}
+
+fn u1_homspace(rank: usize) -> FusionTreeHomSpace {
+    let leg = || {
+        SectorLeg::new(
+            [
+                (U1Irrep::new(-1).sector_id(), 2),
+                (U1Irrep::new(0).sector_id(), 3),
+                (U1Irrep::new(2).sector_id(), 1),
+            ],
+            false,
+        )
+    };
+    let nout = rank / 2;
+    FusionTreeHomSpace::new(
+        FusionProductSpace::new((0..nout).map(|_| leg())),
+        FusionProductSpace::new((nout..rank).map(|_| leg())),
+    )
+}
+
+fn measured_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let output = operation();
+    COUNTING.set(false);
+    (output, ALLOCATIONS.get())
+}
+
+#[test]
+fn rank_eight_or_less_same_side_homspace_derivation_is_heap_free() {
+    let rule = U1FusionRule;
+    for rank in [2usize, 4, 6, 8] {
+        let homspace = u1_homspace(rank);
+        let nout = rank / 2;
+        let codomain_axes = (0..nout).rev().collect::<Vec<_>>();
+        let domain_axes = (nout..rank).rev().collect::<Vec<_>>();
+
+        let (_, select_allocations) = measured_allocations(|| {
+            black_box(
+                homspace
+                    .select(&rule, &codomain_axes, &domain_axes)
+                    .unwrap(),
+            )
+        });
+        assert_eq!(
+            select_allocations, 0,
+            "rank-{rank} same-side HomSpace::select must stay heap-free"
+        );
+
+        let (_, permute_allocations) = measured_allocations(|| {
+            black_box(
+                homspace
+                    .permute(&rule, &codomain_axes, &domain_axes)
+                    .unwrap(),
+            )
+        });
+        assert_eq!(
+            permute_allocations, 0,
+            "rank-{rank} same-side HomSpace::permute must stay heap-free"
+        );
+
+        let (_, compose_allocations) = measured_allocations(|| {
+            black_box(FusionTreeHomSpace::compose(&rule, &homspace, &homspace).unwrap())
+        });
+        assert_eq!(
+            compose_allocations, 0,
+            "rank-{rank} HomSpace::compose must stay heap-free"
+        );
+    }
+}
+
+#[test]
+fn rank_eight_or_less_crossing_derivation_allocates_only_final_dual_legs() {
+    let rule = U1FusionRule;
+    for rank in [2usize, 4, 6, 8] {
+        let homspace = u1_homspace(rank);
+        let nout = rank / 2;
+        let output_axes = (0..rank).rev().collect::<Vec<_>>();
+        let codomain_axes = &output_axes[..nout];
+        let domain_axes = &output_axes[nout..];
+        let lhs_axes = (nout..rank).collect::<Vec<_>>();
+        let rhs_axes = (0..nout).collect::<Vec<_>>();
+
+        let (_, permute_allocations) = measured_allocations(|| {
+            black_box(homspace.permute(&rule, codomain_axes, domain_axes).unwrap())
+        });
+        assert_eq!(
+            permute_allocations, rank,
+            "rank-{rank} crossing permute must allocate one final LegData per crossed leg"
+        );
+
+        let (_, contract_allocations) = measured_allocations(|| {
+            black_box(
+                FusionTreeHomSpace::tensorcontract_homspace(
+                    &rule,
+                    &homspace,
+                    &homspace,
+                    &lhs_axes,
+                    &rhs_axes,
+                    &output_axes,
+                    nout,
+                )
+                .unwrap(),
+            )
+        });
+        assert_eq!(
+            contract_allocations, rank,
+            "rank-{rank} contraction must allocate only final crossed LegData"
+        );
+
+        let (_, repeated_allocations) = measured_allocations(|| {
+            for _ in 0..10 {
+                black_box(
+                    FusionTreeHomSpace::tensorcontract_homspace(
+                        &rule,
+                        &homspace,
+                        &homspace,
+                        &lhs_axes,
+                        &rhs_axes,
+                        &output_axes,
+                        nout,
+                    )
+                    .unwrap(),
+                );
+            }
+        });
+        assert_eq!(
+            repeated_allocations,
+            rank * 10,
+            "rank-{rank} contraction allocation bound must be independent of prior calls"
+        );
+    }
 }

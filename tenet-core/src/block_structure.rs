@@ -1096,10 +1096,11 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
     structure
 }
 
-/// Clears the bounded tenet-core intern tables — block-structure content,
-/// block-structure `Arc` dedup, fusion-tree layouts, and coupled subblock
-/// structures. Chained from tenet-tensors' `reset_global_operation_caches` so a
-/// long-lived / multi-tenant process can release the tables between workloads.
+/// Clears the bounded tenet-core intern tables — lazy hom-space identities,
+/// block-structure content, block-structure `Arc` dedup, fusion-tree layouts,
+/// and coupled subblock structures. Chained from tenet-tensors'
+/// `reset_global_operation_caches` so a long-lived / multi-tenant process can
+/// release the tables between workloads.
 ///
 /// Why-safe (id coherence): block-structure content ids come from
 /// `BLOCK_STRUCTURE_CONTENT_ID`, a monotonic counter deliberately NOT reset here.
@@ -1108,6 +1109,7 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
 /// minted it; content re-interned after this reset gets a fresh id and misses
 /// cleanly. Reset is thus safe to call on its own — no "all layers at once" API
 pub fn reset_core_intern_tables() {
+    reset_hom_space_intern_table();
     if let Ok(mut table) = block_structure_intern_table().write() {
         table.clear();
     }
