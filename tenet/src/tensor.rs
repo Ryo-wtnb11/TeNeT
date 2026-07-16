@@ -2631,14 +2631,26 @@ impl Tensor {
     /// # Panics
     ///
     /// Panics if the tensor stores c64 data (use [`Self::data_c64`]) or is
-    /// device-resident (use `to_host()`).
+    /// device-resident (use `to_host()`). Both are legal tensor states, so
+    /// prefer [`Self::try_data`] when the dtype/placement is not statically
+    /// known — this method is the panicking half of that pair (#128).
     pub fn data(&self) -> &[f64] {
+        self.try_data()
+            .expect("data(): tensor is not host f64; use try_data()/data_c64()/to_host()")
+    }
+
+    /// Flat host `f64` storage, or a typed error when the tensor is not in that
+    /// state. The recoverable counterpart of [`Self::data`]: a c64 tensor
+    /// yields [`Error::DtypeMismatch`] and a device tensor
+    /// [`Error::PlacementMismatch`] instead of panicking (#128). Same
+    /// internal-packing caveats as [`Self::data`].
+    pub fn try_data(&self) -> Result<&[f64], Error> {
         match self.coupled_data() {
-            Data::F64(data) => data,
-            Data::C64(_) => panic!("data(): tensor stores c64 data; use data_c64()"),
+            Data::F64(data) => Ok(data),
+            Data::C64(_) => Err(Error::DtypeMismatch),
             Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
             #[cfg(feature = "cuda")]
-            Data::CudaF64(_) => panic!("data(): tensor is device-resident; use to_host()"),
+            Data::CudaF64(_) => Err(Error::PlacementMismatch),
         }
     }
 
@@ -2651,20 +2663,47 @@ impl Tensor {
     /// # Panics
     ///
     /// Panics if the tensor stores f64 data (use [`Self::data`]) or is
-    /// device-resident (use `to_host()`).
+    /// device-resident (use `to_host()`). Both are legal tensor states, so
+    /// prefer [`Self::try_data_c64`] when the dtype/placement is not
+    /// statically known — this method is the panicking half of that pair
+    /// (#128).
     pub fn data_c64(&self) -> &[Complex64] {
+        self.try_data_c64()
+            .expect("data_c64(): tensor is not host c64; use try_data_c64()/data()/to_host()")
+    }
+
+    /// Flat host [`Complex64`] storage, or a typed error when the tensor is not
+    /// in that state. The recoverable counterpart of [`Self::data_c64`]: an
+    /// f64 tensor yields [`Error::DtypeMismatch`] and a device tensor
+    /// [`Error::PlacementMismatch`] instead of panicking (#128). Same
+    /// internal-packing caveats as [`Self::data`].
+    pub fn try_data_c64(&self) -> Result<&[Complex64], Error> {
         match self.coupled_data() {
-            Data::C64(data) => data,
-            Data::F64(_) => panic!("data_c64(): tensor stores f64 data; use data()"),
+            Data::C64(data) => Ok(data),
+            Data::F64(_) => Err(Error::DtypeMismatch),
             Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
             #[cfg(feature = "cuda")]
-            Data::CudaF64(_) => panic!("data_c64(): tensor is device-resident; use to_host()"),
+            Data::CudaF64(_) => Err(Error::PlacementMismatch),
         }
     }
 
     /// Widens to a c64 tensor (imaginary parts zero); a cheap clone when the
     /// tensor already stores c64 data.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tensor is device-resident (a legal state); prefer
+    /// [`Self::try_to_c64`], the recoverable half of this pair (#128).
     pub fn to_c64(&self) -> Self {
+        self.try_to_c64()
+            .expect("to_c64(): tensor is device-resident; use try_to_c64()/to_host()")
+    }
+
+    /// Widens to a c64 tensor, or a typed error when widening is not possible
+    /// in place: a device-resident tensor yields [`Error::PlacementMismatch`]
+    /// instead of panicking (#128). The recoverable counterpart of
+    /// [`Self::to_c64`].
+    pub fn try_to_c64(&self) -> Result<Self, Error> {
         let data = match self.coupled_data() {
             Data::F64(data) => Data::C64(
                 data.iter()
@@ -2674,15 +2713,15 @@ impl Tensor {
             Data::C64(data) => Data::C64(data.clone()),
             Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
             #[cfg(feature = "cuda")]
-            Data::CudaF64(_) => panic!("to_c64(): tensor is device-resident; use to_host()"),
+            Data::CudaF64(_) => return Err(Error::PlacementMismatch),
         };
-        Self {
+        Ok(Self {
             rt: self.rt.clone(),
             space: Arc::clone(&self.space),
             data: Arc::new(data),
             adjoint_source: None,
             materialized: OnceLock::new(),
-        }
+        })
     }
 
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit
