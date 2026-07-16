@@ -13,9 +13,11 @@ pub use operation::{
     TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
 };
 pub use plan::{
-    build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreeTransformBlockSpec,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
+    build_all_codomain_tree_transform_group_plan,
+    build_generic_all_codomain_tree_transform_group_plan,
+    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
+    build_tree_transform_group_plan, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
+    TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
 };
 
 #[cfg(test)]

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair,
-    multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
+    generic_braid_tree, generic_braid_tree_pair, generic_permute_tree_pair,
+    generic_transpose_tree_pair, multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
     multiplicity_free_braid_tree_pair_block, multiplicity_free_permute_tree,
     multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
     multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block, BlockKey,
@@ -301,6 +301,113 @@ where
         }
     };
     rows.map_err(OperationError::from_core_preserving_context)
+}
+
+/// All-codomain recoupling rows for one source codomain tree, Generic-fusion
+/// (outer-multiplicity) path. Generic sibling of [`transformed_all_codomain_rows`]:
+/// same operation → primitive dispatch, over the outer-multiplicity-aware
+/// `generic_braid_tree` (fusion_tree.rs:2738). Adds no recoupling math.
+///
+/// The multiplicity-free permute arm delegates to `multiplicity_free_permute_tree`,
+/// which is `multiplicity_free_braid_tree` with identity levels plus a symmetric
+/// braiding check; the Generic permute arm mirrors that by calling
+/// `generic_braid_tree` with identity levels. The symmetric-braiding requirement
+/// for `Permute` is already enforced by `operation.validate_braiding_support` at
+/// the builder entry (`requires_symmetric_braiding` is true for `Permute`), so it
+/// is not re-checked here — same as `generic_permute_tree_pair` relying on its
+/// caller for the codomain-only case.
+fn transformed_generic_all_codomain_rows<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    codomain_tree: &FusionTreeKey,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let rows = match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            ..
+        } => {
+            let levels = (0..codomain_tree.uncoupled().len()).collect::<Vec<_>>();
+            generic_braid_tree(rule, codomain_tree, codomain_permutation, &levels)
+        }
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            codomain_levels,
+            ..
+        } => generic_braid_tree(rule, codomain_tree, codomain_permutation, codomain_levels),
+        TreeTransformOperation::Transpose { .. } => {
+            unreachable!("all-codomain operation scope validation rejected transpose")
+        }
+    };
+    rows.map_err(OperationError::from_core_preserving_context)
+}
+
+/// Generic-fusion (outer-multiplicity) all-codomain plan compile — the Stage
+/// B2c-style sibling of [`build_multiplicity_free_all_codomain_tree_transform_group_plan`]
+/// for SU(3)/SO(N≥7)/Sp(N) rules. Opens the last tree-transform surface that
+/// rejected Generic (the MF `..._with_rows` / `..._parallel` builders guard on
+/// `is_multiplicity_free()`); it reuses the exact same group-spec assembly
+/// (`assemble_identity_all_codomain_group_specs` / `assemble_all_codomain_group_specs`,
+/// both generic over the coefficient type) and differs only in the recoupling-row
+/// source (`transformed_generic_all_codomain_rows`).
+///
+/// A SEPARATE entry, not a runtime branch in the mult-free builder, for the same
+/// type-level-disjointness reason as `build_generic_tree_pair_transform_group_plan`:
+/// `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never both
+/// implemented by a real rule, so a mult-free rule can never name this bound. The
+/// `has_multiplicity` gate defends against a `GenericRigidSymbols` rule that
+/// mis-reports a multiplicity-free style. Non-memoized like the tree-pair Generic
+/// sibling — correctness before the memo/persist perf handoff.
+pub fn build_generic_all_codomain_tree_transform_group_plan<R>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Zero,
+{
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation: Box::new(operation),
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    validate_all_codomain_operation_scope(&operation)?;
+    let source_axes = operation_source_axes(&operation);
+
+    let mut specs = Vec::new();
+    for group in src_structure.fusion_tree_groups() {
+        if operation.is_identity_for(group.group_key().codomain_uncoupled().len(), 0) {
+            specs.extend(assemble_identity_all_codomain_group_specs(
+                rule,
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |codomain_tree| {
+                    transformed_generic_all_codomain_rows(rule, &operation, codomain_tree)
+                        .map(Arc::new)
+                },
+            )?);
+        } else {
+            specs.extend(assemble_all_codomain_group_specs(
+                rule,
+                src_structure,
+                &group,
+                &source_axes,
+                &mut |codomain_tree| {
+                    transformed_generic_all_codomain_rows(rule, &operation, codomain_tree)
+                        .map(Arc::new)
+                },
+            )?);
+        }
+    }
+
+    Ok(TreeTransformGroupPlan::new(specs))
 }
 
 #[allow(clippy::too_many_arguments)]
