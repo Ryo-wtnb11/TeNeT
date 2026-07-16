@@ -328,8 +328,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      # TEMP-PROBE: confirm headroom now that free-linux-disk is gone.
-      - run: df -h /
       - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
