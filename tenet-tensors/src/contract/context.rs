@@ -28,10 +28,12 @@ use super::backend::{
 use super::dynamic::{
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
-use super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+use super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand};
 use super::fusion::{
-    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_structure, FusionContractPlan,
-    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
+    tensorcontract_fusion_structure, tensorcontract_fusion_structure_dyn_prelowered,
+    FusionContractPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
+    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::{ContractionResolutionCache, Resolution};
@@ -1037,10 +1039,104 @@ where
             dst_space.structure(),
             dst_data,
             Some(lhs_space),
+            None,
             lhs_space.structure(),
             lhs_data,
             Some(rhs_space),
+            None,
             rhs_space.structure(),
+            rhs_data,
+            alpha,
+            beta,
+        )
+    }
+
+    /// Executes TeNeT's validated prelowered operand seam.
+    ///
+    /// Logical spaces are the categorical authority; storage spaces and slices
+    /// are the physical authority. Why not make this a normal entrypoint:
+    /// arbitrary callers cannot establish the lazy-adjoint coherence contract.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_prelowered_into<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        let rule = dst_space.provider();
+        for space in [
+            lhs.logical_space(),
+            lhs.storage_space(),
+            rhs.logical_space(),
+            rhs.storage_space(),
+        ] {
+            space.validate_rule(rule)?;
+        }
+        if axes.lhs_conjugate() != lhs.storage_conjugate()
+            || axes.rhs_conjugate() != rhs.storage_conjugate()
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "prelowered operand flags must match the contraction cache key",
+            });
+        }
+        let resolution = self.resolution_cache.get_or_resolve(
+            rule,
+            dst_space.space(),
+            lhs.logical_space(),
+            rhs.logical_space(),
+            axes,
+            || match tensorcontract_fusion_structure_dyn_prelowered(
+                rule,
+                dst_space.space(),
+                lhs.logical_space(),
+                lhs.storage_space(),
+                rhs.logical_space(),
+                rhs.storage_space(),
+                axes,
+            ) {
+                Ok(structure) => Ok(Some(Arc::new(structure))),
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => Ok(None),
+                Err(err) => Err(err),
+            },
+            || {
+                prepare_tensorcontract_fusion_plan_dyn_prelowered(
+                    rule,
+                    dst_space.space(),
+                    lhs.logical_space(),
+                    rhs.logical_space(),
+                    axes,
+                    lhs.storage_conjugate(),
+                    rhs.storage_conjugate(),
+                )
+                .map(Arc::new)
+            },
+        )?;
+        self.execute_resolution_dyn(
+            &resolution,
+            rule,
+            Some(dst_space.space()),
+            dst_space.space().structure(),
+            dst_data,
+            Some(lhs.logical_space()),
+            Some(lhs.storage_space()),
+            lhs.storage_space().structure(),
+            lhs_data,
+            Some(rhs.logical_space()),
+            Some(rhs.storage_space()),
+            rhs.storage_space().structure(),
             rhs_data,
             alpha,
             beta,
@@ -1259,9 +1355,11 @@ where
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
         lhs_space: Option<&DynamicFusionMapSpace>,
+        lhs_storage_space: Option<&DynamicFusionMapSpace>,
         lhs_structure: &Arc<BlockStructure>,
         lhs_data: &[D],
         rhs_space: Option<&DynamicFusionMapSpace>,
+        rhs_storage_space: Option<&DynamicFusionMapSpace>,
         rhs_structure: &Arc<BlockStructure>,
         rhs_data: &[D],
         alpha: D,
@@ -1329,9 +1427,11 @@ where
                     dst_structure,
                     dst_data,
                     lhs_space,
+                    lhs_storage_space,
                     lhs_structure,
                     lhs_data,
                     rhs_space,
+                    rhs_storage_space,
                     rhs_structure,
                     rhs_data,
                     alpha,
@@ -1408,9 +1508,11 @@ where
             &dst_structure,
             dst.data_mut(),
             lhs_space.as_ref(),
+            None,
             &lhs_structure,
             lhs.data(),
             rhs_space.as_ref(),
+            None,
             &rhs_structure,
             rhs.data(),
             alpha,

@@ -196,6 +196,67 @@ pub struct DynamicFusionMapSpace {
     rule_identity: Option<tenet_core::RuleIdentity>,
 }
 
+/// Internal contraction operand separating categorical and storage authority.
+///
+/// `logical_space` defines sectors, trees, and user axes; `storage_space`
+/// defines the physical block buffer. Why not expose this as a general public
+/// API: only TeNeT's validated lazy-adjoint representation can prove that the
+/// two spaces describe the same tensor.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct FusionOperand<'a> {
+    logical_space: &'a DynamicFusionMapSpace,
+    storage_space: &'a DynamicFusionMapSpace,
+    storage_conjugate: bool,
+}
+
+impl<'a> FusionOperand<'a> {
+    pub fn direct(space: &'a DynamicFusionMapSpace) -> Self {
+        Self {
+            logical_space: space,
+            storage_space: space,
+            storage_conjugate: false,
+        }
+    }
+
+    pub fn prelowered_adjoint(
+        logical_space: &'a DynamicFusionMapSpace,
+        storage_space: &'a DynamicFusionMapSpace,
+    ) -> Result<Self, OperationError> {
+        if logical_space.rank() != storage_space.rank()
+            || logical_space.nout() != storage_space.nin()
+            || logical_space.nin() != storage_space.nout()
+            || logical_space.homspace().codomain() != storage_space.homspace().domain()
+            || logical_space.homspace().domain() != storage_space.homspace().codomain()
+            || logical_space.rule_identity != storage_space.rule_identity
+        {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prelowered adjoint operand",
+            });
+        }
+        Ok(Self {
+            logical_space,
+            storage_space,
+            storage_conjugate: true,
+        })
+    }
+
+    #[inline]
+    pub fn logical_space(self) -> &'a DynamicFusionMapSpace {
+        self.logical_space
+    }
+
+    #[inline]
+    pub fn storage_space(self) -> &'a DynamicFusionMapSpace {
+        self.storage_space
+    }
+
+    #[inline]
+    pub fn storage_conjugate(self) -> bool {
+        self.storage_conjugate
+    }
+}
+
 fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {
     let expected_nout = space.homspace().codomain().len();
     let expected_nin = space.homspace().domain().len();

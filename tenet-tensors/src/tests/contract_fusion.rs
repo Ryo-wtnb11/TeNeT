@@ -4511,8 +4511,8 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
 // equals its dual, so a sector-dualization mislabel is invisible; here charge +1
 // and -1 are distinct duals. The Structure route mislabels the output coupled
 // sector for this case, so it declines (`all_sectors_self_dual`) to the
-// DynamicTree route, which folds the adjoint via `adjoint_view` + a data-only
-// storage conjugation correctly for any symmetry.
+// DynamicTree route, where logical adjoint geometry stays separate from parent
+// storage and only referenced blocks are mapped and conjugated.
 #[test]
 fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     use num_complex::Complex64;
@@ -4586,31 +4586,48 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     )
     .unwrap();
 
-    // Fold under test: parent buffer + conjugate flag, adjoint axis 1 remapped to
-    // parent axis 0 (adjointtensorindex inverse for a 1<-1 map: 1 -> 0).
-    let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
-    ctx.tensorcontract_fusion_dyn_into(
-        &dst_bound,
-        &mut fold,
-        &lhs_bound,
-        &lhs_data,
-        &rhs_bound,
-        &rhs_data,
+    let lhs_operand =
+        crate::FusionOperand::prelowered_adjoint(adj_bound.space(), lhs_bound.space()).unwrap();
+    let rhs_operand = crate::FusionOperand::direct(rhs_bound.space());
+    let axes = || {
         TensorContractSpec::new_with_conjugation(
-            &[0],
+            &[1],
             &[0],
             crate::OutputAxisOrder::identity(),
             true,
             false,
-        ),
-        Complex64::new(1.0, 0.0),
-        Complex64::new(0.0, 0.0),
-    )
-    .unwrap();
-    let max = oracle
-        .iter()
-        .zip(&fold)
-        .map(|(o, f)| (o - f).norm())
-        .fold(0.0f64, f64::max);
-    assert!(max < 1e-10, "fold vs eager oracle: max diff {max}");
+        )
+    };
+    for policy in [
+        OperationCachePolicy::default(),
+        OperationCachePolicy::NoCache,
+    ] {
+        ctx.set_cache_policy(policy);
+        crate::reset_global_operation_caches();
+        crate::lowering::reset_adjoint_view_build_count();
+        for _ in 0..2 {
+            let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+            ctx.tensorcontract_fusion_dyn_prelowered_into(
+                &dst_bound,
+                &mut fold,
+                lhs_operand,
+                &lhs_data,
+                rhs_operand,
+                &rhs_data,
+                axes(),
+                Complex64::new(1.0, 0.0),
+                Complex64::new(0.0, 0.0),
+            )
+            .unwrap();
+            let max = oracle
+                .iter()
+                .zip(&fold)
+                .map(|(o, f)| (o - f).norm())
+                .fold(0.0f64, f64::max);
+            assert!(max < 1e-10, "fold vs eager oracle: max diff {max}");
+        }
+        // What: neither cold/reset execution nor NoCache may reconstruct the
+        // full categorical adjoint view hidden behind the prelowered operand.
+        assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
+    }
 }

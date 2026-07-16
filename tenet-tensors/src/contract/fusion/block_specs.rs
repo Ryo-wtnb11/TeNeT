@@ -6,7 +6,9 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
-use crate::lowering::lower_tensorcontract_adjoint_axes;
+use crate::lowering::{
+    lower_tensorcontract_adjoint_axes, prelowered_storage_axis, prelowered_storage_block_index,
+};
 use crate::OperationError;
 use tenet_operations::TensorContractSpec;
 
@@ -131,10 +133,11 @@ where
     // charge q whose dual is -q ≠ q — it mislabels the coupled sector of the
     // output block (pairing q with -q across codomain/domain), producing an
     // invalid `MissingBlockKey`. This was only ever exercised on self-dual
-    // symmetries (Z2, fermion parity, SU(2)). Decline to the DynamicTree route,
-    // which handles the adjoint via `adjoint_view` + a data-only storage
-    // conjugation correctly for any symmetry (still copy-free). Verified against
-    // the eager `adjoint_dyn` oracle for U(1).
+    // symmetries (Z2, fermion parity, SU(2)). Decline to the DynamicTree route.
+    // The prelowered seam keeps logical adjoint geometry separate from parent
+    // storage and maps only referenced blocks; the legacy seam derives the same
+    // logical geometry before execution. Both are verified against the eager
+    // `adjoint_dyn` oracle for U(1).
     if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs))
         || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs))
     {
@@ -166,6 +169,131 @@ where
         lhs_storage_structure,
         rhs_storage_structure,
         lowered_axes.as_spec(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_fusion_structure_dyn_prelowered<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs_logical: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_logical: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<TensorContractStructure, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    dst.validate_rule(rule)?;
+    lhs_logical.validate_rule(rule)?;
+    lhs_storage.validate_rule(rule)?;
+    rhs_logical.validate_rule(rule)?;
+    rhs_storage.validate_rule(rule)?;
+    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs_storage))
+        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs_storage))
+    {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+        });
+    }
+    let logical_axes = TensorContractSpec::new(
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axes.output_permutation(),
+    );
+    let logical_specs = tensorcontract_fusion_block_specs_lowered(
+        rule,
+        dst,
+        lhs_logical,
+        rhs_logical,
+        logical_axes,
+    )?;
+    let lhs_block = prelowered_storage_block_index(lhs_logical, lhs_storage, axes.lhs_conjugate());
+    let rhs_block = prelowered_storage_block_index(rhs_logical, rhs_storage, axes.rhs_conjugate());
+    let storage_specs = logical_specs
+        .iter()
+        .map(|spec| {
+            Ok(TensorContractBlockSpec::with_coefficient(
+                spec.dst_block(),
+                lhs_block(spec.lhs_block())?,
+                rhs_block(spec.rhs_block())?,
+                spec.coefficient(),
+            ))
+        })
+        .collect::<Result<Vec<_>, OperationError>>()?;
+    let logical_plan = TensorContractAxisPlan::compile(
+        lhs_logical.rank(),
+        rhs_logical.rank(),
+        dst.rank(),
+        logical_axes,
+    )?;
+    let lhs_axis = prelowered_storage_axis(lhs_logical, lhs_storage, axes.lhs_conjugate());
+    let rhs_axis = prelowered_storage_axis(rhs_logical, rhs_storage, axes.rhs_conjugate());
+    let lhs_contracting = logical_plan
+        .lhs_contracting_axes
+        .iter()
+        .map(|&axis| lhs_axis(axis))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rhs_contracting = logical_plan
+        .rhs_contracting_axes
+        .iter()
+        .map(|&axis| rhs_axis(axis))
+        .collect::<Result<Vec<_>, _>>()?;
+    let logical_core = logical_plan
+        .lhs_open_axes
+        .iter()
+        .map(|&axis| lhs_axis(axis).map(|axis| (0u8, axis)))
+        .chain(
+            logical_plan
+                .rhs_open_axes
+                .iter()
+                .map(|&axis| rhs_axis(axis).map(|axis| (1u8, axis))),
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    let physical_core = (0..lhs_storage.rank())
+        .filter(|axis| !lhs_contracting.contains(axis))
+        .map(|axis| (0u8, axis))
+        .chain(
+            (0..rhs_storage.rank())
+                .filter(|axis| !rhs_contracting.contains(axis))
+                .map(|axis| (1u8, axis)),
+        )
+        .collect::<Vec<_>>();
+    let output_axes = logical_plan
+        .output_axes
+        .iter()
+        .map(|&position| {
+            let requested =
+                logical_core
+                    .get(position)
+                    .ok_or(OperationError::InvalidPermutation {
+                        axes: logical_plan.output_axes.clone(),
+                        rank: logical_core.len(),
+                    })?;
+            physical_core
+                .iter()
+                .position(|axis| axis == requested)
+                .ok_or(OperationError::StructureMismatch {
+                    tensor: "prelowered physical output order",
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let storage_axes = TensorContractSpec::new_with_conjugation(
+        &lhs_contracting,
+        &rhs_contracting,
+        tenet_operations::OutputAxisOrder::from_axes(&output_axes),
+        axes.lhs_conjugate(),
+        axes.rhs_conjugate(),
+    );
+    TensorContractStructure::compile_shared_structures_with_block_specs_and_storage(
+        Arc::clone(dst.structure()),
+        Arc::clone(lhs_storage.structure()),
+        Arc::clone(rhs_storage.structure()),
+        Arc::clone(lhs_storage.structure()),
+        Arc::clone(rhs_storage.structure()),
+        storage_axes,
+        &storage_specs,
     )
 }
 

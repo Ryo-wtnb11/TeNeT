@@ -264,6 +264,44 @@ where
     )
 }
 
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_storage_conjugate: bool,
+    rhs_storage_conjugate: bool,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
+    if axes.lhs_conjugate() != lhs_storage_conjugate
+        || axes.rhs_conjugate() != rhs_storage_conjugate
+    {
+        return Err(OperationError::InvalidArgument {
+            message: "prelowered operand flags must match the contraction cache key",
+        });
+    }
+    let logical_axes = TensorContractSpec::new(
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axes.output_permutation(),
+    );
+    prepare_tensorcontract_fusion_plan_from_spaces(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        logical_axes,
+        lhs_storage_conjugate,
+        rhs_storage_conjugate,
+    )
+}
+
 /// Prepare a plan with an explicitly paired contraction-axis ordering.
 ///
 /// This is intentionally crate-private: it is an oracle seam for validating

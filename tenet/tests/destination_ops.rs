@@ -123,6 +123,47 @@ fn destination_validation_precedes_mutation() {
 }
 
 #[test]
+fn destination_apis_reject_lazy_adjoint_inputs_without_panicking() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::u1([(-2, 1), (-1, 2), (1, 3)]);
+    let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 30_129).unwrap();
+    let lazy = parent.adjoint().unwrap();
+    let rhs = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 30_130).unwrap();
+    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+
+    let mut contract_destination = lazy.contract(&rhs, &[1], &[0]).unwrap();
+    let contract_before = contract_destination.data_c64().to_vec();
+    assert!(matches!(
+        context.contract_overwrite_into(
+            &mut contract_destination,
+            &lazy,
+            &rhs,
+            &[1],
+            &[0],
+            Scalar::C64(Complex64::new(1.0, 0.0)),
+        ),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert_eq!(contract_destination.data_c64(), contract_before);
+
+    let mut permute_destination = lazy.permute(&[1], &[0]).unwrap();
+    let permute_before = permute_destination.data_c64().to_vec();
+    assert!(matches!(
+        context.permute_overwrite_into(
+            &mut permute_destination,
+            &lazy,
+            &[1],
+            &[0],
+            Scalar::C64(Complex64::new(1.0, 0.0)),
+        ),
+        Err(Error::InvalidArgument(_))
+    ));
+    // What: unsupported lazy inputs are recoverable validation failures and
+    // never reach ordinary-body access or mutate caller-owned destinations.
+    assert_eq!(permute_destination.data_c64(), permute_before);
+}
+
+#[test]
 fn su3_contract_overwrite_clears_structural_zero_output() {
     let runtime = Runtime::builder().build().unwrap();
     let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();

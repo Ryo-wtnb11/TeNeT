@@ -12,7 +12,7 @@ fn real_diagonal(rt: &Runtime, space: &Space, seed: u64) -> Tensor {
 fn complex_diagonal(rt: &Runtime, space: &Space, seed: u64) -> Tensor {
     let source = Tensor::rand_with_seed(rt, Dtype::C64, [space], [space], seed).unwrap();
     let diagonal = source.svd_compact().unwrap().1;
-    let real = match diagonal.data.as_ref() {
+    let real = match diagonal.stored_data() {
         Data::Diagonal(DiagonalData::RealC64(spectrum)) => spectrum,
         storage => panic!("expected compact real-c64 spectrum, got {storage:?}"),
     };
@@ -43,9 +43,15 @@ fn real_c64_diagonal(rt: &Runtime, space: &Space, seed: u64) -> Tensor {
 }
 
 fn assert_tensor_close(actual: &Tensor, expected: &Tensor) {
-    assert_eq!(actual.space, expected.space);
+    assert_eq!(
+        actual.logical_space().unwrap(),
+        expected.logical_space().unwrap()
+    );
     assert_eq!(actual.dtype(), expected.dtype());
-    match (actual.coupled_data(), expected.coupled_data()) {
+    match (
+        actual.coupled_data().unwrap(),
+        expected.coupled_data().unwrap(),
+    ) {
         (Data::F64(actual), Data::F64(expected)) => {
             for (actual, expected) in actual.iter().zip(expected) {
                 assert!((actual - expected).abs() < 1e-11);
@@ -65,8 +71,8 @@ fn dense_oracle(diagonal: &Tensor) -> Tensor {
 }
 
 fn assert_compact_unmaterialized(tensor: &Tensor) {
-    assert!(matches!(tensor.data.as_ref(), Data::Diagonal(_)));
-    assert!(tensor.materialized.get().is_none());
+    assert!(matches!(tensor.stored_data(), Data::Diagonal(_)));
+    assert!(!tensor.has_cached_materialization());
 }
 
 fn fixed_diagonal(
@@ -87,10 +93,10 @@ fn fixed_diagonal(
 }
 
 fn scalar_block_by_codomain_sector(tensor: &Tensor, sector: SectorId) -> f64 {
-    let Data::F64(data) = tensor.coupled_data() else {
+    let Data::F64(data) = tensor.coupled_data().unwrap() else {
         panic!("expected f64 tensor")
     };
-    let structure = tensor.space.structure();
+    let structure = tensor.ordinary_body().space.structure();
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         let BlockKey::FusionTree(key) = block.key() else {
@@ -128,16 +134,16 @@ fn one_axis_diagonal_products_stay_compact() {
         ] {
             let actual = lhs.contract(&rhs, &[1], &[0]).unwrap();
             assert!(
-                matches!(actual.data.as_ref(), Data::Diagonal(_)),
+                matches!(actual.stored_data(), Data::Diagonal(_)),
                 "one-axis diagonal product must preserve compact storage"
             );
-            assert!(lhs.materialized.get().is_none());
-            assert!(rhs.materialized.get().is_none());
+            assert!(!lhs.has_cached_materialization());
+            assert!(!rhs.has_cached_materialization());
 
             let composed = lhs.compose(&rhs).unwrap();
-            assert!(matches!(composed.data.as_ref(), Data::Diagonal(_)));
-            assert!(lhs.materialized.get().is_none());
-            assert!(rhs.materialized.get().is_none());
+            assert!(matches!(composed.stored_data(), Data::Diagonal(_)));
+            assert!(!lhs.has_cached_materialization());
+            assert!(!rhs.has_cached_materialization());
 
             let expected = lhs
                 .densified_if_diagonal()
@@ -169,7 +175,7 @@ fn complex_diagonal_scales_dense_and_lazy_operands() {
         ] {
             let diagonal = complex_diagonal(&rt, &space, 711);
             let actual = diagonal.contract(operand, &diagonal_axes, &operand_axes);
-            assert_eq!(diagonal.materialized.get().is_none(), stays_compact);
+            assert_eq!(!diagonal.has_cached_materialization(), stays_compact);
             let expected =
                 diagonal
                     .densified_if_diagonal()
@@ -200,7 +206,7 @@ fn ambiguous_diagonal_contractions_keep_dense_fallback() {
     let rhs = real_diagonal(&rt, &space, 722);
 
     let outer = lhs.contract(&rhs, &[], &[]).unwrap();
-    assert!(!matches!(outer.data.as_ref(), Data::Diagonal(_)));
+    assert!(!matches!(outer.stored_data(), Data::Diagonal(_)));
 }
 
 #[test]
@@ -244,7 +250,10 @@ fn compact_storage_local_operations_match_dense_oracles() {
         let rhs_dense = dense_oracle(&rhs);
 
         let adjoint = lhs.adjoint().unwrap();
-        assert!(Arc::ptr_eq(&adjoint.data, &lhs.data));
+        assert!(Arc::ptr_eq(
+            &adjoint.ordinary_body().data,
+            &lhs.ordinary_body().data
+        ));
         let scaled = lhs.scale(-1.25).unwrap();
         let added = lhs.add(&rhs, 0.75, -0.5).unwrap();
         let widened = lhs.to_c64();
@@ -262,14 +271,14 @@ fn compact_storage_local_operations_match_dense_oracles() {
                 .norm()
                 < 1e-11
         );
-        assert!(lhs.materialized.get().is_none());
-        assert!(rhs.materialized.get().is_none());
+        assert!(!lhs.has_cached_materialization());
+        assert!(!rhs.has_cached_materialization());
 
         for legs in [&[0][..], &[1][..], &[0, 1][..]] {
             let twisted = lhs.twist(legs).unwrap();
             assert_compact_unmaterialized(&twisted);
             assert_tensor_close(&twisted, &lhs_dense.twist(legs).unwrap());
-            assert!(lhs.materialized.get().is_none());
+            assert!(!lhs.has_cached_materialization());
         }
     }
 }
@@ -311,8 +320,8 @@ fn compact_c64_operations_match_dense_oracles() {
 
             let adjoint = lhs.adjoint().unwrap();
             assert_eq!(
-                Arc::ptr_eq(&adjoint.data, &lhs.data),
-                matches!(lhs.data.as_ref(), Data::Diagonal(DiagonalData::RealC64(_)))
+                Arc::ptr_eq(&adjoint.ordinary_body().data, &lhs.ordinary_body().data),
+                matches!(lhs.stored_data(), Data::Diagonal(DiagonalData::RealC64(_)))
             );
             let scaled = lhs.scale_c64(factor).unwrap();
             let added_real = lhs.add(&rhs, 0.75, -0.5).unwrap();
@@ -333,14 +342,14 @@ fn compact_c64_operations_match_dense_oracles() {
                     .norm()
                     < 1e-11
             );
-            assert!(lhs.materialized.get().is_none());
-            assert!(rhs.materialized.get().is_none());
+            assert!(!lhs.has_cached_materialization());
+            assert!(!rhs.has_cached_materialization());
 
             for legs in [&[0][..], &[1][..], &[0, 1][..]] {
                 let twisted = lhs.twist(legs).unwrap();
                 assert_compact_unmaterialized(&twisted);
                 assert_tensor_close(&twisted, &lhs_dense.twist(legs).unwrap());
-                assert!(lhs.materialized.get().is_none());
+                assert!(!lhs.has_cached_materialization());
             }
         }
     }
@@ -362,13 +371,11 @@ fn compact_dense_binary_operations_scatter_without_materializing_source() {
         let dense = Tensor::rand_with_seed(&rt, Dtype::F64, [&space], [&space], 822).unwrap();
         let lazy = dense.adjoint().unwrap();
         for operand in [&dense, &lazy] {
-            let operand_dense = Tensor {
-                rt: operand.rt.clone(),
-                space: Arc::clone(&operand.space),
-                data: Arc::new(operand.coupled_data().clone()),
-                adjoint_source: None,
-                materialized: OnceLock::new(),
-            };
+            let operand_dense = Tensor::owned(
+                operand.rt.clone(),
+                Arc::clone(&operand.materialized_body().unwrap().space),
+                Arc::new(operand.coupled_data().unwrap().clone()),
+            );
             assert_tensor_close(
                 &diagonal.add(operand, 0.75, -0.5).unwrap(),
                 &diagonal_dense.add(&operand_dense, 0.75, -0.5).unwrap(),
@@ -389,7 +396,7 @@ fn compact_dense_binary_operations_scatter_without_materializing_source() {
                 .norm()
                     < 1e-11
             );
-            assert!(diagonal.materialized.get().is_none());
+            assert!(!diagonal.has_cached_materialization());
         }
 
         let dense = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 824).unwrap();
@@ -428,7 +435,7 @@ fn compact_dense_binary_operations_scatter_without_materializing_source() {
                 .norm()
                     < 1e-11
             );
-            assert!(diagonal.materialized.get().is_none());
+            assert!(!diagonal.has_cached_materialization());
         }
     }
 }
@@ -475,7 +482,10 @@ fn identity_compact_twist_shares_storage() {
     ] {
         let diagonal = real_diagonal(&rt, &space, 841);
         let twisted = diagonal.twist(&[0]).unwrap();
-        assert!(Arc::ptr_eq(&twisted.data, &diagonal.data));
+        assert!(Arc::ptr_eq(
+            &twisted.ordinary_body().data,
+            &diagonal.ordinary_body().data
+        ));
         assert_compact_unmaterialized(&diagonal);
         assert_compact_unmaterialized(&twisted);
     }
@@ -483,7 +493,10 @@ fn identity_compact_twist_shares_storage() {
     let odd = Space::fz2([(1, 3)]);
     let diagonal = real_diagonal(&rt, &odd, 842);
     let twisted = diagonal.twist(&[0]).unwrap();
-    assert!(!Arc::ptr_eq(&twisted.data, &diagonal.data));
+    assert!(!Arc::ptr_eq(
+        &twisted.ordinary_body().data,
+        &diagonal.ordinary_body().data
+    ));
     assert_compact_unmaterialized(&diagonal);
     assert_compact_unmaterialized(&twisted);
 }
@@ -503,17 +516,20 @@ fn su3_compact_storage_ops_and_fallback_boundaries_are_explicit() {
         for tensor in [&diagonal, &adjoint, &scaled, &added] {
             assert_compact_unmaterialized(tensor);
         }
-        assert!(Arc::ptr_eq(&adjoint.data, &diagonal.data));
+        assert!(Arc::ptr_eq(
+            &adjoint.ordinary_body().data,
+            &diagonal.ordinary_body().data
+        ));
 
         let norm_input = diagonal.clone();
-        assert!(norm_input.materialized.get().is_none());
+        assert!(!norm_input.has_cached_materialization());
         assert!(norm_input.norm().unwrap().is_finite());
-        assert!(norm_input.materialized.get().is_some());
+        assert!(norm_input.has_cached_materialization());
 
         let trace_input = diagonal.clone();
-        assert!(trace_input.materialized.get().is_none());
+        assert!(!trace_input.has_cached_materialization());
         assert!(trace_input.tr().unwrap().to_c64().norm().is_finite());
-        assert!(trace_input.materialized.get().is_none());
+        assert!(!trace_input.has_cached_materialization());
     }
 }
 
@@ -524,7 +540,7 @@ fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
     let plus = Space::product([((1, 1), 1)]).unwrap().sectors[0].0;
     let minus = Space::product([((-1, 1), 1)]).unwrap().sectors[0].0;
     let probe = fixed_diagonal(&rt, &space, plus, 2.0, 3.0);
-    let homspace = probe.space.homspace();
+    let homspace = probe.ordinary_body().space.homspace();
     assert!(!homspace.codomain().legs()[0].is_dual());
     assert!(!homspace.domain().legs()[0].is_dual());
     assert_eq!(homspace.external_axis_is_dual(0), Some(false));
@@ -544,7 +560,7 @@ fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
                     assert!(expected.norm().unwrap() > 0.0);
                     assert_tensor_close(&actual, &expected);
                     assert_eq!(
-                        matches!(actual.data.as_ref(), Data::Diagonal(_)),
+                        matches!(actual.stored_data(), Data::Diagonal(_)),
                         lhs_axis == 1 && rhs_axis == 0,
                         "only canonical diagonal composition may stay compact: lhs={lhs_axis}, rhs={rhs_axis}"
                     );
@@ -577,8 +593,8 @@ fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
     .unwrap();
     let diagonal = fixed_diagonal(&rt, &space, plus, 2.0, 3.0);
     let actual = dense_dual.contract(&diagonal, &[1], &[1]).unwrap();
-    assert!(!matches!(actual.data.as_ref(), Data::Diagonal(_)));
-    assert!(diagonal.materialized.get().is_some());
+    assert!(!matches!(actual.stored_data(), Data::Diagonal(_)));
+    assert!(diagonal.has_cached_materialization());
     let expected = dense_dual
         .contract(&diagonal.densified_if_diagonal(), &[1], &[1])
         .unwrap();
@@ -588,8 +604,8 @@ fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
 
     let diagonal = fixed_diagonal(&rt, &space, plus, 2.0, 3.0);
     let actual = diagonal.contract(&dense_dual, &[1], &[1]).unwrap();
-    assert!(!matches!(actual.data.as_ref(), Data::Diagonal(_)));
-    assert!(diagonal.materialized.get().is_some());
+    assert!(!matches!(actual.stored_data(), Data::Diagonal(_)));
+    assert!(diagonal.has_cached_materialization());
     let expected = diagonal
         .densified_if_diagonal()
         .contract(&dense_dual, &[1], &[1])
@@ -619,4 +635,37 @@ fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
         .unwrap();
     assert!(expected.norm().unwrap() > 0.0);
     assert_tensor_close(&actual, &expected);
+}
+
+#[test]
+fn fermionic_adjoint_diagonal_contractions_match_dense_oracles() {
+    // What: lhs dagger, rhs dagger, and both preserve the odd-sector contraction sign.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let spaces = [
+        Space::fz2([(0, 2), (1, 2)]),
+        Space::product([((0, 0), 2), ((1, 1), 2)]).unwrap(),
+    ];
+
+    for space in spaces {
+        for (lhs_adjoint, rhs_adjoint) in [(true, false), (false, true), (true, true)] {
+            let lhs = complex_diagonal(&rt, &space, 261_201);
+            let rhs = complex_diagonal(&rt, &space, 261_202);
+            let lhs = if lhs_adjoint {
+                lhs.adjoint().unwrap()
+            } else {
+                lhs
+            };
+            let rhs = if rhs_adjoint {
+                rhs.adjoint().unwrap()
+            } else {
+                rhs
+            };
+
+            let actual = lhs.contract(&rhs, &[1], &[0]).unwrap();
+            let expected = dense_oracle(&lhs)
+                .contract(&dense_oracle(&rhs), &[1], &[0])
+                .unwrap();
+            assert_tensor_close(&actual, &expected);
+        }
+    }
 }

@@ -65,6 +65,50 @@ fn diagonal_transfer_entry_points_observe_dense_host_data() {
 
 #[test]
 #[ignore]
+fn lazy_adjoint_metadata_and_involution_stay_on_cuda() {
+    // What: device transfer preserves the lazy wrapper and unsupported lowering stays explicit.
+    let rt = Runtime::builder().cuda(0).build().unwrap();
+    let v = u1_space();
+    let source_host = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v]).unwrap();
+    let source = source_host.clone().to_cuda().unwrap();
+
+    let adjoint = source.adjoint().unwrap();
+    assert_eq!(adjoint.placement(), Placement::Cuda(0));
+    assert_eq!(adjoint.codomain_spaces(), source.domain_spaces());
+    assert_eq!(adjoint.domain_spaces(), source.codomain_spaces());
+    assert_eq!(adjoint.codomain_rank(), source.domain_rank());
+    assert_eq!(adjoint.domain_rank(), source.codomain_rank());
+    assert!(matches!(
+        adjoint.try_data().unwrap_err(),
+        Error::PlacementMismatch
+    ));
+
+    let host_adjoint = adjoint.to_host().unwrap();
+    assert_eq!(host_adjoint.placement(), Placement::Host);
+    assert_eq!(host_adjoint.data(), source_host.adjoint().unwrap().data());
+    let device_adjoint = host_adjoint.to_cuda().unwrap();
+    assert_eq!(device_adjoint.placement(), Placement::Cuda(0));
+    assert!(matches!(
+        device_adjoint.try_data().unwrap_err(),
+        Error::PlacementMismatch
+    ));
+    let rhs = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert!(matches!(
+        device_adjoint.compose(&rhs).unwrap_err(),
+        Error::UnsupportedOnDevice(_)
+    ));
+
+    let restored = adjoint.adjoint().unwrap();
+    assert_eq!(restored.placement(), Placement::Cuda(0));
+    assert_eq!(restored.codomain_spaces(), source.codomain_spaces());
+    assert_eq!(restored.domain_spaces(), source.domain_spaces());
+}
+
+#[test]
+#[ignore]
 fn u1_contract_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();

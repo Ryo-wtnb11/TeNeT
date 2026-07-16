@@ -387,4 +387,51 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
             storage_conjugate,
         )
     }
+
+    pub fn compile_shared_structures_with_storage_mapping<FBlock, FAxis>(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        logical_src_structure: &BlockStructure,
+        storage_src_structure: Arc<BlockStructure>,
+        logical_to_storage_block: FBlock,
+        logical_to_storage_axis: FAxis,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError>
+    where
+        FBlock: Fn(usize) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        let specs = self
+            .specs
+            .iter()
+            .map(|spec| {
+                let indexed = spec.to_indexed_spec(&dst_structure, logical_src_structure)?;
+                let src_blocks = indexed
+                    .src_blocks()
+                    .iter()
+                    .map(|&index| logical_to_storage_block(index))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let logical_axes = indexed
+                    .source_axes()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| (0..logical_src_structure.rank()).collect());
+                let storage_axes = logical_axes
+                    .into_iter()
+                    .map(&logical_to_storage_axis)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(TreeTransformBlockSpec::multi(
+                    indexed.dst_blocks().to_vec(),
+                    src_blocks,
+                    indexed.recoupling_coefficients_dst_src().to_vec(),
+                )
+                .with_source_axes(storage_axes))
+            })
+            .collect::<Result<Vec<_>, OperationError>>()?;
+        TreeTransformStructure::compile_indexed_shared_structures_with_storage_conjugation(
+            dst_structure,
+            storage_src_structure,
+            &specs,
+            storage_conjugate,
+        )
+    }
 }
