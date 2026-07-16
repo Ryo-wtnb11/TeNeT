@@ -1,0 +1,24 @@
+name: Cache cargo build-script outputs
+description: >
+  Persist target/<profile>/build across runs, layered on top of
+  Swatinem/rust-cache. rust-cache caches dependency rlibs but drops the
+  native/codegen build-script output dirs, so *-sys and SIMD-codegen crates
+  (openblas-src's 6.5-min C build, gemm-*, pulp, private-gemm-x86, ...) rebuild
+  on every warm run. cargo's own fingerprint still gates reuse, so restoring a
+  stale build dir is at worst a rebuild -- never a wrong artifact.
+inputs:
+  key:
+    description: Per-job key discriminator; must be unique per build profile.
+    required: true
+runs:
+  using: composite
+  steps:
+    # Why-not fold into rust-cache's key: rust-cache owns the lockfile hash and
+    # its own pruning; a separate cache with a coarser (Cargo.toml) key lets the
+    # build dir survive rust-cache's prune without fighting its restore.
+    - uses: actions/cache@v4
+      with:
+        path: tenet/target/*/build
+        key: build-out-v1-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml', 'tenferro-rs/**/Cargo.toml') }}
+        restore-keys: |
+          build-out-v1-${{ inputs.key }}-${{ runner.os }}-

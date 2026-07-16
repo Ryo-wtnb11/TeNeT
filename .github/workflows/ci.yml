@@ -115,6 +115,12 @@ jobs:
         with:
           workspaces: tenet
           key: backend-${{ matrix.name }}
+      # Only openblas pays a native source build; the other rows are ~1 min and
+      # would only lose time to the extra cache round-trip.
+      - if: matrix.name == 'openblas'
+        uses: ./tenet/.github/actions/cargo-build-script-cache
+        with:
+          key: backend-openblas
       - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
 
@@ -151,6 +157,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+          key: feature-${{ matrix.name }}
+      - uses: ./tenet/.github/actions/cargo-build-script-cache
+        with:
           key: feature-${{ matrix.name }}
       - run: cargo test --workspace --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
@@ -254,6 +263,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+      - uses: ./tenet/.github/actions/cargo-build-script-cache
+        with:
+          key: test-linux
       - name: Run light Rust tests
         if: needs.changes.outputs.light_rust == 'true'
         run: cargo test -p tenet-krylov
@@ -284,6 +296,9 @@ jobs:
         with:
           workspaces: tenet
           key: workspace-test-debug0-v1
+      - uses: ./tenet/.github/actions/cargo-build-script-cache
+        with:
+          key: test-macos
       - run: cargo test --workspace
         working-directory: tenet
         env:
@@ -310,6 +325,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet
+      # llvm-cov builds into target/llvm-cov-target; the glob covers that too.
+      - uses: ./tenet/.github/actions/cargo-build-script-cache
+        with:
+          key: coverage
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage JSON
         run: |
