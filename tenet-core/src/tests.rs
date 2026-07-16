@@ -4114,7 +4114,7 @@ mod tests {
     }
 
     #[test]
-    fn fusion_layout_global_cache_bypasses_oversized_rule_identity() {
+    fn fusion_layout_local_cache_bypasses_oversized_rule_identity() {
         #[derive(Clone)]
         struct OversizedIdentityRule {
             identity: RuleIdentity,
@@ -4146,10 +4146,6 @@ mod tests {
 
         // What: canonical rule bytes participate in admission accounting, so
         // an identity alone above the per-entry limit is computed but not retained.
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_core_intern_tables();
         let canonical_bytes = Arc::<[u8]>::from(vec![
             0;
             FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
@@ -4169,16 +4165,26 @@ mod tests {
             [(SectorId::new(0), 1)],
             Vec::<(SectorId, usize)>::new(),
         );
+        let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
+        let layout = Arc::new(fusion_tree_layout_from_keys(
+            &rule,
+            next_fusion_tree_layout_id(),
+            hom.fusion_tree_keys_uncached(&rule),
+        ));
+        let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+        assert!(charged_bytes > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
 
-        assert_eq!(hom.fusion_tree_keys(&rule).len(), 1);
-        let info = fusion_tree_layout_cache_info();
+        let mut cache = FusionTreeLayoutCache::new(
+            8,
+            FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET,
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
+        );
+        let returned = cache.admit(Arc::clone(&key), Arc::clone(&layout), charged_bytes);
+        assert!(Arc::ptr_eq(&returned, &layout));
+        assert!(cache.lookup(&key).is_none());
+        let info = cache.info();
         assert_eq!(info.entries(), 0);
         assert_eq!(info.admission_bypasses(), 1);
-
-        assert_eq!(hom.fusion_tree_keys(&rule).len(), 1);
-        let info = fusion_tree_layout_cache_info();
-        assert_eq!(info.entries(), 0);
-        assert_eq!(info.admission_bypasses(), 2);
     }
 
     #[test]
