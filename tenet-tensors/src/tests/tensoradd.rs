@@ -810,6 +810,14 @@ fn tensoradd_fusion_conjugation_lowers_source_adjoint_like_tensorkit() {
 
 #[test]
 fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
+    // What: this asserts exact compile/replay counters, which are perturbed
+    // when a sibling test's promotion into the shared global structure maps
+    // changes whether this context compiles or reuses (the #174 reset-race
+    // family; observed flaking in CI coverage runs). Both cache-state
+    // asserters and resetters take the shared lock.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (rule, src, mut dst, expected) = z2_tensoradd_adjoint_fixture();
     type RuleKey = <Z2FusionRule as TreeTransformRuleCacheKey>::Key;
     let mut context = TreeTransformExecutionContext::<

@@ -3289,6 +3289,13 @@ fn tensorcontract_fusion_non_core_form_su2_lhs_adjoint_prepared_plan_matches_ref
 
 #[test]
 fn tensorcontract_fusion_non_core_form_su2_rhs_adjoint_prepared_plan_matches_reference_sequence() {
+    // What: the reference-sequence assertion counts prepared-plan cache
+    // activity, which shared-global-map promotions from concurrent sibling
+    // tests can shift (the #174 reset-race family; reproduces under default
+    // parallel --lib runs on wide machines). Serialize with the shared lock.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         su2_three_to_one_homspace(false, true),
         su2_one_to_three_homspace(false, true),
