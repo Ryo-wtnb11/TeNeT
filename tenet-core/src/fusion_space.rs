@@ -668,7 +668,7 @@ fn fusion_tree_layout_from_keys<R>(
     keys: Vec<FusionTreeBlockKey>,
 ) -> FusionTreeHomSpaceLayout
 where
-    R: MultiplicityFreeFusionRule,
+    R: FusionRule,
 {
     let keys = Arc::<[FusionTreeBlockKey]>::from(keys);
     let mut sectors = Vec::new();
@@ -1079,6 +1079,87 @@ impl FusionTreeHomSpace {
         }
         write.put(cache_key, Arc::downgrade(&structure));
         Ok(structure)
+    }
+
+    /// Builds the canonical coupled-sector layout directly from this hom
+    /// space's authoritative per-leg degeneracies.
+    ///
+    /// Unlike [`Self::coupled_subblock_structure`], callers do not first
+    /// materialize one owned shape per tree. The miss builder evaluates each
+    /// tree shape once and moves it directly into the final degeneracy
+    /// structure.
+    pub fn coupled_subblock_structure_from_leg_degeneracies<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Arc<BlockStructure>, CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let layout = self.cached_fusion_tree_layout(rule);
+        coupled_subblock_structure_from_layout(
+            self,
+            self.codomain.len(),
+            &layout,
+            |key| self.degeneracy_shape_for_key(key),
+        )
+    }
+
+    /// Multiplicity-aware sibling of
+    /// [`Self::coupled_subblock_structure_from_leg_degeneracies`].
+    ///
+    /// Generic layouts are intentionally not published in the
+    /// multiplicity-free layout cache. Their vertex-resolved keys are grouped
+    /// ephemerally and fed through the same single-pass degeneracy builder.
+    pub fn coupled_subblock_structure_from_leg_degeneracies_generic<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Arc<BlockStructure>, CoreError>
+    where
+        R: FusionRule,
+    {
+        let keys = self.fusion_tree_keys_generic(rule)?;
+        let layout = fusion_tree_layout_from_keys(rule, next_fusion_tree_layout_id(), keys);
+        coupled_subblock_structure_from_layout(
+            self,
+            self.codomain.len(),
+            &layout,
+            |key| self.degeneracy_shape_for_key(key),
+        )
+    }
+
+    fn degeneracy_shape_for_key(
+        &self,
+        key: &FusionTreeBlockKey,
+    ) -> Result<DimVec, CoreError> {
+        let rank = self.rank();
+        if key.codomain_uncoupled().len() != self.codomain.len()
+            || key.domain_uncoupled().len() != self.domain.len()
+        {
+            return Err(CoreError::StructureRankMismatch {
+                expected: rank,
+                actual: key.codomain_uncoupled().len() + key.domain_uncoupled().len(),
+            });
+        }
+        let mut shape = DimVec::new();
+        for (leg, &sector) in self
+            .codomain
+            .legs()
+            .iter()
+            .chain(self.domain.legs())
+            .zip(
+                key.codomain_uncoupled()
+                    .iter()
+                    .chain(key.domain_uncoupled()),
+            )
+        {
+            shape.push(
+                leg.degeneracy(sector)
+                    .ok_or(CoreError::MalformedFusionTree {
+                        message: "fusion tree uses a sector absent from its leg",
+                    })?,
+            );
+        }
+        Ok(shape)
     }
 
     fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
@@ -1495,6 +1576,138 @@ where
         &lhs_domain.materialize(rule),
         &rhs_codomain.materialize(rule),
     )
+}
+
+fn coupled_subblock_structure_from_layout<F>(
+    homspace: &FusionTreeHomSpace,
+    nout: usize,
+    layout: &FusionTreeHomSpaceLayout,
+    mut shape_for_key: F,
+) -> Result<Arc<BlockStructure>, CoreError>
+where
+    F: FnMut(&FusionTreeBlockKey) -> Result<DimVec, CoreError>,
+{
+    let rank = homspace.rank();
+    if nout > rank {
+        return Err(CoreError::StructureRankMismatch {
+            expected: rank,
+            actual: nout,
+        });
+    }
+
+    let mut degeneracy_blocks = Vec::with_capacity(layout.keys.len());
+    let mut sector_offset = 0usize;
+    for sector in &layout.sectors {
+        if sector.entries.len() != sector.row_count * sector.col_count {
+            return Err(CoreError::BlockCountMismatch {
+                expected: sector.row_count * sector.col_count,
+                actual: sector.entries.len(),
+            });
+        }
+
+        let mut shapes = Vec::with_capacity(sector.entries.len());
+        let mut row_dims = vec![None; sector.row_count];
+        let mut col_dims = vec![None; sector.col_count];
+        for (local_index, entry) in sector.entries.iter().enumerate() {
+            let shape = shape_for_key(&layout.keys[sector.start + local_index])?;
+            if shape.len() != rank {
+                return Err(CoreError::StructureRankMismatch {
+                    expected: rank,
+                    actual: shape.len(),
+                });
+            }
+            register_layout_dim(
+                &mut row_dims[entry.row],
+                shape[..nout].iter().try_fold(1usize, |product, &dim| {
+                    product
+                        .checked_mul(dim)
+                        .ok_or(CoreError::ElementCountOverflow)
+                })?,
+            )?;
+            register_layout_dim(
+                &mut col_dims[entry.col],
+                shape[nout..].iter().try_fold(1usize, |product, &dim| {
+                    product
+                        .checked_mul(dim)
+                        .ok_or(CoreError::ElementCountOverflow)
+                })?,
+            )?;
+            shapes.push(shape);
+        }
+
+        let row_dims = row_dims
+            .into_iter()
+            .map(|dim| {
+                dim.ok_or(CoreError::MalformedFusionTree {
+                    message: "fusion tree layout has an empty row",
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let col_dims = col_dims
+            .into_iter()
+            .map(|dim| {
+                dim.ok_or(CoreError::MalformedFusionTree {
+                    message: "fusion tree layout has an empty column",
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let row_offsets = prefix_offsets(&row_dims)?;
+        let col_offsets = prefix_offsets(&col_dims)?;
+        let matrix_rows = match row_offsets.last().zip(row_dims.last()) {
+            Some((&offset, &dim)) => offset
+                .checked_add(dim)
+                .ok_or(CoreError::ElementCountOverflow)?,
+            None => 0,
+        };
+        let matrix_cols = match col_offsets.last().zip(col_dims.last()) {
+            Some((&offset, &dim)) => offset
+                .checked_add(dim)
+                .ok_or(CoreError::ElementCountOverflow)?,
+            None => 0,
+        };
+
+        for (shape, entry) in shapes.into_iter().zip(&sector.entries) {
+            let mut strides = DimVec::new();
+            let mut stride = 1usize;
+            for &dim in &shape[..nout] {
+                strides.push(stride);
+                stride = stride
+                    .checked_mul(dim)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            }
+            let mut stride = matrix_rows;
+            for &dim in &shape[nout..] {
+                strides.push(stride);
+                stride = stride
+                    .checked_mul(dim)
+                    .ok_or(CoreError::ElementCountOverflow)?;
+            }
+            let offset = sector_offset
+                .checked_add(row_offsets[entry.row])
+                .and_then(|offset| {
+                    matrix_rows
+                        .checked_mul(col_offsets[entry.col])
+                        .and_then(|column| offset.checked_add(column))
+                })
+                .ok_or(CoreError::ElementCountOverflow)?;
+            degeneracy_blocks.push(DegeneracyBlock::new(shape, strides, offset)?);
+        }
+
+        sector_offset = sector_offset
+            .checked_add(
+                matrix_rows
+                    .checked_mul(matrix_cols)
+                    .ok_or(CoreError::ElementCountOverflow)?,
+            )
+            .ok_or(CoreError::ElementCountOverflow)?;
+    }
+
+    let sector_structure =
+        SectorStructure::from_keys(rank, layout.keys.iter().cloned().map(BlockKey::from))?;
+    let degeneracy_structure =
+        DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
+    BlockStructure::from_parts(sector_structure, degeneracy_structure)
+        .map(BlockStructure::into_shared)
 }
 
 /// Computes coupled-sector matrix block specs for fusion-tree subblocks.

@@ -4167,6 +4167,181 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    fn legacy_leg_degeneracy_structure<R>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) -> Arc<BlockStructure>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let keys = homspace.fusion_tree_keys(rule);
+        let blocks = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    homspace.degeneracy_shape_for_key(key).unwrap().to_vec(),
+                )
+            })
+            .collect();
+        BlockStructure::coupled_sector_matrix_with_keys(
+            rule,
+            homspace.codomain().len(),
+            homspace.rank(),
+            blocks,
+        )
+        .unwrap()
+        .into_shared()
+    }
+
+    fn assert_direct_leg_degeneracy_structure_matches_legacy<R>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) where
+        R: MultiplicityFreeFusionRule,
+    {
+        let expected = legacy_leg_degeneracy_structure(rule, homspace);
+        let actual = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(rule)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.content_id(), expected.content_id());
+        assert_eq!(actual.required_len().unwrap(), expected.required_len().unwrap());
+    }
+
+    #[test]
+    fn direct_leg_degeneracy_layout_matches_legacy_for_supported_rules() {
+        let mixed_leg = |sectors: &[(SectorId, usize)], dual| {
+            SectorLeg::new(sectors.iter().copied(), dual)
+        };
+        let build = |sectors: &[(SectorId, usize)]| {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([
+                    mixed_leg(sectors, false),
+                    mixed_leg(sectors, true),
+                ]),
+                FusionProductSpace::new([
+                    mixed_leg(sectors, true),
+                    mixed_leg(sectors, false),
+                ]),
+            )
+        };
+
+        let u1_hom = build(&[(u1(-2), 2), (u1(1), 1)]);
+        assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &u1_hom);
+
+        let parity_hom = build(&[(SectorId::new(0), 3), (SectorId::new(1), 2)]);
+        assert_direct_leg_degeneracy_structure_matches_legacy(
+            &FermionParityFusionRule,
+            &parity_hom,
+        );
+
+        let su2_hom = build(&[
+            (SU2Irrep::from_twice_spin(0).sector_id(), 2),
+            (SU2Irrep::from_twice_spin(1).sector_id(), 1),
+        ]);
+        assert_direct_leg_degeneracy_structure_matches_legacy(&SU2FusionRule, &su2_hom);
+
+        let product_rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+        let product_hom = build(&[
+            (product_rule.encode_sector(SectorId::new(0), u1(-1)), 2),
+            (product_rule.encode_sector(SectorId::new(1), u1(2)), 1),
+        ]);
+        assert_direct_leg_degeneracy_structure_matches_legacy(&product_rule, &product_hom);
+
+        let scalar =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &scalar);
+
+        let empty_domain = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(-1), 2), (u1(0), 1)], false),
+                SectorLeg::new([(u1(0), 3), (u1(1), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &empty_domain);
+    }
+
+    fn assert_direct_generic_leg_degeneracy_structure_matches_legacy<R>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) where
+        R: FusionRule,
+    {
+        let keys = homspace.fusion_tree_keys_generic(rule).unwrap();
+        let blocks = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    homspace.degeneracy_shape_for_key(key).unwrap().to_vec(),
+                )
+            })
+            .collect();
+        let expected = BlockStructure::coupled_sector_matrix_with_keys(
+            rule,
+            homspace.codomain().len(),
+            homspace.rank(),
+            blocks,
+        )
+        .unwrap()
+        .into_shared();
+        let actual = homspace
+            .coupled_subblock_structure_from_leg_degeneracies_generic(rule)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.content_id(), expected.content_id());
+    }
+
+    #[test]
+    fn direct_generic_leg_degeneracy_layout_matches_legacy() {
+        let rule = UnitaryToyOmRule;
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(a, 2)], false),
+                SectorLeg::new([(a, 2)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(c, 3)], false)]),
+        );
+        assert_direct_generic_leg_degeneracy_structure_matches_legacy(&rule, &homspace);
+
+        let su3_rule = su3();
+        let eight = su3_id(1, 1);
+        let su3_homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(eight, 2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(eight, 3)], false)]),
+        );
+        assert_direct_generic_leg_degeneracy_structure_matches_legacy(&su3_rule, &su3_homspace);
+    }
+
+    #[test]
+    fn direct_leg_degeneracy_layout_evaluates_each_tree_shape_once() {
+        let rule = U1FusionRule;
+        let leg = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(2), 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg.clone()]),
+            FusionProductSpace::new([leg.clone(), leg]),
+        );
+        let layout = homspace.cached_fusion_tree_layout(&rule);
+        let evaluations = std::cell::Cell::new(0usize);
+        let actual = coupled_subblock_structure_from_layout(
+            &homspace,
+            homspace.codomain().len(),
+            &layout,
+            |key| {
+                evaluations.set(evaluations.get() + 1);
+                homspace.degeneracy_shape_for_key(key)
+            },
+        )
+        .unwrap();
+        let expected = legacy_leg_degeneracy_structure(&rule, &homspace);
+        assert_eq!(actual, expected);
+        assert_eq!(evaluations.get(), layout.keys.len());
+    }
+
     #[test]
     fn fusion_tree_homspace_compose_rejects_unmatched_contracted_sector() {
         // Pairing a domain leg with the *dual* codomain leg is a
