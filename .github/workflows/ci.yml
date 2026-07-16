@@ -320,8 +320,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: tenet
-      - uses: ./tenet/.github/actions/free-linux-disk
-        if: needs.changes.outputs.light_rust != 'true'
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
@@ -330,6 +328,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      # TEMP-PROBE: confirm headroom now that free-linux-disk is gone.
+      - run: df -h /
       - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
