@@ -121,6 +121,7 @@ impl Drop for WorkspaceLease {
         }
         if let Some(mut workspace) = self.workspace.take() {
             workspace.clear();
+            workspace.park_runtime_owners();
             let mut available = self
                 .pool
                 .available
@@ -1072,12 +1073,115 @@ mod tests {
         drop((first, second, third));
     }
 
+    /// An active lease owns its runtime until return; the parked idle form does
+    /// not keep the last external owner alive.
+    #[test]
+    fn active_lease_lifetime_ends_when_workspace_is_parked() {
+        let pool = Arc::new(WorkspacePool::default());
+        let runtime = Runtime::builder().build().unwrap();
+        let identity = runtime.identity();
+        let space = Space::u1([(0, 2)]);
+        let tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_010).unwrap();
+        let mut lease = pool.lease();
+        lease.workspace().retain_tensor(tensor);
+
+        drop(runtime);
+        assert!(identity.is_alive());
+        drop(lease);
+        assert!(!identity.is_alive());
+        assert_eq!(pool.available.lock().unwrap().len(), 1);
+    }
+
+    /// Parking removes Runtime ownership, not the numerical destinations that
+    /// make the cached network path allocation-efficient.
+    #[test]
+    fn parked_cached_workspace_reuses_intermediate_storage_and_values() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 3)]);
+        let tensors = (0..3)
+            .map(|index| {
+                Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_030 + index)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let labels = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| TemporaryLabel::from(*name))
+                .collect::<Vec<_>>()
+        };
+        let network = Network::new(
+            vec![
+                labels(&["i", "j"]),
+                labels(&["j", "k"]),
+                labels(&["k", "l"]),
+            ],
+            vec![false; 3],
+            vec![None; 3],
+            labels(&["i", "l"]),
+            None,
+        )
+        .unwrap();
+        let refs = tensors.iter().collect::<Vec<_>>();
+        let cached = get_or_plan(&network, &refs, &Optimizer::Greedy).unwrap();
+
+        let first = cached.execute(&refs).unwrap();
+        let first_stats = cached.workspaces.available.lock().unwrap()[0].stats();
+        let second = cached.execute(&refs).unwrap();
+        let second_stats = cached.workspaces.available.lock().unwrap()[0].stats();
+
+        assert_eq!(first.data(), second.data());
+        assert!(second_stats.reused_intermediates > first_stats.reused_intermediates);
+        assert!(second_stats.reused_contractions > first_stats.reused_contractions);
+        assert_eq!(cached.workspaces.created.load(Ordering::Relaxed), 1);
+        assert_eq!(cached.workspaces.reused.load(Ordering::Relaxed), 1);
+    }
+
+    /// Clearing cache ownership cannot invalidate a lease that was already
+    /// checked out for execution.
+    #[test]
+    fn active_workspace_completes_after_plan_cache_clear() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 2)]);
+        let a = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_040).unwrap();
+        let b = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_041).unwrap();
+        let labels = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| TemporaryLabel::from(*name))
+                .collect::<Vec<_>>()
+        };
+        let network = Network::new(
+            vec![labels(&["i", "j"]), labels(&["j", "k"])],
+            vec![false; 2],
+            vec![None; 2],
+            labels(&["i", "k"]),
+            None,
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+        let cached = get_or_plan(&network, &tensors, &Optimizer::Greedy).unwrap();
+        let mut lease = cached.workspaces.lease();
+        let expected = cached.planned.execute(&tensors).unwrap();
+
+        super::clear_plan_cache(&runtime);
+        let actual = cached
+            .planned
+            .execute_with_workspace(&tensors, lease.workspace())
+            .unwrap();
+
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(plan_cache_stats(&runtime).entries, 0);
+    }
+
     /// Unwinding quarantines the whole workspace because backend context and
     /// arena contents may have been partially mutated before the panic.
     #[test]
     fn injected_backend_panic_quarantines_workspace() {
         let pool = Arc::new(WorkspacePool::default());
         let runtime = Runtime::builder().build().unwrap();
+        let identity = runtime.identity();
         let space = Space::u1([(0, 2)]);
         let tensor =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 12421).unwrap();
@@ -1101,6 +1205,9 @@ mod tests {
         replacement.workspace().retain_tensor(tensor.clone());
         drop(replacement);
         assert_eq!(pool.available.lock().unwrap().len(), 1);
+        drop(tensor);
+        drop(runtime);
+        assert!(!identity.is_alive());
     }
 
     /// An in-flight strong reference cannot make a weak alias valid after its
