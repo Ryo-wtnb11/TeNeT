@@ -29,8 +29,8 @@ use super::dynamic::{
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
 use super::dynamic_space::{
-    encoded_layout_primer, lowered_layout_primer, BoundDynamicFusionMapSpace,
-    DynamicFusionMapSpace, FusionOperand, LayoutPrimer,
+    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
+    LayoutPrimer,
 };
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
@@ -984,7 +984,7 @@ where
     {
         // Why not accept a separate rule: the lhs bound space is the authority
         // used for planning and execution; the raw core only checks identities.
-        self.tensorcontract_fusion_dyn_into_raw(
+        self.tensorcontract_fusion_dyn_into_raw_with_primer(
             lhs_space.provider(),
             dst_space.space(),
             dst_data,
@@ -995,6 +995,7 @@ where
             axes,
             alpha,
             beta,
+            lhs_space.layout_primer(),
         )
     }
 
@@ -1020,22 +1021,13 @@ where
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        self.tensorcontract_fusion_dyn_into_raw_with_primer(
-            lhs_space.provider(),
-            dst_space.space(),
-            dst_data,
-            lhs_space.space(),
-            lhs_data,
-            rhs_space.space(),
-            rhs_data,
-            axes,
-            alpha,
-            beta,
-            lowered_layout_primer::<R>,
+        self.tensorcontract_fusion_dyn_into(
+            dst_space, dst_data, lhs_space, lhs_data, rhs_space, rhs_data, axes, alpha, beta,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn tensorcontract_fusion_dyn_into_raw<R>(
         &mut self,
         rule: &R,
@@ -1172,7 +1164,7 @@ where
             axes,
             alpha,
             beta,
-            encoded_layout_primer::<R>,
+            dst_space.layout_primer(),
         )
     }
 
@@ -1197,17 +1189,8 @@ where
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        self.tensorcontract_fusion_dyn_prelowered_into_with_primer(
-            dst_space,
-            dst_data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            axes,
-            alpha,
-            beta,
-            lowered_layout_primer::<R>,
+        self.tensorcontract_fusion_dyn_prelowered_into(
+            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
         )
     }
 

@@ -829,8 +829,7 @@ fn build_bound_space<
     provider: Arc<R>,
     hom: FusionTreeHomSpace,
 ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
-    let shapes = lowered_degeneracy_shapes(provider.as_ref(), &hom)?;
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(provider, hom, shapes)
+    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(provider, hom)
         .map_err(Into::into)
 }
 
@@ -840,38 +839,9 @@ fn build_bound_space_like<
     authority: &BoundDynamicFusionMapSpace<R>,
     hom: FusionTreeHomSpace,
 ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
-    let shapes = lowered_degeneracy_shapes(authority.provider(), &hom)?;
     authority
-        .derive_from_degeneracy_shapes(hom, shapes)
+        .derive_from_final_homspace(hom)
         .map_err(Into::into)
-}
-
-fn lowered_degeneracy_shapes<
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
->(
-    provider: &R,
-    hom: &FusionTreeHomSpace,
-) -> Result<Vec<Vec<usize>>, Error> {
-    let leg_deg = |leg: &tenet_core::SectorLeg, sector: SectorId| -> Result<usize, Error> {
-        leg.degeneracy(sector).ok_or_else(|| {
-            Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
-        })
-    };
-    let keys = hom
-        .try_fusion_tree_keys_lowered(provider)
-        .map_err(|error| Error::InvalidArgument(error.to_string()))?;
-    let mut shapes = Vec::with_capacity(keys.len());
-    for key in keys.iter() {
-        let mut shape = Vec::with_capacity(hom.rank());
-        for (leg, &sector) in hom.codomain().legs().iter().zip(key.codomain_uncoupled()) {
-            shape.push(leg_deg(leg, sector)?);
-        }
-        for (leg, &sector) in hom.domain().legs().iter().zip(key.domain_uncoupled()) {
-            shape.push(leg_deg(leg, sector)?);
-        }
-        shapes.push(shape);
-    }
-    Ok(shapes)
 }
 
 fn build_bound_space_generic<R: FusionRule>(

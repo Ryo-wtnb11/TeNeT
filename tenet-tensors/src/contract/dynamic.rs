@@ -2401,16 +2401,15 @@ mod tests {
                 Arc::clone(&provider),
             )
             .unwrap();
-        let output = super::super::dynamic_space::BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        let output_bound = super::super::dynamic_space::BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
             &source_bound,
             &scalar_bound,
             axes.lhs_contracting_axes(),
             axes.rhs_contracting_axes(),
             axes.output_permutation(),
         )
-        .unwrap()
-        .space()
-        .clone();
+        .unwrap();
+        let output = output_bound.space().clone();
         let plan = super::super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw(
             &rule, &output, &source, &scalar, axes,
         )
@@ -2498,6 +2497,34 @@ mod tests {
         assert_eq!(execution_primer_calls(), 1);
         assert_eq!(no_cache.len(), 0);
         assert_eq!(no_cache.stats().hits(), 0);
+
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        reset_execution_primer_calls();
+        let counted_source = source_bound
+            .clone()
+            .with_test_layout_primer(counting_su2_primer);
+        let mut context = crate::TensorContractFusionExecutionContext::<
+            f64,
+            crate::TreeTransformBuiltinRuleCacheKey,
+        >::default();
+        let mut dst_data = vec![0.0; output_bound.space().required_len().unwrap()];
+        let lhs_data = vec![0.0; counted_source.space().required_len().unwrap()];
+        let rhs_data = vec![0.0; scalar_bound.space().required_len().unwrap()];
+        context
+            .tensorcontract_fusion_dyn_into(
+                &output_bound,
+                &mut dst_data,
+                &counted_source,
+                &lhs_data,
+                &scalar_bound,
+                &rhs_data,
+                axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert!(execution_primer_calls() > 0);
     }
 
     #[test]

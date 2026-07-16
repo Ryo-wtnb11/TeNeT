@@ -3920,25 +3920,29 @@ fn ordinary_factorizations_and_composition_inherit_lowered_layout_strategy() {
         Arc::new(Z2FusionRule),
     )
     .unwrap();
-    assert!(!bound.has_same_layout_build_strategy(&expert));
+    let malformed = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(SectorId::new(99), 1)], false)]),
+        FusionProductSpace::new([]),
+    );
+    assert!(expert.prime_derived_homspace(&malformed).is_ok());
     let input = BoundDynamicTensorRef::try_new(&bound, tensor.data()).unwrap();
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let svd = svd_compact_dyn(&mut dense, &input).unwrap();
     for factor in [svd.u(), svd.s(), svd.vh()] {
-        assert!(bound.has_same_layout_build_strategy(factor.space()));
+        assert!(factor.space().prime_derived_homspace(&malformed).is_err());
     }
     let (q, r) = qr_compact_dyn(&mut dense, &input).unwrap();
-    assert!(bound.has_same_layout_build_strategy(q.space()));
-    assert!(bound.has_same_layout_build_strategy(r.space()));
+    assert!(q.space().prime_derived_homspace(&malformed).is_err());
+    assert!(r.space().prime_derived_homspace(&malformed).is_err());
     let eigh = eigh_full_dyn(&mut dense, &input).unwrap();
-    assert!(bound.has_same_layout_build_strategy(eigh.v().space()));
+    assert!(eigh.v().space().prime_derived_homspace(&malformed).is_err());
 
     let adjoint = crate::factorize::adjoint_bound_factor(svd.u()).unwrap();
-    assert!(bound.has_same_layout_build_strategy(adjoint.space()));
+    assert!(adjoint.space().prime_derived_homspace(&malformed).is_err());
     let mut context = default_context();
     let composed = crate::compose::compose_bound_dyn(&mut context, svd.u(), svd.s()).unwrap();
-    assert!(bound.has_same_layout_build_strategy(composed.space()));
+    assert!(composed.space().prime_derived_homspace(&malformed).is_err());
 }
 
 #[test]

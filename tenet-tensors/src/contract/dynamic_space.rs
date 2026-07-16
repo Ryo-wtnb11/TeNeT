@@ -34,10 +34,6 @@ impl<R> LayoutBuildCapability<R> {
         }
     }
 
-    fn same_as(self, other: Self) -> bool {
-        self.prime as usize == other.prime as usize
-    }
-
     fn prime(self, rule: &R, homspace: &FusionTreeHomSpace) -> Result<(), OperationError> {
         (self.prime)(rule, homspace)
     }
@@ -483,9 +479,18 @@ where
         Shapes::Item: Into<Vec<usize>>,
     {
         let layout_build = LayoutBuildCapability::lowered();
-        layout_build.prime(provider.as_ref(), &homspace)?;
-        let space =
-            DynamicFusionMapSpace::from_degeneracy_shapes(provider.as_ref(), homspace, shapes)?;
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            provider.as_ref(),
+            homspace,
+            shapes,
+            |rule, homspace| {
+                homspace
+                    .try_fusion_tree_keys_lowered(rule)
+                    .map_err(|error| OperationError::InvalidArgument {
+                        message: error.static_message(),
+                    })
+            },
+        )?;
         Self::from_derived_with_capability(provider, space, layout_build)
     }
 
@@ -802,6 +807,12 @@ where
         self.layout_build.prime
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_layout_primer(mut self, primer: LayoutPrimer<R>) -> Self {
+        self.layout_build = LayoutBuildCapability { prime: primer };
+        self
+    }
+
     /// Primes a derived HomSpace with this binding's opaque build strategy.
     #[doc(hidden)]
     pub fn prime_derived_homspace(
@@ -809,12 +820,6 @@ where
         homspace: &FusionTreeHomSpace,
     ) -> Result<(), OperationError> {
         self.layout_build.prime(self.provider.as_ref(), homspace)
-    }
-
-    /// Reports whether two bindings derive layouts through the same opaque strategy.
-    #[doc(hidden)]
-    pub fn has_same_layout_build_strategy(&self, other: &Self) -> bool {
-        self.layout_build.same_as(other.layout_build)
     }
 
     /// Builds a derived layout while preserving this binding's build strategy.
@@ -1006,6 +1011,24 @@ impl DynamicFusionMapSpace {
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
+        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, |rule, homspace| {
+            Ok(homspace.fusion_tree_keys(rule))
+        })
+    }
+
+    fn from_degeneracy_shapes_with_key_builder<R, Shapes, BuildKeys>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        shapes: Shapes,
+        build_keys: BuildKeys,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        Shapes: IntoIterator,
+        Shapes::Item: Into<Vec<usize>>,
+        BuildKeys:
+            FnOnce(&R, &FusionTreeHomSpace) -> Result<Arc<[FusionTreeBlockKey]>, OperationError>,
+    {
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         let rank = nout + nin;
@@ -1034,7 +1057,10 @@ impl DynamicFusionMapSpace {
                 });
             }
         }
-        let keys = homspace.fusion_tree_keys(rule);
+        // Why not prime one layout and call the encoded constructor afterward:
+        // lowered and encoded enumeration have independent caches. Selecting
+        // the key builder on this cache miss keeps one root construction pass.
+        let keys = build_keys(rule, &homspace)?;
         if keys.len() != shapes.len() {
             return Err(OperationError::from_core_preserving_context(
                 CoreError::BlockCountMismatch {
@@ -2727,13 +2753,69 @@ mod scratch_cache_tests {
             BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lowered, &cloned, &[], &[])
                 .unwrap();
 
+        let malformed = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(255), 1)], false)]),
+            FusionProductSpace::new([]),
+        );
         for output in [&cloned, &rebound, &derived, &transformed, &contracted] {
-            assert!(lowered.has_same_layout_build_strategy(output));
+            assert!(matches!(
+                output.prime_derived_homspace(&malformed),
+                Err(OperationError::InvalidArgument { .. })
+            ));
         }
-        assert!(!lowered.has_same_layout_build_strategy(&encoded));
+        assert!(encoded.prime_derived_homspace(&malformed).is_ok());
         let mixed =
             BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lowered, &encoded, &[], &[])
                 .unwrap();
-        assert!(lowered.has_same_layout_build_strategy(&mixed));
+        assert!(matches!(
+            mixed.prime_derived_homspace(&malformed),
+            Err(OperationError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn lowered_root_constructor_builds_from_lowered_keys() {
+        // What: the lowered root accepts its lowered key set directly and
+        // produces the same complete storage grid as the encoded oracle.
+        let provider = Arc::new(tenet_core::SU2FusionRule);
+        let half = tenet_core::SU2Irrep::from_twice_spin(1).sector_id();
+        let leg = || FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]);
+        let hom = FusionTreeHomSpace::new(leg(), leg());
+        let lowered_keys = hom.try_fusion_tree_keys_lowered(provider.as_ref()).unwrap();
+        let count = lowered_keys.len();
+        let bound = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::clone(&provider),
+            hom.clone(),
+            vec![vec![1, 1]; count],
+        )
+        .unwrap();
+        let actual = (0..bound.space().structure().block_count())
+            .map(|index| {
+                bound
+                    .space()
+                    .structure()
+                    .block(index)
+                    .unwrap()
+                    .key()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let expected = lowered_keys
+            .iter()
+            .cloned()
+            .map(BlockKey::FusionTree)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        let malformed = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(255), 1)], false)]),
+            FusionProductSpace::new([]),
+        );
+        assert!(matches!(
+            BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
+                provider, malformed,
+            ),
+            Err(OperationError::InvalidArgument { .. })
+        ));
     }
 }
