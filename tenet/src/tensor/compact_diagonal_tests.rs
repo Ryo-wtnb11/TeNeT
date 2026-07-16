@@ -288,11 +288,19 @@ fn compact_c64_operations_match_dense_oracles() {
         for (lhs, rhs) in [
             (
                 real_c64_diagonal(&rt, &space, 811),
-                complex_diagonal(&rt, &space, 812),
+                real_c64_diagonal(&rt, &space, 812),
             ),
             (
-                complex_diagonal(&rt, &space, 813),
-                real_c64_diagonal(&rt, &space, 814),
+                real_c64_diagonal(&rt, &space, 813),
+                complex_diagonal(&rt, &space, 814),
+            ),
+            (
+                complex_diagonal(&rt, &space, 815),
+                real_c64_diagonal(&rt, &space, 816),
+            ),
+            (
+                complex_diagonal(&rt, &space, 817),
+                complex_diagonal(&rt, &space, 818),
             ),
         ] {
             let lhs_dense = dense_oracle(&lhs);
@@ -309,13 +317,15 @@ fn compact_c64_operations_match_dense_oracles() {
             let scaled = lhs.scale_c64(factor).unwrap();
             let added_real = lhs.add(&rhs, 0.75, -0.5).unwrap();
             let added = lhs.add_c64(&rhs, alpha, beta).unwrap();
-            for tensor in [&lhs, &rhs, &adjoint, &scaled, &added_real, &added] {
+            let widened = lhs.to_c64();
+            for tensor in [&lhs, &rhs, &adjoint, &scaled, &added_real, &added, &widened] {
                 assert_compact_unmaterialized(tensor);
             }
             assert_tensor_close(&adjoint, &lhs_dense.adjoint().unwrap());
             assert_tensor_close(&scaled, &lhs_dense.scale_c64(factor).unwrap());
             assert_tensor_close(&added_real, &lhs_dense.add(&rhs_dense, 0.75, -0.5).unwrap());
             assert_tensor_close(&added, &lhs_dense.add_c64(&rhs_dense, alpha, beta).unwrap());
+            assert_tensor_close(&widened, &lhs_dense.to_c64());
             assert!((lhs.norm().unwrap() - lhs_dense.norm().unwrap()).abs() < 1e-11);
             assert!((lhs.norm_inf().unwrap() - lhs_dense.norm_inf().unwrap()).abs() < 1e-11);
             assert!(
@@ -325,6 +335,13 @@ fn compact_c64_operations_match_dense_oracles() {
             );
             assert!(lhs.materialized.get().is_none());
             assert!(rhs.materialized.get().is_none());
+
+            for legs in [&[0][..], &[1][..], &[0, 1][..]] {
+                let twisted = lhs.twist(legs).unwrap();
+                assert_compact_unmaterialized(&twisted);
+                assert_tensor_close(&twisted, &lhs_dense.twist(legs).unwrap());
+                assert!(lhs.materialized.get().is_none());
+            }
         }
     }
 }
@@ -375,32 +392,44 @@ fn compact_dense_binary_operations_scatter_without_materializing_source() {
             assert!(diagonal.materialized.get().is_none());
         }
 
-        let diagonal = complex_diagonal(&rt, &space, 823);
-        let diagonal_dense = dense_oracle(&diagonal);
         let dense = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 824).unwrap();
         let alpha = Complex64::new(0.25, -0.5);
         let beta = Complex64::new(-0.75, 0.125);
-        assert_tensor_close(
-            &diagonal.add_c64(&dense, alpha, beta).unwrap(),
-            &diagonal_dense.add_c64(&dense, alpha, beta).unwrap(),
-        );
-        assert_tensor_close(
-            &dense.add_c64(&diagonal, alpha, beta).unwrap(),
-            &dense.add_c64(&diagonal_dense, alpha, beta).unwrap(),
-        );
-        assert!(
-            (diagonal.inner(&dense).unwrap().to_c64()
-                - diagonal_dense.inner(&dense).unwrap().to_c64())
-            .norm()
-                < 1e-11
-        );
-        assert!(
-            (dense.inner(&diagonal).unwrap().to_c64()
-                - dense.inner(&diagonal_dense).unwrap().to_c64())
-            .norm()
-                < 1e-11
-        );
-        assert!(diagonal.materialized.get().is_none());
+        for diagonal in [
+            real_c64_diagonal(&rt, &space, 823),
+            complex_diagonal(&rt, &space, 825),
+        ] {
+            let diagonal_dense = dense_oracle(&diagonal);
+            assert_tensor_close(
+                &diagonal.add(&dense, 0.75, -0.5).unwrap(),
+                &diagonal_dense.add(&dense, 0.75, -0.5).unwrap(),
+            );
+            assert_tensor_close(
+                &dense.add(&diagonal, 0.75, -0.5).unwrap(),
+                &dense.add(&diagonal_dense, 0.75, -0.5).unwrap(),
+            );
+            assert_tensor_close(
+                &diagonal.add_c64(&dense, alpha, beta).unwrap(),
+                &diagonal_dense.add_c64(&dense, alpha, beta).unwrap(),
+            );
+            assert_tensor_close(
+                &dense.add_c64(&diagonal, alpha, beta).unwrap(),
+                &dense.add_c64(&diagonal_dense, alpha, beta).unwrap(),
+            );
+            assert!(
+                (diagonal.inner(&dense).unwrap().to_c64()
+                    - diagonal_dense.inner(&dense).unwrap().to_c64())
+                .norm()
+                    < 1e-11
+            );
+            assert!(
+                (dense.inner(&diagonal).unwrap().to_c64()
+                    - dense.inner(&diagonal_dense).unwrap().to_c64())
+                .norm()
+                    < 1e-11
+            );
+            assert!(diagonal.materialized.get().is_none());
+        }
     }
 }
 
