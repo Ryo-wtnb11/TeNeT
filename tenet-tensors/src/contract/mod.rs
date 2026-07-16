@@ -34,7 +34,7 @@ pub use context::{
     TensorContractPlanKey,
 };
 pub use dynamic_space::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, ValidatedDynamicFusionLayout,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, ValidatedDynamicFusionLayout,
 };
 #[cfg(test)]
 pub(crate) use fusion::{

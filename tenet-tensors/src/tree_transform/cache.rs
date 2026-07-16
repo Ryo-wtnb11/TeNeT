@@ -1494,6 +1494,94 @@ where
         )
     }
 
+    pub(crate) fn get_or_compile_tree_pair_prelowered<R, FBlock, FAxis>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        logical_src_structure: &Arc<BlockStructure>,
+        storage_src_structure: &Arc<BlockStructure>,
+        storage_conjugate: bool,
+        logical_to_storage_block: FBlock,
+        logical_to_storage_axis: FAxis,
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        RuleKey: 'static + Send + Sync,
+        FBlock: Fn(usize) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        let rule_key = rule.tree_transform_rule_cache_key();
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            logical_src_structure,
+        )?;
+        if !self.policy.stores_entries() {
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan = build_tree_pair_transform_group_plan(
+                rule,
+                operation.clone(),
+                logical_src_structure,
+            )?;
+            return Ok(Arc::new(
+                plan.compile_shared_structures_with_storage_mapping(
+                    Arc::clone(dst_structure),
+                    logical_src_structure,
+                    Arc::clone(storage_src_structure),
+                    logical_to_storage_block,
+                    logical_to_storage_axis,
+                    storage_conjugate,
+                )?,
+            ));
+        }
+        if self.plans.contains_key(&plan_key) {
+            self.stats.plan_hits += 1;
+            self.touch_plan(&plan_key);
+        } else {
+            self.stats.plan_misses += 1;
+            let plan = self.get_or_compile_global_tree_pair_plan(
+                rule,
+                &rule_key,
+                operation.clone(),
+                logical_src_structure,
+                &plan_key,
+            )?;
+            self.insert_plan_arc(plan_key.clone(), plan);
+        }
+        let structure_key =
+            TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
+                plan_key.clone(),
+                dst_structure,
+                storage_src_structure,
+                storage_conjugate,
+            )?;
+        if let Some(structure) = self.structures.get_arc(&structure_key) {
+            self.stats.structure_hits += 1;
+            self.structures.touch(&structure_key);
+            return Ok(structure);
+        }
+        self.stats.structure_misses += 1;
+        let plan = self
+            .plans
+            .get(&plan_key)
+            .expect("tree transform plan inserted before prelowered structure compile");
+        let structure = Arc::new(plan.compile_shared_structures_with_storage_mapping(
+            Arc::clone(dst_structure),
+            logical_src_structure,
+            Arc::clone(storage_src_structure),
+            logical_to_storage_block,
+            logical_to_storage_axis,
+            storage_conjugate,
+        )?);
+        self.structures
+            .insert_arc(structure_key, Arc::clone(&structure));
+        Ok(structure)
+    }
+
     /// Generic-fusion (outer-multiplicity, e.g. SU(3)) sibling of
     /// [`Self::get_or_compile_tree_pair`].
     ///

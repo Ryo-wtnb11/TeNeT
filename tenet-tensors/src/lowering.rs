@@ -5,10 +5,26 @@ use tenet_core::{
     FusionTreeHomSpace, TensorMapSpace,
 };
 
+use crate::DynamicFusionMapSpace;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{
     permutation_axes, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
 };
+
+#[cfg(test)]
+thread_local! {
+    static ADJOINT_VIEW_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_adjoint_view_build_count() {
+    ADJOINT_VIEW_BUILDS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn adjoint_view_build_count() -> usize {
+    ADJOINT_VIEW_BUILDS.with(std::cell::Cell::get)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoweredTensorAddSourceOperation {
@@ -362,6 +378,8 @@ pub(crate) fn adjoint_block_structure_view(
     nin: usize,
     source: &BlockStructure,
 ) -> Result<BlockStructure, OperationError> {
+    #[cfg(test)]
+    ADJOINT_VIEW_BUILDS.with(|count| count.set(count.get() + 1));
     let rank = nout
         .checked_add(nin)
         .ok_or(OperationError::ElementCountOverflow)?;
@@ -395,5 +413,51 @@ fn adjoint_block_key(key: &BlockKey) -> Result<BlockKey, OperationError> {
             tree.domain_tree().clone(),
             tree.codomain_tree().clone(),
         ))),
+    }
+}
+
+pub(crate) fn prelowered_storage_block_index<'a>(
+    logical_space: &'a DynamicFusionMapSpace,
+    storage_space: &'a DynamicFusionMapSpace,
+    storage_conjugate: bool,
+) -> impl Fn(usize) -> Result<usize, OperationError> + 'a {
+    move |index| {
+        if !storage_conjugate {
+            return Ok(index);
+        }
+        let logical = logical_space.structure().block(index)?;
+        let storage_key = adjoint_block_key(logical.key())?;
+        storage_space
+            .structure()
+            .find_block_index_by_key(&storage_key)
+            .ok_or_else(|| {
+                OperationError::Core(tenet_core::CoreError::MissingBlockKey {
+                    key: Box::new(storage_key),
+                })
+            })
+    }
+}
+
+pub(crate) fn prelowered_storage_axis<'a>(
+    logical_space: &'a DynamicFusionMapSpace,
+    storage_space: &'a DynamicFusionMapSpace,
+    storage_conjugate: bool,
+) -> impl Fn(usize) -> Result<usize, OperationError> + 'a {
+    move |axis| {
+        if axis >= logical_space.rank() {
+            return Err(OperationError::InvalidAxisSet {
+                tensor: "logical src",
+                axes: vec![axis],
+                rank: logical_space.rank(),
+            });
+        }
+        if !storage_conjugate {
+            return Ok(axis);
+        }
+        Ok(if axis < storage_space.nin() {
+            storage_space.nout() + axis
+        } else {
+            axis - storage_space.nin()
+        })
     }
 }

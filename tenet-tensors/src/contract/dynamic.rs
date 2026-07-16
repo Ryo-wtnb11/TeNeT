@@ -10,7 +10,9 @@ use tenet_core::{
 };
 
 use crate::cache::{touch_lru_key, BlockStructureCacheKey, OperationCachePolicy};
-use crate::lowering::adjoint_fusion_space_view;
+use crate::lowering::{
+    adjoint_fusion_space_view, prelowered_storage_axis, prelowered_storage_block_index,
+};
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::{
@@ -476,9 +478,11 @@ where
         &dst_structure,
         dst.data_mut(),
         &lhs_space,
+        None,
         &lhs_structure,
         lhs.data(),
         &rhs_space,
+        None,
         &rhs_structure,
         rhs.data(),
         alpha,
@@ -504,9 +508,11 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
     dst_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     lhs_space: &DynamicFusionMapSpace,
+    lhs_storage_space: Option<&DynamicFusionMapSpace>,
     lhs_structure: &Arc<BlockStructure>,
     lhs_data: &[D],
     rhs_space: &DynamicFusionMapSpace,
+    rhs_storage_space: Option<&DynamicFusionMapSpace>,
     rhs_structure: &Arc<BlockStructure>,
     rhs_data: &[D],
     alpha: D,
@@ -519,14 +525,25 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
-        tree_context,
-        rule,
-        lhs_space,
-        lhs_structure,
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-    )?;
+    let lhs_transform = match lhs_storage_space {
+        Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
+            tree_context,
+            rule,
+            lhs_space,
+            storage_space,
+            lhs_structure,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+        )?,
+        None => dynamic_space_cache.get_or_compile_transformed_source(
+            tree_context,
+            rule,
+            lhs_space,
+            lhs_structure,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+        )?,
+    };
     let lhs_borrowed = source_is_borrowable_core_layout(
         lhs_space,
         lhs_structure,
@@ -534,14 +551,25 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     );
-    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
-        tree_context,
-        rule,
-        rhs_space,
-        rhs_structure,
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-    )?;
+    let rhs_transform = match rhs_storage_space {
+        Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
+            tree_context,
+            rule,
+            rhs_space,
+            storage_space,
+            rhs_structure,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+        )?,
+        None => dynamic_space_cache.get_or_compile_transformed_source(
+            tree_context,
+            rule,
+            rhs_space,
+            rhs_structure,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+        )?,
+    };
     let lhs_core_space = lhs_transform.space.clone();
     let rhs_core_space = rhs_transform.space.clone();
     let rhs_borrowed = rhs_source_is_borrowable(
@@ -1737,6 +1765,81 @@ where
             source_conjugate,
             entry: entry.clone(),
         });
+        Ok(entry)
+    }
+
+    fn get_or_compile_transformed_source_prelowered<R, D, BT>(
+        &mut self,
+        tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+        rule: &R,
+        logical_space: &DynamicFusionMapSpace,
+        storage_space: &DynamicFusionMapSpace,
+        storage_structure: &Arc<BlockStructure>,
+        operation: &TreeTransformOperation,
+        storage_conjugate: bool,
+    ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar,
+        BT: TreeTransformBackend<D, f64>,
+    {
+        let rule_key = rule.tree_transform_rule_cache_key();
+        let nout = logical_space.nout();
+        let homspace = logical_space.homspace().clone();
+        let replay_structure = Arc::clone(storage_structure);
+        let fast_key = DynamicFusionTransformedSourceFastKey {
+            rule: rule_key.clone(),
+            nout,
+            homspace: homspace.clone(),
+            replay_structure_id: replay_structure.content_id(),
+            operation: operation.clone(),
+            source_conjugate: storage_conjugate,
+        };
+        let key = DynamicFusionTransformedSourceSpaceKey {
+            rule: rule_key.clone(),
+            nout,
+            homspace: homspace.clone(),
+            structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
+            operation: operation.clone(),
+            source_conjugate: storage_conjugate,
+        };
+        if self.policy.stores_entries() {
+            if let Some(entry) = self.fast_transformed_sources.get(&fast_key).cloned() {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                self.touch_transformed_source(&key);
+                return Ok(entry);
+            }
+            if let Some(entry) = self.transformed_sources.get(&key).cloned() {
+                self.stats.hits += 1;
+                self.touch_transformed_source(&key);
+                self.fast_transformed_sources
+                    .insert(fast_key, entry.clone());
+                return Ok(entry);
+            }
+        }
+
+        self.stats.misses += 1;
+        let space = logical_space.transformed(rule, operation)?;
+        let dst_structure = Arc::clone(space.structure());
+        let transform_structure = tree_context.get_or_compile_tree_pair_structure_prelowered(
+            rule,
+            operation,
+            &dst_structure,
+            logical_space.structure(),
+            storage_structure,
+            storage_conjugate,
+            prelowered_storage_block_index(logical_space, storage_space, storage_conjugate),
+            prelowered_storage_axis(logical_space, storage_space, storage_conjugate),
+        )?;
+        let entry = DynamicFusionTransformedSourceEntry {
+            space: Arc::new(space),
+            replay_structure,
+            transform_structure,
+        };
+        if self.policy.stores_entries() {
+            self.insert_transformed_source(key, fast_key, entry.clone());
+        }
         Ok(entry)
     }
 

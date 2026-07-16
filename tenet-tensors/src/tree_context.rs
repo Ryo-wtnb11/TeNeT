@@ -493,6 +493,37 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_or_compile_tree_pair_structure_prelowered<R, FBlock, FAxis>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        logical_src_structure: &Arc<BlockStructure>,
+        storage_src_structure: &Arc<BlockStructure>,
+        storage_conjugate: bool,
+        logical_to_storage_block: FBlock,
+        logical_to_storage_axis: FAxis,
+    ) -> Result<Arc<TreeTransformStructure<C>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        FBlock: Fn(usize) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        self.cache
+            .set_recoupling_threads(self.backend.recoupling_threads());
+        self.cache.get_or_compile_tree_pair_prelowered(
+            rule,
+            operation,
+            dst_structure,
+            logical_src_structure,
+            storage_src_structure,
+            storage_conjugate,
+            logical_to_storage_block,
+            logical_to_storage_axis,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn tree_transform_into_raw_with_storage_conjugation<R>(
         &mut self,
         rule: &R,

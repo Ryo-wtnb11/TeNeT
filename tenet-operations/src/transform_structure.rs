@@ -194,6 +194,15 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
+    pub(crate) fn compile_indexed_shared_structures_with_storage_conjugation(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[TreeTransformBlockSpec<T>],
+        storage_conjugate: bool,
+    ) -> Result<Self, OperationError> {
+        Self::compile_shared_structures(dst_structure, src_structure, specs, storage_conjugate)
+    }
+
     pub fn compile_keyed<
         TDst,
         TSrc,
