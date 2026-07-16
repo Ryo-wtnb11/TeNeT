@@ -60,6 +60,15 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor) {
     }
 }
 
+fn dense_oracle(diagonal: &Tensor) -> Tensor {
+    diagonal.clone().densified_if_diagonal()
+}
+
+fn assert_compact_unmaterialized(tensor: &Tensor) {
+    assert!(matches!(tensor.data.as_ref(), Data::Diagonal(_)));
+    assert!(tensor.materialized.get().is_none());
+}
+
 fn fixed_diagonal(
     rt: &Runtime,
     space: &Space,
@@ -215,6 +224,267 @@ fn diagonal_fast_paths_preserve_world_checks_and_dense_routes() {
     match (actual, expected) {
         (Ok(actual), Ok(expected)) => assert_tensor_close(&actual, &expected),
         pair => panic!("ordinary dense route changed: {pair:?}"),
+    }
+}
+
+#[test]
+fn compact_storage_local_operations_match_dense_oracles() {
+    // What: every storage-local unary/reduction/binary operation preserves the
+    // compact spectrum and matches the former dense path across supported rules.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::u1([(-2, 1), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]),
+        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        product_space(),
+    ] {
+        let lhs = real_diagonal(&rt, &space, 801);
+        let rhs = real_diagonal(&rt, &space, 802);
+        let lhs_dense = dense_oracle(&lhs);
+        let rhs_dense = dense_oracle(&rhs);
+
+        let adjoint = lhs.adjoint().unwrap();
+        assert!(Arc::ptr_eq(&adjoint.data, &lhs.data));
+        let scaled = lhs.scale(-1.25).unwrap();
+        let added = lhs.add(&rhs, 0.75, -0.5).unwrap();
+        let widened = lhs.to_c64();
+        for tensor in [&lhs, &rhs, &adjoint, &scaled, &added, &widened] {
+            assert_compact_unmaterialized(tensor);
+        }
+        assert_tensor_close(&adjoint, &lhs_dense.adjoint().unwrap());
+        assert_tensor_close(&scaled, &lhs_dense.scale(-1.25).unwrap());
+        assert_tensor_close(&added, &lhs_dense.add(&rhs_dense, 0.75, -0.5).unwrap());
+        assert_tensor_close(&widened, &lhs_dense.to_c64());
+        assert!((lhs.norm().unwrap() - lhs_dense.norm().unwrap()).abs() < 1e-11);
+        assert!((lhs.norm_inf().unwrap() - lhs_dense.norm_inf().unwrap()).abs() < 1e-11);
+        assert!(
+            (lhs.inner(&rhs).unwrap().to_c64() - lhs_dense.inner(&rhs_dense).unwrap().to_c64())
+                .norm()
+                < 1e-11
+        );
+        assert!(lhs.materialized.get().is_none());
+        assert!(rhs.materialized.get().is_none());
+
+        for legs in [&[0][..], &[1][..], &[0, 1][..]] {
+            let twisted = lhs.twist(legs).unwrap();
+            assert_compact_unmaterialized(&twisted);
+            assert_tensor_close(&twisted, &lhs_dense.twist(legs).unwrap());
+            assert!(lhs.materialized.get().is_none());
+        }
+    }
+}
+
+#[test]
+fn compact_c64_operations_match_dense_oracles() {
+    // What: real-valued and genuinely complex c64 spectra follow dense dtype,
+    // conjugation, axpby, and inner-product semantics without materialization.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::u1([(-2, 1), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]),
+        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        product_space(),
+    ] {
+        for (lhs, rhs) in [
+            (
+                real_c64_diagonal(&rt, &space, 811),
+                complex_diagonal(&rt, &space, 812),
+            ),
+            (
+                complex_diagonal(&rt, &space, 813),
+                real_c64_diagonal(&rt, &space, 814),
+            ),
+        ] {
+            let lhs_dense = dense_oracle(&lhs);
+            let rhs_dense = dense_oracle(&rhs);
+            let factor = Complex64::new(-0.5, 0.75);
+            let alpha = Complex64::new(0.25, -0.5);
+            let beta = Complex64::new(-0.75, 0.125);
+
+            let adjoint = lhs.adjoint().unwrap();
+            assert_eq!(
+                Arc::ptr_eq(&adjoint.data, &lhs.data),
+                matches!(lhs.data.as_ref(), Data::Diagonal(DiagonalData::RealC64(_)))
+            );
+            let scaled = lhs.scale_c64(factor).unwrap();
+            let added_real = lhs.add(&rhs, 0.75, -0.5).unwrap();
+            let added = lhs.add_c64(&rhs, alpha, beta).unwrap();
+            for tensor in [&lhs, &rhs, &adjoint, &scaled, &added_real, &added] {
+                assert_compact_unmaterialized(tensor);
+            }
+            assert_tensor_close(&adjoint, &lhs_dense.adjoint().unwrap());
+            assert_tensor_close(&scaled, &lhs_dense.scale_c64(factor).unwrap());
+            assert_tensor_close(&added_real, &lhs_dense.add(&rhs_dense, 0.75, -0.5).unwrap());
+            assert_tensor_close(&added, &lhs_dense.add_c64(&rhs_dense, alpha, beta).unwrap());
+            assert!((lhs.norm().unwrap() - lhs_dense.norm().unwrap()).abs() < 1e-11);
+            assert!((lhs.norm_inf().unwrap() - lhs_dense.norm_inf().unwrap()).abs() < 1e-11);
+            assert!(
+                (lhs.inner(&rhs).unwrap().to_c64() - lhs_dense.inner(&rhs_dense).unwrap().to_c64())
+                    .norm()
+                    < 1e-11
+            );
+            assert!(lhs.materialized.get().is_none());
+            assert!(rhs.materialized.get().is_none());
+        }
+    }
+}
+
+#[test]
+fn compact_dense_binary_operations_scatter_without_materializing_source() {
+    // What: diagonal+dense and dense+diagonal add/inner consume only the
+    // diagonal entries, including a lazy-adjoint dense operand.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::u1([(-2, 1), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]),
+        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        product_space(),
+    ] {
+        let diagonal = real_diagonal(&rt, &space, 821);
+        let diagonal_dense = dense_oracle(&diagonal);
+        let dense = Tensor::rand_with_seed(&rt, Dtype::F64, [&space], [&space], 822).unwrap();
+        let lazy = dense.adjoint().unwrap();
+        for operand in [&dense, &lazy] {
+            let operand_dense = Tensor {
+                rt: operand.rt.clone(),
+                space: Arc::clone(&operand.space),
+                data: Arc::new(operand.coupled_data().clone()),
+                adjoint_source: None,
+                materialized: OnceLock::new(),
+            };
+            assert_tensor_close(
+                &diagonal.add(operand, 0.75, -0.5).unwrap(),
+                &diagonal_dense.add(&operand_dense, 0.75, -0.5).unwrap(),
+            );
+            assert_tensor_close(
+                &operand.add(&diagonal, 0.75, -0.5).unwrap(),
+                &operand_dense.add(&diagonal_dense, 0.75, -0.5).unwrap(),
+            );
+            assert!(
+                (diagonal.inner(operand).unwrap().to_c64()
+                    - diagonal_dense.inner(&operand_dense).unwrap().to_c64())
+                .norm()
+                    < 1e-11
+            );
+            assert!(
+                (operand.inner(&diagonal).unwrap().to_c64()
+                    - operand_dense.inner(&diagonal_dense).unwrap().to_c64())
+                .norm()
+                    < 1e-11
+            );
+            assert!(diagonal.materialized.get().is_none());
+        }
+
+        let diagonal = complex_diagonal(&rt, &space, 823);
+        let diagonal_dense = dense_oracle(&diagonal);
+        let dense = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 824).unwrap();
+        let alpha = Complex64::new(0.25, -0.5);
+        let beta = Complex64::new(-0.75, 0.125);
+        assert_tensor_close(
+            &diagonal.add_c64(&dense, alpha, beta).unwrap(),
+            &diagonal_dense.add_c64(&dense, alpha, beta).unwrap(),
+        );
+        assert_tensor_close(
+            &dense.add_c64(&diagonal, alpha, beta).unwrap(),
+            &dense.add_c64(&diagonal_dense, alpha, beta).unwrap(),
+        );
+        assert!(
+            (diagonal.inner(&dense).unwrap().to_c64()
+                - diagonal_dense.inner(&dense).unwrap().to_c64())
+            .norm()
+                < 1e-11
+        );
+        assert!(
+            (dense.inner(&diagonal).unwrap().to_c64()
+                - dense.inner(&diagonal_dense).unwrap().to_c64())
+            .norm()
+                < 1e-11
+        );
+        assert!(diagonal.materialized.get().is_none());
+    }
+}
+
+#[test]
+fn compact_storage_local_operations_preserve_validation_precedence() {
+    // What: storage dispatch does not bypass runtime, space, or dtype checks.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let foreign_rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(0, 2), (1, 1)]);
+    let other_space = Space::u1([(0, 3), (1, 1)]);
+    let diagonal = real_diagonal(&rt, &space, 831);
+    let foreign = real_diagonal(&foreign_rt, &space, 832);
+    let mismatched = real_diagonal(&rt, &other_space, 833);
+    let complex = real_c64_diagonal(&rt, &space, 834);
+
+    assert!(matches!(
+        diagonal.add(&foreign, 1.0, 1.0),
+        Err(Error::RuntimeMismatch)
+    ));
+    assert!(matches!(
+        diagonal.add(&mismatched, 1.0, 1.0),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        diagonal.add(&complex, 1.0, 1.0),
+        Err(Error::DtypeMismatch)
+    ));
+    assert!(matches!(
+        diagonal.scale_c64(Complex64::new(1.0, 1.0)),
+        Err(Error::DtypeMismatch)
+    ));
+}
+
+#[test]
+fn identity_compact_twist_shares_storage() {
+    // What: identity twists on bosonic/all-even compact spectra are O(1),
+    // while an odd fermionic sector still takes the compact O(r) value path.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::u1([(-1, 2), (2, 1)]),
+        Space::su2([(0, 2), (1, 1)]),
+        Space::fz2([(0, 3)]),
+    ] {
+        let diagonal = real_diagonal(&rt, &space, 841);
+        let twisted = diagonal.twist(&[0]).unwrap();
+        assert!(Arc::ptr_eq(&twisted.data, &diagonal.data));
+        assert_compact_unmaterialized(&diagonal);
+        assert_compact_unmaterialized(&twisted);
+    }
+
+    let odd = Space::fz2([(1, 3)]);
+    let diagonal = real_diagonal(&rt, &odd, 842);
+    let twisted = diagonal.twist(&[0]).unwrap();
+    assert!(!Arc::ptr_eq(&twisted.data, &diagonal.data));
+    assert_compact_unmaterialized(&diagonal);
+    assert_compact_unmaterialized(&twisted);
+}
+
+#[test]
+fn su3_compact_storage_ops_and_fallback_boundaries_are_explicit() {
+    // What: storage-local SU(3) operations and ordinary trace remain compact;
+    // norm still uses the generic block-semantic materialization boundary.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+    for dtype in [Dtype::F64, Dtype::C64] {
+        let source = Tensor::rand_with_seed(&rt, dtype, [&space], [&space], 851).unwrap();
+        let diagonal = source.svd_compact().unwrap().1;
+        let adjoint = diagonal.adjoint().unwrap();
+        let scaled = diagonal.scale(-0.5).unwrap();
+        let added = diagonal.add(&diagonal, 0.75, -0.5).unwrap();
+        for tensor in [&diagonal, &adjoint, &scaled, &added] {
+            assert_compact_unmaterialized(tensor);
+        }
+        assert!(Arc::ptr_eq(&adjoint.data, &diagonal.data));
+
+        let norm_input = diagonal.clone();
+        assert!(norm_input.materialized.get().is_none());
+        assert!(norm_input.norm().unwrap().is_finite());
+        assert!(norm_input.materialized.get().is_some());
+
+        let trace_input = diagonal.clone();
+        assert!(trace_input.materialized.get().is_none());
+        assert!(trace_input.tr().unwrap().to_c64().norm().is_finite());
+        assert!(trace_input.materialized.get().is_none());
     }
 }
 

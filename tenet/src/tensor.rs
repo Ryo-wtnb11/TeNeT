@@ -43,6 +43,9 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 
+mod diagonal;
+use diagonal::{axpby_dense_c64, axpby_dense_real, compact_inner, dense_inner};
+
 #[cfg(test)]
 thread_local! {
     static PERMUTE_PRE_REPLAY_POISON: std::cell::Cell<Option<bool>> =
@@ -147,9 +150,9 @@ pub enum Data {
     C64(Vec<Complex64>),
     /// Compact O(rank) diagonal storage for spectrum tensors (SVD `s`, eigh/eig
     /// `d`): only the per-sector diagonal values are held, not the dense
-    /// block-diagonal matrix (issue #55). Materialized into the equivalent dense
-    /// `F64`/`C64` on demand by [`Tensor::coupled_data`], so every existing value
-    /// consumer is unaffected. Never surfaces *from* `coupled_data`.
+    /// block-diagonal matrix (issue #55). Storage-local operations consume this
+    /// representation directly; dense-only operations use
+    /// [`Tensor::coupled_data`] as the explicit materialization boundary.
     Diagonal(DiagonalData),
     #[cfg(feature = "cuda")]
     CudaF64(Arc<CudaStorage>),
@@ -178,14 +181,11 @@ impl DiagonalData {
     /// values with their quantum dimensions. Why not reuse `trace_pairs`: that
     /// contraction API intentionally inserts orientation-dependent fermionic
     /// twists, while matrix trace uses TensorKit's positive trace formalism.
-    fn ordinary_trace<R>(&self, rule: &R) -> Complex64
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    {
+    fn ordinary_trace_with(&self, dim: impl Fn(SectorId) -> f64) -> Complex64 {
         let trace_real = |spectra: &[SectorSpectrum<f64>]| {
             spectra
                 .iter()
-                .map(|entry| entry.values.iter().sum::<f64>() * rule.dim_scalar(entry.sector))
+                .map(|entry| entry.values.iter().sum::<f64>() * dim(entry.sector))
                 .sum::<f64>()
         };
         match self {
@@ -194,9 +194,16 @@ impl DiagonalData {
             }
             Self::C64(spectra) => spectra
                 .iter()
-                .map(|entry| entry.values.iter().sum::<Complex64>() * rule.dim_scalar(entry.sector))
+                .map(|entry| entry.values.iter().sum::<Complex64>() * dim(entry.sector))
                 .sum(),
         }
+    }
+
+    fn ordinary_trace<R>(&self, rule: &R) -> Complex64
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        self.ordinary_trace_with(|sector| rule.dim_scalar(sector))
     }
 
     fn elementwise_product(&self, rhs: &Self) -> Option<Self> {
@@ -1708,9 +1715,9 @@ pub struct Tensor {
     // *adjoint* coupled space, so all metadata is correct with no data touched.
     space: Arc<UserBoundSpace>,
     // Shared behind `Arc` so a lazy adjoint (see `adjoint`) can point at the
-    // parent buffer with no copy; every value-read funnels through
-    // `coupled_data`, so nothing else observes the sharing. For a lazy adjoint
-    // this holds the *parent's* buffer in the parent's coupled layout.
+    // parent buffer with no copy. Dense consumers resolve that view through
+    // `coupled_data`; storage-aware operations inspect the representation
+    // directly. For a lazy adjoint this holds the parent's buffer and layout.
     data: Arc<Data>,
     // `Some(parent_space)` marks a lazy adjoint (TensorKit's `AdjointTensorMap`):
     // `data` is the parent's buffer and `parent_space` its coupled space, so the
@@ -2136,6 +2143,20 @@ impl Tensor {
         }
         self.reject_unwired_su3("Tensor::twist")?;
         let nout = self.codomain_rank();
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return with_user_rule!(self.space, rule, {
+                let sector_factor = |sector| {
+                    legs.iter()
+                        .map(|_| rule.twist_scalar(sector))
+                        .product::<f64>()
+                };
+                if diagonal.sectors_all(|sector| sector_factor(sector) == 1.0) {
+                    Ok(self.clone())
+                } else {
+                    Ok(self.with_diagonal(diagonal.scaled_by_sector(sector_factor)))
+                }
+            });
+        }
         // TensorKit `has_shared_twist` (`indexmanipulations.jl`): the twist is
         // the identity when every requested leg carries theta = 1 on every
         // block. Bosonic rules are all-theta=1 by construction (O(1)
@@ -2363,11 +2384,10 @@ impl Tensor {
         })
     }
 
-    /// The stored buffer resolved into this tensor's own coupled layout. The
-    /// single funnel through which every value-read observes the data, so a
-    /// lazy adjoint materializes its conjugate-transpose here exactly once
-    /// (memoized) without any other method being aware of it. Ordinary tensors
-    /// return the stored buffer directly.
+    /// Resolves the stored representation into this tensor's dense coupled
+    /// layout. Why not require every operation to call this: compact-aware
+    /// operations must preserve O(r) storage and therefore inspect
+    /// [`Data::Diagonal`] before reaching this dense fallback.
     fn coupled_data(&self) -> &Data {
         if let Some(parent_space) = &self.adjoint_source {
             return self
@@ -2375,9 +2395,8 @@ impl Tensor {
                 .get_or_init(|| Arc::new(self.materialize_adjoint(parent_space)))
                 .as_ref();
         }
-        // Compact diagonal storage materializes into its dense equivalent on
-        // first value-read (issue #55), memoized like the lazy-adjoint case, so
-        // no other method observes `Data::Diagonal`.
+        // Dense-only consumers materialize compact storage once. Storage-local
+        // operations branch before this boundary and retain the compact form.
         if let Data::Diagonal(diagonal) = self.data.as_ref() {
             return self
                 .materialized
@@ -2388,9 +2407,9 @@ impl Tensor {
     }
 
     /// A non-diagonal clone: `Data::Diagonal` materialized into its dense
-    /// equivalent, everything else shared by `Arc` (cheap). Used at the entry of
-    /// the binary ops that read the raw buffer (`contract`/`add`/`inner`), which
-    /// do not yet have a diagonal-aware scaling path (that is issue #55 PR2).
+    /// equivalent, everything else shared by `Arc` (cheap). Why not use this in
+    /// compact-aware arithmetic: it would recreate the O(r²) payload those
+    /// paths are designed to avoid.
     fn densified_if_diagonal(&self) -> Self {
         if !matches!(self.data.as_ref(), Data::Diagonal(_)) {
             return self.clone();
@@ -2405,9 +2424,9 @@ impl Tensor {
     }
 
     /// Rebuilds the dense block-diagonal buffer of a [`Data::Diagonal`] tensor in
-    /// its own (`space`) layout — the eager fallback for any consumer other than
-    /// a diagonal-aware scaling (issue #55). Reproduces the former dense diagonal
-    /// tensor bit-for-bit via [`tenet_matrixalgebra::diagonal_bond_data`].
+    /// its own (`space`) layout. This is the eager fallback for dense-only
+    /// consumers and reproduces the former dense diagonal tensor bit-for-bit via
+    /// [`tenet_matrixalgebra::diagonal_bond_data`].
     fn materialize_diagonal(&self, diagonal: &DiagonalData) -> Data {
         match diagonal {
             DiagonalData::RealF64(spectrum) => Data::F64(
@@ -2704,6 +2723,9 @@ impl Tensor {
     /// instead of panicking (#128). The recoverable counterpart of
     /// [`Self::to_c64`].
     pub fn try_to_c64(&self) -> Result<Self, Error> {
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(self.with_diagonal(diagonal.to_c64_storage()));
+        }
         let data = match self.coupled_data() {
             Data::F64(data) => Data::C64(
                 data.iter()
@@ -3912,6 +3934,21 @@ impl Tensor {
         // compile, rank-0 destination allocation, and kernel dispatch that the
         // former `trace_pairs` route paid to produce a single scalar.
         let nout = self.codomain_rank();
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            let value = if self.rule_kind() == RuleKind::Su3 {
+                let rule = self.su3_rule();
+                diagonal.ordinary_trace_with(|sector| {
+                    let sqrt = tenet_core::GenericRigidSymbols::sqrt_dim_scalar(rule, sector);
+                    sqrt * sqrt
+                })
+            } else {
+                with_user_rule!(self.space, rule, diagonal.ordinary_trace(rule))
+            };
+            return Ok(match diagonal {
+                DiagonalData::RealF64(_) => Scalar::F64(value.re),
+                DiagonalData::RealC64(_) | DiagonalData::C64(_) => Scalar::C64(value),
+            });
+        }
         // SU(N) (Generic): same block-local weighted trace through the
         // generic-dim sibling (mult-free `with_rule!` cannot host it).
         if self.rule_kind() == RuleKind::Su3 {
@@ -3925,15 +3962,6 @@ impl Tensor {
                 #[cfg(feature = "cuda")]
                 Data::CudaF64(_) => Err(device_unsupported("tr()")),
             };
-        }
-        if let Data::Diagonal(diagonal) = self.data.as_ref() {
-            return with_user_rule!(self.space, rule, {
-                let value = diagonal.ordinary_trace(rule);
-                Ok(match diagonal {
-                    DiagonalData::RealF64(_) => Scalar::F64(value.re),
-                    DiagonalData::RealC64(_) | DiagonalData::C64(_) => Scalar::C64(value),
-                })
-            });
         }
         match self.coupled_data() {
             Data::F64(data) => with_user_rule!(self.space, rule, {
@@ -3957,15 +3985,21 @@ impl Tensor {
     /// adjoint coupled space (O(blocks) metadata). A contraction folds the
     /// conjugate-transpose into its GEMM; any other consumer (`data`, `svd`, …)
     /// materializes it once, on demand, via the internal `coupled_data`.
+    /// Compact diagonal storage is handled directly and does not use this lazy
+    /// dense-adjoint route.
     pub fn adjoint(&self) -> Result<Self, Error> {
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(_) = self.data.as_ref() {
             return Err(device_unsupported("adjoint()"));
         }
-        // Materialize compact diagonal storage before taking a lazy adjoint, so
-        // the adjoint materialization path never has to handle it (issue #55).
-        if matches!(self.data.as_ref(), Data::Diagonal(_)) {
-            return self.densified_if_diagonal().adjoint();
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            // Why not use the lazy dense-adjoint wrapper: real compact spectra
+            // are self-adjoint and can share their Data Arc; only genuinely
+            // complex entries require an owned O(r) conjugated result.
+            return Ok(match diagonal {
+                DiagonalData::RealF64(_) | DiagonalData::RealC64(_) => self.clone(),
+                DiagonalData::C64(_) => self.with_diagonal(diagonal.conjugated_complex()?),
+            });
         }
         if let Some(parent_space) = &self.adjoint_source {
             // Involution: the adjoint of a lazy adjoint is the original parent,
@@ -4001,6 +4035,31 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.data.as_ref() {
             return Ok(self.weighted_inner_cuda(storage, storage)?.re.sqrt());
         }
+        if self.rule_kind() != RuleKind::Su3 {
+            if let Data::Diagonal(diagonal) = self.data.as_ref() {
+                let value = with_user_rule!(self.space, rule, {
+                    match diagonal {
+                        DiagonalData::RealF64(spectrum) => {
+                            compact_inner(rule, spectrum, spectrum, |value| value, |value| value)
+                        }
+                        DiagonalData::RealC64(spectrum) => compact_inner(
+                            rule,
+                            spectrum,
+                            spectrum,
+                            |value| Complex64::new(value, 0.0),
+                            |value| Complex64::new(value, 0.0),
+                        ),
+                        DiagonalData::C64(spectrum) => {
+                            compact_inner(rule, spectrum, spectrum, |value| value, |value| value)
+                        }
+                    }
+                })
+                .ok_or_else(|| {
+                    internal_layout_error("a diagonal spectrum is incompatible with itself")
+                })?;
+                return Ok(value.re.sqrt());
+            }
+        }
         // SU(N) (Generic): dedicated non-macro path — the Frobenius norm is a
         // storage-level block sum weighted by dim(c) = sqrt_dim(c)², so it needs
         // only `GenericRigidSymbols`, no contract. Sums over OM vertices.
@@ -4029,6 +4088,9 @@ impl Tensor {
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(_) = self.data.as_ref() {
             return Err(device_unsupported("norm_inf()"));
+        }
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(diagonal.max_abs());
         }
         match self.coupled_data() {
             Data::F64(data) => Ok(data.iter().map(|value| value.abs()).fold(0.0, f64::max)),
@@ -4069,6 +4131,9 @@ impl Tensor {
     /// [`Error::DtypeMismatch`] on f64 tensors (widen with
     /// [`Self::to_c64`] first).
     pub fn scale_c64(&self, factor: Complex64) -> Result<Self, Error> {
+        if let Data::Diagonal(diagonal) = self.data.as_ref() {
+            return Ok(self.with_diagonal(diagonal.scaled_c64(factor)?));
+        }
         match self.coupled_data() {
             Data::C64(data) => Ok(Self {
                 rt: self.rt.clone(),
@@ -4091,6 +4156,27 @@ impl Tensor {
     /// space and block layout) and store the same dtype.
     pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
         self.check_same_space(other)?;
+        match (self.diagonal_data(), other.diagonal_data()) {
+            (Some(lhs), Some(rhs)) => {
+                let data = lhs.axpby_real(rhs, alpha, beta).ok_or_else(|| {
+                    internal_layout_error("equal diagonal spaces carry incompatible spectra")
+                })?;
+                return Ok(self.with_diagonal(data));
+            }
+            (Some(diagonal), None) => {
+                // Why not materialize `diagonal`: the owned dense result is the
+                // only O(n²) allocation required by diagonal+dense addition.
+                let data =
+                    axpby_dense_real(&self.space, other.coupled_data(), diagonal, beta, alpha)?;
+                return Ok(self.with_same_data(data));
+            }
+            (None, Some(diagonal)) => {
+                let data =
+                    axpby_dense_real(&self.space, self.coupled_data(), diagonal, alpha, beta)?;
+                return Ok(self.with_same_data(data));
+            }
+            (None, None) => {}
+        }
         let data = match (self.coupled_data(), other.coupled_data()) {
             (Data::F64(a), Data::F64(b)) => Data::F64(
                 a.iter()
@@ -4123,6 +4209,25 @@ impl Tensor {
     /// tensors must be c64 (widen with [`Self::to_c64`] first).
     pub fn add_c64(&self, other: &Self, alpha: Complex64, beta: Complex64) -> Result<Self, Error> {
         self.check_same_space(other)?;
+        match (self.diagonal_data(), other.diagonal_data()) {
+            (Some(lhs), Some(rhs)) => {
+                let data = lhs
+                    .axpby_c64(rhs, alpha, beta)
+                    .ok_or(Error::DtypeMismatch)?;
+                return Ok(self.with_diagonal(data));
+            }
+            (Some(diagonal), None) => {
+                let data =
+                    axpby_dense_c64(&self.space, other.coupled_data(), diagonal, beta, alpha)?;
+                return Ok(self.with_same_data(data));
+            }
+            (None, Some(diagonal)) => {
+                let data =
+                    axpby_dense_c64(&self.space, self.coupled_data(), diagonal, alpha, beta)?;
+                return Ok(self.with_same_data(data));
+            }
+            (None, None) => {}
+        }
         match (self.coupled_data(), other.coupled_data()) {
             (Data::C64(a), Data::C64(b)) => Ok(Self {
                 rt: self.rt.clone(),
@@ -4152,6 +4257,94 @@ impl Tensor {
     pub fn inner(&self, other: &Self) -> Result<Scalar, Error> {
         self.check_same_space(other)?;
         self.reject_unwired_su3("Tensor::inner")?;
+        match (self.diagonal_data(), other.diagonal_data()) {
+            (Some(lhs), Some(rhs)) => {
+                let value = with_user_rule!(self.space, rule, {
+                    match (lhs, rhs) {
+                        (DiagonalData::RealF64(lhs), DiagonalData::RealF64(rhs)) => {
+                            compact_inner(rule, lhs, rhs, |value| value, |value| value)
+                                .map(|value| Scalar::F64(value.re))
+                        }
+                        (DiagonalData::RealC64(lhs), DiagonalData::RealC64(rhs)) => compact_inner(
+                            rule,
+                            lhs,
+                            rhs,
+                            |value| Complex64::new(value, 0.0),
+                            |value| Complex64::new(value, 0.0),
+                        )
+                        .map(Scalar::C64),
+                        (DiagonalData::RealC64(lhs), DiagonalData::C64(rhs)) => compact_inner(
+                            rule,
+                            lhs,
+                            rhs,
+                            |value| Complex64::new(value, 0.0),
+                            |value| value,
+                        )
+                        .map(Scalar::C64),
+                        (DiagonalData::C64(lhs), DiagonalData::RealC64(rhs)) => compact_inner(
+                            rule,
+                            lhs,
+                            rhs,
+                            |value| value,
+                            |value| Complex64::new(value, 0.0),
+                        )
+                        .map(Scalar::C64),
+                        (DiagonalData::C64(lhs), DiagonalData::C64(rhs)) => {
+                            compact_inner(rule, lhs, rhs, |value| value, |value| value)
+                                .map(Scalar::C64)
+                        }
+                        _ => None,
+                    }
+                })
+                .ok_or(Error::DtypeMismatch)?;
+                return Ok(value);
+            }
+            (Some(diagonal), None) => {
+                let value = with_user_rule!(self.space, rule, {
+                    match (diagonal, other.coupled_data()) {
+                        (DiagonalData::RealF64(spectrum), Data::F64(dense)) => {
+                            dense_inner(rule, &self.space, spectrum, dense, true, |value| value)
+                                .map(|value| Scalar::F64(value.re))
+                        }
+                        (DiagonalData::RealC64(spectrum), Data::C64(dense)) => {
+                            dense_inner(rule, &self.space, spectrum, dense, true, |value| {
+                                Complex64::new(value, 0.0)
+                            })
+                            .map(Scalar::C64)
+                        }
+                        (DiagonalData::C64(spectrum), Data::C64(dense)) => {
+                            dense_inner(rule, &self.space, spectrum, dense, true, |value| value)
+                                .map(Scalar::C64)
+                        }
+                        _ => Err(Error::DtypeMismatch),
+                    }
+                })?;
+                return Ok(value);
+            }
+            (None, Some(diagonal)) => {
+                let value = with_user_rule!(self.space, rule, {
+                    match (self.coupled_data(), diagonal) {
+                        (Data::F64(dense), DiagonalData::RealF64(spectrum)) => {
+                            dense_inner(rule, &self.space, spectrum, dense, false, |value| value)
+                                .map(|value| Scalar::F64(value.re))
+                        }
+                        (Data::C64(dense), DiagonalData::RealC64(spectrum)) => {
+                            dense_inner(rule, &self.space, spectrum, dense, false, |value| {
+                                Complex64::new(value, 0.0)
+                            })
+                            .map(Scalar::C64)
+                        }
+                        (Data::C64(dense), DiagonalData::C64(spectrum)) => {
+                            dense_inner(rule, &self.space, spectrum, dense, false, |value| value)
+                                .map(Scalar::C64)
+                        }
+                        _ => Err(Error::DtypeMismatch),
+                    }
+                })?;
+                return Ok(value);
+            }
+            (None, None) => {}
+        }
         match (self.coupled_data(), other.coupled_data()) {
             (Data::F64(a), Data::F64(b)) => with_user_rule!(self.space, rule, {
                 weighted_inner(rule, self.space.structure(), a, b).map(|v| Scalar::F64(v.re))
@@ -4363,14 +4556,15 @@ impl Tensor {
     /// Wraps a real per-sector spectrum (svd `S`, eigh `D`) as a diagonal-storage
     /// tensor: the bond space is built eagerly, but the values stay O(rank) in
     /// `Data::Diagonal` instead of a dense O(rank²) block-diagonal buffer (issue
-    /// #55). `complex` picks the materialized dtype so the on-demand dense buffer
-    /// matches the former dense `S` — a complex input yields a complex-valued but
-    /// real-magnitude `S` (`RealC64`), a real input a real `S` (`RealF64`).
+    /// #55). `complex` preserves the public dtype: a complex input yields a
+    /// complex-valued but real-magnitude `S` (`RealC64`), while a real input
+    /// yields `RealF64`.
     fn from_diagonal_real_spectrum(
         &self,
-        spectrum: Vec<SectorSpectrum<f64>>,
+        mut spectrum: Vec<SectorSpectrum<f64>>,
         complex: bool,
     ) -> Result<Self, Error> {
+        spectrum.sort_unstable_by_key(|entry| entry.sector);
         // SU(N) (Generic): the bond space is a rank-1/rank-1 hom whose trees
         // are trivial, but the key enumeration must still be the generic one.
         let space = if let UserBoundSpace::Su3(bound) = self.space.as_ref() {
@@ -4407,8 +4601,9 @@ impl Tensor {
     /// is always c64 and stays compact through block-local scaling/products.
     fn from_diagonal_complex_spectrum(
         &self,
-        spectrum: Vec<SectorSpectrum<Complex64>>,
+        mut spectrum: Vec<SectorSpectrum<Complex64>>,
     ) -> Result<Self, Error> {
+        spectrum.sort_unstable_by_key(|entry| entry.sector);
         with_bound_multiplicity_free!(self.space, bound, {
             let space = tenet_matrixalgebra::diagonal_bond_bound_space(
                 Arc::clone(bound.provider_arc()),
@@ -4427,6 +4622,16 @@ impl Tensor {
             rt: self.rt.clone(),
             space: Arc::clone(&self.space),
             data: Arc::new(D::lift(data)),
+            adjoint_source: None,
+            materialized: OnceLock::new(),
+        }
+    }
+
+    fn with_same_data(&self, data: Data) -> Self {
+        Self {
+            rt: self.rt.clone(),
+            space: Arc::clone(&self.space),
+            data: Arc::new(data),
             adjoint_source: None,
             materialized: OnceLock::new(),
         }
@@ -4475,7 +4680,8 @@ impl Tensor {
     }
 
     /// Folds the supertrace twist into compact values. Why not call `twist` on
-    /// the diagonal tensor: that path materializes diagonal storage first.
+    /// a temporary tensor: this helper already has the spectrum and avoids an
+    /// extra compact result allocation before contraction.
     fn twist_folded_diagonal(&self, diagonal: &DiagonalData, apply: bool) -> DiagonalData {
         if !apply {
             return diagonal.clone();
