@@ -3996,7 +3996,7 @@ mod tests {
     }
 
     #[test]
-    fn fusion_layout_lru_churn_and_reset_preserve_coupled_structure() {
+    fn fusion_layout_global_churn_and_reset_preserve_coupled_structure() {
         // What: cap overflow gives the rebuilt layout a fresh non-recycling id;
         // coupled content remains equal, and reset cannot stale-alias live old values.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -4019,50 +4019,18 @@ mod tests {
             );
             let _ = distinct.fusion_tree_keys(&rule);
         }
-        let saturated = fusion_tree_layout_cache_info();
-        assert_eq!(saturated.entries(), saturated.capacity());
-        assert!(saturated.estimated_payload_bytes() > 0);
-        assert!(saturated.evictions() > 0);
-        for charge in (FUSION_TREE_LAYOUT_CACHE_CAP as i32 + 65)
-            ..=(FUSION_TREE_LAYOUT_CACHE_CAP as i32 + 320)
-        {
-            let distinct = FusionTreeHomSpace::from_sectors(
-                [(U1Irrep::new(charge), 1)],
-                [(U1Irrep::new(charge), 1)],
-            );
-            let _ = distinct.fusion_tree_keys(&rule);
-        }
-        let plateau = fusion_tree_layout_cache_info();
-        assert_eq!(plateau.entries(), saturated.entries());
-        assert_eq!(
-            plateau.estimated_payload_bytes(),
-            saturated.estimated_payload_bytes()
-        );
+        let global_info = fusion_tree_layout_cache_info();
+        assert!(global_info.entries() <= global_info.entry_capacity());
+        assert!(global_info.charged_payload_bytes() <= global_info.byte_budget());
 
         let rebuilt_layout = hom.cached_fusion_tree_layout(&rule);
         assert!(rebuilt_layout.id > old_id);
-        let coupled_entries_before = coupled_block_structure_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len();
         let reused_structure = hom
             .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
             .unwrap();
-        let coupled_entries_after = coupled_block_structure_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len();
-        assert!(coupled_entries_after > coupled_entries_before);
         assert_eq!(old_structure.as_ref(), reused_structure.as_ref());
 
         reset_core_intern_tables();
-        assert_eq!(
-            fusion_tree_layout_cache_info(),
-            FusionTreeLayoutCacheInfo {
-                capacity: FUSION_TREE_LAYOUT_CACHE_CAP,
-                ..FusionTreeLayoutCacheInfo::default()
-            }
-        );
         let after_reset_layout = hom.cached_fusion_tree_layout(&rule);
         let after_reset_structure = hom
             .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
@@ -4071,6 +4039,78 @@ mod tests {
         assert!(after_reset_layout.id > rebuilt_layout.id);
         assert!(!Arc::ptr_eq(&old_structure, &after_reset_structure));
         assert_eq!(old_structure.as_ref(), after_reset_structure.as_ref());
+    }
+
+    fn local_u1_layout(
+        charge: i32,
+    ) -> (
+        Arc<FusionTreeHomSpaceCacheKey>,
+        Arc<FusionTreeHomSpaceLayout>,
+    ) {
+        let rule = U1FusionRule;
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(U1Irrep::new(charge), 1)],
+            [(U1Irrep::new(charge), 1)],
+        );
+        let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
+        let layout = Arc::new(fusion_tree_layout_from_keys(
+            &rule,
+            next_fusion_tree_layout_id(),
+            hom.fusion_tree_keys_uncached(&rule),
+        ));
+        (key, layout)
+    }
+
+    #[test]
+    fn fusion_layout_local_cache_is_strict_insertion_order_and_resets_exactly() {
+        // What: read hits do not promote FIFO order; entry eviction and reset
+        // update charged bytes and counters deterministically in isolated state.
+        let mut cache = FusionTreeLayoutCache::new(2, 100, 100);
+        let (key0, layout0) = local_u1_layout(40_000);
+        let (key1, layout1) = local_u1_layout(40_001);
+        let (key2, layout2) = local_u1_layout(40_002);
+        cache.admit(Arc::clone(&key0), layout0, 30);
+        cache.admit(Arc::clone(&key1), layout1, 30);
+        assert!(cache.lookup(&key0).is_some());
+        cache.admit(Arc::clone(&key2), layout2, 30);
+
+        assert!(cache.lookup(&key0).is_none());
+        assert!(cache.lookup(&key1).is_some());
+        assert!(cache.lookup(&key2).is_some());
+        assert_eq!(cache.info().entries(), 2);
+        assert_eq!(cache.info().charged_payload_bytes(), 60);
+        assert_eq!(cache.info().evictions(), 1);
+
+        cache.clear();
+        assert_eq!(cache.info().entries(), 0);
+        assert_eq!(cache.info().charged_payload_bytes(), 0);
+        assert_eq!(cache.info().misses(), 0);
+        assert_eq!(cache.info().evictions(), 0);
+        assert_eq!(cache.info().admission_bypasses(), 0);
+    }
+
+    #[test]
+    fn fusion_layout_local_cache_enforces_byte_and_max_entry_admission() {
+        // What: charged-byte pressure evicts oldest entries, while an oversized
+        // entry is returned to its caller but never retained by the cache.
+        let mut cache = FusionTreeLayoutCache::new(8, 50, 40);
+        let (key0, layout0) = local_u1_layout(50_000);
+        let (key1, layout1) = local_u1_layout(50_001);
+        let (oversized_key, oversized_layout) = local_u1_layout(50_002);
+        cache.admit(Arc::clone(&key0), layout0, 30);
+        cache.admit(Arc::clone(&key1), layout1, 30);
+
+        assert!(cache.lookup(&key0).is_none());
+        assert!(cache.lookup(&key1).is_some());
+        assert_eq!(cache.info().charged_payload_bytes(), 30);
+        assert_eq!(cache.info().evictions(), 1);
+
+        let returned = cache.admit(Arc::clone(&oversized_key), Arc::clone(&oversized_layout), 41);
+        assert!(Arc::ptr_eq(&returned, &oversized_layout));
+        assert!(cache.lookup(&oversized_key).is_none());
+        assert_eq!(cache.info().entries(), 1);
+        assert_eq!(cache.info().charged_payload_bytes(), 30);
+        assert_eq!(cache.info().admission_bypasses(), 1);
     }
 
     #[test]

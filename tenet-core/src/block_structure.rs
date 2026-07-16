@@ -1096,7 +1096,7 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
     structure
 }
 
-/// Clears the LRU-capped tenet-core intern tables — block-structure content,
+/// Clears the bounded tenet-core intern tables — block-structure content,
 /// block-structure `Arc` dedup, fusion-tree layouts, and coupled subblock
 /// structures. Chained from tenet-tensors' `reset_global_operation_caches` so a
 /// long-lived / multi-tenant process can release the tables between workloads.

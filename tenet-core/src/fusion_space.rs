@@ -167,30 +167,147 @@ struct CoupledBlockStructureCacheKey {
     shapes: Arc<[DimVec]>,
 }
 
+#[derive(Clone)]
+struct FusionTreeLayoutCacheEntry {
+    layout: Arc<FusionTreeHomSpaceLayout>,
+    charged_bytes: usize,
+}
+
+/// Bounded insertion-order cache with a one-entry last-inserted front.
+/// Lookups never promote an entry; eviction always removes the oldest admitted
+/// entry, so this policy is FIFO rather than LRU.
 struct FusionTreeLayoutCache {
     entries: lru::LruCache<
-        FusionTreeHomSpaceCacheKey,
-        Arc<FusionTreeHomSpaceLayout>,
+        Arc<FusionTreeHomSpaceCacheKey>,
+        FusionTreeLayoutCacheEntry,
         rustc_hash::FxBuildHasher,
     >,
-    // Why-not route every hit through LruCache: its linked-list/hash wrapper
-    // regressed the repeated small-layout path past the 3% gate. This bounded
-    // one-entry semantic front avoids pointer authority and preserves that path.
-    last: Option<(FusionTreeHomSpaceCacheKey, Arc<FusionTreeHomSpaceLayout>)>,
+    // Why-not route the repeated hit through LruCache: even `peek` regressed
+    // the small-layout gate. This front shares the entry key/value Arcs and is
+    // replaced only on insertion; it neither adds pointer authority nor claims
+    // to implement read-recency.
+    last: Option<(
+        Arc<FusionTreeHomSpaceCacheKey>,
+        Arc<FusionTreeHomSpaceLayout>,
+    )>,
+    entry_capacity: usize,
+    byte_budget: usize,
+    max_entry_bytes: usize,
+    charged_payload_bytes: usize,
+    misses: usize,
+    evictions: usize,
+    admission_bypasses: usize,
 }
 
 const FUSION_TREE_LAYOUT_CACHE_CAP: usize = 8192;
+const FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+const FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 
-static FUSION_TREE_LAYOUT_CACHE_MISSES: AtomicUsize = AtomicUsize::new(0);
-static FUSION_TREE_LAYOUT_CACHE_EVICTIONS: AtomicUsize = AtomicUsize::new(0);
+impl FusionTreeLayoutCache {
+    fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
+        assert!(entry_capacity > 0, "fusion-tree layout cache capacity must be positive");
+        Self {
+            entries: lru::LruCache::with_hasher(
+                std::num::NonZeroUsize::new(entry_capacity).unwrap(),
+                rustc_hash::FxBuildHasher,
+            ),
+            last: None,
+            entry_capacity,
+            byte_budget,
+            max_entry_bytes,
+            charged_payload_bytes: 0,
+            misses: 0,
+            evictions: 0,
+            admission_bypasses: 0,
+        }
+    }
 
+    fn lookup(
+        &self,
+        key: &FusionTreeHomSpaceCacheKey,
+    ) -> Option<Arc<FusionTreeHomSpaceLayout>> {
+        if let Some((_, layout)) = self.last.as_ref().filter(|(last, _)| last.as_ref() == key) {
+            return Some(Arc::clone(layout));
+        }
+        self.entries
+            .peek(key)
+            .map(|entry| Arc::clone(&entry.layout))
+    }
+
+    fn admit(
+        &mut self,
+        key: Arc<FusionTreeHomSpaceCacheKey>,
+        layout: Arc<FusionTreeHomSpaceLayout>,
+        charged_bytes: usize,
+    ) -> Arc<FusionTreeHomSpaceLayout> {
+        if let Some(existing) = self.entries.peek(key.as_ref()) {
+            return Arc::clone(&existing.layout);
+        }
+        self.misses = self.misses.saturating_add(1);
+        if charged_bytes > self.max_entry_bytes || charged_bytes > self.byte_budget {
+            self.admission_bypasses = self.admission_bypasses.saturating_add(1);
+            return layout;
+        }
+        while self.entries.len() == self.entry_capacity
+            || self
+                .charged_payload_bytes
+                .saturating_add(charged_bytes)
+                > self.byte_budget
+        {
+            let Some((_, evicted)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.charged_payload_bytes = self
+                .charged_payload_bytes
+                .saturating_sub(evicted.charged_bytes);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+        self.charged_payload_bytes = self.charged_payload_bytes.saturating_add(charged_bytes);
+        self.last = Some((Arc::clone(&key), Arc::clone(&layout)));
+        self.entries.put(
+            key,
+            FusionTreeLayoutCacheEntry {
+                layout: Arc::clone(&layout),
+                charged_bytes,
+            },
+        );
+        layout
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.last = None;
+        self.charged_payload_bytes = 0;
+        self.misses = 0;
+        self.evictions = 0;
+        self.admission_bypasses = 0;
+    }
+
+    fn info(&self) -> FusionTreeLayoutCacheInfo {
+        FusionTreeLayoutCacheInfo {
+            entries: self.entries.len(),
+            entry_capacity: self.entry_capacity,
+            charged_payload_bytes: self.charged_payload_bytes,
+            byte_budget: self.byte_budget,
+            max_entry_bytes: self.max_entry_bytes,
+            misses: self.misses,
+            evictions: self.evictions,
+            admission_bypasses: self.admission_bypasses,
+        }
+    }
+}
+
+/// Snapshot of the bounded FIFO fusion-layout cache accounting state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FusionTreeLayoutCacheInfo {
     entries: usize,
-    capacity: usize,
-    estimated_payload_bytes: usize,
+    entry_capacity: usize,
+    charged_payload_bytes: usize,
+    byte_budget: usize,
+    max_entry_bytes: usize,
     misses: usize,
     evictions: usize,
+    admission_bypasses: usize,
 }
 
 impl FusionTreeLayoutCacheInfo {
@@ -198,16 +315,23 @@ impl FusionTreeLayoutCacheInfo {
         self.entries
     }
 
-    pub fn capacity(self) -> usize {
-        self.capacity
+    pub fn entry_capacity(self) -> usize {
+        self.entry_capacity
     }
 
-    /// Approximate heap payload owned by keys and layouts.
+    /// Conservative payload charge used for cache admission and eviction.
     ///
-    /// Hash-table buckets and allocator bookkeeping are excluded because their
-    /// byte cost is allocator-specific and cannot be reported portably here.
-    pub fn estimated_payload_bytes(self) -> usize {
-        self.estimated_payload_bytes
+    /// This is an accounting contract, not allocator-observed resident bytes.
+    pub fn charged_payload_bytes(self) -> usize {
+        self.charged_payload_bytes
+    }
+
+    pub fn byte_budget(self) -> usize {
+        self.byte_budget
+    }
+
+    pub fn max_entry_bytes(self) -> usize {
+        self.max_entry_bytes
     }
 
     pub fn misses(self) -> usize {
@@ -217,66 +341,111 @@ impl FusionTreeLayoutCacheInfo {
     pub fn evictions(self) -> usize {
         self.evictions
     }
+
+    pub fn admission_bypasses(self) -> usize {
+        self.admission_bypasses
+    }
 }
 
 fn fusion_tree_layout_cache() -> &'static RwLock<FusionTreeLayoutCache> {
     static CACHE: OnceLock<RwLock<FusionTreeLayoutCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        RwLock::new(FusionTreeLayoutCache {
-            entries: lru::LruCache::with_hasher(
-                std::num::NonZeroUsize::new(FUSION_TREE_LAYOUT_CACHE_CAP).unwrap(),
-                rustc_hash::FxBuildHasher,
-            ),
-            last: None,
-        })
+        RwLock::new(FusionTreeLayoutCache::new(
+            FUSION_TREE_LAYOUT_CACHE_CAP,
+            FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET,
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
+        ))
     })
 }
 
+/// Returns entry and charged-payload bounds for the process-global layout cache.
 pub fn fusion_tree_layout_cache_info() -> FusionTreeLayoutCacheInfo {
     let cache = fusion_tree_layout_cache()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let estimated_payload_bytes = cache
-        .entries
-        .iter()
-        .map(|(identity, layout)| {
-            let layout_bytes = std::mem::size_of::<FusionTreeHomSpaceLayout>()
-                + layout.keys.len() * std::mem::size_of::<FusionTreeBlockKey>()
-                + layout.sectors.len() * std::mem::size_of::<FusionTreeCoupledSectorLayout>()
-                + layout
-                    .sectors
-                    .iter()
-                    .map(|sector| {
-                        sector.entries.len() * std::mem::size_of::<FusionTreeBlockLayoutEntry>()
-                    })
-                    .sum::<usize>();
-            estimated_fusion_tree_layout_key_bytes(identity) + layout_bytes
-        })
-        .sum::<usize>()
-        + cache.last.as_ref().map_or(0, |(identity, _)| {
-            std::mem::size_of::<Arc<FusionTreeHomSpaceLayout>>()
-                + estimated_fusion_tree_layout_key_bytes(identity)
-        });
-    FusionTreeLayoutCacheInfo {
-        entries: cache.entries.len(),
-        capacity: FUSION_TREE_LAYOUT_CACHE_CAP,
-        estimated_payload_bytes,
-        misses: FUSION_TREE_LAYOUT_CACHE_MISSES.load(Ordering::Relaxed),
-        evictions: FUSION_TREE_LAYOUT_CACHE_EVICTIONS.load(Ordering::Relaxed),
-    }
+    cache.info()
 }
 
-fn estimated_fusion_tree_layout_key_bytes(identity: &FusionTreeHomSpaceCacheKey) -> usize {
-    std::mem::size_of::<FusionTreeHomSpaceCacheKey>()
-        + identity
-            .codomain
-            .iter()
-            .chain(identity.domain.iter())
-            .map(|leg| {
-                std::mem::size_of::<FusionTreeLegSetSignature>()
-                    + leg.sectors.len() * std::mem::size_of::<SectorId>()
-            })
-            .sum::<usize>()
+fn charged_fusion_tree_layout_bytes(
+    identity: &FusionTreeHomSpaceCacheKey,
+    layout: &FusionTreeHomSpaceLayout,
+) -> usize {
+    let key_bytes = identity
+        .codomain
+        .iter()
+        .chain(identity.domain.iter())
+        .fold(
+            std::mem::size_of::<FusionTreeHomSpaceCacheKey>()
+                .saturating_add(
+                    identity
+                        .codomain
+                        .capacity()
+                        .saturating_add(identity.domain.capacity())
+                        .saturating_mul(std::mem::size_of::<FusionTreeLegSetSignature>()),
+                ),
+            |charged, leg| {
+                charged.saturating_add(
+                    leg.sectors
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<SectorId>()),
+                )
+            },
+        );
+    let tree_bytes = layout
+        .keys
+        .iter()
+        .map(|key| {
+            [key.codomain_tree(), key.domain_tree()]
+                .iter()
+                .map(|tree| {
+                    std::mem::size_of::<FusionTreeKey>()
+                        .saturating_add(
+                            tree.uncoupled
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<SectorId>()),
+                        )
+                        .saturating_add(
+                            tree.is_dual
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<bool>()),
+                        )
+                        .saturating_add(
+                            tree.innerlines
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<SectorId>()),
+                        )
+                        .saturating_add(
+                            tree.vertices
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<SectorId>()),
+                        )
+                })
+                .fold(0usize, usize::saturating_add)
+        })
+        .fold(0usize, usize::saturating_add);
+    let sector_bytes = layout
+        .sectors
+        .iter()
+        .fold(
+            layout
+                .sectors
+                .capacity()
+                .saturating_mul(std::mem::size_of::<FusionTreeCoupledSectorLayout>()),
+            |charged, sector| {
+                charged.saturating_add(
+                    sector
+                        .entries
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<FusionTreeBlockLayoutEntry>()),
+                )
+            },
+        );
+    key_bytes
+        .saturating_add(std::mem::size_of::<FusionTreeLayoutCacheEntry>())
+        .saturating_add(std::mem::size_of::<FusionTreeHomSpaceLayout>())
+        .saturating_add(tree_bytes)
+        .saturating_add(sector_bytes)
+        .saturating_add(8 * std::mem::size_of::<usize>())
 }
 
 type CoupledBlockStructureCache =
@@ -296,15 +465,12 @@ fn reset_fusion_tree_layout_caches() {
     let mut layouts = fusion_tree_layout_cache()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    layouts.entries.clear();
-    layouts.last = None;
+    layouts.clear();
     drop(layouts);
     coupled_block_structure_cache()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
-    FUSION_TREE_LAYOUT_CACHE_MISSES.store(0, Ordering::Relaxed);
-    FUSION_TREE_LAYOUT_CACHE_EVICTIONS.store(0, Ordering::Relaxed);
 }
 
 /// Process-global intern id for a fusion hom space. [`FusionTreeHomSpace::id`]
@@ -705,33 +871,22 @@ impl FusionTreeHomSpace {
         let read = cache
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((_, layout)) = read.last.as_ref().filter(|(last, _)| last == &key) {
-            return Arc::clone(layout);
-        }
-        if let Some(layout) = read.entries.peek(&key) {
-            return Arc::clone(layout);
+        if let Some(layout) = read.lookup(&key) {
+            return layout;
         }
         drop(read);
 
+        let key = Arc::new(key);
         let computed = Arc::new(fusion_tree_layout_from_keys(
             rule,
             next_fusion_tree_layout_id(),
             self.fusion_tree_keys_uncached(rule),
         ));
+        let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
         let mut write = cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(layout) = write.entries.get(&key).map(Arc::clone) {
-            write.last = Some((key, Arc::clone(&layout)));
-            return layout;
-        }
-        FUSION_TREE_LAYOUT_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-        if write.entries.len() == FUSION_TREE_LAYOUT_CACHE_CAP {
-            FUSION_TREE_LAYOUT_CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
-        }
-        write.last = Some((key.clone(), Arc::clone(&computed)));
-        write.entries.put(key, Arc::clone(&computed));
-        computed
+        write.admit(key, computed, charged_bytes)
     }
 
     pub fn coupled_subblock_structure<R, Shapes>(
