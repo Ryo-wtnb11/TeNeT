@@ -1,0 +1,26 @@
+name: Cache gmp-mpfr-sys
+description: Reuse the native exact-arithmetic build across CI runs
+runs:
+  using: composite
+  steps:
+    - id: fingerprints
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustc_fingerprint="$(rustc -Vv | shasum -a 256 | cut -d' ' -f1)"
+        manifest_fingerprint="$(
+          {
+            if [ -f tenet/Cargo.lock ]; then
+              shasum -a 256 tenet/Cargo.lock
+            fi
+            find tenet -name Cargo.toml -type f -print \
+              | LC_ALL=C sort \
+              | while IFS= read -r manifest; do shasum -a 256 "$manifest"; done
+          } | shasum -a 256 | cut -d' ' -f1
+        )"
+        echo "rustc=$rustc_fingerprint" >> "$GITHUB_OUTPUT"
+        echo "manifests=$manifest_fingerprint" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.cache/gmp-mpfr-sys
+        key: gmp-mpfr-sys-${{ runner.os }}-${{ steps.fingerprints.outputs.rustc }}-${{ steps.fingerprints.outputs.manifests }}
