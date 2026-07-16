@@ -3774,6 +3774,9 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
 
 #[test]
 fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su2_recoupling() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let left_rule = FpU1Rule::default();
     let rule = FpU1Su2Rule::default();
     let even = SectorId::new(0);
@@ -3793,8 +3796,8 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
 
     let lhs_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([
-            SectorLeg::new([(a, 1)], false),
-            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(a, 1)], true),
+            SectorLeg::new([(b, 1)], true),
         ]),
         FusionProductSpace::new([SectorLeg::new([(c0, 1), (c1, 1)], false)]),
     );
@@ -3808,49 +3811,44 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
     );
     let dst_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([
+            SectorLeg::new([(a, 1)], true),
             SectorLeg::new([(a, 1)], false),
-            SectorLeg::new([(a, 1)], false),
-            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(b, 1)], true),
             SectorLeg::new([(b, 1)], false),
         ]),
         FusionProductSpace::new(Vec::<SectorLeg>::new()),
     );
     let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
-        lhs_hom,
+        lhs_hom.clone(),
         &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
     let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
-        rhs_hom,
+        rhs_hom.clone(),
         &rule,
         [vec![1, 1, 1], vec![1, 1, 1]],
     )
     .unwrap();
     let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
-        dst_hom,
+        dst_hom.clone(),
         &rule,
         [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
     )
     .unwrap();
-    let lhs = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
-        vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)],
-        lhs_space,
-    )
-    .unwrap();
-    let rhs = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(
-        vec![Complex64::new(-2.0, 0.5), Complex64::new(4.0, 3.0)],
-        rhs_space,
-    )
-    .unwrap();
-    let mut dst = TensorMap::<Complex64, 4, 0>::from_vec_with_fusion_space(
-        vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)],
-        dst_space,
-    )
-    .unwrap();
+    let lhs_data = vec![Complex64::new(1.0, 2.0), Complex64::new(3.0, -1.0)];
+    let rhs_data = vec![Complex64::new(-2.0, 0.5), Complex64::new(4.0, 3.0)];
+    let initial_dst = vec![Complex64::new(5.0, 1.0), Complex64::new(-2.0, 4.0)];
+    let lhs = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space)
+        .unwrap();
+    let rhs = TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space)
+        .unwrap();
+    let mut dst =
+        TensorMap::<Complex64, 4, 0>::from_vec_with_fusion_space(initial_dst.clone(), dst_space)
+            .unwrap();
     let alpha = Complex64::new(2.0, -0.25);
     let beta = Complex64::new(-1.0, 0.5);
     let axes = TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 2, 1, 3]));
@@ -3866,6 +3864,66 @@ fn tensorcontract_fusion_product_fz2_u1_su2_contracts_component_channels_with_su
             (actual - expected).norm() < 1.0e-12,
             "actual {actual} expected {expected}"
         );
+    }
+
+    let expected_structure = std::sync::Arc::clone(dst.structure());
+    let rebuild_and_contract = || {
+        let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+            lhs_hom.clone(),
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap(),
+            rhs_hom.clone(),
+            &rule,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+            dst_hom.clone(),
+            &rule,
+            [vec![1, 1, 1, 1], vec![1, 1, 1, 1]],
+        )
+        .unwrap();
+        let rebuilt_lhs =
+            TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_space)
+                .unwrap();
+        let rebuilt_rhs =
+            TensorMap::<Complex64, 3, 0>::from_vec_with_fusion_space(rhs_data.clone(), rhs_space)
+                .unwrap();
+        let mut rebuilt_dst = TensorMap::<Complex64, 4, 0>::from_vec_with_fusion_space(
+            initial_dst.clone(),
+            dst_space,
+        )
+        .unwrap();
+        tensorcontract_fusion_into(
+            &rule,
+            &mut rebuilt_dst,
+            &rebuilt_lhs,
+            &rebuilt_rhs,
+            axes,
+            alpha,
+            beta,
+        )
+        .unwrap();
+        rebuilt_dst
+    };
+
+    force_fusion_layout_eviction();
+    let after_eviction = rebuild_and_contract();
+    assert_eq!(after_eviction.structure(), &expected_structure);
+    for (&actual, &expected) in after_eviction.data().iter().zip(&expected) {
+        assert!((actual - expected).norm() < 1.0e-12);
+    }
+    reset_global_operation_caches();
+    let after_reset = rebuild_and_contract();
+    assert_eq!(after_reset.structure(), &expected_structure);
+    for (&actual, &expected) in after_reset.data().iter().zip(&expected) {
+        assert!((actual - expected).norm() < 1.0e-12);
     }
 }
 
