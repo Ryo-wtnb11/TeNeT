@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    FermionParityFusionRule, FusionRule, ProductFusionRule, ProductSectorCodec, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su3FusionRule, TensorKitProductCodec,
-    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    FermionParityFusionRule, FusionRule, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
+    ProductSectorCodec, ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule,
+    Z2Irrep,
 };
 
 use crate::error::Error;
@@ -75,9 +76,17 @@ pub(crate) enum RuleKind {
     Su3,
 }
 
-pub(crate) type U1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule>;
-pub(crate) type Fz2U1Su2Rule =
-    ProductFusionRule<ProductFusionRule<FermionParityFusionRule, U1FusionRule>, SU2FusionRule>;
+type U1Fz2Codec = PackedProductCodec<U1SectorLayout, Fz2SectorLayout>;
+type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+
+// Why not use the default Cantor codec for built-in spaces: nested IDs lose
+// most of the i32 U1 domain and every algebra call pays magnitude-dependent
+// inverse pairing. The expert ProductFusionRule default remains unchanged.
+pub(crate) type U1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule, U1Fz2Codec>;
+type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+pub(crate) type Fz2U1Su2Rule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, Fz2U1Su2Codec>;
 
 #[derive(Clone, Debug)]
 pub(crate) enum UserRuleContext {
@@ -365,8 +374,15 @@ impl Space {
     }
 
     /// U(1) x fermion-parity product space from `((charge, parity),
-    /// degeneracy)` pairs, using the TensorKit product-sector encoding
-    /// ([`tenet_core::TensorKitProductCodec`]).
+    /// degeneracy)` pairs, using the association-independent packed
+    /// product-sector encoding.
+    ///
+    /// Internal numeric IDs intentionally differ from the earlier 0.1
+    /// Cantor-coded built-in IDs. Labels and algebraic semantics are unchanged;
+    /// raw `usize` sector IDs are not a stable wire format.
+    ///
+    /// The packed layout requires a 64-bit target. Narrower targets return
+    /// [`Error::InvalidArgument`] instead of truncating a component.
     ///
     /// TensorKit equivalent: `Vect[U1Irrep ⊠ FermionParity]`.
     pub fn product<I>(sectors: I) -> Result<Self, Error>
@@ -376,14 +392,15 @@ impl Space {
         let sectors = sectors
             .into_iter()
             .map(|((charge, parity), deg)| {
-                TensorKitProductCodec::try_encode(
+                U1Fz2Codec::encode_checked(
                     U1Irrep::new(charge).sector_id(),
                     SectorId::new(usize::from(parity & 1)),
                 )
                 .map(|sector| (sector, deg))
-                .ok_or_else(|| {
+                .map_err(|error| {
                     Error::InvalidArgument(format!(
-                        "product sector ({charge}, {parity}) does not fit the sector-id encoding"
+                        "product sector ({charge}, {parity}) does not fit the packed \
+                         sector-id encoding: {error}"
                     ))
                 })
             })
@@ -399,8 +416,15 @@ impl Space {
 
     /// fZ2 x U(1) x SU(2) triple-product space from `((parity, charge,
     /// twice_spin), degeneracy)` pairs (`parity`: `0` even / `1` odd,
-    /// `twice_spin = 2j`), left-associated as `(fZ2 ⊠ U1) ⊠ SU2` with the
-    /// TensorKit product-sector encoding applied pairwise.
+    /// `twice_spin = 2j`), encoded with the association-independent packed
+    /// product layout `fZ2[1] | U1[32] | SU2[8]`.
+    ///
+    /// Internal numeric IDs intentionally differ from the earlier 0.1
+    /// Cantor-coded built-in IDs. Labels and algebraic semantics are unchanged;
+    /// raw `usize` sector IDs are not a stable wire format.
+    ///
+    /// The packed layout requires a 64-bit target. Narrower targets return
+    /// [`Error::InvalidArgument`] instead of truncating a component.
     ///
     /// TensorKit equivalent: `Vect[FermionParity ⊠ Irrep[U₁] ⊠ Irrep[SU₂]]`.
     pub fn fz2_u1_su2<I>(sectors: I) -> Result<Self, Error>
@@ -410,21 +434,22 @@ impl Space {
         let sectors = sectors
             .into_iter()
             .map(|((parity, charge, twice_spin), deg)| {
-                TensorKitProductCodec::try_encode(
+                let spin = SU2Irrep::try_from_twice_spin(twice_spin).ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "product sector ({parity}, {charge}, {twice_spin}) exceeds the \
+                         supported SU(2) doubled-spin maximum 254"
+                    ))
+                })?;
+                Fz2U1Codec::encode_checked(
                     SectorId::new(usize::from(parity & 1)),
                     U1Irrep::new(charge).sector_id(),
                 )
-                .and_then(|inner| {
-                    TensorKitProductCodec::try_encode(
-                        inner,
-                        SU2Irrep::from_twice_spin(twice_spin).sector_id(),
-                    )
-                })
+                .and_then(|inner| Fz2U1Su2Codec::encode_checked(inner, spin.sector_id()))
                 .map(|sector| (sector, deg))
-                .ok_or_else(|| {
+                .map_err(|error| {
                     Error::InvalidArgument(format!(
                         "product sector ({parity}, {charge}, {twice_spin}) does not fit the \
-                         sector-id encoding"
+                         packed sector-id encoding: {error}"
                     ))
                 })
             })
@@ -532,8 +557,8 @@ impl Space {
                 twice_spin: SU2Irrep::from_sector_id(sector).twice_spin(),
             },
             RuleKind::U1FZ2 => {
-                let (u1, fz2) =
-                    TensorKitProductCodec::decode(sector).expect("invalid product sector id");
+                let (u1, fz2) = U1Fz2Codec::decode_checked(sector)
+                    .expect("invalid built-in packed product sector id");
                 SectorLabel::U1FZ2 {
                     charge: U1Irrep::from_sector_id(u1)
                         .expect("invalid U1 sector id")
@@ -542,10 +567,10 @@ impl Space {
                 }
             }
             RuleKind::FZ2U1SU2 => {
-                let (inner, su2) =
-                    TensorKitProductCodec::decode(sector).expect("invalid product sector id");
-                let (fz2, u1) =
-                    TensorKitProductCodec::decode(inner).expect("invalid product sector id");
+                let (inner, su2) = Fz2U1Su2Codec::decode_checked(sector)
+                    .expect("invalid built-in packed product sector id");
+                let (fz2, u1) = Fz2U1Codec::decode_checked(inner)
+                    .expect("invalid built-in packed product component");
                 SectorLabel::FZ2U1SU2 {
                     parity: fz2.id() as u8,
                     charge: U1Irrep::from_sector_id(u1)
@@ -575,12 +600,10 @@ impl Space {
             (RuleKind::SU2, SectorLabel::SU2 { twice_spin }) => {
                 Some(SU2Irrep::from_twice_spin(twice_spin).sector_id())
             }
-            (RuleKind::U1FZ2, SectorLabel::U1FZ2 { charge, parity }) => {
-                TensorKitProductCodec::try_encode(
-                    U1Irrep::new(charge).sector_id(),
-                    SectorId::new(usize::from(parity & 1)),
-                )
-            }
+            (RuleKind::U1FZ2, SectorLabel::U1FZ2 { charge, parity }) => U1Fz2Codec::try_encode(
+                U1Irrep::new(charge).sector_id(),
+                SectorId::new(usize::from(parity & 1)),
+            ),
             (
                 RuleKind::FZ2U1SU2,
                 SectorLabel::FZ2U1SU2 {
@@ -588,15 +611,12 @@ impl Space {
                     charge,
                     twice_spin,
                 },
-            ) => TensorKitProductCodec::try_encode(
-                SectorId::new(usize::from(parity & 1)),
-                U1Irrep::new(charge).sector_id(),
-            )
-            .and_then(|inner| {
-                TensorKitProductCodec::try_encode(
-                    inner,
-                    SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+            ) => SU2Irrep::try_from_twice_spin(twice_spin).and_then(|spin| {
+                Fz2U1Codec::try_encode(
+                    SectorId::new(usize::from(parity & 1)),
+                    U1Irrep::new(charge).sector_id(),
                 )
+                .and_then(|inner| Fz2U1Su2Codec::try_encode(inner, spin.sector_id()))
             }),
             _ => None,
         }

@@ -168,6 +168,10 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - BLAS/LAPACK backend choices can change floating-point and decomposition gauge
   behavior. Numerical parity-sensitive workflows should pin and test the chosen
   backend.
+- `SectorId`, raw block order, and seeded random storage are internal
+  representations rather than cross-version formats. See
+  [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md) for the
+  packed product-sector migration and cache/fixture guidance.
 
 ## Documentation Map
 
@@ -181,6 +185,9 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   TensorKit user.
 - [`docs/user_api_design.md`](docs/user_api_design.md): API design notes and
   TensorKit vocabulary alignment.
+- [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md):
+  `SectorId`, product-codec, storage-order, seeded-random, and cache
+  compatibility contract.
 - [`docs/tensorkit_compatibility_table.md`](docs/tensorkit_compatibility_table.md):
   internal naming and compatibility table.
 - [`docs/backend_policy.md`](docs/backend_policy.md): selectable dense

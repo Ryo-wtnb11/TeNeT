@@ -720,12 +720,16 @@ fn leg_pairing_rules_on_asymmetric_charges() {
 // ---------------------------------------------------------------------------
 
 use tenet::core::{
-    FermionParityFusionRule, FusionRule, MultiplicityFreeRigidSymbols, ProductFusionRule,
-    ProductSectorCodec, SU2FusionRule, SU2Irrep, TensorKitProductCodec,
+    FermionParityFusionRule, FusionRule, Fz2SectorLayout, MultiplicityFreeRigidSymbols,
+    PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule,
+    SU2Irrep, Su2SectorLayout, U1SectorLayout,
 };
 
-type TripleRule =
-    ProductFusionRule<ProductFusionRule<FermionParityFusionRule, U1FusionRule>, SU2FusionRule>;
+type FpU1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+type FpU1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, FpU1Codec>;
+type TripleCodec = PackedProductCodec<FpU1Layout, Su2SectorLayout>;
+type TripleRule = ProductFusionRule<FpU1Rule, SU2FusionRule, TripleCodec>;
 
 fn triple_rule() -> TripleRule {
     ProductFusionRule::new(
@@ -736,11 +740,11 @@ fn triple_rule() -> TripleRule {
 
 /// Packed sector id of `(parity ⊠ charge ⊠ twice_spin)`, left-associated.
 fn triple_sector(parity: u8, charge: i32, twice_spin: usize) -> SectorId {
-    let inner = TensorKitProductCodec::encode(
+    let inner = FpU1Codec::encode(
         SectorId::new(usize::from(parity & 1)),
         U1Irrep::new(charge).sector_id(),
     );
-    TensorKitProductCodec::encode(inner, SU2Irrep::from_twice_spin(twice_spin).sector_id())
+    TripleCodec::encode(inner, SU2Irrep::from_twice_spin(twice_spin).sector_id())
 }
 
 /// The Julia reference space:
@@ -749,9 +753,10 @@ fn triple_space() -> Space {
     Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 1), ((0, 2, 0), 1)]).unwrap()
 }
 
+#[cfg(target_pointer_width = "64")]
 #[test]
 fn fz2_u1_su2_codec_roundtrip_and_dual() {
-    // Encode/decode round-trip of the pairwise TensorKit codec for triples.
+    // Encode/decode round-trip of the built-in packed codec for triples.
     for &(parity, charge, twice_spin) in &[
         (0u8, 0i32, 0usize),
         (1, 1, 1),
@@ -759,10 +764,12 @@ fn fz2_u1_su2_codec_roundtrip_and_dual() {
         (1, -1, 1),
         (0, -2, 4),
         (1, 5, 3),
+        (0, i32::MIN, 254),
+        (1, i32::MAX, 254),
     ] {
         let sector = triple_sector(parity, charge, twice_spin);
-        let (inner, su2) = TensorKitProductCodec::decode(sector).unwrap();
-        let (fz2, u1) = TensorKitProductCodec::decode(inner).unwrap();
+        let (inner, su2) = TripleCodec::decode(sector).unwrap();
+        let (fz2, u1) = FpU1Codec::decode(inner).unwrap();
         assert_eq!(fz2, SectorId::new(usize::from(parity)));
         assert_eq!(u1, U1Irrep::new(charge).sector_id());
         assert_eq!(su2, SU2Irrep::from_twice_spin(twice_spin).sector_id());
@@ -775,6 +782,82 @@ fn fz2_u1_su2_codec_roundtrip_and_dual() {
     assert_eq!(rule.dual(triple_sector(0, 2, 0)), triple_sector(0, -2, 0));
     assert_eq!(rule.dual(triple_sector(0, 0, 0)), triple_sector(0, 0, 0));
     assert_eq!(rule.vacuum(), triple_sector(0, 0, 0));
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn fz2_u1_su2_space_represents_the_full_packed_u1_label_domain() {
+    // What: construction and label readback preserve both i32 endpoints;
+    // algebraic overflow behavior is tracked separately in issue #274.
+    let space = Space::fz2_u1_su2([((0, i32::MIN, 0), 2), ((1, i32::MAX, 254), 3)]).unwrap();
+    assert_eq!(
+        space.sectors(),
+        vec![
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 0,
+                    charge: i32::MIN,
+                    twice_spin: 0,
+                },
+                2,
+            ),
+            (
+                SectorLabel::FZ2U1SU2 {
+                    parity: 1,
+                    charge: i32::MAX,
+                    twice_spin: 254,
+                },
+                3,
+            ),
+        ]
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn u1_fz2_space_represents_the_full_packed_u1_label_domain() {
+    // What: pair construction and label readback preserve both i32 endpoints;
+    // algebraic overflow behavior is tracked separately in issue #274.
+    let space = Space::product([((i32::MIN, 0), 2), ((i32::MAX, 1), 3)]).unwrap();
+    assert_eq!(
+        space.sectors(),
+        vec![
+            (
+                SectorLabel::U1FZ2 {
+                    charge: i32::MIN,
+                    parity: 0,
+                },
+                2,
+            ),
+            (
+                SectorLabel::U1FZ2 {
+                    charge: i32::MAX,
+                    parity: 1,
+                },
+                3,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn fz2_u1_su2_space_rejects_labels_outside_the_packed_leaf_layout() {
+    // What: the user boundary reports unsupported SU2 labels instead of
+    // truncating the high bit into another product component.
+    let error = Space::fz2_u1_su2([((1, 0, 255), 1)]).unwrap_err();
+    assert!(error.to_string().contains("doubled-spin maximum 254"));
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn builtin_product_spaces_report_the_target_width_boundary() {
+    // What: 32-bit targets reject the fixed 33/41-bit built-in layouts with a
+    // typed user error instead of truncating otherwise valid labels.
+    let pair = Space::product([((0, 0), 1)]).unwrap_err();
+    assert!(pair.to_string().contains("needs 33 bits"));
+
+    let triple = Space::fz2_u1_su2([((0, 0, 0), 1)]).unwrap_err();
+    assert!(triple.to_string().contains("needs 41 bits"));
 }
 
 #[test]

@@ -1,11 +1,24 @@
+/// Opaque identifier used by one fusion-rule implementation.
+///
+/// The numeric value is an internal representation, not a stable wire format
+/// or a cross-version sector label. Persist and compare the corresponding
+/// semantic irrep/product labels instead. Codec or layout changes may alter
+/// numeric IDs, block order, and storage offsets without changing the
+/// represented tensor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct SectorId(usize);
 
 impl SectorId {
+    /// Constructs an expert-layer identifier for a specific fusion rule.
+    ///
+    /// Callers are responsible for using the rule's matching codec.
     pub const fn new(id: usize) -> Self {
         Self(id)
     }
 
+    /// Returns the rule-local opaque numeric representation.
+    ///
+    /// Do not serialize this value as a semantic sector label.
     #[inline]
     pub const fn id(self) -> usize {
         self.0
