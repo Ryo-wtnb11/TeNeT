@@ -5,7 +5,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use num_complex::Complex64;
 use tenet_tensors::{
@@ -459,6 +459,27 @@ pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Non-owning identity for internal state parked outside an active execution.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeIdentity {
+    inner: Weak<RuntimeInner>,
+}
+
+impl RuntimeIdentity {
+    #[doc(hidden)]
+    pub fn matches(&self, runtime: &Runtime) -> bool {
+        self.inner
+            .upgrade()
+            .is_some_and(|inner| Arc::ptr_eq(&inner, &runtime.inner))
+    }
+
+    #[doc(hidden)]
+    pub fn is_alive(&self) -> bool {
+        self.inner.strong_count() != 0
+    }
+}
+
 impl Runtime {
     /// Starts building a runtime. The default runtime uses the CPU backend;
     /// feature-gated device options such as CUDA are attached through the
@@ -483,6 +504,13 @@ impl Runtime {
     #[doc(hidden)]
     pub fn shares_state_with(&self, other: &Runtime) -> bool {
         self.same_runtime(other)
+    }
+
+    #[doc(hidden)]
+    pub fn identity(&self) -> RuntimeIdentity {
+        RuntimeIdentity {
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 
     pub(crate) fn execution_config(&self) -> &RuntimeExecutionConfig {

@@ -40,7 +40,7 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig};
+use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 
 #[cfg(test)]
@@ -508,6 +508,7 @@ macro_rules! define_tensor_execution_context {
         #[derive(Default)]
         pub struct TensorExecutionContext {
             runtime: Option<Runtime>,
+            runtime_identity: Option<RuntimeIdentity>,
             $($field: Ctxs<$key>,)+
         }
 
@@ -517,6 +518,7 @@ macro_rules! define_tensor_execution_context {
             pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
                 let mut context = Self {
                     runtime: None,
+                    runtime_identity: None,
                     $($field: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,)+
                 };
                 if let Some(threads) = config.recoupling_threads {
@@ -534,6 +536,25 @@ macro_rules! define_tensor_execution_context {
 
             fn set_transpose_backend(&mut self, backend: tenet_tensors::TransposeBackend) {
                 $(self.$field.set_transpose_backend(backend);)+
+            }
+
+            #[doc(hidden)]
+            pub fn release_runtime_binding(&mut self) {
+                self.runtime = None;
+            }
+
+            #[doc(hidden)]
+            pub fn bind_runtime(&mut self, runtime: &Runtime) -> Result<(), Error> {
+                if self
+                    .runtime_identity
+                    .as_ref()
+                    .is_some_and(|identity| !identity.matches(runtime))
+                {
+                    return Err(Error::RuntimeMismatch);
+                }
+                self.runtime_identity = Some(runtime.identity());
+                self.runtime = Some(runtime.clone());
+                Ok(())
             }
 
             #[cfg(test)]
@@ -645,6 +666,7 @@ impl TensorExecutionContext {
     /// configuration as `runtime`, bound to it for runtime validation.
     pub fn for_runtime(runtime: &Runtime) -> Result<Self, Error> {
         let mut context = Self::for_config(runtime.execution_config())?;
+        context.runtime_identity = Some(runtime.identity());
         context.runtime = Some(runtime.clone());
         Ok(context)
     }
@@ -652,7 +674,13 @@ impl TensorExecutionContext {
     fn accepts_runtime(&self, tensor: &Tensor) -> bool {
         self.runtime
             .as_ref()
-            .is_none_or(|runtime| runtime.shares_state_with(tensor.runtime()))
+            .map(|runtime| runtime.shares_state_with(tensor.runtime()))
+            .or_else(|| {
+                self.runtime_identity
+                    .as_ref()
+                    .map(|identity| identity.matches(tensor.runtime()))
+            })
+            .unwrap_or(true)
     }
 
     fn validate_runtime(&self, tensor: &Tensor) -> Result<(), Error> {
@@ -1690,6 +1718,18 @@ pub struct Tensor {
     materialized: OnceLock<Arc<Data>>,
 }
 
+/// Opaque tensor authority parked without owning its runtime.
+#[doc(hidden)]
+pub struct RuntimeDetachedTensor {
+    // Why not store `Runtime`: idle plan-cache buffers would point back to the
+    // cache owner and keep the entire Runtime alive.
+    runtime: RuntimeIdentity,
+    space: Arc<UserBoundSpace>,
+    data: Arc<Data>,
+    adjoint_source: Option<Arc<UserBoundSpace>>,
+    materialized: OnceLock<Arc<Data>>,
+}
+
 impl Clone for Tensor {
     fn clone(&self) -> Self {
         // `OnceLock` isn't `Clone`; carry over an already-materialized buffer
@@ -1709,6 +1749,24 @@ impl Clone for Tensor {
 }
 
 impl Tensor {
+    #[doc(hidden)]
+    pub fn detach_runtime(self) -> RuntimeDetachedTensor {
+        let Self {
+            rt,
+            space,
+            data,
+            adjoint_source,
+            materialized,
+        } = self;
+        RuntimeDetachedTensor {
+            runtime: rt.identity(),
+            space,
+            data,
+            adjoint_source,
+            materialized,
+        }
+    }
+
     fn rule_kind(&self) -> RuleKind {
         self.space.kind()
     }
@@ -5107,6 +5165,34 @@ impl Tensor {
     }
 }
 
+impl RuntimeDetachedTensor {
+    #[doc(hidden)]
+    pub fn matches_runtime(&self, runtime: &Runtime) -> bool {
+        self.runtime.matches(runtime)
+    }
+
+    #[doc(hidden)]
+    pub fn attach_runtime(self, runtime: &Runtime) -> Result<Tensor, Error> {
+        if !self.matches_runtime(runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let Self {
+            runtime: _,
+            space,
+            data,
+            adjoint_source,
+            materialized,
+        } = self;
+        Ok(Tensor {
+            rt: runtime.clone(),
+            space,
+            data,
+            adjoint_source,
+            materialized,
+        })
+    }
+}
+
 impl TensorExecutionContext {
     // Why not keep `can_contract_overwrite_into`/`can_permute_overwrite_into`:
     // #144 moved every real caller onto `try_contract_overwrite_into`/
@@ -6782,6 +6868,92 @@ where
 
 #[cfg(test)]
 mod compact_diagonal_tests;
+
+#[cfg(test)]
+mod runtime_detached_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_detached_roundtrip_preserves_host_authority() {
+        for dtype in [Dtype::F64, Dtype::C64] {
+            let runtime = Runtime::builder().build().unwrap();
+            let other = Runtime::builder().build().unwrap();
+            let space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+            let tensor =
+                Tensor::rand_with_seed(&runtime, dtype, [&space], [&space], 247_001).unwrap();
+            let expected_f64 = (dtype == Dtype::F64).then(|| tensor.data().to_vec());
+            let expected_c64 = (dtype == Dtype::C64).then(|| tensor.data_c64().to_vec());
+            let data = Arc::clone(&tensor.data);
+            let bound_space = Arc::clone(&tensor.space);
+
+            let detached = tensor.detach_runtime();
+            assert!(!detached.matches_runtime(&other));
+            assert!(detached.matches_runtime(&runtime));
+            let restored = detached.attach_runtime(&runtime).unwrap();
+
+            assert!(Arc::ptr_eq(&restored.data, &data));
+            assert!(Arc::ptr_eq(&restored.space, &bound_space));
+            if let Some(expected) = expected_f64 {
+                assert_eq!(restored.data(), expected);
+            }
+            if let Some(expected) = expected_c64 {
+                assert_eq!(restored.data_c64(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_detached_roundtrip_preserves_lazy_adjoint_state() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 247_002).unwrap();
+        let lazy = source.adjoint().unwrap();
+        let expected = lazy.data_c64().to_vec();
+        assert!(lazy.adjoint_source.is_some());
+        assert!(lazy.materialized.get().is_some());
+
+        let restored = lazy.detach_runtime().attach_runtime(&runtime).unwrap();
+
+        assert!(restored.adjoint_source.is_some());
+        assert!(restored.materialized.get().is_some());
+        assert_eq!(restored.data_c64(), expected);
+    }
+
+    #[test]
+    fn runtime_detached_roundtrip_keeps_lazy_adjoint_unmaterialized_until_read() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 247_004).unwrap();
+        let expected = source.adjoint().unwrap().data_c64().to_vec();
+        let lazy = source.adjoint().unwrap();
+        assert!(lazy.adjoint_source.is_some());
+        assert!(lazy.materialized.get().is_none());
+
+        let restored = lazy.detach_runtime().attach_runtime(&runtime).unwrap();
+        assert!(restored.adjoint_source.is_some());
+        assert!(restored.materialized.get().is_none());
+
+        assert_eq!(restored.data_c64(), expected);
+        assert!(restored.materialized.get().is_some());
+    }
+
+    #[test]
+    fn runtime_detached_authority_rejects_a_different_runtime() {
+        let runtime = Runtime::builder().build().unwrap();
+        let other = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 2)]);
+        let detached = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_003)
+            .unwrap()
+            .detach_runtime();
+
+        assert_eq!(
+            detached.attach_runtime(&other).unwrap_err(),
+            Error::RuntimeMismatch
+        );
+    }
+}
 
 #[cfg(test)]
 mod shared_context_tests {

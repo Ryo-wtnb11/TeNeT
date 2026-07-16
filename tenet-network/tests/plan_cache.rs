@@ -44,6 +44,37 @@ fn second_identical_call_hits() {
     assert_eq!((stats.hits, stats.misses, stats.entries), (0, 0, 0));
 }
 
+/// The cached plan and its idle numerical buffers are non-owning with respect
+/// to the Runtime; no explicit cache clear is required for normal destruction.
+#[test]
+fn idle_cached_workspace_does_not_keep_runtime_alive() {
+    let rt = Runtime::builder().build().unwrap();
+    let identity = rt.identity();
+    let (a, b) = chain(&rt, 2, 247_020);
+    let result = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
+    assert_eq!(plan_cache_stats(&rt).idle_workspaces, 1);
+
+    drop(result);
+    drop(a);
+    drop(b);
+    drop(rt);
+
+    assert!(!identity.is_alive());
+}
+
+#[test]
+fn explicit_clear_and_drop_releases_runtime() {
+    let rt = Runtime::builder().build().unwrap();
+    let identity = rt.identity();
+    let (a, b) = chain(&rt, 2, 247_021);
+    drop(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap());
+    clear_plan_cache(&rt);
+    drop(a);
+    drop(b);
+    drop(rt);
+    assert!(!identity.is_alive());
+}
+
 /// The standard macro path materializes topology and grows a slot table once,
 /// then keeps both counters unchanged across warm executions.
 #[test]

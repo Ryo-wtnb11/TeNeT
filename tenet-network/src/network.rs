@@ -14,6 +14,7 @@ use tenet::prelude::{
     ContractOverwriteCache, Dtype, Error, OverwriteOutcome, PermuteOverwriteCache, Runtime, Scalar,
     Tensor, TensorExecutionContext,
 };
+use tenet::{RuntimeDetachedTensor, RuntimeIdentity};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
 use crate::ir::NetworkIR;
@@ -403,7 +404,7 @@ pub struct NetworkExecutionWorkspace {
     slot_producers: Vec<Option<(usize, bool)>>,
     intermediates: Vec<IntermediateBuffers>,
     tensor_context: Option<TensorExecutionContext>,
-    tensor_runtime: Option<Runtime>,
+    tensor_runtime: Option<RuntimeIdentity>,
     stats: NetworkExecutionStats,
 }
 
@@ -426,6 +427,8 @@ pub struct NetworkExecutionStats {
 struct IntermediateBuffers {
     contracted: Option<Tensor>,
     oriented: Option<Tensor>,
+    parked_contracted: Option<RuntimeDetachedTensor>,
+    parked_oriented: Option<RuntimeDetachedTensor>,
     contract_cache: ContractOverwriteCache,
     orientation_cache: PermuteOverwriteCache,
 }
@@ -438,6 +441,49 @@ impl NetworkExecutionWorkspace {
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
         self.slot_producers.clear();
+    }
+
+    pub(crate) fn park_runtime_owners(&mut self) {
+        for buffers in &mut self.intermediates {
+            debug_assert!(buffers.parked_contracted.is_none());
+            debug_assert!(buffers.parked_oriented.is_none());
+            buffers.parked_contracted = buffers.contracted.take().map(Tensor::detach_runtime);
+            buffers.parked_oriented = buffers.oriented.take().map(Tensor::detach_runtime);
+        }
+        if let Some(context) = &mut self.tensor_context {
+            context.release_runtime_binding();
+        }
+    }
+
+    fn activate_parked(&mut self, runtime: &Runtime) -> Result<(), Error> {
+        // Why not attach as we iterate: a later identity mismatch would leave
+        // half the workspace rebound. Validate the complete idle set first.
+        let same_runtime = self.intermediates.iter().all(|buffers| {
+            buffers
+                .parked_contracted
+                .as_ref()
+                .is_none_or(|tensor| tensor.matches_runtime(runtime))
+                && buffers
+                    .parked_oriented
+                    .as_ref()
+                    .is_none_or(|tensor| tensor.matches_runtime(runtime))
+        });
+        if !same_runtime {
+            for buffers in &mut self.intermediates {
+                buffers.parked_contracted = None;
+                buffers.parked_oriented = None;
+            }
+            return Ok(());
+        }
+        for buffers in &mut self.intermediates {
+            if let Some(tensor) = buffers.parked_contracted.take() {
+                buffers.contracted = Some(tensor.attach_runtime(runtime)?);
+            }
+            if let Some(tensor) = buffers.parked_oriented.take() {
+                buffers.oriented = Some(tensor.attach_runtime(runtime)?);
+            }
+        }
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -509,6 +555,9 @@ impl PlannedNetwork {
             )));
         }
 
+        let runtime = tensors[0].runtime();
+        workspace.activate_parked(runtime)?;
+
         workspace
             .slots
             .resize_with(self.schedule.slot_count, || None);
@@ -518,18 +567,19 @@ impl PlannedNetwork {
         workspace
             .intermediates
             .resize_with(self.schedule.steps.len(), IntermediateBuffers::default);
-        let runtime = tensors[0].runtime();
         if workspace
             .tensor_runtime
             .as_ref()
-            .is_none_or(|cached| !cached.shares_state_with(runtime))
+            .is_none_or(|cached| !cached.matches(runtime))
         {
             workspace.tensor_context = Some(TensorExecutionContext::for_runtime(runtime)?);
-            workspace.tensor_runtime = Some(runtime.clone());
+            workspace.tensor_runtime = Some(runtime.identity());
             workspace.intermediates.clear();
             workspace
                 .intermediates
                 .resize_with(self.schedule.steps.len(), IntermediateBuffers::default);
+        } else if let Some(context) = &mut workspace.tensor_context {
+            context.bind_runtime(runtime)?;
         }
         for slot in &mut workspace.slots {
             *slot = None;
