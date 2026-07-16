@@ -3804,6 +3804,369 @@ mod tests {
         assert!(composed.domain().legs()[0].is_dual());
     }
 
+    fn legacy_select<R: FusionRule>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> FusionTreeHomSpace {
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                codomain_axes
+                    .iter()
+                    .map(|&axis| homspace.external_axis_leg(rule, axis)),
+            ),
+            FusionProductSpace::new(domain_axes.iter().map(|&axis| {
+                homspace.external_axis_leg(rule, axis).dual(rule)
+            })),
+        )
+    }
+
+    fn legacy_tensorcontract_homspace<R: FusionRule>(
+        rule: &R,
+        lhs: &FusionTreeHomSpace,
+        rhs: &FusionTreeHomSpace,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        nout: usize,
+    ) -> FusionTreeHomSpace {
+        let lhs_open = (0..lhs.rank())
+            .filter(|axis| !lhs_axes.contains(axis))
+            .collect::<Vec<_>>();
+        let rhs_open = (0..rhs.rank())
+            .filter(|axis| !rhs_axes.contains(axis))
+            .collect::<Vec<_>>();
+        let lhs = legacy_select(rule, lhs, &lhs_open, lhs_axes);
+        let rhs = legacy_select(rule, rhs, rhs_axes, &rhs_open);
+        let composed = FusionTreeHomSpace::compose(rule, &lhs, &rhs).unwrap();
+        legacy_select(
+            rule,
+            &composed,
+            &output_axes[..nout],
+            &output_axes[nout..],
+        )
+    }
+
+    fn assert_direct_contract_matches_legacy<R: FusionRule>(
+        rule: &R,
+        lhs: &FusionTreeHomSpace,
+        rhs: &FusionTreeHomSpace,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        nout: usize,
+    ) {
+        let expected = legacy_tensorcontract_homspace(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            nout,
+        );
+        let actual = FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            nout,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn direct_homspace_derivation_matches_old_sequence_for_supported_rules() {
+        let mixed_leg = |sectors: &[(SectorId, usize)], dual| {
+            SectorLeg::new(sectors.iter().copied(), dual)
+        };
+
+        let u1_sectors = [(u1(-2), 1), (u1(1), 2)];
+        let u1_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                mixed_leg(&u1_sectors, false),
+                mixed_leg(&u1_sectors, true),
+            ]),
+            FusionProductSpace::new([
+                mixed_leg(&u1_sectors, true),
+                mixed_leg(&u1_sectors, false),
+            ]),
+        );
+        assert_direct_contract_matches_legacy(
+            &U1FusionRule,
+            &u1_hom,
+            &u1_hom,
+            &[3, 2],
+            &[0, 1],
+            &[2, 0, 3, 1],
+            2,
+        );
+
+        let parity = [(SectorId::new(0), 2), (SectorId::new(1), 1)];
+        let fz2_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                mixed_leg(&parity, false),
+                mixed_leg(&parity, true),
+            ]),
+            FusionProductSpace::new([
+                mixed_leg(&parity, true),
+                mixed_leg(&parity, false),
+            ]),
+        );
+        assert_direct_contract_matches_legacy(
+            &FermionParityFusionRule,
+            &fz2_hom,
+            &fz2_hom,
+            &[3, 2],
+            &[0, 1],
+            &[1, 3, 0, 2],
+            2,
+        );
+
+        let su2 = [
+            (SU2Irrep::from_twice_spin(0).sector_id(), 2),
+            (SU2Irrep::from_twice_spin(1).sector_id(), 1),
+        ];
+        let su2_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                mixed_leg(&su2, false),
+                mixed_leg(&su2, true),
+            ]),
+            FusionProductSpace::new([
+                mixed_leg(&su2, true),
+                mixed_leg(&su2, false),
+            ]),
+        );
+        assert_direct_contract_matches_legacy(
+            &SU2FusionRule,
+            &su2_hom,
+            &su2_hom,
+            &[3, 2],
+            &[0, 1],
+            &[3, 1, 2, 0],
+            2,
+        );
+
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let product_rule = ProductRule::new(
+            FpU1Rule::new(FermionParityFusionRule, U1FusionRule),
+            SU2FusionRule,
+        );
+        let encode = |parity, charge, spin| {
+            let inner = TensorKitProductCodec::encode(
+                SectorId::new(parity),
+                U1Irrep::new(charge).sector_id(),
+            );
+            TensorKitProductCodec::encode(inner, SU2Irrep::from_twice_spin(spin).sector_id())
+        };
+        let product = [(encode(0, 0, 0), 2), (encode(1, 1, 1), 1)];
+        let product_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                mixed_leg(&product, false),
+                mixed_leg(&product, true),
+            ]),
+            FusionProductSpace::new([
+                mixed_leg(&product, true),
+                mixed_leg(&product, false),
+            ]),
+        );
+        assert_direct_contract_matches_legacy(
+            &product_rule,
+            &product_hom,
+            &product_hom,
+            &[3, 2],
+            &[0, 1],
+            &[2, 1, 3, 0],
+            2,
+        );
+    }
+
+    #[test]
+    fn direct_tensorcontract_matches_old_sequence_for_all_leg_orientations() {
+        let rule = U1FusionRule;
+        let matched = SectorLeg::new([(u1(-2), 1), (u1(1), 2)], false);
+        let open = SectorLeg::new([(u1(0), 1)], false);
+        for lhs_axis in 0..2 {
+            for rhs_axis in 0..2 {
+                let lhs_stored = if lhs_axis == 0 {
+                    matched.dual(&rule)
+                } else {
+                    matched.clone()
+                };
+                let rhs_stored = if rhs_axis == 0 {
+                    matched.clone()
+                } else {
+                    matched.dual(&rule)
+                };
+                let lhs = if lhs_axis == 0 {
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([lhs_stored]),
+                        FusionProductSpace::new([open.clone()]),
+                    )
+                } else {
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([open.clone()]),
+                        FusionProductSpace::new([lhs_stored]),
+                    )
+                };
+                let rhs = if rhs_axis == 0 {
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([rhs_stored]),
+                        FusionProductSpace::new([open.clone()]),
+                    )
+                } else {
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([open.clone()]),
+                        FusionProductSpace::new([rhs_stored]),
+                    )
+                };
+                assert_direct_contract_matches_legacy(
+                    &rule,
+                    &lhs,
+                    &rhs,
+                    &[lhs_axis],
+                    &[rhs_axis],
+                    &[1, 0],
+                    1,
+                );
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct DualCountingRule<R> {
+        inner: R,
+        dual_calls: Arc<AtomicUsize>,
+    }
+
+    impl<R> DualCountingRule<R>
+    where
+        R: FusionRule,
+    {
+        fn new(inner: R) -> Self {
+            Self {
+                inner,
+                dual_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn reset_dual_calls(&self) {
+            self.dual_calls.store(0, Ordering::Relaxed);
+        }
+
+        fn dual_calls(&self) -> usize {
+            self.dual_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl<R> FusionRule for DualCountingRule<R>
+    where
+        R: FusionRule,
+    {
+        fn rule_identity(&self) -> RuleIdentity {
+            self.inner.rule_identity()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            self.inner.fusion_style()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            self.inner.braiding_style()
+        }
+
+        fn vacuum(&self) -> SectorId {
+            self.inner.vacuum()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            self.dual_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.dual(sector)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            self.inner.fusion_channels(left, right)
+        }
+    }
+
+    fn assert_oriented_validation_dual_calls_are_linear<R>(
+        rule: &DualCountingRule<R>,
+        sectors: impl IntoIterator<Item = (SectorId, usize)>,
+        sector_count: usize,
+    ) where
+        R: FusionRule,
+    {
+        let leg = SectorLeg::new(sectors, false);
+        let lhs = OrientedLegView::borrowed(&leg).toggled();
+        let rhs = OrientedLegView::borrowed(&leg).toggled();
+        rule.reset_dual_calls();
+        validate_oriented_composed_leg(rule, lhs, rhs).unwrap();
+        assert_eq!(rule.dual_calls(), 2 * sector_count);
+    }
+
+    #[test]
+    fn oriented_composed_leg_membership_is_linear_in_dual_operations() {
+        const SECTORS: usize = 256;
+        let u1_rule = DualCountingRule::new(U1FusionRule);
+        assert_oriented_validation_dual_calls_are_linear(
+            &u1_rule,
+            (0..SECTORS).map(|index| (u1(index as i32 - 97), index % 5 + 1)),
+            SECTORS,
+        );
+
+        let product_rule = DualCountingRule::new(ProductFusionRule::<
+            U1FusionRule,
+            FermionParityFusionRule,
+            TensorKitProductCodec,
+        >::new(U1FusionRule, FermionParityFusionRule));
+        assert_oriented_validation_dual_calls_are_linear(
+            &product_rule,
+            (0..SECTORS).map(|index| {
+                (
+                    TensorKitProductCodec::encode(
+                        u1(index as i32 - 113),
+                        SectorId::new(index % 2),
+                    ),
+                    index % 7 + 1,
+                )
+            }),
+            SECTORS,
+        );
+    }
+
+    #[test]
+    fn oriented_composed_leg_invalid_path_preserves_legacy_error_order() {
+        let rule = U1FusionRule;
+        let lhs = SectorLeg::new([(u1(-3), 1), (u1(2), 2)], false);
+        let rhs = SectorLeg::new([(u1(-3), 4), (u1(2), 2)], false);
+        let lhs_view = OrientedLegView::borrowed(&lhs).toggled();
+        let rhs_view = OrientedLegView::borrowed(&rhs).toggled();
+        let expected =
+            validate_composed_leg(&lhs_view.materialize(&rule), &rhs_view.materialize(&rule));
+        assert_eq!(
+            validate_oriented_composed_leg(&rule, lhs_view, rhs_view),
+            expected
+        );
+    }
+
+    #[test]
+    fn generic_su3_select_matches_old_sequence() {
+        let rule = su3();
+        let leg = SectorLeg::new([(su3_id(0, 0), 2), (su3_id(1, 0), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg.clone()]),
+            FusionProductSpace::new([leg.clone(), leg]),
+        );
+        let expected = legacy_select(&rule, &hom, &[3, 0], &[2, 1]);
+        let actual = hom.select(&rule, &[3, 0], &[2, 1]).unwrap();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn fusion_tree_homspace_compose_rejects_unmatched_contracted_sector() {
         // Pairing a domain leg with the *dual* codomain leg is a
@@ -8781,7 +9144,8 @@ mod tests {
             let _ = FusionTreeHomSpace::new(
                 FusionProductSpace::new([u1_leg(charge, 1, false)]),
                 FusionProductSpace::new([u1_leg(charge, 1, false)]),
-            );
+            )
+            .id();
         }
         let after = build().id();
         assert!(!Arc::ptr_eq(&before.key, &after.key));
@@ -8792,7 +9156,108 @@ mod tests {
             std::hash::Hasher::finish(&state)
         };
         assert_eq!(hash(&before), hash(&after));
-        assert_eq!(hom_space_intern_table().read().unwrap().entries.len(), HOM_SPACE_INTERN_CAP);
+        assert_eq!(
+            hom_space_intern_table().read().unwrap().entries.len(),
+            HOM_SPACE_INTERN_CAP
+        );
+    }
+
+    #[test]
+    fn eager_hom_space_derivation_does_not_touch_lazy_id_interner() {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_hom_space_intern_table();
+        let rule = U1FusionRule;
+        let leg = SectorLeg::new([(u1(-1), 2), (u1(2), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg.clone()]),
+            FusionProductSpace::new([leg.clone(), leg]),
+        );
+        let before = hom_space_intern_table().read().unwrap().entries.len();
+
+        let selected = hom.select(&rule, &[1, 0], &[3, 2]).unwrap();
+        let permuted = hom.permute(&rule, &[1, 0], &[3, 2]).unwrap();
+        let composed = FusionTreeHomSpace::compose(&rule, &hom, &hom).unwrap();
+        let contracted = FusionTreeHomSpace::tensorcontract_homspace(
+            &rule,
+            &hom,
+            &hom,
+            &[2, 3],
+            &[0, 1],
+            &[0, 1, 2, 3],
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            hom_space_intern_table().read().unwrap().entries.len(),
+            before
+        );
+
+        let selected_id = selected.id();
+        assert_eq!(selected_id, permuted.id());
+        assert_eq!(composed.id(), contracted.id());
+        assert_eq!(
+            hom_space_intern_table().read().unwrap().entries.len(),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn concurrent_eager_hom_space_derivation_does_not_touch_lazy_id_interner() {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_hom_space_intern_table();
+        let rule = U1FusionRule;
+        let leg = SectorLeg::new([(u1(-1), 2), (u1(2), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg.clone()]),
+            FusionProductSpace::new([leg.clone(), leg]),
+        );
+        let before = hom_space_intern_table().read().unwrap().entries.len();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..100 {
+                        let _ = hom.permute(&rule, &[1, 0], &[3, 2]).unwrap();
+                        let _ = FusionTreeHomSpace::tensorcontract_homspace(
+                            &rule,
+                            &hom,
+                            &hom,
+                            &[2, 3],
+                            &[0, 1],
+                            &[0, 1, 2, 3],
+                            2,
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            hom_space_intern_table().read().unwrap().entries.len(),
+            before
+        );
+    }
+
+    #[test]
+    fn resetting_lazy_hom_space_interner_preserves_semantic_identity() {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_hom_space_intern_table();
+        let build = || {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([u1_leg(23, 2, false)]),
+                FusionProductSpace::new([u1_leg(-23, 3, true)]),
+            )
+        };
+        let before = build().id();
+        reset_hom_space_intern_table();
+        let after = build().id();
+        assert_eq!(before, after);
+        assert!(!Arc::ptr_eq(&before.key, &after.key));
     }
 
     #[test]
