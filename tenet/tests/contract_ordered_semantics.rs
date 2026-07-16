@@ -200,6 +200,38 @@ fn ordered_contract_preserves_contraction_error_precedence() {
 }
 
 #[test]
+fn ordered_contract_preserves_dtype_precedence_over_bad_pab_and_space() {
+    let runtime = Runtime::builder().build().unwrap();
+    let lhs_space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+    let incompatible_rhs_space = Space::u1([(-1, 1), (0, 3), (1, 1)]);
+    let lhs =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&lhs_space], [&lhs_space], 224_331).unwrap();
+    let compatible_rhs =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&lhs_space], [&lhs_space], 224_332).unwrap();
+    let incompatible_rhs = Tensor::rand_with_seed(
+        &runtime,
+        Dtype::C64,
+        [&incompatible_rhs_space],
+        [&incompatible_rhs_space],
+        224_333,
+    )
+    .unwrap();
+
+    // What: outer host-dense preconditions stay authoritative. Neither a bad
+    // pAB nor a contracted-leg degeneracy mismatch may hide DtypeMismatch.
+    assert_eq!(
+        lhs.contract_ordered(&compatible_rhs, &[1], &[0], &[0])
+            .unwrap_err(),
+        Error::DtypeMismatch
+    );
+    assert_eq!(
+        lhs.contract_ordered(&incompatible_rhs, &[1], &[0], &[0])
+            .unwrap_err(),
+        Error::DtypeMismatch
+    );
+}
+
+#[test]
 fn ordered_contract_parallel_replay_matches_serial() {
     let serial = Runtime::builder().recoupling_threads(1).build().unwrap();
     let parallel = Runtime::builder().recoupling_threads(2).build().unwrap();

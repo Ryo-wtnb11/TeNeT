@@ -52,6 +52,8 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static ORDERED_CONTRACT_FUSED_ROUTE: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
+    static SELECTED_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -68,6 +70,15 @@ fn observe_ordered_contract_fused_route() {
     ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| {
         if observation.get().is_some() {
             observation.set(Some(true));
+        }
+    });
+}
+
+#[cfg(test)]
+fn observe_selected_result_layout_build() {
+    SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| {
+        if let Some(builds) = observation.get() {
+            observation.set(Some(builds + 1));
         }
     });
 }
@@ -1400,16 +1411,95 @@ impl UserBoundSpace {
         rhs_axes: &[usize],
         output_order: OutputAxisOrder<'_>,
     ) -> Result<Self, Error> {
-        let default = self.contracted(rhs, lhs_axes, rhs_axes)?;
         let OutputAxisOrder::Axes(output_axes) = output_order else {
-            return Ok(default);
+            return self.contracted(rhs, lhs_axes, rhs_axes);
         };
-        validate_axis_permutation(output_axes, default.raw().rank())?;
-        let split = default.raw().nout();
-        default.transformed(&TreeTransformOperation::permute(
-            output_axes[..split].iter().copied(),
-            output_axes[split..].iter().copied(),
-        ))
+
+        // The Generic facade stays on its separately proved sequential path.
+        if matches!((self, rhs), (Self::Su3(_), Self::Su3(_))) {
+            let default = self.contracted(rhs, lhs_axes, rhs_axes)?;
+            validate_axis_permutation(output_axes, default.raw().rank())?;
+            let split = default.raw().nout();
+            return default.transformed(&TreeTransformOperation::permute(
+                output_axes[..split].iter().copied(),
+                output_axes[split..].iter().copied(),
+            ));
+        }
+
+        let output_rank = match self
+            .raw()
+            .rank()
+            .checked_sub(lhs_axes.len())
+            .and_then(|lhs_open| {
+                rhs.raw()
+                    .rank()
+                    .checked_sub(rhs_axes.len())
+                    .and_then(|rhs_open| lhs_open.checked_add(rhs_open))
+            }) {
+            Some(rank) => rank,
+            None => {
+                self.validate_contracted_homspace(rhs, lhs_axes, rhs_axes)?;
+                return Err(Error::InvalidArgument(
+                    "contracted axis count exceeds tensor rank".to_string(),
+                ));
+            }
+        };
+        if let Err(output_error) = validate_axis_permutation(output_axes, output_rank) {
+            // Preserve historical contraction-before-pAB error precedence
+            // without building the default coupled layout. Valid pAB skips
+            // this cold check and reaches the cache lookup immediately.
+            self.validate_contracted_homspace(rhs, lhs_axes, rhs_axes)?;
+            return Err(output_error);
+        }
+        macro_rules! contract {
+            ($lhs:expr, $rhs:expr, $variant:ident) => {
+                Ok(UserBoundSpace::$variant(
+                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                        $lhs,
+                        $rhs,
+                        lhs_axes,
+                        rhs_axes,
+                        OutputAxisOrder::from_axes(output_axes),
+                    )?,
+                ))
+            };
+        }
+        match (self, rhs) {
+            (Self::U1(lhs), Self::U1(rhs)) => contract!(lhs, rhs, U1),
+            (Self::Z2(lhs), Self::Z2(rhs)) => contract!(lhs, rhs, Z2),
+            (Self::FZ2(lhs), Self::FZ2(rhs)) => contract!(lhs, rhs, FZ2),
+            (Self::SU2(lhs), Self::SU2(rhs)) => contract!(lhs, rhs, SU2),
+            (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => contract!(lhs, rhs, U1FZ2),
+            (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => {
+                contract!(lhs, rhs, FZ2U1SU2)
+            }
+            _ => Err(Error::RuleMismatch),
+        }
+    }
+
+    fn validate_contracted_homspace(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<(), Error> {
+        macro_rules! validate {
+            ($lhs:expr, $rhs:expr) => {
+                BoundDynamicFusionMapSpace::validate_contracted_homspace_multiplicity_free(
+                    $lhs, $rhs, lhs_axes, rhs_axes,
+                )
+                .map_err(Into::into)
+            };
+        }
+        match (self, rhs) {
+            (Self::U1(lhs), Self::U1(rhs)) => validate!(lhs, rhs),
+            (Self::Z2(lhs), Self::Z2(rhs)) => validate!(lhs, rhs),
+            (Self::FZ2(lhs), Self::FZ2(rhs)) => validate!(lhs, rhs),
+            (Self::SU2(lhs), Self::SU2(rhs)) => validate!(lhs, rhs),
+            (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => validate!(lhs, rhs),
+            (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => validate!(lhs, rhs),
+            _ => Err(Error::RuleMismatch),
+        }
     }
 
     fn transformed(&self, operation: &TreeTransformOperation) -> Result<Self, Error> {
@@ -1487,6 +1577,35 @@ impl UserBoundSpace {
                 Arc::clone(space.provider_arc()),
                 homspace,
             )?)),
+        }
+    }
+
+    fn from_selected_homspace(&self, homspace: FusionTreeHomSpace) -> Result<Self, Error> {
+        #[cfg(test)]
+        observe_selected_result_layout_build();
+        macro_rules! build {
+            ($space:expr, $variant:ident) => {
+                Ok(UserBoundSpace::$variant(
+                    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+                        Arc::clone($space.provider_arc()),
+                        homspace,
+                    )?,
+                ))
+            };
+        }
+        match self {
+            Self::U1(space) => build!(space, U1),
+            Self::Z2(space) => build!(space, Z2),
+            Self::FZ2(space) => build!(space, FZ2),
+            Self::SU2(space) => build!(space, SU2),
+            Self::U1FZ2(space) => build!(space, U1FZ2),
+            Self::FZ2U1SU2(space) => build!(space, FZ2U1SU2),
+            Self::Su3(space) => Ok(UserBoundSpace::Su3(
+                BoundDynamicFusionMapSpace::from_final_homspace_generic(
+                    Arc::clone(space.provider_arc()),
+                    homspace,
+                )?,
+            )),
         }
     }
 
@@ -3626,7 +3745,8 @@ impl Tensor {
             // contraction before inspecting pAB, so an incompatible contracted
             // pair must retain precedence when both inputs are invalid. This
             // compatibility-only path is cold because valid pAB skips it.
-            self.space.contracted(&rhs.space, lhs_axes, rhs_axes)?;
+            self.space
+                .validate_contracted_homspace(&rhs.space, lhs_axes, rhs_axes)?;
             return Err(Error::InvalidArgument(format!(
                 "output axis list length {} does not match open rank {}",
                 output_axes.len(),
@@ -3881,7 +4001,7 @@ impl Tensor {
             )?;
             Ok::<_, Error>(hom)
         })?;
-        let dst_bound = self.space.from_homspace(hom)?;
+        let dst_bound = self.space.from_selected_homspace(hom)?;
         let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
         macro_rules! trace_bound {
             ($dst:expr, $src:expr) => {
@@ -8094,5 +8214,20 @@ mod ordered_contract_route_tests {
         for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
             assert!((actual - expected).abs() < 1.0e-11);
         }
+    }
+
+    #[test]
+    fn partial_trace_builds_selected_result_layout_once() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(-1, 2), (0, 3), (2, 1)]);
+        let tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_506).unwrap();
+
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.set(Some(0)));
+        let traced = tensor.trace_pairs(&[(0, 1)]).unwrap();
+        let builds = SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None));
+
+        assert_eq!(builds, Some(1));
+        assert_eq!(traced.rank(), 0);
     }
 }
