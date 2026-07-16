@@ -18,7 +18,9 @@ runs:
     # build dir survive rust-cache's prune without fighting its restore.
     - uses: actions/cache@v4
       with:
-        path: tenet/target/*/build
+        path: |
+          tenet/target/*/build
+          tenet/target/llvm-cov-target/*/build
         key: build-out-v1-${{ inputs.key }}-${{ runner.os }}-${{ hashFiles('tenet/**/Cargo.toml', 'tenferro-rs/**/Cargo.toml') }}
         restore-keys: |
           build-out-v1-${{ inputs.key }}-${{ runner.os }}-
