@@ -255,6 +255,13 @@ where
 use super::fusion::FusionContractPlan;
 use super::structure::TensorContractAxisPlan;
 
+pub(crate) struct TransformedLayoutProbe {
+    pub(crate) nout: usize,
+    pub(crate) homspace: FusionTreeHomSpace,
+    pub(crate) required_len: usize,
+    pub(crate) source_structure_matches: bool,
+}
+
 /// Dynamic-rank fusion space: the expert-layer space handle whose
 /// codomain/domain split is a runtime property.
 ///
@@ -1263,6 +1270,31 @@ impl DynamicFusionMapSpace {
             map.insert(cache_key, space.clone());
         }
         Ok(space)
+    }
+
+    pub(crate) fn transformed_layout_probe<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<TransformedLayoutProbe, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        self.validate_rule(rule)?;
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let homspace = self
+            .homspace()
+            .permute(rule, codomain_axes, domain_axes)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let (required_len, source_structure_matches) = homspace
+            .coupled_subblock_layout_probe_uncached(rule, self.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
+        Ok(TransformedLayoutProbe {
+            nout: codomain_axes.len(),
+            homspace,
+            required_len,
+            source_structure_matches,
+        })
     }
 
     /// Generic-fusion (SU(3)) sibling of [`Self::from_degeneracy_shapes`] for

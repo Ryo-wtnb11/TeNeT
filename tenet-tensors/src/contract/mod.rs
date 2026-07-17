@@ -2,12 +2,20 @@ mod api;
 mod backend;
 mod context;
 mod dynamic;
+#[cfg(test)]
+pub(crate) use dynamic::{
+    reset_source_layout_homspace_id_comparisons, source_layout_homspace_id_comparisons,
+    tensorcontract_fusion_dynamic_plan_into_with,
+};
 mod dynamic_space;
 mod fusion;
 #[cfg(test)]
 pub(crate) use fusion::contracted_axis_order_candidates;
 #[cfg(test)]
-pub(crate) use fusion::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order;
+pub(crate) use fusion::{
+    candidate_score_calls, prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order,
+    reset_candidate_score_calls,
+};
 mod fusion_block;
 mod resolution;
 mod scratch;

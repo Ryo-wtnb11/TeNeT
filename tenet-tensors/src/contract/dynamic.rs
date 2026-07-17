@@ -84,13 +84,17 @@ fn select_core_source<'a, D>(
     }
 }
 
-fn source_is_borrowable_core_layout(
+pub(super) fn source_layout_metadata_is_borrowable<HomSpaceMatches>(
     source_space: &DynamicFusionMapSpace,
-    source_structure: &Arc<BlockStructure>,
-    core_space: &DynamicFusionMapSpace,
+    core_nout: usize,
+    core_rank: usize,
+    homspace_matches: HomSpaceMatches,
     operation: &TreeTransformOperation,
     source_conjugate: bool,
-) -> bool {
+) -> bool
+where
+    HomSpaceMatches: FnOnce() -> bool,
+{
     if source_conjugate {
         return false;
     }
@@ -112,13 +116,54 @@ fn source_is_borrowable_core_layout(
     {
         return false;
     }
-    if core_space.nout() != source_space.nout()
-        || core_space.rank() != source_space.rank()
-        || core_space.homspace().id() != source_space.homspace().id()
-    {
+    if core_nout != source_space.nout() || core_rank != source_space.rank() || !homspace_matches() {
         return false;
     }
+    true
+}
 
+#[cfg(test)]
+std::thread_local! {
+    static SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_source_layout_homspace_id_comparisons() {
+    SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn source_layout_homspace_id_comparisons() -> usize {
+    SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.get()
+}
+
+fn source_layout_homspaces_match_by_id(
+    source_space: &DynamicFusionMapSpace,
+    core_space: &DynamicFusionMapSpace,
+) -> bool {
+    #[cfg(test)]
+    SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.set(SOURCE_LAYOUT_HOMSPACE_ID_COMPARISONS.get() + 1);
+    core_space.homspace().id() == source_space.homspace().id()
+}
+
+fn source_is_borrowable_core_layout(
+    source_space: &DynamicFusionMapSpace,
+    source_structure: &Arc<BlockStructure>,
+    core_space: &DynamicFusionMapSpace,
+    operation: &TreeTransformOperation,
+    source_conjugate: bool,
+) -> bool {
+    if !source_layout_metadata_is_borrowable(
+        source_space,
+        core_space.nout(),
+        core_space.rank(),
+        || source_layout_homspaces_match_by_id(source_space, core_space),
+        operation,
+        source_conjugate,
+    ) {
+        return false;
+    }
     let core_structure = core_space.structure();
     // Why not compare only the source's declared structure: even identity axes
     // can complete a sparse fusion-tree grid with structural-zero core blocks.
@@ -2977,6 +3022,54 @@ mod tests {
             &TreeTransformOperation::permute([0], [1]),
             false,
         ));
+    }
+
+    #[test]
+    fn borrowable_core_layout_defers_homspace_identity_until_after_cheap_gates() {
+        // What: nonidentity and conjugating sources skip HomSpace identity,
+        // while an otherwise borrowable identity layout performs one comparison.
+        let rule = Z2FusionRule;
+        let typed = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let source = DynamicFusionMapSpace::from_typed(&typed);
+        let source_structure = Arc::clone(source.structure());
+
+        reset_source_layout_homspace_id_comparisons();
+        assert!(!source_is_borrowable_core_layout(
+            &source,
+            &source_structure,
+            &source,
+            &TreeTransformOperation::permute([1], [0]),
+            false,
+        ));
+        assert_eq!(source_layout_homspace_id_comparisons(), 0);
+
+        reset_source_layout_homspace_id_comparisons();
+        assert!(!source_is_borrowable_core_layout(
+            &source,
+            &source_structure,
+            &source,
+            &TreeTransformOperation::permute([0], [1]),
+            true,
+        ));
+        assert_eq!(source_layout_homspace_id_comparisons(), 0);
+
+        reset_source_layout_homspace_id_comparisons();
+        assert!(source_is_borrowable_core_layout(
+            &source,
+            &source_structure,
+            &source,
+            &TreeTransformOperation::permute([0], [1]),
+            false,
+        ));
+        assert_eq!(source_layout_homspace_id_comparisons(), 1);
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
