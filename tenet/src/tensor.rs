@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
-    BlockKey, BlockStructure, CoupledSectorRegion, FusionProductSpace, FusionRule,
-    FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement,
-    SectorId, Su3FusionRule,
+    BlockKey, BlockStructure, CheckedFusionAlgebra, CoupledSectorRegion, FusionProductSpace,
+    FusionRule, FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols,
+    Placement, SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -824,7 +824,9 @@ fn rand_unit(state: &mut u64) -> f64 {
 }
 
 fn build_bound_space<
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + tenet_core::CheckedFusionAlgebra,
 >(
     provider: Arc<R>,
     hom: FusionTreeHomSpace,
@@ -834,7 +836,9 @@ fn build_bound_space<
 }
 
 fn build_bound_space_like<
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + tenet_core::CheckedFusionAlgebra,
 >(
     authority: &BoundDynamicFusionMapSpace<R>,
     hom: FusionTreeHomSpace,
@@ -6482,6 +6486,7 @@ fn contract_into_bound<R, D, Key>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + LoweredMultiplicityFreeAlgebra
+        + CheckedFusionAlgebra
         + TreeTransformRuleCacheKey<Key = Key>,
     D: UserScalar,
     Key: Clone + Eq + Hash + Send + Sync + 'static,

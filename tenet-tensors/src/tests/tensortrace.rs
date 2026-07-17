@@ -1,6 +1,222 @@
 use super::*;
 use tenet_core::Trivial;
 
+fn lowered_u1_dynamic_space(
+    homspace: FusionTreeHomSpace,
+    shapes: Vec<Vec<usize>>,
+) -> BoundDynamicFusionMapSpace<U1FusionRule> {
+    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        std::sync::Arc::new(U1FusionRule),
+        homspace,
+        shapes,
+    )
+    .unwrap()
+}
+
+#[test]
+fn lowered_dynamic_trace_select_reports_u1_min_without_mutating_destination() {
+    // What: checked output selection returns the exact U1 MIN dual failure
+    // before trace terms, result-layout publication, or destination scaling.
+    let min = U1Irrep::new(i32::MIN).sector_id();
+    let zero = U1Irrep::new(0).sector_id();
+    let src = lowered_u1_dynamic_space(
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
+            FusionProductSpace::new([]),
+        ),
+        Vec::new(),
+    );
+    let dst = lowered_u1_dynamic_space(
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]),
+        ),
+        vec![vec![1]],
+    );
+    let mut dst_data = vec![37.0_f64];
+    crate::contract::reset_scratch_publication_observations();
+    crate::tensortrace::reset_trace_transform_invocations();
+
+    let error = tensortrace_fusion_dyn_into_checked(
+        &dst,
+        &mut dst_data,
+        &src,
+        &[],
+        TensorTraceAxisSpec::new(&[0], &[], &[]),
+        2.0,
+        3.0,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::U1DualOverflow {
+            charge: i32::MIN
+        },))
+    );
+    assert_eq!(dst_data, [37.0]);
+    assert_eq!(
+        crate::contract::scratch_publication_observations(),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(crate::tensortrace::take_trace_transform_invocations(), 0);
+}
+
+#[test]
+fn lowered_dynamic_trace_outward_leg_reports_u1_min_without_mutating_destination() {
+    // What: checked trace-pair orientation returns the exact U1 MIN dual
+    // failure before trace terms, result publication, or destination scaling.
+    let min = U1Irrep::new(i32::MIN).sector_id();
+    let zero = U1Irrep::new(0).sector_id();
+    let src = lowered_u1_dynamic_space(
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(zero, 1)], false),
+                SectorLeg::new([(min, 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        ),
+        Vec::new(),
+    );
+    let dst = lowered_u1_dynamic_space(
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
+        vec![Vec::new()],
+    );
+    let mut dst_data = vec![41.0_f64];
+    crate::contract::reset_scratch_publication_observations();
+    crate::tensortrace::reset_trace_transform_invocations();
+
+    let error = tensortrace_fusion_dyn_into_checked(
+        &dst,
+        &mut dst_data,
+        &src,
+        &[],
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+        2.0,
+        3.0,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::U1DualOverflow {
+            charge: i32::MIN
+        },))
+    );
+    assert_eq!(dst_data, [41.0]);
+    assert_eq!(
+        crate::contract::scratch_publication_observations(),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(crate::tensortrace::take_trace_transform_invocations(), 0);
+}
+
+#[test]
+fn lowered_dynamic_trace_invalid_axis_precedes_u1_min_dual_failure() {
+    // What: trace axis validation retains its structural precedence before
+    // checked selection can attempt to dual a U1 MIN source leg.
+    let min = U1Irrep::new(i32::MIN).sector_id();
+    let zero = U1Irrep::new(0).sector_id();
+    let src = lowered_u1_dynamic_space(
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
+            FusionProductSpace::new([]),
+        ),
+        Vec::new(),
+    );
+    let dst = lowered_u1_dynamic_space(
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]),
+        ),
+        vec![vec![1]],
+    );
+    let mut dst_data = vec![43.0_f64];
+
+    let error = tensortrace_fusion_dyn_into(
+        &dst,
+        &mut dst_data,
+        &src,
+        &[],
+        TensorTraceAxisSpec::new(&[1], &[], &[]),
+        2.0,
+        3.0,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::InvalidAxisSet {
+            tensor: "trace output",
+            axes: vec![1],
+            rank: 1,
+        }
+    );
+    assert_eq!(dst_data, [43.0]);
+}
+
+#[test]
+fn fz2_lowered_dynamic_trace_matches_encoded_data_oracle() {
+    // What: the closed fZ2 trace produces byte-for-byte identical reduced data
+    // through encoded and lowered bindings.
+    let provider = std::sync::Arc::new(tenet_core::FermionParityFusionRule);
+    let odd = tenet_core::Z2Irrep::ODD.sector_id();
+    let leg = || FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]);
+    let src_homspace = FusionTreeHomSpace::new(leg(), leg());
+    let src_count = src_homspace.fusion_tree_keys(provider.as_ref()).len();
+    let src_shapes = vec![vec![1, 1]; src_count];
+    let encoded_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&provider),
+        src_homspace.clone(),
+        src_shapes.clone(),
+    )
+    .unwrap();
+    let lowered_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        std::sync::Arc::clone(&provider),
+        src_homspace,
+        src_shapes,
+    )
+    .unwrap();
+    let scalar = FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let encoded_dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&provider),
+        scalar.clone(),
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+    let lowered_dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        provider,
+        scalar,
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+    let axes = TensorTraceAxisSpec::new(&[], &[0], &[1]);
+    let mut encoded_data = vec![7.0_f64];
+    let mut lowered_data = encoded_data.clone();
+    tensortrace_fusion_dyn_into(
+        &encoded_dst,
+        &mut encoded_data,
+        &encoded_src,
+        &[5.0],
+        axes,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+    tensortrace_fusion_dyn_into(
+        &lowered_dst,
+        &mut lowered_data,
+        &lowered_src,
+        &[5.0],
+        axes,
+        2.0,
+        3.0,
+    )
+    .unwrap();
+
+    assert_eq!(lowered_data, encoded_data);
+}
+
 #[test]
 fn tensortrace_default_host_api_accepts_custom_host_storage() {
     let src_space = TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap();

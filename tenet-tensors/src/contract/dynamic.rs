@@ -24,8 +24,6 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
-#[cfg(test)]
-use super::dynamic_space::PreparedLayoutKeys;
 use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
 use super::fusion::{prepare_tensorcontract_fusion_plan, FusionContractPlan};
 use super::fusion_block::{
@@ -2667,7 +2665,9 @@ mod tests {
     use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
     use tenet_operations::OutputAxisOrder;
 
-    use super::super::dynamic_space::lowered_layout_primer;
+    use super::super::dynamic_space::{
+        lowered_metadata_dispatcher, MetadataOutput, MetadataRequest,
+    };
     use super::super::fusion_block::FusionBlockContractWorkspace;
     use super::super::scratch::StorageDynamicFusionScratchWorkspace;
 
@@ -2677,10 +2677,10 @@ mod tests {
 
     fn counting_su2_primer(
         rule: &SU2FusionRule,
-        homspace: &FusionTreeHomSpace,
-    ) -> Result<PreparedLayoutKeys, OperationError> {
+        request: MetadataRequest<'_>,
+    ) -> Result<MetadataOutput, OperationError> {
         EXECUTION_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
-        lowered_layout_primer(rule, homspace)
+        lowered_metadata_dispatcher(rule, request)
     }
 
     fn reset_execution_primer_calls() {

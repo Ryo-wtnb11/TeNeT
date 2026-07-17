@@ -15,12 +15,15 @@ use tenet_core::{
 };
 
 use crate::cache::registered_operation_cache;
+use crate::contract::{
+    dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
+};
 #[cfg(test)]
 use crate::contract::{
-    encoded_layout_primer, lowered_layout_primer, reset_scratch_publication_observations,
-    scratch_publication_observations, PreparedLayoutKeys,
+    encoded_layout_primer, lowered_layout_primer, lowered_metadata_dispatcher,
+    reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
+    MetadataRequest,
 };
-use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
 
@@ -155,7 +158,7 @@ where
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
 
     let structure = Arc::clone(space.structure());
-    let prepared = primer(rule, &adjoint_hom)?;
+    let prepared = dispatch_prepare(primer, rule, &adjoint_hom)?;
     let keys = prepared.keys(rule, &adjoint_hom);
     let shapes = keys
         .iter()
@@ -704,10 +707,10 @@ mod cache_tests {
 
     fn counting_primer(
         rule: &TripleRule,
-        homspace: &FusionTreeHomSpace,
-    ) -> Result<PreparedLayoutKeys, OperationError> {
+        request: MetadataRequest<'_>,
+    ) -> Result<MetadataOutput, OperationError> {
         LOWERED_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
-        lowered_layout_primer(rule, homspace)
+        lowered_metadata_dispatcher(rule, request)
     }
 
     // Single-charge U(1) source: one coupled sector, block shape [deg, deg].
@@ -794,9 +797,13 @@ mod cache_tests {
             .collect::<Vec<_>>();
         crate::reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
-        let (lowered_space, lowered_data) =
-            adjoint_dyn_with_primer(&rule, &source, &data, lowered_layout_primer::<TripleRule>)
-                .unwrap();
+        let (lowered_space, lowered_data) = adjoint_dyn_with_primer(
+            &rule,
+            &source,
+            &data,
+            lowered_metadata_dispatcher::<TripleRule>,
+        )
+        .unwrap();
         crate::reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
         let (encoded_space, encoded_data) = adjoint_dyn(&rule, &source, &data).unwrap();
@@ -834,9 +841,12 @@ mod cache_tests {
         let source = DynamicFusionMapSpace::from_typed(&typed);
         reset_scratch_publication_observations();
 
-        let error =
-            adjoint_space_dyn_with_primer(&rule, &source, lowered_layout_primer::<U1FusionRule>)
-                .unwrap_err();
+        let error = adjoint_space_dyn_with_primer(
+            &rule,
+            &source,
+            lowered_metadata_dispatcher::<U1FusionRule>,
+        )
+        .unwrap_err();
 
         assert!(matches!(error, OperationError::MissingBlockKey { .. }));
         assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));

@@ -910,28 +910,25 @@ where
 {
     FusionTreeHomSpaceLayout {
         id,
-        data: fusion_tree_layout_data_from_keys(rule, keys),
+        data: fusion_tree_layout_data_from_keys(rule.vacuum(), keys),
     }
 }
 
-fn fusion_tree_layout_data_from_keys<R>(
-    rule: &R,
+fn fusion_tree_layout_data_from_keys(
+    vacuum: SectorId,
     keys: Vec<FusionTreeBlockKey>,
-) -> FusionTreeHomSpaceLayoutData
-where
-    R: FusionRule,
-{
+) -> FusionTreeHomSpaceLayoutData {
     let keys = Arc::<[FusionTreeBlockKey]>::from(keys);
     let mut sectors = Vec::new();
     let mut run_start = 0usize;
     while run_start < keys.len() {
-        let coupled = coupled_or_vacuum(rule, keys[run_start].codomain_tree());
+        let coupled = keys[run_start].codomain_tree().coupled().unwrap_or(vacuum);
         let mut run_end = run_start;
         let mut row_indices = FxHashMap::<FusionTreeKey, usize>::default();
         let mut col_indices = FxHashMap::<FusionTreeKey, usize>::default();
         let mut entries = Vec::new();
         while run_end < keys.len()
-            && coupled_or_vacuum(rule, keys[run_end].codomain_tree()) == coupled
+            && keys[run_end].codomain_tree().coupled().unwrap_or(vacuum) == coupled
         {
             let row = match row_indices.get(keys[run_end].codomain_tree()) {
                 Some(&index) => index,
@@ -1299,7 +1296,10 @@ impl FusionTreeHomSpace {
         drop(read);
 
         let keys = self.try_fusion_tree_keys_uncached_lowered(rule)?;
-        let data = fusion_tree_layout_data_from_keys(rule, keys);
+        let vacuum = rule
+            .try_lowered_vacuum()
+            .and_then(|sector| rule.try_encode_lowered(sector))?;
+        let data = fusion_tree_layout_data_from_keys(vacuum, keys);
         Ok(PreparedLoweredFusionTreeLayout {
             state: PreparedLoweredFusionTreeLayoutState::Cold {
                 key,
@@ -1483,7 +1483,7 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         let layout =
-            fusion_tree_layout_data_from_keys(rule, self.fusion_tree_keys_uncached(rule));
+            fusion_tree_layout_data_from_keys(rule.vacuum(), self.fusion_tree_keys_uncached(rule));
         let (sector, degeneracy) = coupled_subblock_parts_from_layout(
             self,
             self.codomain.len(),
