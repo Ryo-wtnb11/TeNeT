@@ -1236,8 +1236,19 @@ fn parallel_group_errors_preserve_source_order_and_transaction_state() {
         build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
         TreePairRowMemo,
     };
-    use std::sync::{Arc, Barrier};
-    use std::time::Duration;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::{Duration, Instant};
+
+    struct CompletionFlag(Arc<AtomicBool>);
+
+    impl Drop for CompletionFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
 
     let keys = [
         all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]),
@@ -1256,8 +1267,9 @@ fn parallel_group_errors_preserve_source_order_and_transaction_state() {
             .num_threads(threads)
             .build()
             .unwrap();
-        for _ in 0..8 {
-            let barrier = Arc::new(Barrier::new(if threads > 1 { 2 } else { 1 }));
+        for _ in 0..32 {
+            let later_completed = Arc::new(AtomicBool::new(false));
+            let completion_order_observed = Arc::new(AtomicBool::new(false));
             let mut memo = TreePairRowMemo::default();
             let mut hits = 7;
             let mut misses = 11;
@@ -1273,17 +1285,23 @@ fn parallel_group_errors_preserve_source_order_and_transaction_state() {
                     threads,
                     |_, _, missing| {
                         let first_sector = missing[0].codomain_uncoupled()[0].id();
-                        if threads > 1 {
-                            barrier.wait();
-                        }
                         if first_sector == 1 {
                             if threads > 1 {
-                                std::thread::sleep(Duration::from_millis(2));
+                                let deadline = Instant::now() + Duration::from_secs(5);
+                                while !later_completed.load(Ordering::Acquire) {
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "later source-group closure did not complete"
+                                    );
+                                    std::thread::yield_now();
+                                }
+                                completion_order_observed.store(true, Ordering::Release);
                             }
                             Err(OperationError::InvalidArgument {
                                 message: "first source-group error",
                             })
                         } else {
+                            let _completion = CompletionFlag(Arc::clone(&later_completed));
                             Err(OperationError::InvalidArgument {
                                 message: "second source-group error",
                             })
@@ -1297,6 +1315,9 @@ fn parallel_group_errors_preserve_source_order_and_transaction_state() {
             assert_eq!(result.unwrap_err(), expected);
             assert!(memo.is_empty());
             assert_eq!((hits, misses), (7, 11));
+            if threads > 1 {
+                assert!(completion_order_observed.load(Ordering::Acquire));
+            }
         }
     }
 }
