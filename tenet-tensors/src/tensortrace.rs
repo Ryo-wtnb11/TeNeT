@@ -4,7 +4,7 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     multiplicity_free_permute_tree_pair, split_fusion_tree, BlockKey, BlockStructure, FusionRule,
-    FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
     HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, SectorLeg, TensorMap,
     TensorStorage,
 };
@@ -12,6 +12,7 @@ use tenet_core::{
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use crate::lowering::{adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes};
 use crate::strided::offset_to_isize;
+use crate::tree_transform::{transformed_tree_pair_rows_block, TreeTransformOperation};
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::OperationError;
@@ -109,6 +110,27 @@ pub(crate) const PLAIN_TENSORTRACE_BLOCK_SPARSE_UNSUPPORTED: &str =
     "block-sparse tensortrace enumeration is not implemented yet";
 pub(crate) const FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING: &str =
     "fusion tensortrace requires symmetric braiding";
+
+#[cfg(test)]
+thread_local! {
+    static TRACE_TRANSFORM_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_trace_transform_invocations() {
+    TRACE_TRANSFORM_INVOCATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn take_trace_transform_invocations() -> usize {
+    TRACE_TRANSFORM_INVOCATIONS.replace(0)
+}
+
+#[inline]
+fn record_trace_transform_invocation() {
+    #[cfg(test)]
+    TRACE_TRANSFORM_INVOCATIONS.set(TRACE_TRANSFORM_INVOCATIONS.get() + 1);
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorTraceFusionStructure<C> {
@@ -802,7 +824,9 @@ where
     domain_permutation.extend_from_slice(&axis_plan.output_axes[dst_codomain_rank..]);
     domain_permutation.extend_from_slice(&axis_plan.trace_rhs_axes);
 
-    let mut terms = Vec::new();
+    // Collect source keys in storage order before symbol evaluation so malformed
+    // structural blocks retain their original error precedence.
+    let mut source_keys = Vec::with_capacity(src_structure.block_count());
     for src_block_index in 0..src_structure.block_count() {
         let src_block = src_structure.block(src_block_index)?;
         let BlockKey::FusionTree(src_key) = src_block.key() else {
@@ -811,46 +835,119 @@ where
                 index: src_block_index,
             });
         };
-        for (permuted_key, permutation_coefficient) in multiplicity_free_permute_tree_pair(
-            rule,
-            src_key,
-            &codomain_permutation,
-            &domain_permutation,
-        )
-        .map_err(OperationError::from_core_preserving_context)?
-        {
-            let (dst_codomain_tree, trace_codomain_tree) =
-                split_fusion_tree(rule, permuted_key.codomain_tree(), dst_codomain_rank)
-                    .map_err(OperationError::from_core_preserving_context)?;
-            let (dst_domain_tree, trace_domain_tree) = split_fusion_tree(
-                rule,
-                permuted_key.domain_tree(),
-                axis_plan.output_axes.len() - dst_codomain_rank,
-            )
-            .map_err(OperationError::from_core_preserving_context)?;
-            if trace_codomain_tree != trace_domain_tree {
-                continue;
-            }
+        source_keys.push(src_key.clone());
+    }
 
-            let trace_factor = trace_channel_factor(rule, &trace_codomain_tree)
-                .map_err(OperationError::from_core_preserving_context)?;
-            let coefficient = permutation_coefficient * trace_factor;
-            let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, dst_domain_tree);
-            let dst_block = dst_structure
-                .find_block_index_by_fusion_tree_key(&dst_key)
-                .ok_or_else(|| OperationError::MissingBlockKey {
-                    key: Box::new(BlockKey::from(dst_key.clone())),
-                })?;
-            terms.push(TensorTraceFusionStructureTerm {
-                dst_key,
-                src_key: src_key.clone(),
-                dst_block,
-                src_block: src_block_index,
-                coefficient,
-            });
+    let operation =
+        TreeTransformOperation::permute(codomain_permutation.clone(), domain_permutation.clone());
+    let mut rows_by_source = (0..source_keys.len())
+        .map(|_| None)
+        .collect::<Vec<Option<Vec<(FusionTreeBlockKey, R::Scalar)>>>>();
+    if rule.fusion_style() == FusionStyleKind::Unique {
+        // Why not route Unique fusion through the block matrix: every source has
+        // one destination, so its existing scalar transform is the direct path.
+        for (src_block_index, src_key) in source_keys.iter().enumerate() {
+            record_trace_transform_invocation();
+            rows_by_source[src_block_index] = Some(
+                multiplicity_free_permute_tree_pair(
+                    rule,
+                    src_key,
+                    &codomain_permutation,
+                    &domain_permutation,
+                )
+                .map_err(OperationError::from_core_preserving_context)?,
+            );
+        }
+    } else {
+        // Transform each external-sector group once, then index its source
+        // columns by the original structure position.
+        for group in src_structure.fusion_tree_groups() {
+            let group_keys = group
+                .block_indices()
+                .iter()
+                .map(|&src_block_index| source_keys[src_block_index].clone())
+                .collect::<Vec<_>>();
+            record_trace_transform_invocation();
+            let group_rows = transformed_tree_pair_rows_block(rule, &operation, &group_keys)?;
+            if group_rows.len() != group.block_indices().len() {
+                return Err(OperationError::InvalidArgument {
+                    message: "trace block transform returned the wrong source row count",
+                });
+            }
+            for (&src_block_index, rows) in group.block_indices().iter().zip(group_rows) {
+                rows_by_source[src_block_index] = Some(rows);
+            }
         }
     }
+
+    // Why not lower while visiting groups: groups may interleave in a legal
+    // BlockStructure, while trace accumulation follows global source order.
+    let mut terms = Vec::new();
+    for (src_block_index, (src_key, rows)) in source_keys.iter().zip(rows_by_source).enumerate() {
+        let rows = rows.ok_or(OperationError::InvalidArgument {
+            message: "trace source block was not assigned to a fusion group",
+        })?;
+        lower_fusion_trace_source_rows(
+            rule,
+            dst_structure,
+            axis_plan,
+            dst_codomain_rank,
+            src_block_index,
+            src_key,
+            rows,
+            &mut terms,
+        )?;
+    }
     Ok(terms)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_fusion_trace_source_rows<R>(
+    rule: &R,
+    dst_structure: &BlockStructure,
+    axis_plan: &TensorTraceAxisPlan,
+    dst_codomain_rank: usize,
+    src_block_index: usize,
+    src_key: &FusionTreeBlockKey,
+    rows: Vec<(FusionTreeBlockKey, R::Scalar)>,
+    terms: &mut Vec<TensorTraceFusionStructureTerm<R::Scalar>>,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    for (permuted_key, permutation_coefficient) in rows {
+        let (dst_codomain_tree, trace_codomain_tree) =
+            split_fusion_tree(rule, permuted_key.codomain_tree(), dst_codomain_rank)
+                .map_err(OperationError::from_core_preserving_context)?;
+        let (dst_domain_tree, trace_domain_tree) = split_fusion_tree(
+            rule,
+            permuted_key.domain_tree(),
+            axis_plan.output_axes.len() - dst_codomain_rank,
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+        if trace_codomain_tree != trace_domain_tree {
+            continue;
+        }
+
+        let trace_factor = trace_channel_factor(rule, &trace_codomain_tree)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let coefficient = permutation_coefficient * trace_factor;
+        let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, dst_domain_tree);
+        let dst_block = dst_structure
+            .find_block_index_by_fusion_tree_key(&dst_key)
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(BlockKey::from(dst_key.clone())),
+            })?;
+        terms.push(TensorTraceFusionStructureTerm {
+            dst_key,
+            src_key: src_key.clone(),
+            dst_block,
+            src_block: src_block_index,
+            coefficient,
+        });
+    }
+    Ok(())
 }
 
 fn trace_channel_factor<R>(

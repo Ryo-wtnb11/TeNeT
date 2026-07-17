@@ -12,6 +12,7 @@ pub use operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformProductRuleCacheKey,
     TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
 };
+pub(crate) use plan::transformed_tree_pair_rows_block;
 pub use plan::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
     build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreeTransformBlockSpec,
@@ -27,6 +28,5 @@ pub(crate) use plan::{
     build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
-    partition_staged_groups_for_test, transformed_tree_pair_rows_block, AllCodomainRowMemo,
-    TreePairRowMemo,
+    partition_staged_groups_for_test, AllCodomainRowMemo, TreePairRowMemo,
 };
