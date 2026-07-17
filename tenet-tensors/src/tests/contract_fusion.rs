@@ -478,8 +478,7 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
         )
         .unwrap()
     };
-    // Cloned spaces share the subblock-structure Arc, so tensors built from
-    // clones satisfy the prepared handle's identity check.
+    // What: replaying the tensors used to prepare the handle remains valid.
     let space = fusion_space();
     let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], space.clone());
     let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], space.clone());
@@ -521,6 +520,96 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
             1.0,
             0.0,
         )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        OperationError::StructureMismatch {
+            tensor: "prepared contraction"
+        }
+    ));
+
+    let foreign_lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+    let err = context
+        .execute_prepared_tensorcontract_fusion(
+            &prepared,
+            &rule,
+            &mut dst_prepared,
+            &foreign_lhs,
+            &rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        OperationError::StructureMismatch {
+            tensor: "prepared contraction"
+        }
+    ));
+
+    let foreign_rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+    let err = context
+        .execute_prepared_tensorcontract_fusion(
+            &prepared,
+            &rule,
+            &mut dst_prepared,
+            &lhs,
+            &foreign_rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        OperationError::StructureMismatch {
+            tensor: "prepared contraction"
+        }
+    ));
+}
+
+#[test]
+fn prepared_tensorcontract_fusion_pins_exact_space_allocations() {
+    // What: a prepared handle pins all original fusion-space allocations and
+    // rejects semantically equal replacements after the source tensors drop.
+    let rule = Z2FusionRule;
+    let fusion_space = || {
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let (prepared, dst_weak, lhs_weak, rhs_weak) = {
+        let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+        let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+        let dst = test_host_fusion_tensor_map(vec![0.0_f64, 0.0], fusion_space());
+        let dst_weak = Arc::downgrade(dst.fusion_space().unwrap());
+        let lhs_weak = Arc::downgrade(lhs.fusion_space().unwrap());
+        let rhs_weak = Arc::downgrade(rhs.fusion_space().unwrap());
+        let prepared = context
+            .prepare_tensorcontract_fusion(&rule, &dst, &lhs, &rhs, axes)
+            .unwrap();
+        (prepared, dst_weak, lhs_weak, rhs_weak)
+    };
+
+    assert!(dst_weak.upgrade().is_some());
+    assert!(lhs_weak.upgrade().is_some());
+    assert!(rhs_weak.upgrade().is_some());
+
+    let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+    let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+    let mut dst = test_host_fusion_tensor_map(vec![0.0_f64, 0.0], fusion_space());
+    let err = context
+        .execute_prepared_tensorcontract_fusion(&prepared, &rule, &mut dst, &lhs, &rhs, 1.0, 0.0)
         .unwrap_err();
     assert!(matches!(
         err,
@@ -2655,6 +2744,30 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert_eq!(context.contraction_resolution_cache_hits(), 0);
     assert!(context.contraction_resolution_cache_misses() >= 1);
 
+    let pinned = context
+        .prepare_tensorcontract_fusion(&rule, &context_dst, &lhs, &rhs, axes)
+        .unwrap();
+    context.set_cache_policy(OperationCachePolicy::NoCache);
+    context_dst
+        .data_mut()
+        .copy_from_slice(&initial_dst_for_context_replay);
+    context
+        .execute_prepared_tensorcontract_fusion(
+            &pinned,
+            &rule,
+            &mut context_dst,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+    for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
+        assert!((actual - expected).abs() < 1.0e-10);
+    }
+    assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
+    context.set_cache_policy(OperationCachePolicy::TaskLocal);
+
     context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
@@ -4769,4 +4882,325 @@ fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eage
         !context.last_resolution_is_core(),
         "a nontrivial fermionic RHS twist must stay on a twist-aware fallback route"
     );
+}
+
+#[test]
+fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles() {
+    // What: direct and lazy-adjoint contractions for a nested non-Abelian
+    // product keep the encoded layout/data semantics with and without replay
+    // caching, including source transforms and a nonidentity output transform.
+    const ISOLATED_ENV: &str = "TENET_LOWERED_DYNAMIC_ORACLE_CHILD";
+    if std::env::var_os(ISOLATED_ENV).is_none() {
+        // What: cache resets used to make the two oracles independent cannot
+        // change process-global cache generations observed by sibling tests.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::contract_fusion::nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles",
+                "--nocapture",
+            ])
+            .env(ISOLATED_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    use tenet_core::{
+        FermionParityFusionRule, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
+        ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, Su2SectorLayout,
+        U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+    };
+
+    type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+    type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+    type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+    type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+    type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+    type TripleRuleKey = <TripleRule as TreeTransformRuleCacheKey>::Key;
+
+    let rule = TripleRule::new(
+        Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule),
+        SU2FusionRule,
+    );
+    let sector = |parity: u8, charge: i32, twice_spin: usize| {
+        TripleCodec::encode(
+            Fz2U1Codec::encode(
+                Z2Irrep::new(parity).sector_id(),
+                U1Irrep::new(charge).sector_id(),
+            ),
+            SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+        )
+    };
+    let vacuum = sector(0, 0, 0);
+    let charged = sector(1, 0, 1);
+    let leg = |dual| SectorLeg::new([(vacuum, 1), (charged, 1)], dual);
+    let provider = Arc::new(rule);
+    let bind_encoded = |homspace: FusionTreeHomSpace| {
+        let count = homspace.fusion_tree_keys(provider.as_ref()).len();
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            homspace,
+            vec![vec![1; 3]; count],
+        )
+        .unwrap()
+    };
+    let bind_lowered = |homspace: FusionTreeHomSpace| {
+        let count = homspace
+            .try_fusion_tree_keys_lowered(provider.as_ref())
+            .unwrap()
+            .len();
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::clone(&provider),
+            homspace,
+            vec![vec![1; 3]; count],
+        )
+        .unwrap()
+    };
+    let lhs_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(false), leg(true)]),
+        FusionProductSpace::new([leg(false)]),
+    );
+    let rhs_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(true)]),
+        FusionProductSpace::new([leg(true), leg(false)]),
+    );
+    let encoded_lhs = bind_encoded(lhs_hom.clone());
+    let encoded_rhs = bind_encoded(rhs_hom.clone());
+    let lowered_lhs = bind_lowered(lhs_hom);
+    let lowered_rhs = bind_lowered(rhs_hom);
+    assert_eq!(encoded_lhs.space(), lowered_lhs.space());
+    assert_eq!(encoded_rhs.space(), lowered_rhs.space());
+    let lhs_data = (0..encoded_lhs.space().required_len().unwrap())
+        .map(|index| index as f64 + 1.0)
+        .collect::<Vec<_>>();
+    let rhs_data = (0..encoded_rhs.space().required_len().unwrap())
+        .map(|index| 0.5 * index as f64 - 2.0)
+        .collect::<Vec<_>>();
+    let direct_axes =
+        TensorContractSpec::new(&[0], &[2], OutputAxisOrder::from_axes(&[2, 0, 3, 1]));
+
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let encoded_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        &encoded_lhs,
+        &encoded_rhs,
+        direct_axes.lhs_contracting_axes(),
+        direct_axes.rhs_contracting_axes(),
+        direct_axes.output_permutation(),
+    )
+    .unwrap();
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
+        &lowered_lhs,
+        &lowered_rhs,
+        direct_axes.lhs_contracting_axes(),
+        direct_axes.rhs_contracting_axes(),
+        direct_axes.output_permutation(),
+    )
+    .unwrap();
+    assert_eq!(encoded_dst.space(), lowered_dst.space());
+
+    for policy in [
+        OperationCachePolicy::NoCache,
+        OperationCachePolicy::TaskLocal,
+    ] {
+        reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let mut encoded = vec![0.0; encoded_dst.space().required_len().unwrap()];
+        let mut encoded_context =
+            TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
+        encoded_context.set_cache_policy(policy);
+        encoded_context
+            .tensorcontract_fusion_dyn_into(
+                &encoded_dst,
+                &mut encoded,
+                &encoded_lhs,
+                &lhs_data,
+                &encoded_rhs,
+                &rhs_data,
+                direct_axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+
+        reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let mut lowered = vec![0.0; lowered_dst.space().required_len().unwrap()];
+        let mut lowered_context =
+            TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
+        lowered_context.set_cache_policy(policy);
+        lowered_context
+            .tensorcontract_fusion_dyn_into_lowered(
+                &lowered_dst,
+                &mut lowered,
+                &lowered_lhs,
+                &lhs_data,
+                &lowered_rhs,
+                &rhs_data,
+                direct_axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(lowered, encoded);
+        let cold_misses = lowered_context.dynamic_fusion_space_cache_misses();
+        let cold_hits = lowered_context.dynamic_fusion_space_cache_hits();
+        assert!(cold_misses >= 3);
+        let mut warm = vec![0.0; lowered.len()];
+        lowered_context
+            .tensorcontract_fusion_dyn_into_lowered(
+                &lowered_dst,
+                &mut warm,
+                &lowered_lhs,
+                &lhs_data,
+                &lowered_rhs,
+                &rhs_data,
+                direct_axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(warm, lowered);
+        if policy == OperationCachePolicy::NoCache {
+            assert_eq!(lowered_context.dynamic_fusion_space_cache_len(), 0);
+            assert_eq!(lowered_context.dynamic_fusion_space_cache_hits(), 0);
+            assert!(lowered_context.dynamic_fusion_space_cache_misses() > cold_misses);
+        } else {
+            assert!(lowered_context.dynamic_fusion_space_cache_len() >= 3);
+            assert_eq!(
+                lowered_context.dynamic_fusion_space_cache_misses(),
+                cold_misses
+            );
+            assert!(lowered_context.dynamic_fusion_space_cache_hits() > cold_hits);
+        }
+    }
+
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let (eager_lhs, eager_lhs_data) = crate::adjoint_bound_dyn(&encoded_lhs, &lhs_data).unwrap();
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let lazy_lhs = crate::adjoint_bound_space_dyn_lowered(&lowered_lhs).unwrap();
+    assert_eq!(eager_lhs.space(), lazy_lhs.space());
+    let lazy_axes = TensorContractSpec::new_with_conjugation(
+        &[1],
+        &[1],
+        OutputAxisOrder::from_axes(&[2, 0, 3, 1]),
+        true,
+        false,
+    );
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let encoded_lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        &eager_lhs,
+        &encoded_rhs,
+        lazy_axes.lhs_contracting_axes(),
+        lazy_axes.rhs_contracting_axes(),
+        lazy_axes.output_permutation(),
+    )
+    .unwrap();
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
+        &lazy_lhs,
+        &lowered_rhs,
+        lazy_axes.lhs_contracting_axes(),
+        lazy_axes.rhs_contracting_axes(),
+        lazy_axes.output_permutation(),
+    )
+    .unwrap();
+    assert_eq!(encoded_lazy_dst.space(), lazy_dst.space());
+
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let mut eager = vec![0.0; lazy_dst.space().required_len().unwrap()];
+    let mut eager_context = TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
+    eager_context
+        .tensorcontract_fusion_dyn_into(
+            &lazy_dst,
+            &mut eager,
+            &eager_lhs,
+            &eager_lhs_data,
+            &encoded_rhs,
+            &rhs_data,
+            TensorContractSpec::new(
+                lazy_axes.lhs_contracting_axes(),
+                lazy_axes.rhs_contracting_axes(),
+                lazy_axes.output_permutation(),
+            ),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    for policy in [
+        OperationCachePolicy::NoCache,
+        OperationCachePolicy::TaskLocal,
+    ] {
+        reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let mut encoded_lazy = vec![0.0; encoded_lazy_dst.space().required_len().unwrap()];
+        let mut encoded_lazy_context =
+            TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
+        encoded_lazy_context.set_cache_policy(policy);
+        encoded_lazy_context
+            .tensorcontract_fusion_dyn_prelowered_into(
+                &encoded_lazy_dst,
+                &mut encoded_lazy,
+                FusionOperand::prelowered_adjoint(eager_lhs.space(), encoded_lhs.space()).unwrap(),
+                &lhs_data,
+                FusionOperand::direct(encoded_rhs.space()),
+                &rhs_data,
+                lazy_axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(encoded_lazy, eager);
+
+        reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let mut lazy = vec![0.0; lazy_dst.space().required_len().unwrap()];
+        let mut lazy_context =
+            TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
+        lazy_context.set_cache_policy(policy);
+        let execute_lazy =
+            |context: &mut TensorContractFusionExecutionContext<f64, TripleRuleKey>,
+             output: &mut [f64]| {
+                context.tensorcontract_fusion_dyn_prelowered_into_lowered(
+                    &lazy_dst,
+                    output,
+                    FusionOperand::prelowered_adjoint(lazy_lhs.space(), lowered_lhs.space())
+                        .unwrap(),
+                    &lhs_data,
+                    FusionOperand::direct(lowered_rhs.space()),
+                    &rhs_data,
+                    lazy_axes,
+                    1.0,
+                    0.0,
+                )
+            };
+        execute_lazy(&mut lazy_context, &mut lazy).unwrap();
+        assert_eq!(lazy, eager);
+        let cold_misses = lazy_context.dynamic_fusion_space_cache_misses();
+        let cold_hits = lazy_context.dynamic_fusion_space_cache_hits();
+        assert!(cold_misses >= 3);
+        let mut warm = vec![0.0; lazy.len()];
+        execute_lazy(&mut lazy_context, &mut warm).unwrap();
+        assert_eq!(warm, lazy);
+        if policy == OperationCachePolicy::NoCache {
+            assert_eq!(lazy_context.dynamic_fusion_space_cache_len(), 0);
+            assert_eq!(lazy_context.dynamic_fusion_space_cache_hits(), 0);
+            assert!(lazy_context.dynamic_fusion_space_cache_misses() > cold_misses);
+        } else {
+            assert!(lazy_context.dynamic_fusion_space_cache_len() >= 3);
+            assert_eq!(
+                lazy_context.dynamic_fusion_space_cache_misses(),
+                cold_misses
+            );
+            assert!(lazy_context.dynamic_fusion_space_cache_hits() > cold_hits);
+        }
+    }
 }

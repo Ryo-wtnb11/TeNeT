@@ -22,8 +22,8 @@ mod tree_context;
 mod tree_transform;
 
 pub use adjoint::{
-    adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_space_dyn,
-    adjoint_bound_space_dyn_generic,
+    adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_dyn_lowered,
+    adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic, adjoint_bound_space_dyn_lowered,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{

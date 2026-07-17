@@ -4429,7 +4429,7 @@ mod tests {
                 SectorLeg::new([(u1(-1), 2), (u1(0), 1)], false),
                 SectorLeg::new([(u1(0), 3), (u1(1), 1)], false),
             ]),
-            FusionProductSpace::new([]),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
         assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &empty_domain);
     }
@@ -4768,6 +4768,266 @@ mod tests {
             hom.fusion_tree_keys_uncached(&rule),
         ));
         (key, layout)
+    }
+
+    fn assert_lowered_keys_match_encoded_oracle<R>(rule: &R, hom: &FusionTreeHomSpace)
+    where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        let encoded = hom.fusion_tree_keys_uncached(rule);
+        let lowered = hom.try_fusion_tree_keys_uncached_lowered(rule).unwrap();
+        assert_eq!(lowered, encoded);
+    }
+
+    fn singleton_rank_hom(sector: SectorId, rank: usize) -> FusionTreeHomSpace {
+        let side = |invert_dual| {
+            FusionProductSpace::new((0..rank).map(|axis| {
+                SectorLeg::new([(sector, axis % 3 + 1)], (axis % 2 == 0) ^ invert_dual)
+            }))
+        };
+        FusionTreeHomSpace::new(side(false), side(true))
+    }
+
+    #[test]
+    fn lowered_builder_matches_encoded_oracle_for_builtin_ranks_and_products() {
+        // What: every persistent key field and key order stays identical for
+        // ranks 0 through 6 across all built-in multiplicity-free algebras.
+        for rank in 0..=6 {
+            assert_lowered_keys_match_encoded_oracle(
+                &U1FusionRule,
+                &singleton_rank_hom(u1(1), rank),
+            );
+            assert_lowered_keys_match_encoded_oracle(
+                &Z2FusionRule,
+                &singleton_rank_hom(z2_odd(), rank),
+            );
+            assert_lowered_keys_match_encoded_oracle(
+                &FermionParityFusionRule,
+                &singleton_rank_hom(z2_odd(), rank),
+            );
+            assert_lowered_keys_match_encoded_oracle(
+                &SU2FusionRule,
+                &singleton_rank_hom(su2(1), rank),
+            );
+        }
+
+        type U1Fz2Codec = PackedProductCodec<U1SectorLayout, Fz2SectorLayout>;
+        type U1Fz2Rule =
+            ProductFusionRule<U1FusionRule, FermionParityFusionRule, U1Fz2Codec>;
+        let pair_rule = U1Fz2Rule::new(U1FusionRule, FermionParityFusionRule);
+        let pair_sector = U1Fz2Codec::encode(u1(1), z2_odd());
+
+        type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+        type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+        type Fz2U1Rule =
+            ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+        type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+        let triple_rule = TripleRule::new(
+            Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule),
+            SU2FusionRule,
+        );
+        let triple_sector =
+            TripleCodec::encode(Fz2U1Codec::encode(z2_odd(), u1(1)), su2(1));
+        let triple_pair_coupled =
+            TripleCodec::encode(Fz2U1Codec::encode(z2_even(), u1(2)), su2(0));
+
+        for rank in 0..=6 {
+            assert_lowered_keys_match_encoded_oracle(
+                &pair_rule,
+                &singleton_rank_hom(pair_sector, rank),
+            );
+            assert_lowered_keys_match_encoded_oracle(
+                &triple_rule,
+                &singleton_rank_hom(triple_sector, rank),
+            );
+        }
+
+        let triple_vacuum =
+            TripleCodec::encode(Fz2U1Codec::encode(z2_even(), u1(0)), su2(0));
+        let multi_tuple_side = |invert_dual| {
+            FusionProductSpace::new((0..4).map(|axis| {
+                SectorLeg::new(
+                    [(triple_vacuum, 1), (triple_sector, 2)],
+                    (axis % 2 == 0) ^ invert_dual,
+                )
+            }))
+        };
+        let multi_tuple_rank_eight =
+            FusionTreeHomSpace::new(multi_tuple_side(false), multi_tuple_side(true));
+        assert_lowered_keys_match_encoded_oracle(&triple_rule, &multi_tuple_rank_eight);
+
+        for dual_mask in 0usize..(1 << 3) {
+            let all_dual_masks = FusionTreeHomSpace::new(
+                FusionProductSpace::new([
+                    SectorLeg::new([(triple_sector, 2)], dual_mask & 1 != 0),
+                    SectorLeg::new([(triple_sector, 3)], dual_mask & 2 != 0),
+                ]),
+                FusionProductSpace::new([SectorLeg::new(
+                    [(triple_pair_coupled, 4)],
+                    dual_mask & 4 != 0,
+                )]),
+            );
+            assert_lowered_keys_match_encoded_oracle(&triple_rule, &all_dual_masks);
+        }
+
+        let asymmetric = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(triple_sector, 2)], true),
+                SectorLeg::new([(triple_sector, 3)], false),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new(
+                    [(
+                        TripleCodec::encode(
+                            Fz2U1Codec::encode(z2_even(), u1(2)),
+                            su2(0),
+                        ),
+                        4,
+                    )],
+                    true,
+                ),
+                SectorLeg::new(
+                    [(
+                        TripleCodec::encode(
+                            Fz2U1Codec::encode(z2_even(), u1(0)),
+                            su2(0),
+                        ),
+                        5,
+                    )],
+                    false,
+                ),
+            ]),
+        );
+        assert_lowered_keys_match_encoded_oracle(&triple_rule, &asymmetric);
+    }
+
+    #[test]
+    fn lowered_and_encoded_entries_share_the_same_layout_cache() {
+        // What: old-first and lowered-first construction converge on the same
+        // Arc rather than publishing parallel layouts for one semantic key.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hom = singleton_rank_hom(su2(1), 4);
+
+        reset_core_intern_tables();
+        let encoded_first = hom.cached_fusion_tree_layout(&SU2FusionRule);
+        let lowered_second = hom
+            .try_cached_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        assert!(Arc::ptr_eq(&encoded_first, &lowered_second));
+
+        reset_core_intern_tables();
+        let lowered_first = hom
+            .try_cached_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        let encoded_second = hom.cached_fusion_tree_layout(&SU2FusionRule);
+        assert!(Arc::ptr_eq(&lowered_first, &encoded_second));
+    }
+
+    #[test]
+    fn lowered_layout_cache_hit_performs_no_decode_or_channel_work() {
+        // What: a warm hit returns the retained layout without entering any
+        // typed decode, forward fold, or backward fusion enumeration.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = singleton_rank_hom(su2(1), 5);
+        reset_lowered_layout_build_observations();
+        let cold = hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
+        let (cold_decodes, cold_channels) = lowered_layout_build_observations();
+        assert!(cold_decodes > 0);
+        assert!(cold_channels > 0);
+
+        reset_lowered_layout_build_observations();
+        let warm = hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
+        assert!(Arc::ptr_eq(&cold, &warm));
+        assert_eq!(lowered_layout_build_observations(), (0, 0));
+    }
+
+    #[test]
+    fn lowered_builder_reports_malformed_ids_and_algebra_closure_without_panicking() {
+        // What: packed decode, U(1) overflow, and SU(2) closure failures are
+        // typed lowered-build errors; the expert encoded panic path is untouched.
+        type Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type Rule =
+            ProductFusionRule<FermionParityFusionRule, U1FusionRule, Codec>;
+        let rule = Rule::new(FermionParityFusionRule, U1FusionRule);
+        let malformed = singleton_rank_hom(SectorId::new(usize::MAX), 1);
+        let error = malformed
+            .try_fusion_tree_keys_uncached_lowered(&rule)
+            .unwrap_err();
+        assert!(error.to_string().contains("packed product sector"));
+
+        let u1_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(i32::MAX), 1)], false),
+                SectorLeg::new([(u1(1), 1)], false),
+            ]),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        );
+        let error = u1_overflow
+            .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
+            .unwrap_err();
+        assert!(error.to_string().contains("U(1) fusion charge"));
+
+        let u1_dual_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(0), 1)], false),
+                SectorLeg::new([(u1(0), 1)], false),
+                SectorLeg::new([(u1(i32::MIN), 1)], false),
+            ]),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        );
+        let error = u1_dual_overflow
+            .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
+            .unwrap_err();
+        assert!(error.to_string().contains("U(1) dual charge"));
+
+        let su2_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(su2(SU2_MAX_DOUBLED_SPIN), 1)], false),
+                SectorLeg::new([(su2(1), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let error = su2_overflow
+            .try_fusion_tree_keys_uncached_lowered(&SU2FusionRule)
+            .unwrap_err();
+        assert!(error.to_string().contains("SU(2) fusion closure"));
+    }
+
+    #[test]
+    fn empty_lowered_leg_short_circuits_before_other_leg_decode() {
+        // What: an empty product has no tuples and returns empty even when a
+        // different leg carries an ID that would fail lowered decoding.
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(SectorId::new(usize::MAX), 1)], false),
+                SectorLeg::new(Vec::<(SectorId, usize)>::new(), false),
+            ]),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        );
+        let keys = hom
+            .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
+            .unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn expert_cantor_product_keeps_the_encoded_fallback() {
+        // What: custom-codec/expert product construction remains available via
+        // the unchanged encoded public entry and preserves its historical IDs.
+        type Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        let rule = Rule::new(FermionParityFusionRule, U1FusionRule);
+        let sector = TensorKitProductCodec::encode(z2_odd(), u1(2));
+        let hom = singleton_rank_hom(sector, 3);
+        assert_eq!(
+            hom.fusion_tree_keys(&rule).as_ref(),
+            hom.fusion_tree_keys_uncached(&rule)
+        );
     }
 
     #[test]

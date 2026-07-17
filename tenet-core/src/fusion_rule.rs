@@ -241,6 +241,118 @@ pub trait FusionRule: 'static {
 
 pub trait MultiplicityFreeFusionRule: FusionRule {}
 
+mod lowered_multiplicity_free_sealed {
+    pub trait Sealed {}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LoweredFusionTreeBuildErrorKind {
+    InvalidSector(SectorId),
+    Codec(ProductSectorCodecError),
+    AlgebraClosure(&'static str),
+}
+
+/// Failure while lowering encoded sectors into the built-in multiplicity-free
+/// algebra used by the fusion-tree layout builder.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoweredFusionTreeBuildError {
+    kind: LoweredFusionTreeBuildErrorKind,
+}
+
+impl LoweredFusionTreeBuildError {
+    fn invalid_sector(sector: SectorId) -> Self {
+        Self {
+            kind: LoweredFusionTreeBuildErrorKind::InvalidSector(sector),
+        }
+    }
+
+    fn codec(error: ProductSectorCodecError) -> Self {
+        Self {
+            kind: LoweredFusionTreeBuildErrorKind::Codec(error),
+        }
+    }
+
+    fn algebra_closure(message: &'static str) -> Self {
+        Self {
+            kind: LoweredFusionTreeBuildErrorKind::AlgebraClosure(message),
+        }
+    }
+
+    #[doc(hidden)]
+    pub const fn static_message(&self) -> &'static str {
+        match &self.kind {
+            LoweredFusionTreeBuildErrorKind::InvalidSector(_) => {
+                "built-in fusion-tree layout contains an invalid sector"
+            }
+            LoweredFusionTreeBuildErrorKind::Codec(_) => {
+                "built-in fusion-tree layout contains an invalid product sector"
+            }
+            LoweredFusionTreeBuildErrorKind::AlgebraClosure(message) => message,
+        }
+    }
+}
+
+impl fmt::Display for LoweredFusionTreeBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            LoweredFusionTreeBuildErrorKind::InvalidSector(sector) => {
+                write!(formatter, "invalid built-in sector {sector:?}")
+            }
+            LoweredFusionTreeBuildErrorKind::Codec(error) => error.fmt(formatter),
+            LoweredFusionTreeBuildErrorKind::AlgebraClosure(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoweredFusionTreeBuildError {}
+
+/// Typed algebra used only while building built-in multiplicity-free layouts.
+///
+/// Persistent keys remain encoded as [`SectorId`]; implementations lower a
+/// sector once at the miss boundary and operate on components until emission.
+#[doc(hidden)]
+pub trait LoweredMultiplicityFreeAlgebra:
+    MultiplicityFreeFusionRule + lowered_multiplicity_free_sealed::Sealed
+{
+    type Sector: Copy + Eq + Hash;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError>;
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError>;
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError>;
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError>;
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>;
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError>;
+}
+
 pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     // Send + Sync because cached recoupling coefficients are shared across
     // tree-transform replay workers (TensorKit sectorscalartype parity: the
@@ -1204,6 +1316,123 @@ where
 {
 }
 
+impl<LeftRule, RightRule, LeftLayout, RightLayout>
+    lowered_multiplicity_free_sealed::Sealed
+    for ProductFusionRule<
+        LeftRule,
+        RightRule,
+        PackedProductCodec<LeftLayout, RightLayout>,
+    >
+where
+    LeftRule: LoweredMultiplicityFreeAlgebra,
+    RightRule: LoweredMultiplicityFreeAlgebra,
+    LeftLayout: PackedSectorLayout + 'static,
+    RightLayout: PackedSectorLayout + 'static,
+{
+}
+
+impl<LeftRule, RightRule, LeftLayout, RightLayout> LoweredMultiplicityFreeAlgebra
+    for ProductFusionRule<
+        LeftRule,
+        RightRule,
+        PackedProductCodec<LeftLayout, RightLayout>,
+    >
+where
+    LeftRule: LoweredMultiplicityFreeAlgebra,
+    RightRule: LoweredMultiplicityFreeAlgebra,
+    LeftLayout: PackedSectorLayout + 'static,
+    RightLayout: PackedSectorLayout + 'static,
+{
+    type Sector = ProductSector<LeftRule::Sector, RightRule::Sector>;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        let (left, right) =
+            PackedProductCodec::<LeftLayout, RightLayout>::decode_checked(sector)
+                .map_err(LoweredFusionTreeBuildError::codec)?;
+        Ok(ProductSector::new(
+            self.left.try_decode_lowered(left)?,
+            self.right.try_decode_lowered(right)?,
+        ))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        let left = self.left.try_encode_lowered(*sector.left())?;
+        let right = self.right.try_encode_lowered(*sector.right())?;
+        PackedProductCodec::<LeftLayout, RightLayout>::encode_checked(left, right)
+            .map_err(LoweredFusionTreeBuildError::codec)
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(ProductSector::new(
+            self.left.try_lowered_vacuum()?,
+            self.right.try_lowered_vacuum()?,
+        ))
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(ProductSector::new(
+            self.left.try_lowered_dual(*sector.left())?,
+            self.right.try_lowered_dual(*sector.right())?,
+        ))
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        self.right.try_for_each_lowered_channel(
+            *left.right(),
+            *right.right(),
+            &mut |right_channel| {
+                self.left.try_for_each_lowered_channel(
+                    *left.left(),
+                    *right.left(),
+                    &mut |left_channel| {
+                        emit(ProductSector::new(left_channel, right_channel))
+                    },
+                )
+            },
+        )
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        let left_n = self.left.try_lowered_nsymbol(
+            *left.left(),
+            *right.left(),
+            *coupled.left(),
+        )?;
+        let right_n = self.right.try_lowered_nsymbol(
+            *left.right(),
+            *right.right(),
+            *coupled.right(),
+        )?;
+        left_n.checked_mul(right_n).ok_or_else(|| {
+            LoweredFusionTreeBuildError::algebra_closure(
+                "product fusion multiplicity exceeds usize",
+            )
+        })
+    }
+}
+
 impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionSymbols
     for ProductFusionRule<LeftRule, RightRule, Codec>
 where
@@ -1386,6 +1615,61 @@ impl FusionRule for Z2FusionRule {
 
 impl MultiplicityFreeFusionRule for Z2FusionRule {}
 
+impl lowered_multiplicity_free_sealed::Sealed for Z2FusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for Z2FusionRule {
+    type Sector = Z2Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2Irrep::from_sector_id(sector)
+            .ok_or_else(|| LoweredFusionTreeBuildError::invalid_sector(sector))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Ok(sector.into())
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(Z2Irrep::EVEN)
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(sector)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        emit(Z2Irrep::new(left.parity() ^ right.parity()))
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        Ok(usize::from(
+            coupled.parity() == (left.parity() ^ right.parity()),
+        ))
+    }
+}
+
 impl MultiplicityFreeFusionSymbols for Z2FusionRule {
     type Scalar = f64;
 
@@ -1492,6 +1776,58 @@ impl FusionRule for FermionParityFusionRule {
 }
 
 impl MultiplicityFreeFusionRule for FermionParityFusionRule {}
+
+impl lowered_multiplicity_free_sealed::Sealed for FermionParityFusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for FermionParityFusionRule {
+    type Sector = Z2Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_decode_lowered(sector)
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_encode_lowered(sector)
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_lowered_vacuum()
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_lowered_dual(sector)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        Z2FusionRule.try_for_each_lowered_channel(left, right, emit)
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_lowered_nsymbol(left, right, coupled)
+    }
+}
 
 impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
     type Scalar = f64;
@@ -1668,6 +2004,83 @@ impl FusionRule for U1FusionRule {
 
 impl MultiplicityFreeFusionRule for U1FusionRule {}
 
+impl lowered_multiplicity_free_sealed::Sealed for U1FusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
+    type Sector = U1Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        U1Irrep::from_sector_id(sector)
+            .ok_or_else(|| LoweredFusionTreeBuildError::invalid_sector(sector))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Ok(sector.into())
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(U1Irrep::new(0))
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        sector
+            .charge()
+            .checked_neg()
+            .map(U1Irrep::new)
+            .ok_or_else(|| {
+                LoweredFusionTreeBuildError::algebra_closure(
+                    "U(1) dual charge exceeds the representable algebra",
+                )
+            })
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        let charge = left
+            .charge()
+            .checked_add(right.charge())
+            .ok_or_else(|| {
+                LoweredFusionTreeBuildError::algebra_closure(
+                    "U(1) fusion charge exceeds the representable algebra",
+                )
+            })?;
+        emit(U1Irrep::new(charge))
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        let charge = left
+            .charge()
+            .checked_add(right.charge())
+            .ok_or_else(|| {
+                LoweredFusionTreeBuildError::algebra_closure(
+                    "U(1) fusion charge exceeds the representable algebra",
+                )
+            })?;
+        Ok(usize::from(coupled.charge() == charge))
+    }
+}
+
 impl MultiplicityFreeFusionSymbols for U1FusionRule {
     type Scalar = f64;
 
@@ -1835,6 +2248,91 @@ impl FusionRule for SU2FusionRule {
 }
 
 impl MultiplicityFreeFusionRule for SU2FusionRule {}
+
+impl lowered_multiplicity_free_sealed::Sealed for SU2FusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
+    type Sector = SU2Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        SU2Irrep::try_from_sector_id(sector)
+            .ok_or_else(|| LoweredFusionTreeBuildError::invalid_sector(sector))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Ok(sector.into())
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(SU2Irrep::from_twice_spin(0))
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(sector)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        let left = left.twice_spin();
+        let right = right.twice_spin();
+        let max = left.checked_add(right).ok_or_else(|| {
+            LoweredFusionTreeBuildError::algebra_closure(
+                "SU(2) fusion closure exceeds the supported doubled-spin range",
+            )
+        })?;
+        if max > SU2_MAX_DOUBLED_SPIN {
+            return Err(LoweredFusionTreeBuildError::algebra_closure(
+                "SU(2) fusion closure exceeds the supported doubled-spin range",
+            ));
+        }
+        for twice_spin in (left.abs_diff(right)..=max).step_by(2) {
+            emit(SU2Irrep::from_twice_spin(twice_spin))?;
+        }
+        Ok(())
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        let left = left.twice_spin();
+        let right = right.twice_spin();
+        let max = left.checked_add(right).ok_or_else(|| {
+            LoweredFusionTreeBuildError::algebra_closure(
+                "SU(2) fusion closure exceeds the supported doubled-spin range",
+            )
+        })?;
+        if max > SU2_MAX_DOUBLED_SPIN {
+            return Err(LoweredFusionTreeBuildError::algebra_closure(
+                "SU(2) fusion closure exceeds the supported doubled-spin range",
+            ));
+        }
+        let coupled = coupled.twice_spin();
+        Ok(usize::from(
+            coupled >= left.abs_diff(right)
+                && coupled <= max
+                && (coupled - left.abs_diff(right)) % 2 == 0,
+        ))
+    }
+}
 
 impl MultiplicityFreeFusionSymbols for SU2FusionRule {
     type Scalar = f64;

@@ -61,6 +61,315 @@ where
     grouped
 }
 
+#[derive(Clone, Copy)]
+struct LoweredFusionTreeLeg<S> {
+    encoded: SectorId,
+    lowered: S,
+    is_dual: bool,
+}
+
+struct LoweredReachableWorkspace<S>
+where
+    S: Eq + Hash,
+{
+    acc: Vec<S>,
+    next: Vec<S>,
+    seen: rustc_hash::FxHashSet<S>,
+}
+
+impl<S> Default for LoweredReachableWorkspace<S>
+where
+    S: Eq + Hash,
+{
+    fn default() -> Self {
+        Self {
+            acc: Vec::new(),
+            next: Vec::new(),
+            seen: rustc_hash::FxHashSet::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOWERED_LAYOUT_BUILD_OBSERVATIONS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn reset_lowered_layout_build_observations() {
+    LOWERED_LAYOUT_BUILD_OBSERVATIONS.with(|observation| observation.set((0, 0)));
+}
+
+#[cfg(test)]
+fn lowered_layout_build_observations() -> (usize, usize) {
+    LOWERED_LAYOUT_BUILD_OBSERVATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn observe_lowered_layout_decode() {
+    LOWERED_LAYOUT_BUILD_OBSERVATIONS.with(|observation| {
+        let (decodes, channels) = observation.get();
+        observation.set((decodes + 1, channels));
+    });
+}
+
+#[cfg(test)]
+fn observe_lowered_layout_channel() {
+    LOWERED_LAYOUT_BUILD_OBSERVATIONS.with(|observation| {
+        let (decodes, channels) = observation.get();
+        observation.set((decodes, channels + 1));
+    });
+}
+
+fn try_fusion_trees_by_coupled_for_space_lowered<R>(
+    rule: &R,
+    space: &FusionProductSpace,
+) -> Result<Vec<CoupledFusionTrees>, LoweredFusionTreeBuildError>
+where
+    R: LoweredMultiplicityFreeAlgebra,
+{
+    if space.legs().iter().any(|leg| leg.sectors().is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let choices = space
+        .legs()
+        .iter()
+        .map(|leg| {
+            leg.sectors()
+                .iter()
+                .map(|&encoded| {
+                    #[cfg(test)]
+                    observe_lowered_layout_decode();
+                    Ok(LoweredFusionTreeLeg {
+                        encoded,
+                        lowered: rule.try_decode_lowered(encoded)?,
+                        is_dual: leg.is_dual(),
+                    })
+                })
+                .collect::<Result<Vec<_>, LoweredFusionTreeBuildError>>()
+        })
+        .collect::<Result<Vec<_>, LoweredFusionTreeBuildError>>()?;
+
+    struct LoweredGroup<S> {
+        coupled: S,
+        trees: Vec<FusionTreeKey>,
+    }
+
+    let mut grouped = Vec::<LoweredGroup<R::Sector>>::new();
+    let mut index = FxHashMap::<R::Sector, usize>::default();
+    let mut current = vec![None; choices.len()];
+    let mut uncoupled = Vec::with_capacity(choices.len());
+    let mut is_dual = Vec::with_capacity(choices.len());
+    let mut effective = Vec::with_capacity(choices.len());
+    let mut reachable = LoweredReachableWorkspace::default();
+    visit_lowered_leg_tuples(
+        &choices,
+        choices.len(),
+        &mut current,
+        &mut |tuple| {
+            uncoupled.clear();
+            is_dual.clear();
+            effective.clear();
+            for &leg in tuple {
+                let leg = leg.expect("lowered tuple must be assigned");
+                uncoupled.push(leg.encoded);
+                is_dual.push(leg.is_dual);
+                effective.push(leg.lowered);
+            }
+            try_for_each_reachable_coupled_lowered(
+                rule,
+                &effective,
+                &mut reachable,
+                &mut |coupled| {
+                let group = match index.get(&coupled) {
+                    Some(&group) => group,
+                    None => {
+                        let group = grouped.len();
+                        index.insert(coupled, group);
+                        grouped.push(LoweredGroup {
+                            coupled,
+                            trees: Vec::new(),
+                        });
+                        group
+                    }
+                };
+                try_append_fusion_trees_for_coupled_lowered(
+                    rule,
+                    &uncoupled,
+                    &is_dual,
+                    &effective,
+                    coupled,
+                    &mut grouped[group].trees,
+                )
+            },
+            )?;
+            Ok(())
+        },
+    )?;
+
+    let mut encoded = grouped
+        .into_iter()
+        .map(|group| {
+            Ok(CoupledFusionTrees {
+                coupled: rule.try_encode_lowered(group.coupled)?,
+                trees: group.trees,
+            })
+        })
+        .collect::<Result<Vec<_>, LoweredFusionTreeBuildError>>()?;
+    encoded.sort_by_key(|group| group.coupled);
+    Ok(encoded)
+}
+
+fn visit_lowered_leg_tuples<S, F>(
+    choices: &[Vec<LoweredFusionTreeLeg<S>>],
+    remaining: usize,
+    current: &mut [Option<LoweredFusionTreeLeg<S>>],
+    emit: &mut F,
+) -> Result<(), LoweredFusionTreeBuildError>
+where
+    S: Copy,
+    F: FnMut(&[Option<LoweredFusionTreeLeg<S>>]) -> Result<(), LoweredFusionTreeBuildError>,
+{
+    if remaining == 0 {
+        return emit(current);
+    }
+    let index = remaining - 1;
+    for &leg in &choices[index] {
+        current[index] = Some(leg);
+        visit_lowered_leg_tuples(choices, remaining - 1, current, emit)?;
+    }
+    Ok(())
+}
+
+fn try_for_each_reachable_coupled_lowered<R, F>(
+    rule: &R,
+    effective: &[R::Sector],
+    workspace: &mut LoweredReachableWorkspace<R::Sector>,
+    emit: &mut F,
+) -> Result<(), LoweredFusionTreeBuildError>
+where
+    R: LoweredMultiplicityFreeAlgebra,
+    F: FnMut(R::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+{
+    workspace.acc.clear();
+    workspace.next.clear();
+    workspace.seen.clear();
+    workspace.acc.push(match effective.first() {
+        None => rule.try_lowered_vacuum()?,
+        Some(&first) => first,
+    });
+    for &last in effective.iter().skip(1) {
+        workspace.next.clear();
+        workspace.seen.clear();
+        for &front in &workspace.acc {
+            #[cfg(test)]
+            observe_lowered_layout_channel();
+            rule.try_for_each_lowered_channel(front, last, &mut |coupled| {
+                if workspace.seen.insert(coupled) {
+                    workspace.next.push(coupled);
+                }
+                Ok(())
+            })?;
+        }
+        std::mem::swap(&mut workspace.acc, &mut workspace.next);
+    }
+    for &coupled in &workspace.acc {
+        emit(coupled)?;
+    }
+    Ok(())
+}
+
+fn try_append_fusion_trees_for_coupled_lowered<R>(
+    rule: &R,
+    uncoupled: &[SectorId],
+    is_dual: &[bool],
+    effective: &[R::Sector],
+    coupled: R::Sector,
+    out: &mut Vec<FusionTreeKey>,
+) -> Result<(), LoweredFusionTreeBuildError>
+where
+    R: LoweredMultiplicityFreeAlgebra,
+{
+    let coupled_encoded = rule.try_encode_lowered(coupled)?;
+    let vertex_count = uncoupled.len().saturating_sub(1);
+    let mut inner_rev = SmallVec::<[R::Sector; 8]>::new();
+    try_visit_fusion_trees_lowered(
+        rule,
+        effective,
+        coupled,
+        &mut inner_rev,
+        &mut |inner_rev| {
+            let mut innerlines = SectorVec::new();
+            for &sector in inner_rev.iter().rev() {
+                innerlines.push(rule.try_encode_lowered(sector)?);
+            }
+            out.push(FusionTreeKey::new(
+                uncoupled.iter().copied(),
+                Some(coupled_encoded),
+                is_dual.iter().copied(),
+                innerlines,
+                std::iter::repeat(SectorId::new(1)).take(vertex_count),
+            ));
+            Ok(())
+        },
+    )
+}
+
+fn try_visit_fusion_trees_lowered<R, F>(
+    rule: &R,
+    effective: &[R::Sector],
+    coupled: R::Sector,
+    inner_rev: &mut SmallVec<[R::Sector; 8]>,
+    emit: &mut F,
+) -> Result<(), LoweredFusionTreeBuildError>
+where
+    R: LoweredMultiplicityFreeAlgebra,
+    F: FnMut(&[R::Sector]) -> Result<(), LoweredFusionTreeBuildError>,
+{
+    match effective.len() {
+        0 => {
+            if coupled == rule.try_lowered_vacuum()? {
+                emit(inner_rev)?;
+            }
+        }
+        1 => {
+            if effective[0] == coupled {
+                emit(inner_rev)?;
+            }
+        }
+        2 => {
+            if rule.try_lowered_nsymbol(effective[0], effective[1], coupled)? != 0 {
+                emit(inner_rev)?;
+            }
+        }
+        _ => {
+            let last = effective[effective.len() - 1];
+            let dual_last = rule.try_lowered_dual(last)?;
+            let front_effective = &effective[..effective.len() - 1];
+            #[cfg(test)]
+            observe_lowered_layout_channel();
+            rule.try_for_each_lowered_channel(coupled, dual_last, &mut |front_coupled| {
+                if rule.try_lowered_nsymbol(front_coupled, last, coupled)? == 0 {
+                    return Ok(());
+                }
+                inner_rev.push(front_coupled);
+                let result = try_visit_fusion_trees_lowered(
+                    rule,
+                    front_effective,
+                    front_coupled,
+                    inner_rev,
+                    emit,
+                );
+                inner_rev.pop();
+                result
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn fusion_trees_by_coupled_for_selected_space<R>(
     rule: &R,
     space: &FusionProductSpace,

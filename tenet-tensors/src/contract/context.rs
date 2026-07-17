@@ -1,11 +1,12 @@
 use rustc_hash::FxHashMap;
+use std::any::Any;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionRule, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
-    TensorStorage,
+    BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
+    HostWritableStorage, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement,
+    ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -28,7 +29,10 @@ use super::backend::{
 use super::dynamic::{
     tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
 };
-use super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand};
+use super::dynamic_space::{
+    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
+    LayoutKeyBuilder,
+};
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
     tensorcontract_fusion_structure, tensorcontract_fusion_structure_dyn_prelowered,
@@ -981,7 +985,7 @@ where
     {
         // Why not accept a separate rule: the lhs bound space is the authority
         // used for planning and execution; the raw core only checks identities.
-        self.tensorcontract_fusion_dyn_into_raw(
+        self.tensorcontract_fusion_dyn_into_raw_with_primer(
             lhs_space.provider(),
             dst_space.space(),
             dst_data,
@@ -992,10 +996,39 @@ where
             axes,
             alpha,
             beta,
+            lhs_space.layout_primer(),
+        )
+    }
+
+    /// Built-in multiplicity-free sibling that carries typed sectors through
+    /// cold layout enumeration before encoding the persistent block keys.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_into_lowered<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs_data: &[D],
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + LoweredMultiplicityFreeAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_into(
+            dst_space, dst_data, lhs_space, lhs_data, rhs_space, rhs_data, axes, alpha, beta,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn tensorcontract_fusion_dyn_into_raw<R>(
         &mut self,
         rule: &R,
@@ -1008,6 +1041,40 @@ where
         axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_into_raw_with_primer(
+            rule,
+            dst_space,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            encoded_layout_primer::<R>,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tensorcontract_fusion_dyn_into_raw_with_primer<R>(
+        &mut self,
+        rule: &R,
+        dst_space: &DynamicFusionMapSpace,
+        dst_data: &mut [D],
+        lhs_space: &DynamicFusionMapSpace,
+        lhs_data: &[D],
+        rhs_space: &DynamicFusionMapSpace,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1045,18 +1112,26 @@ where
         {
             self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         }
-        self.execute_resolution_dyn(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
             &resolution,
             rule,
             Some(dst_space),
             dst_space.structure(),
-            dst_data,
             Some(lhs_space),
             None,
             lhs_space.structure(),
-            lhs_data,
             Some(rhs_space),
             None,
+            rhs_space.structure(),
+            layout_primer,
+        )?;
+        self.execute_resolution_dyn(
+            &resolution,
+            dynamic_artifact.as_ref(),
+            dst_space.structure(),
+            dst_data,
+            lhs_space.structure(),
+            lhs_data,
             rhs_space.structure(),
             rhs_data,
             alpha,
@@ -1082,6 +1157,64 @@ where
         axes: TensorContractSpec<'_>,
         alpha: D,
         beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_prelowered_into_with_primer(
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            dst_space.layout_primer(),
+        )
+    }
+
+    /// Built-in multiplicity-free sibling of the validated prelowered seam.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_prelowered_into_lowered<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + LoweredMultiplicityFreeAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcontract_fusion_dyn_prelowered_into(
+            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tensorcontract_fusion_dyn_prelowered_into_with_primer<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        axes: TensorContractSpec<'_>,
+        alpha: D,
+        beta: D,
+        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1143,18 +1276,26 @@ where
         {
             self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         }
-        self.execute_resolution_dyn(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
             &resolution,
             rule,
             Some(dst_space.space()),
             dst_space.space().structure(),
-            dst_data,
             Some(lhs.logical_space()),
             Some(lhs.storage_space()),
             lhs.storage_space().structure(),
-            lhs_data,
             Some(rhs.logical_space()),
             Some(rhs.storage_space()),
+            rhs.storage_space().structure(),
+            layout_primer,
+        )?;
+        self.execute_resolution_dyn(
+            &resolution,
+            dynamic_artifact.as_ref(),
+            dst_space.space().structure(),
+            dst_data,
+            lhs.storage_space().structure(),
+            lhs_data,
             rhs.storage_space().structure(),
             rhs_data,
             alpha,
@@ -1354,6 +1495,69 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_dynamic_execution_artifact<R>(
+        &mut self,
+        resolution: &Resolution,
+        rule: &R,
+        dst_space: Option<&DynamicFusionMapSpace>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_space: Option<&DynamicFusionMapSpace>,
+        lhs_storage_space: Option<&DynamicFusionMapSpace>,
+        lhs_structure: &Arc<BlockStructure>,
+        rhs_space: Option<&DynamicFusionMapSpace>,
+        rhs_storage_space: Option<&DynamicFusionMapSpace>,
+        rhs_structure: &Arc<BlockStructure>,
+        layout_primer: LayoutKeyBuilder<R>,
+    ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar,
+    {
+        let Resolution::DynamicTree(plan) = resolution else {
+            return Ok(None);
+        };
+        let missing = || OperationError::Core(CoreError::MissingFusionSpace);
+        let dst_space = dst_space.ok_or_else(missing)?;
+        let lhs_space = lhs_space.ok_or_else(missing)?;
+        let rhs_space = rhs_space.ok_or_else(missing)?;
+        if let Some(artifact) = self.dynamic_space_cache.get_execution_artifact(
+            plan,
+            dst_structure,
+            lhs_structure,
+            lhs_storage_space,
+            rhs_structure,
+            rhs_storage_space,
+        ) {
+            return Ok(Some(artifact));
+        }
+        let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact(
+            &mut self.tree_context,
+            &mut self.dynamic_space_cache,
+            &mut self.resolution_cache,
+            rule,
+            layout_primer,
+            plan.as_ref(),
+            dst_space,
+            lhs_space,
+            lhs_storage_space,
+            lhs_structure,
+            rhs_space,
+            rhs_storage_space,
+            rhs_structure,
+        )?);
+        self.dynamic_space_cache.insert_execution_artifact(
+            Arc::clone(plan),
+            dst_structure,
+            lhs_structure,
+            lhs_storage_space,
+            rhs_structure,
+            rhs_storage_space,
+            Arc::clone(&artifact),
+        );
+        Ok(Some(artifact))
+    }
+
     /// Executes a resolved contraction on raw slices; shared by the
     /// dynamic-rank entry point and the typed facade / prepared-handle path.
     ///
@@ -1366,26 +1570,20 @@ where
     /// they are optional: a typed tensor without a fusion space errors
     /// there and only there (as before the merge).
     #[allow(clippy::too_many_arguments)]
-    fn execute_resolution_dyn<R>(
+    fn execute_resolution_dyn(
         &mut self,
         resolution: &Resolution,
-        rule: &R,
-        dst_space: Option<&DynamicFusionMapSpace>,
+        dynamic_artifact: Option<&Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
-        lhs_space: Option<&DynamicFusionMapSpace>,
-        lhs_storage_space: Option<&DynamicFusionMapSpace>,
         lhs_structure: &Arc<BlockStructure>,
         lhs_data: &[D],
-        rhs_space: Option<&DynamicFusionMapSpace>,
-        rhs_storage_space: Option<&DynamicFusionMapSpace>,
         rhs_structure: &Arc<BlockStructure>,
         rhs_data: &[D],
         alpha: D,
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
         match resolution {
@@ -1417,41 +1615,29 @@ where
                     beta,
                 )
             }
-            Resolution::DynamicTree(plan) => {
-                let missing = || OperationError::Core(CoreError::MissingFusionSpace);
-                let dst_space = dst_space.ok_or_else(missing)?;
-                let lhs_space = lhs_space.ok_or_else(missing)?;
-                let rhs_space = rhs_space.ok_or_else(missing)?;
+            Resolution::DynamicTree(_) => {
                 let Self {
                     tree_context,
-                    dynamic_space_cache,
-                    resolution_cache,
                     contract_backend,
                     contract_workspace,
                     fusion_block_workspace,
                     fusion_scratch,
                     ..
                 } = self;
-                super::dynamic::tensorcontract_fusion_dynamic_plan_dyn_into_context(
+                let artifact =
+                    dynamic_artifact.ok_or(OperationError::UnsupportedTensorContractScope {
+                        message: "dynamic-tree resolution requires a compiled execution artifact",
+                    })?;
+                super::dynamic::execute_dynamic_tree_execution_artifact(
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    dynamic_space_cache,
-                    resolution_cache,
                     fusion_block_workspace,
                     fusion_scratch,
-                    rule,
-                    plan.as_ref(),
-                    dst_space,
+                    artifact,
                     dst_structure,
                     dst_data,
-                    lhs_space,
-                    lhs_storage_space,
-                    lhs_structure,
                     lhs_data,
-                    rhs_space,
-                    rhs_storage_space,
-                    rhs_structure,
                     rhs_data,
                     alpha,
                     beta,
@@ -1520,18 +1706,26 @@ where
         let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
         let rhs_structure = Arc::clone(rhs.structure());
-        self.execute_resolution_dyn(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
             resolution,
             rule,
             dst_space.as_ref(),
             &dst_structure,
-            dst.data_mut(),
             lhs_space.as_ref(),
             None,
             &lhs_structure,
-            lhs.data(),
             rhs_space.as_ref(),
             None,
+            &rhs_structure,
+            encoded_layout_primer::<R>,
+        )?;
+        self.execute_resolution_dyn(
+            resolution,
+            dynamic_artifact.as_ref(),
+            &dst_structure,
+            dst.data_mut(),
+            &lhs_structure,
+            lhs.data(),
             &rhs_structure,
             rhs.data(),
             alpha,
@@ -1602,12 +1796,29 @@ where
                     .map(Arc::new)
             },
         )?;
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
+            &resolution,
+            rule,
+            Some(&dst_dynamic),
+            &dst_structure,
+            Some(&lhs_dynamic),
+            None,
+            &lhs_structure,
+            Some(&rhs_dynamic),
+            None,
+            &rhs_structure,
+            encoded_layout_primer::<R>,
+        )?;
         Ok(PreparedTensorContractFusion {
             rule: rule.tree_transform_rule_cache_key(),
-            dst_fusion_space_ptr: Arc::as_ptr(dst_fusion) as usize,
-            lhs_fusion_space_ptr: Arc::as_ptr(lhs_fusion) as usize,
-            rhs_fusion_space_ptr: Arc::as_ptr(rhs_fusion) as usize,
+            dst_fusion_space: PreparedFusionSpaceWitness::new(dst_fusion, dst.structure()),
+            lhs_fusion_space: PreparedFusionSpaceWitness::new(lhs_fusion, lhs.structure()),
+            rhs_fusion_space: PreparedFusionSpaceWitness::new(rhs_fusion, rhs.structure()),
             resolution,
+            dynamic_artifact,
         })
     }
 
@@ -1663,16 +1874,35 @@ where
             });
         };
         if prepared.rule != rule.tree_transform_rule_cache_key()
-            || prepared.dst_fusion_space_ptr != Arc::as_ptr(dst_fusion) as usize
-            || prepared.lhs_fusion_space_ptr != Arc::as_ptr(lhs_fusion) as usize
-            || prepared.rhs_fusion_space_ptr != Arc::as_ptr(rhs_fusion) as usize
+            || !prepared
+                .dst_fusion_space
+                .matches(dst_fusion, dst.structure())
+            || !prepared
+                .lhs_fusion_space
+                .matches(lhs_fusion, lhs.structure())
+            || !prepared
+                .rhs_fusion_space
+                .matches(rhs_fusion, rhs.structure())
         {
             return Err(OperationError::StructureMismatch {
                 tensor: "prepared contraction",
             });
         }
-        let resolution = prepared.resolution.clone();
-        self.execute_resolution(&resolution, rule, dst, lhs, rhs, alpha, beta)
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        self.execute_resolution_dyn(
+            &prepared.resolution,
+            prepared.dynamic_artifact.as_ref(),
+            &dst_structure,
+            dst.data_mut(),
+            &lhs_structure,
+            lhs.data(),
+            &rhs_structure,
+            rhs.data(),
+            alpha,
+            beta,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2101,14 +2331,56 @@ where
     }
 }
 
+#[derive(Clone)]
+struct PreparedFusionSpaceWitness {
+    allocation: Arc<dyn Any + Send + Sync>,
+    structure: Arc<BlockStructure>,
+}
+
+impl PreparedFusionSpaceWitness {
+    fn new<const NOUT: usize, const NIN: usize>(
+        fusion_space: &Arc<FusionTensorMapSpace<NOUT, NIN>>,
+        structure: &Arc<BlockStructure>,
+    ) -> Self {
+        Self {
+            allocation: Arc::clone(fusion_space) as Arc<dyn Any + Send + Sync>,
+            structure: Arc::clone(structure),
+        }
+    }
+
+    fn matches<const NOUT: usize, const NIN: usize>(
+        &self,
+        fusion_space: &Arc<FusionTensorMapSpace<NOUT, NIN>>,
+        structure: &Arc<BlockStructure>,
+    ) -> bool {
+        let same_allocation = self
+            .allocation
+            .downcast_ref::<FusionTensorMapSpace<NOUT, NIN>>()
+            .is_some_and(|prepared| std::ptr::eq(prepared, fusion_space.as_ref()));
+        let same_structure = Arc::ptr_eq(&self.structure, structure)
+            || self.structure.content_id() == structure.content_id()
+            || self.structure.as_ref() == structure.as_ref();
+        same_allocation && same_structure
+    }
+}
+
+impl std::fmt::Debug for PreparedFusionSpaceWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedFusionSpaceWitness")
+            .field("structure_content_id", &self.structure.content_id())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Resolved contraction handle: plan-once/execute-many without per-call
 /// cache lookups. Created by
 /// [`TensorContractFusionExecutionContext::prepare_tensorcontract_fusion`].
 #[derive(Clone, Debug)]
 pub struct PreparedTensorContractFusion<RuleKey> {
     rule: RuleKey,
-    dst_fusion_space_ptr: usize,
-    lhs_fusion_space_ptr: usize,
-    rhs_fusion_space_ptr: usize,
+    dst_fusion_space: PreparedFusionSpaceWitness,
+    lhs_fusion_space: PreparedFusionSpaceWitness,
+    rhs_fusion_space: PreparedFusionSpaceWitness,
     resolution: Resolution,
+    dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
 }

@@ -17,7 +17,8 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
     BlockKey, BlockStructure, CoupledSectorRegion, FusionProductSpace, FusionRule,
-    FusionTreeHomSpace, MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
+    FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement,
+    SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -822,28 +823,25 @@ fn rand_unit(state: &mut u64) -> f64 {
     ((splitmix64(state) >> 11) as f64) / ((1u64 << 52) as f64) - 1.0
 }
 
-fn build_bound_space<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+fn build_bound_space<
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+>(
     provider: Arc<R>,
     hom: FusionTreeHomSpace,
 ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
-    let leg_deg = |leg: &tenet_core::SectorLeg, sector: SectorId| -> Result<usize, Error> {
-        leg.degeneracy(sector).ok_or_else(|| {
-            Error::InvalidArgument(format!("sector {sector:?} not present on this leg"))
-        })
-    };
-    let keys = hom.fusion_tree_keys(provider.as_ref());
-    let mut shapes = Vec::with_capacity(keys.len());
-    for key in keys.iter() {
-        let mut shape = Vec::with_capacity(hom.rank());
-        for (leg, &sector) in hom.codomain().legs().iter().zip(key.codomain_uncoupled()) {
-            shape.push(leg_deg(leg, sector)?);
-        }
-        for (leg, &sector) in hom.domain().legs().iter().zip(key.domain_uncoupled()) {
-            shape.push(leg_deg(leg, sector)?);
-        }
-        shapes.push(shape);
-    }
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, hom, shapes).map_err(Into::into)
+    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(provider, hom)
+        .map_err(Into::into)
+}
+
+fn build_bound_space_like<
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    hom: FusionTreeHomSpace,
+) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
+    authority
+        .derive_from_final_homspace(hom)
+        .map_err(Into::into)
 }
 
 fn build_bound_space_generic<R: FusionRule>(
@@ -1380,22 +1378,22 @@ impl UserBoundSpace {
         }
         match (self, rhs) {
             (Self::U1(lhs), Self::U1(rhs)) => {
-                contract!(lhs, rhs, U1, contracted_multiplicity_free)
+                contract!(lhs, rhs, U1, contracted_multiplicity_free_lowered)
             }
             (Self::Z2(lhs), Self::Z2(rhs)) => {
-                contract!(lhs, rhs, Z2, contracted_multiplicity_free)
+                contract!(lhs, rhs, Z2, contracted_multiplicity_free_lowered)
             }
             (Self::FZ2(lhs), Self::FZ2(rhs)) => {
-                contract!(lhs, rhs, FZ2, contracted_multiplicity_free)
+                contract!(lhs, rhs, FZ2, contracted_multiplicity_free_lowered)
             }
             (Self::SU2(lhs), Self::SU2(rhs)) => {
-                contract!(lhs, rhs, SU2, contracted_multiplicity_free)
+                contract!(lhs, rhs, SU2, contracted_multiplicity_free_lowered)
             }
             (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => {
-                contract!(lhs, rhs, U1FZ2, contracted_multiplicity_free)
+                contract!(lhs, rhs, U1FZ2, contracted_multiplicity_free_lowered)
             }
             (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => {
-                contract!(lhs, rhs, FZ2U1SU2, contracted_multiplicity_free)
+                contract!(lhs, rhs, FZ2U1SU2, contracted_multiplicity_free_lowered)
             }
             (Self::Su3(lhs), Self::Su3(rhs)) => {
                 contract!(lhs, rhs, Su3, contracted_generic)
@@ -1454,7 +1452,7 @@ impl UserBoundSpace {
         macro_rules! contract {
             ($lhs:expr, $rhs:expr, $variant:ident) => {
                 Ok(UserBoundSpace::$variant(
-                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
                         $lhs,
                         $rhs,
                         lhs_axes,
@@ -1509,13 +1507,13 @@ impl UserBoundSpace {
             };
         }
         match self {
-            Self::U1(space) => transform!(space, U1, transformed_multiplicity_free),
-            Self::Z2(space) => transform!(space, Z2, transformed_multiplicity_free),
-            Self::FZ2(space) => transform!(space, FZ2, transformed_multiplicity_free),
-            Self::SU2(space) => transform!(space, SU2, transformed_multiplicity_free),
-            Self::U1FZ2(space) => transform!(space, U1FZ2, transformed_multiplicity_free),
+            Self::U1(space) => transform!(space, U1, transformed_multiplicity_free_lowered),
+            Self::Z2(space) => transform!(space, Z2, transformed_multiplicity_free_lowered),
+            Self::FZ2(space) => transform!(space, FZ2, transformed_multiplicity_free_lowered),
+            Self::SU2(space) => transform!(space, SU2, transformed_multiplicity_free_lowered),
+            Self::U1FZ2(space) => transform!(space, U1FZ2, transformed_multiplicity_free_lowered),
             Self::FZ2U1SU2(space) => {
-                transform!(space, FZ2U1SU2, transformed_multiplicity_free)
+                transform!(space, FZ2U1SU2, transformed_multiplicity_free_lowered)
             }
             Self::Su3(space) => transform!(space, Su3, transformed_generic),
         }
@@ -1528,13 +1526,13 @@ impl UserBoundSpace {
             };
         }
         match self {
-            Self::U1(space) => adjoint!(space, U1, adjoint_bound_space_dyn),
-            Self::Z2(space) => adjoint!(space, Z2, adjoint_bound_space_dyn),
-            Self::FZ2(space) => adjoint!(space, FZ2, adjoint_bound_space_dyn),
-            Self::SU2(space) => adjoint!(space, SU2, adjoint_bound_space_dyn),
-            Self::U1FZ2(space) => adjoint!(space, U1FZ2, adjoint_bound_space_dyn),
+            Self::U1(space) => adjoint!(space, U1, adjoint_bound_space_dyn_lowered),
+            Self::Z2(space) => adjoint!(space, Z2, adjoint_bound_space_dyn_lowered),
+            Self::FZ2(space) => adjoint!(space, FZ2, adjoint_bound_space_dyn_lowered),
+            Self::SU2(space) => adjoint!(space, SU2, adjoint_bound_space_dyn_lowered),
+            Self::U1FZ2(space) => adjoint!(space, U1FZ2, adjoint_bound_space_dyn_lowered),
             Self::FZ2U1SU2(space) => {
-                adjoint!(space, FZ2U1SU2, adjoint_bound_space_dyn)
+                adjoint!(space, FZ2U1SU2, adjoint_bound_space_dyn_lowered)
             }
             Self::Su3(space) => adjoint!(space, Su3, adjoint_bound_space_dyn_generic),
         }
@@ -1543,9 +1541,8 @@ impl UserBoundSpace {
     fn from_homspace(&self, homspace: FusionTreeHomSpace) -> Result<Self, Error> {
         macro_rules! build {
             ($space:expr, $variant:ident) => {
-                Ok(UserBoundSpace::$variant(build_bound_space(
-                    Arc::clone($space.provider_arc()),
-                    homspace,
+                Ok(UserBoundSpace::$variant(build_bound_space_like(
+                    $space, homspace,
                 )?))
             };
         }
@@ -1569,10 +1566,7 @@ impl UserBoundSpace {
         macro_rules! build {
             ($space:expr, $variant:ident) => {
                 Ok(UserBoundSpace::$variant(
-                    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
-                        Arc::clone($space.provider_arc()),
-                        homspace,
-                    )?,
+                    $space.derive_from_final_homspace(homspace)?,
                 ))
             };
         }
@@ -2735,40 +2729,40 @@ impl Tensor {
         }
         match (parent.space.as_ref(), parent.data.as_ref()) {
             (UserBoundSpace::U1(space), Data::F64(data)) => {
-                materialize!(space, U1, adjoint_bound_dyn, data, F64)
+                materialize!(space, U1, adjoint_bound_dyn_lowered, data, F64)
             }
             (UserBoundSpace::U1(space), Data::C64(data)) => {
-                materialize!(space, U1, adjoint_bound_dyn, data, C64)
+                materialize!(space, U1, adjoint_bound_dyn_lowered, data, C64)
             }
             (UserBoundSpace::Z2(space), Data::F64(data)) => {
-                materialize!(space, Z2, adjoint_bound_dyn, data, F64)
+                materialize!(space, Z2, adjoint_bound_dyn_lowered, data, F64)
             }
             (UserBoundSpace::Z2(space), Data::C64(data)) => {
-                materialize!(space, Z2, adjoint_bound_dyn, data, C64)
+                materialize!(space, Z2, adjoint_bound_dyn_lowered, data, C64)
             }
             (UserBoundSpace::FZ2(space), Data::F64(data)) => {
-                materialize!(space, FZ2, adjoint_bound_dyn, data, F64)
+                materialize!(space, FZ2, adjoint_bound_dyn_lowered, data, F64)
             }
             (UserBoundSpace::FZ2(space), Data::C64(data)) => {
-                materialize!(space, FZ2, adjoint_bound_dyn, data, C64)
+                materialize!(space, FZ2, adjoint_bound_dyn_lowered, data, C64)
             }
             (UserBoundSpace::SU2(space), Data::F64(data)) => {
-                materialize!(space, SU2, adjoint_bound_dyn, data, F64)
+                materialize!(space, SU2, adjoint_bound_dyn_lowered, data, F64)
             }
             (UserBoundSpace::SU2(space), Data::C64(data)) => {
-                materialize!(space, SU2, adjoint_bound_dyn, data, C64)
+                materialize!(space, SU2, adjoint_bound_dyn_lowered, data, C64)
             }
             (UserBoundSpace::U1FZ2(space), Data::F64(data)) => {
-                materialize!(space, U1FZ2, adjoint_bound_dyn, data, F64)
+                materialize!(space, U1FZ2, adjoint_bound_dyn_lowered, data, F64)
             }
             (UserBoundSpace::U1FZ2(space), Data::C64(data)) => {
-                materialize!(space, U1FZ2, adjoint_bound_dyn, data, C64)
+                materialize!(space, U1FZ2, adjoint_bound_dyn_lowered, data, C64)
             }
             (UserBoundSpace::FZ2U1SU2(space), Data::F64(data)) => {
-                materialize!(space, FZ2U1SU2, adjoint_bound_dyn, data, F64)
+                materialize!(space, FZ2U1SU2, adjoint_bound_dyn_lowered, data, F64)
             }
             (UserBoundSpace::FZ2U1SU2(space), Data::C64(data)) => {
-                materialize!(space, FZ2U1SU2, adjoint_bound_dyn, data, C64)
+                materialize!(space, FZ2U1SU2, adjoint_bound_dyn_lowered, data, C64)
             }
             (UserBoundSpace::Su3(space), Data::F64(data)) => {
                 materialize!(space, Su3, adjoint_bound_dyn_generic, data, F64)
@@ -3729,7 +3723,7 @@ impl Tensor {
                 // order and bitwise output; only lazy operands need categorical
                 // geometry separated from their parent storage.
                 if !lhs_conj && !rhs_conj {
-                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into(
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into_lowered(
                         $dst,
                         &mut data,
                         $lhs_logical,
@@ -3757,7 +3751,7 @@ impl Tensor {
                     } else {
                         tenet_tensors::FusionOperand::direct($rhs_logical.space())
                     };
-                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into(
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into_lowered(
                         $dst,
                         &mut data,
                         lhs,
@@ -5079,10 +5073,7 @@ impl Tensor {
             UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)?
         } else {
             with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                let space = tenet_matrixalgebra::diagonal_bond_bound_space(
-                    Arc::clone(bound.provider_arc()),
-                    &spectrum,
-                )?;
+                let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(bound, &spectrum)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             })?
         };
@@ -5107,10 +5098,7 @@ impl Tensor {
     ) -> Result<Self, Error> {
         spectrum.sort_unstable_by_key(|entry| entry.sector);
         with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-            let space = tenet_matrixalgebra::diagonal_bond_bound_space(
-                Arc::clone(bound.provider_arc()),
-                &spectrum,
-            )?;
+            let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(bound, &spectrum)?;
             let space = UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)?;
             self.with_bound(space, Data::Diagonal(DiagonalData::C64(spectrum)))
         })
@@ -6543,12 +6531,14 @@ fn contract_into_bound<R, D, Key>(
     beta: D,
 ) -> Result<(), Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = Key>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + TreeTransformRuleCacheKey<Key = Key>,
     D: UserScalar,
     Key: Clone + Eq + Hash + Send + Sync + 'static,
 {
     D::ctx_of(contexts)
-        .tensorcontract_fusion_dyn_into(
+        .tensorcontract_fusion_dyn_into_lowered(
             dst_space,
             dst_data,
             lhs_space,
@@ -7297,7 +7287,7 @@ impl Tensor {
                 false,
             );
             let build_output_space = |hom| {
-                let space = build_bound_space(Arc::clone(bound.provider_arc()), hom)?;
+                let space = build_bound_space_like(bound, hom)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             };
             let u_space = build_output_space(FusionTreeHomSpace::new(
@@ -7422,7 +7412,7 @@ impl Tensor {
             let hom = self.ordinary_body().space.homspace();
             let bond_leg = SectorLeg::new(bond_pairs.iter().copied(), false);
             let build_output_space = |hom| {
-                let space = build_bound_space(Arc::clone(bound.provider_arc()), hom)?;
+                let space = build_bound_space_like(bound, hom)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             };
             let q_space = build_output_space(FusionTreeHomSpace::new(
@@ -7568,7 +7558,7 @@ impl Tensor {
                 false,
             );
             let build_output_space = |hom| {
-                let space = build_bound_space(Arc::clone(bound.provider_arc()), hom)?;
+                let space = build_bound_space_like(bound, hom)?;
                 UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
             };
             let v_space = build_output_space(FusionTreeHomSpace::new(
@@ -9370,8 +9360,10 @@ mod ordered_contract_route_tests {
 
     #[test]
     fn partial_trace_builds_selected_result_layout_once() {
+        // What: nested-product partial trace enters the selected-result layout
+        // builder once and returns the expected rank-zero tensor.
         let runtime = Runtime::builder().build().unwrap();
-        let space = Space::u1([(-1, 2), (0, 3), (2, 1)]);
+        let space = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, -1, 1), 1), ((1, 1, 1), 1)]).unwrap();
         let tensor =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_506).unwrap();
 
