@@ -1683,6 +1683,21 @@ where
         DDst: TensorStorage<TDst>,
         DSrc: TensorStorage<TSrc>,
     {
+        if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+            // Why-not cache Unique all-codomain transforms: with no fusion
+            // multiplicity this lowering is a direct tree relabeling.  A
+            // process/context cache only retains layout descriptors for a
+            // cheap, non-reusable key and defeats the eager Unique path used
+            // by tree-pair transforms.
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan = build_all_codomain_tree_transform_group_plan(
+                rule,
+                operation.clone(),
+                src.structure(),
+            )?;
+            return Ok(Arc::new(plan.compile(dst, src)?));
+        }
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,
