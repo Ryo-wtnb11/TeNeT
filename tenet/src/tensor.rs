@@ -979,6 +979,7 @@ fn scale_blocks_impl<D: UserScalar>(
 fn weighted_inner<R, D>(
     rule: &R,
     structure: &BlockStructure,
+    nout: usize,
     a: &[D],
     b: &[D],
 ) -> Result<Complex64, Error>
@@ -1000,47 +1001,9 @@ where
         }
         return Ok(total.widen_complex());
     }
-    let mut total = Complex64::new(0.0, 0.0);
-    for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
-        let weight = match block.key() {
-            BlockKey::FusionTree(key) => {
-                let coupled = key
-                    .codomain_tree()
-                    .coupled()
-                    .unwrap_or_else(|| rule.vacuum());
-                rule.dim_scalar(coupled)
-            }
-            _ => 1.0,
-        };
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        // ponytail: odometer walk per element; blocks are small strided
-        // views into coupled matrices. Vectorize per contiguous run if this
-        // ever shows up in a profile.
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        let mut partial = D::from_real(0.0);
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            partial = partial + FactorScalar::adjoint(a[position]) * b[position];
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
-        total += partial.widen_complex() * weight;
-    }
-    Ok(total)
+    coupled_region_inner(structure, nout, a, b, |coupled| {
+        rule.dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()))
+    })
 }
 
 /// Generic-fusion (Stage B3c-1) sibling of [`weighted_inner`] for an
@@ -1054,6 +1017,7 @@ where
 fn weighted_inner_generic<R, D>(
     rule: &R,
     structure: &BlockStructure,
+    nout: usize,
     a: &[D],
     b: &[D],
 ) -> Result<Complex64, Error>
@@ -1061,45 +1025,10 @@ where
     R: tenet_core::GenericRigidSymbols<Scalar = f64>,
     D: UserScalar,
 {
-    let mut total = Complex64::new(0.0, 0.0);
-    for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
-        let weight = match block.key() {
-            BlockKey::FusionTree(key) => {
-                let coupled = key
-                    .codomain_tree()
-                    .coupled()
-                    .unwrap_or_else(|| rule.vacuum());
-                let sqrt = rule.sqrt_dim_scalar(coupled);
-                sqrt * sqrt
-            }
-            _ => 1.0,
-        };
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        let mut partial = D::from_real(0.0);
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            partial = partial + FactorScalar::adjoint(a[position]) * b[position];
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
-        total += partial.widen_complex() * weight;
-    }
-    Ok(total)
+    coupled_region_inner(structure, nout, a, b, |coupled| {
+        let sqrt = rule.sqrt_dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()));
+        sqrt * sqrt
+    })
 }
 
 /// Generic-fusion (Stage B3c-2) sibling of [`weighted_trace`] for an
@@ -4506,6 +4435,7 @@ impl Tensor {
                 weighted_inner_generic(
                     self.su3_rule(),
                     self.ordinary_body().space.structure(),
+                    self.ordinary_body().space.nout(),
                     data,
                     data,
                 )
@@ -4514,7 +4444,13 @@ impl Tensor {
         }
         let value = with_data!(self, data, {
             with_user_rule!(self.ordinary_body().space, rule, {
-                weighted_inner(rule, self.ordinary_body().space.structure(), data, data)
+                weighted_inner(
+                    rule,
+                    self.ordinary_body().space.structure(),
+                    self.ordinary_body().space.nout(),
+                    data,
+                    data,
+                )
             })
         })?;
         Ok(value.re.sqrt())
@@ -4843,11 +4779,24 @@ impl Tensor {
         }
         match (self.coupled_data()?, other.coupled_data()?) {
             (Data::F64(a), Data::F64(b)) => with_user_rule!(self.ordinary_body().space, rule, {
-                weighted_inner(rule, self.ordinary_body().space.structure(), a, b)
-                    .map(|v| Scalar::F64(v.re))
+                weighted_inner(
+                    rule,
+                    self.ordinary_body().space.structure(),
+                    self.ordinary_body().space.nout(),
+                    a,
+                    b,
+                )
+                .map(|v| Scalar::F64(v.re))
             }),
             (Data::C64(a), Data::C64(b)) => with_user_rule!(self.ordinary_body().space, rule, {
-                weighted_inner(rule, self.ordinary_body().space.structure(), a, b).map(Scalar::C64)
+                weighted_inner(
+                    rule,
+                    self.ordinary_body().space.structure(),
+                    self.ordinary_body().space.nout(),
+                    a,
+                    b,
+                )
+                .map(Scalar::C64)
             }),
             #[cfg(feature = "cuda")]
             (Data::CudaF64(a), Data::CudaF64(b)) => {
@@ -6897,37 +6846,7 @@ fn sqrt_diagonal_impl<D: UserScalar + PartialEq>(
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// CUDA device paths (f64 only).
-//
-// The user-layer storage is always the TensorKit-equivalent coupled-sector
-// matrix layout, so every coupled sector is one contiguous column-major
-// matrix region of the flat device buffer. All device work is expressed as
-// (a) per-sector cuSOLVER decompositions on those regions and (b) region
-// GEMMs against small host-built selector matrices (identity / prefix /
-// sign / permutation) that also perform factor assembly into freshly
-// allocated coupled-layout buffers. Only scalars ever cross PCIe implicitly:
-// per-sector reduction partials, singular/eigen values and R diagonals
-// (truncation and gauge decisions are host scalar logic).
-// ---------------------------------------------------------------------------
-
 type SectorRegion = CoupledSectorRegion;
-
-#[cfg(feature = "cuda")]
-fn dense_err(err: tenet_dense::DenseError) -> Error {
-    Error::from(OperationError::Dense(err))
-}
-
-#[cfg(feature = "cuda")]
-fn require_cuda(cuda: Option<&mut CudaDenseContext>) -> Result<&mut CudaDenseContext, Error> {
-    cuda.ok_or_else(|| {
-        Error::InvalidArgument(
-            "this runtime was built without a CUDA device; use \
-             Runtime::builder().cuda(device)"
-                .to_string(),
-        )
-    })
-}
 
 fn internal_layout_error(what: &str) -> Error {
     Error::InvalidArgument(format!(
@@ -6944,6 +6863,247 @@ fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Arc<[Sector
     structure
         .coupled_sector_regions(nout)?
         .ok_or_else(|| internal_layout_error("non-packed coupled-sector layout"))
+}
+
+fn coupled_region_inner<D, W>(
+    structure: &BlockStructure,
+    nout: usize,
+    a: &[D],
+    b: &[D],
+    mut weight_of: W,
+) -> Result<Complex64, Error>
+where
+    D: UserScalar,
+    W: FnMut(Option<SectorId>) -> f64,
+{
+    let regions = sector_regions(structure, nout)?;
+    let required_len = structure.required_len()?;
+    if a.len() != required_len || b.len() != required_len {
+        return Err(internal_layout_error(
+            "coupled-sector regions do not cover the scalar buffers",
+        ));
+    }
+
+    let mut total = Complex64::new(0.0, 0.0);
+    for region in regions.iter() {
+        let range = region.range();
+        let lhs = a.get(range.clone()).ok_or_else(|| {
+            internal_layout_error("coupled-sector region exceeds the left scalar buffer")
+        })?;
+        let rhs = b.get(range).ok_or_else(|| {
+            internal_layout_error("coupled-sector region exceeds the right scalar buffer")
+        })?;
+        let mut partial = D::from_real(0.0);
+        for (&ai, &bi) in lhs.iter().zip(rhs) {
+            partial = partial + FactorScalar::adjoint(ai) * bi;
+        }
+        total += partial.widen_complex() * weight_of(region.coupled());
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+fn odometer_inner_oracle<D, W>(
+    structure: &BlockStructure,
+    a: &[D],
+    b: &[D],
+    mut weight_of: W,
+) -> Result<Complex64, Error>
+where
+    D: UserScalar,
+    W: FnMut(Option<SectorId>) -> f64,
+{
+    let mut total = Complex64::new(0.0, 0.0);
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let coupled = match block.key() {
+            BlockKey::FusionTree(key) => key.codomain_tree().coupled(),
+            _ => None,
+        };
+        let shape = block.shape();
+        let strides = block.strides();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        let mut partial = D::from_real(0.0);
+        for _ in 0..count {
+            let position = block.offset()
+                + indices
+                    .iter()
+                    .zip(strides)
+                    .map(|(&i, &stride)| i * stride)
+                    .sum::<usize>();
+            partial = partial + FactorScalar::adjoint(a[position]) * b[position];
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+        total += partial.widen_complex() * weight_of(coupled);
+    }
+    Ok(total)
+}
+
+#[cfg(test)]
+mod coupled_region_inner_tests {
+    use super::*;
+    use tenet_core::GenericRigidSymbols;
+
+    fn assert_close(actual: Complex64, expected: Complex64) {
+        assert!(
+            (actual - expected).norm() <= 1.0e-11 * (1.0 + expected.norm()),
+            "actual={actual:?}, expected={expected:?}"
+        );
+    }
+
+    fn assert_multiplicity_free_oracle(space: Space, seed: u64) {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        for dtype in [Dtype::F64, Dtype::C64] {
+            let lhs =
+                Tensor::rand_with_seed(&runtime, dtype, [&space, &space], [&space], seed).unwrap();
+            let rhs = Tensor::rand_with_seed(&runtime, dtype, [&space, &space], [&space], seed + 1)
+                .unwrap();
+            let structure = lhs.ordinary_body().space.structure();
+            let expected = match (lhs.coupled_data().unwrap(), rhs.coupled_data().unwrap()) {
+                (Data::F64(a), Data::F64(b)) => {
+                    with_user_rule!(lhs.ordinary_body().space, rule, {
+                        odometer_inner_oracle(structure, a, b, |coupled| {
+                            rule.dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()))
+                        })
+                    })
+                }
+                (Data::C64(a), Data::C64(b)) => {
+                    with_user_rule!(lhs.ordinary_body().space, rule, {
+                        odometer_inner_oracle(structure, a, b, |coupled| {
+                            rule.dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()))
+                        })
+                    })
+                }
+                _ => unreachable!(),
+            }
+            .unwrap();
+            let actual = lhs.inner(&rhs).unwrap().to_c64();
+            assert_close(actual, expected);
+            assert_close(rhs.inner(&lhs).unwrap().to_c64(), actual.conj());
+            assert_close(
+                lhs.inner(&lhs).unwrap().to_c64(),
+                Complex64::new(lhs.norm().unwrap().powi(2), 0.0),
+            );
+        }
+    }
+
+    #[test]
+    fn non_abelian_regions_match_the_block_odometer_oracle() {
+        // What: contiguous coupled-sector reduction preserves every block of
+        // multi-sector, multi-tree SU(2) and fermionic product tensors.
+        assert_multiplicity_free_oracle(Space::su2([(0, 2), (1, 2), (2, 1), (3, 1)]), 282_001);
+        assert_multiplicity_free_oracle(
+            Space::fz2_u1_su2([
+                ((0, -2, 0), 2),
+                ((0, 1, 2), 1),
+                ((1, -1, 1), 2),
+                ((1, 2, 3), 1),
+            ])
+            .unwrap(),
+            282_101,
+        );
+    }
+
+    #[test]
+    fn generic_outer_multiplicity_norm_matches_the_block_odometer_oracle() {
+        // What: SU(3) norm includes every outer-multiplicity vertex with the
+        // generic sqrt-dimension-squared weight.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::su3([((1, 1), 2)]).unwrap();
+        let tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 282_201)
+                .unwrap();
+        let rule = tensor.su3_rule();
+        let data = tensor.data_c64();
+        let expected = odometer_inner_oracle(
+            tensor.ordinary_body().space.structure(),
+            data,
+            data,
+            |coupled| {
+                let sqrt = rule.sqrt_dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()));
+                sqrt * sqrt
+            },
+        )
+        .unwrap();
+        assert_close(
+            Complex64::new(tensor.norm().unwrap().powi(2), 0.0),
+            expected,
+        );
+    }
+
+    #[test]
+    fn malformed_scalar_range_is_a_typed_internal_layout_error() {
+        // What: the lowest contiguous-region boundary rejects a scalar buffer
+        // that cannot be covered exactly instead of entering an odometer path.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 282_301).unwrap();
+        let data = tensor.data();
+        let error = coupled_region_inner(
+            tensor.ordinary_body().space.structure(),
+            tensor.ordinary_body().space.nout(),
+            &data[..data.len() - 1],
+            data,
+            |_| 1.0,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::InvalidArgument(message) if
+            message.contains("internal coupled-layout invariant violated")));
+    }
+
+    #[test]
+    fn empty_and_non_fusion_structures_keep_explicit_boundary_semantics() {
+        // What: a canonical empty structure reduces to zero, while an ordinal
+        // dense structure is rejected as non-packed coupled-sector storage.
+        let empty = BlockStructure::empty(3);
+        assert_eq!(
+            coupled_region_inner::<f64, _>(&empty, 1, &[], &[], |_| 7.0).unwrap(),
+            Complex64::new(0.0, 0.0)
+        );
+
+        let trivial = BlockStructure::trivial(&[2, 2]).unwrap();
+        let error = coupled_region_inner(&trivial, 1, &[1.0; 4], &[1.0; 4], |_| 1.0).unwrap_err();
+        assert!(matches!(error, Error::InvalidArgument(message) if
+            message.contains("non-packed coupled-sector layout")));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CUDA device paths (f64 only).
+//
+// The user-layer storage is always the TensorKit-equivalent coupled-sector
+// matrix layout, so every coupled sector is one contiguous column-major
+// matrix region of the flat device buffer. All device work is expressed as
+// (a) per-sector cuSOLVER decompositions on those regions and (b) region
+// GEMMs against small host-built selector matrices (identity / prefix /
+// sign / permutation) that also perform factor assembly into freshly
+// allocated coupled-layout buffers. Only scalars ever cross PCIe implicitly:
+// per-sector reduction partials, singular/eigen values and R diagonals
+// (truncation and gauge decisions are host scalar logic).
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cuda")]
+fn dense_err(err: tenet_dense::DenseError) -> Error {
+    Error::from(OperationError::Dense(err))
+}
+
+#[cfg(feature = "cuda")]
+fn require_cuda(cuda: Option<&mut CudaDenseContext>) -> Result<&mut CudaDenseContext, Error> {
+    cuda.ok_or_else(|| {
+        Error::InvalidArgument(
+            "this runtime was built without a CUDA device; use \
+             Runtime::builder().cuda(device)"
+                .to_string(),
+        )
+    })
 }
 
 #[cfg(feature = "cuda")]
