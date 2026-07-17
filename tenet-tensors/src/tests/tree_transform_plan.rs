@@ -2238,6 +2238,89 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
 }
 
 #[test]
+fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
+    // Why-not: UniqueFusion intentionally bypasses reusable plan/row caches;
+    // this protects the process from retaining cheap, layout-specific keys.
+    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        [1],
+        [0, 1],
+        Some(1),
+        [false],
+        [false, true],
+        [],
+        [],
+        [],
+        [1],
+    ));
+    assert_eq!(U1FusionRule.fusion_style(), FusionStyleKind::Unique);
+    let src_tree = expect_tree_key(&src_key);
+    let operation = TreeTransformOperation::permute([0, 2], [1]);
+    let (dst_tree, _) = unique_permute_tree_pair(&U1FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
+    let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
+    let dst_structure =
+        packed_fixture_structure(3, [(BlockKey::from(dst_tree), vec![1, 1, 1])]).unwrap();
+    let src_space = TensorMapSpace::<1, 2>::from_dims([1], [1, 1]).unwrap();
+    let dst_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+    let src = TensorMap::<f64, 1, 2>::from_vec_with_structure(vec![7.0], src_space, src_structure)
+        .unwrap();
+    let dst = TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
+        .unwrap();
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    let first = cache
+        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
+        .unwrap();
+    let second = cache
+        .get_or_compile_tree_pair(&U1FusionRule, operation, &dst, &src)
+        .unwrap();
+    assert_eq!(first.as_ref(), second.as_ref());
+    assert_eq!(cache.plan_len(), 0);
+    assert_eq!(cache.structure_len(), 0);
+    assert_eq!(cache.stats().plan_hits, 0);
+    assert_eq!(cache.stats().structure_hits, 0);
+
+    let dst_structure = Arc::new(dst.structure().clone());
+    let src_structure = Arc::new(src.structure().clone());
+    let direct_plan = build_tree_pair_transform_group_plan(
+        &U1FusionRule,
+        TreeTransformOperation::permute([0, 2], [1]),
+        &src_structure,
+    )
+    .unwrap();
+    let direct = direct_plan
+        .compile_shared_structures_with_storage_conjugation(
+            Arc::clone(&dst_structure),
+            Arc::clone(&src_structure),
+            true,
+        )
+        .unwrap();
+    let _ = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation(
+            &U1FusionRule,
+            TreeTransformOperation::permute([0, 2], [1]),
+            &dst_structure,
+            &src_structure,
+            true,
+        )
+        .unwrap();
+    // Why-not: bypassing the cache must not change the compiled structural or
+    // numerical result relative to the direct compiler.
+    let cached_storage = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation(
+            &U1FusionRule,
+            TreeTransformOperation::permute([0, 2], [1]),
+            &dst_structure,
+            &src_structure,
+            true,
+        )
+        .unwrap();
+    assert_eq!(cached_storage.as_ref(), &direct);
+    assert!(cached_storage.storage_conjugate());
+    assert_eq!(cache.plan_len(), 0);
+    assert_eq!(cache.structure_len(), 0);
+}
+
+#[test]
 fn tree_pair_transform_public_helper_executes_split_changing_permute() {
     let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
         [1],
