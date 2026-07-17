@@ -1044,7 +1044,10 @@ fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
 fn rank_nine_cached_permutation_has_no_caller_thread_operation_allocation() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     let runtime = Runtime::builder().build().unwrap();
-    let space = Space::u1([(0, 1)]);
+    // Keep this cache-reuse probe on a non-Unique fusion rule. Unique fusion
+    // intentionally bypasses the global plan cache and therefore cannot
+    // satisfy the warmed-cache contract exercised below.
+    let space = Space::su2([(0, 1)]);
     let source = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space; 9], [], 31_901).unwrap();
     let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0];
     let expected = source.permute(&axes, &[]).unwrap();
