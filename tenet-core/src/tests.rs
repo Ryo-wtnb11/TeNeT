@@ -5474,7 +5474,6 @@ mod tests {
         reset_fusion_tree_layout_probe_side_effect_calls();
         reset_lowered_layout_build_observations();
         let hom = singleton_rank_hom(su2(1), 5);
-        let before = fusion_tree_layout_cache_info();
 
         let prepared = hom
             .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
@@ -5482,13 +5481,14 @@ mod tests {
         let cold_work = lowered_layout_build_observations();
         assert!(cold_work.0 > 0);
         assert!(cold_work.1 > 0);
-        assert_eq!(fusion_tree_layout_cache_info(), before);
+        // Why not inspect global cache totals: unrelated parallel tests may
+        // populate the same process cache. These thread-local probes attribute
+        // publication exactly to this transaction.
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
 
         let keys = prepared.commit();
         assert!(!keys.is_empty());
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 1);
     }
 
     #[test]
@@ -5506,6 +5506,7 @@ mod tests {
             .unwrap();
 
         reset_core_intern_tables();
+        reset_fusion_tree_layout_probe_side_effect_calls();
         reset_lowered_layout_build_observations();
         let prepared = hom
             .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
@@ -5513,16 +5514,16 @@ mod tests {
         let prepare_work = lowered_layout_build_observations();
         assert!(prepare_work.0 > 0);
         assert!(prepare_work.1 > 0);
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
 
         reset_lowered_layout_build_observations();
         let actual = prepared.build_from_leg_degeneracies(&hom).unwrap();
         assert_eq!(lowered_layout_build_observations(), (0, 0));
         assert_eq!(actual, expected);
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
 
         prepared.commit();
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 1);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
     }
 
     #[test]
@@ -5541,6 +5542,7 @@ mod tests {
         let prepared = source
             .prepare_fusion_tree_layout_lowered(&U1FusionRule)
             .unwrap();
+        reset_fusion_tree_layout_probe_side_effect_calls();
         let mismatched = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(u1(2), 2)], false)]),
             FusionProductSpace::new([SectorLeg::new([(u1(2), 3)], true)]),
@@ -5555,7 +5557,7 @@ mod tests {
                 message: "prepared layout does not match HomSpace sector signature",
             }
         );
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
         let duality_mismatched = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(u1(1), 2)], true)]),
             FusionProductSpace::new([SectorLeg::new([(u1(1), 3)], true)]),
@@ -5568,7 +5570,7 @@ mod tests {
                 message: "prepared layout does not match HomSpace sector signature",
             }
         );
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
 
         let target = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(u1(1), 5)], false)]),
@@ -5584,13 +5586,13 @@ mod tests {
                 .shape(),
             &[5, 7]
         );
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
     }
 
     #[test]
     fn cached_lowered_preparation_is_observationally_read_only() {
         // What: preparing an already-cached layout performs no enumeration,
-        // ID issue, admission, or cache-accounting mutation when abandoned.
+        // ID issue, or admission when abandoned.
         let _guard = test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5599,7 +5601,6 @@ mod tests {
         hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
         reset_fusion_tree_layout_probe_side_effect_calls();
         reset_lowered_layout_build_observations();
-        let before = fusion_tree_layout_cache_info();
 
         let prepared = hom
             .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
@@ -5609,7 +5610,6 @@ mod tests {
 
         assert_eq!(lowered_layout_build_observations(), (0, 0));
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
-        assert_eq!(fusion_tree_layout_cache_info(), before);
     }
 
     #[test]
@@ -5633,7 +5633,6 @@ mod tests {
 
         assert!(Arc::ptr_eq(&retained, &committed));
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 1));
-        assert_eq!(fusion_tree_layout_cache_info().entries(), 1);
     }
 
     #[test]
@@ -5797,26 +5796,24 @@ mod tests {
     ) where
         R: LoweredMultiplicityFreeAlgebra,
     {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_core_intern_tables();
         reset_fusion_tree_layout_probe_side_effect_calls();
         reset_hom_space_intern_calls();
         reset_block_structure_intern_calls();
-        let before = fusion_tree_layout_cache_info();
         let error = hom.try_fusion_tree_keys_lowered(rule).unwrap_err();
         assert_eq!(error.into_fusion_algebra().unwrap(), expected);
-        assert_eq!(fusion_tree_layout_cache_info(), before);
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
         assert_eq!(hom_space_intern_calls(), 0);
         assert_eq!(block_structure_intern_calls(), 0);
     }
 
     #[test]
-    fn failed_lowered_algebra_builds_publish_no_identity_or_cache_state() {
+    fn failed_lowered_algebra_builds_publish_no_identity_or_intern_state() {
         // What: invalid built-in U1, SU2, and product closure leaves layout
-        // identity, admission, HomSpace, BlockStructure, and cache state untouched.
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // identity/admission, HomSpace, and BlockStructure state untouched.
         let u1_overflow = FusionTreeHomSpace::new(
             FusionProductSpace::new([
                 SectorLeg::new([(u1(i32::MAX), 1)], false),
