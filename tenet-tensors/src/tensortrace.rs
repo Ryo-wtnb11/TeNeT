@@ -55,6 +55,21 @@ where
     TensorTraceStructure::compile(dst, src, axes)
 }
 
+/// Compiles a fusion-aware trace into reusable structural terms.
+///
+/// Valid terms and their source accumulation follow global source-block order.
+/// For expert layouts built from an incomplete explicit block structure,
+/// errors between distinct external-sector groups likewise follow the first
+/// source block encountered globally. On the non-`Unique` grouped path
+/// (currently `Simple` fusion), one external-sector group is transformed
+/// atomically, so a symbol or tree-transform error from a later member of that
+/// group can precede an earlier member's destination
+/// [`OperationError::MissingBlockKey`].
+///
+/// This uses the same block-level lowering granularity as TensorKit and QSpace;
+/// those references do not establish identical malformed-layout error
+/// ordering. Why not recover per-source error precedence within a group: doing
+/// so would replay the same F/R traversal for every source tree.
 pub fn tensortrace_fusion_structure<
     R,
     TDst,
@@ -139,6 +154,10 @@ fn record_trace_transform_invocation(_src_block_index: usize) {
     TRACE_TRANSFORM_SOURCES.with_borrow_mut(|sources| sources.push(_src_block_index));
 }
 
+/// A compiled fusion-aware trace whose valid terms retain global source order.
+///
+/// See [`tensortrace_fusion_structure`] for the non-`Unique` grouped path's
+/// block-atomic error-ordering contract for expert incomplete layouts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorTraceFusionStructure<C> {
     dst_rank: usize,
