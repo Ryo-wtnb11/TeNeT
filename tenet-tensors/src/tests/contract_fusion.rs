@@ -478,8 +478,7 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
         )
         .unwrap()
     };
-    // Cloned spaces share the subblock-structure Arc, so tensors built from
-    // clones satisfy the prepared handle's identity check.
+    // What: replaying the tensors used to prepare the handle remains valid.
     let space = fusion_space();
     let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], space.clone());
     let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], space.clone());
@@ -521,6 +520,96 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
             1.0,
             0.0,
         )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        OperationError::StructureMismatch {
+            tensor: "prepared contraction"
+        }
+    ));
+
+    let foreign_lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+    let err = context
+        .execute_prepared_tensorcontract_fusion(
+            &prepared,
+            &rule,
+            &mut dst_prepared,
+            &foreign_lhs,
+            &rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        OperationError::StructureMismatch {
+            tensor: "prepared contraction"
+        }
+    ));
+
+    let foreign_rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+    let err = context
+        .execute_prepared_tensorcontract_fusion(
+            &prepared,
+            &rule,
+            &mut dst_prepared,
+            &lhs,
+            &foreign_rhs,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        OperationError::StructureMismatch {
+            tensor: "prepared contraction"
+        }
+    ));
+}
+
+#[test]
+fn prepared_tensorcontract_fusion_pins_exact_space_allocations() {
+    // What: a prepared handle pins all original fusion-space allocations and
+    // rejects semantically equal replacements after the source tensors drop.
+    let rule = Z2FusionRule;
+    let fusion_space = || {
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let (prepared, dst_weak, lhs_weak, rhs_weak) = {
+        let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+        let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+        let dst = test_host_fusion_tensor_map(vec![0.0_f64, 0.0], fusion_space());
+        let dst_weak = Arc::downgrade(dst.fusion_space().unwrap());
+        let lhs_weak = Arc::downgrade(lhs.fusion_space().unwrap());
+        let rhs_weak = Arc::downgrade(rhs.fusion_space().unwrap());
+        let prepared = context
+            .prepare_tensorcontract_fusion(&rule, &dst, &lhs, &rhs, axes)
+            .unwrap();
+        (prepared, dst_weak, lhs_weak, rhs_weak)
+    };
+
+    assert!(dst_weak.upgrade().is_some());
+    assert!(lhs_weak.upgrade().is_some());
+    assert!(rhs_weak.upgrade().is_some());
+
+    let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+    let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+    let mut dst = test_host_fusion_tensor_map(vec![0.0_f64, 0.0], fusion_space());
+    let err = context
+        .execute_prepared_tensorcontract_fusion(&prepared, &rule, &mut dst, &lhs, &rhs, 1.0, 0.0)
         .unwrap_err();
     assert!(matches!(
         err,

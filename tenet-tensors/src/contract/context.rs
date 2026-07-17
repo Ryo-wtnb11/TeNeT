@@ -1,11 +1,12 @@
 use rustc_hash::FxHashMap;
+use std::any::Any;
 use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionRule, HostReadableStorage, HostWritableStorage,
-    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement, ScratchStorage,
-    SimilarStorage, TensorMap, TensorStorage,
+    BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
+    HostWritableStorage, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement,
+    ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -1813,9 +1814,9 @@ where
         )?;
         Ok(PreparedTensorContractFusion {
             rule: rule.tree_transform_rule_cache_key(),
-            dst_fusion_space_ptr: Arc::as_ptr(dst_fusion) as usize,
-            lhs_fusion_space_ptr: Arc::as_ptr(lhs_fusion) as usize,
-            rhs_fusion_space_ptr: Arc::as_ptr(rhs_fusion) as usize,
+            dst_fusion_space: PreparedFusionSpaceWitness::new(dst_fusion, dst.structure()),
+            lhs_fusion_space: PreparedFusionSpaceWitness::new(lhs_fusion, lhs.structure()),
+            rhs_fusion_space: PreparedFusionSpaceWitness::new(rhs_fusion, rhs.structure()),
             resolution,
             dynamic_artifact,
         })
@@ -1873,9 +1874,15 @@ where
             });
         };
         if prepared.rule != rule.tree_transform_rule_cache_key()
-            || prepared.dst_fusion_space_ptr != Arc::as_ptr(dst_fusion) as usize
-            || prepared.lhs_fusion_space_ptr != Arc::as_ptr(lhs_fusion) as usize
-            || prepared.rhs_fusion_space_ptr != Arc::as_ptr(rhs_fusion) as usize
+            || !prepared
+                .dst_fusion_space
+                .matches(dst_fusion, dst.structure())
+            || !prepared
+                .lhs_fusion_space
+                .matches(lhs_fusion, lhs.structure())
+            || !prepared
+                .rhs_fusion_space
+                .matches(rhs_fusion, rhs.structure())
         {
             return Err(OperationError::StructureMismatch {
                 tensor: "prepared contraction",
@@ -2324,15 +2331,56 @@ where
     }
 }
 
+#[derive(Clone)]
+struct PreparedFusionSpaceWitness {
+    allocation: Arc<dyn Any + Send + Sync>,
+    structure: Arc<BlockStructure>,
+}
+
+impl PreparedFusionSpaceWitness {
+    fn new<const NOUT: usize, const NIN: usize>(
+        fusion_space: &Arc<FusionTensorMapSpace<NOUT, NIN>>,
+        structure: &Arc<BlockStructure>,
+    ) -> Self {
+        Self {
+            allocation: Arc::clone(fusion_space) as Arc<dyn Any + Send + Sync>,
+            structure: Arc::clone(structure),
+        }
+    }
+
+    fn matches<const NOUT: usize, const NIN: usize>(
+        &self,
+        fusion_space: &Arc<FusionTensorMapSpace<NOUT, NIN>>,
+        structure: &Arc<BlockStructure>,
+    ) -> bool {
+        let same_allocation = self
+            .allocation
+            .downcast_ref::<FusionTensorMapSpace<NOUT, NIN>>()
+            .is_some_and(|prepared| std::ptr::eq(prepared, fusion_space.as_ref()));
+        let same_structure = Arc::ptr_eq(&self.structure, structure)
+            || self.structure.content_id() == structure.content_id()
+            || self.structure.as_ref() == structure.as_ref();
+        same_allocation && same_structure
+    }
+}
+
+impl std::fmt::Debug for PreparedFusionSpaceWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedFusionSpaceWitness")
+            .field("structure_content_id", &self.structure.content_id())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Resolved contraction handle: plan-once/execute-many without per-call
 /// cache lookups. Created by
 /// [`TensorContractFusionExecutionContext::prepare_tensorcontract_fusion`].
 #[derive(Clone, Debug)]
 pub struct PreparedTensorContractFusion<RuleKey> {
     rule: RuleKey,
-    dst_fusion_space_ptr: usize,
-    lhs_fusion_space_ptr: usize,
-    rhs_fusion_space_ptr: usize,
+    dst_fusion_space: PreparedFusionSpaceWitness,
+    lhs_fusion_space: PreparedFusionSpaceWitness,
+    rhs_fusion_space: PreparedFusionSpaceWitness,
     resolution: Resolution,
     dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
 }
