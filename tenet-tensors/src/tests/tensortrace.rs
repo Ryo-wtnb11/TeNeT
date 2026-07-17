@@ -350,10 +350,17 @@ fn tensortrace_fusion_fermion_parity_matches_tensorkit_supertrace() {
     let mut dst: TensorMap<f64, 0, 0> =
         TensorMap::from_vec_with_fusion_space(vec![0.0], dst_space).unwrap();
 
+    crate::tensortrace::reset_trace_transform_invocations();
     let structure =
         tensortrace_fusion_structure(&rule, &dst, &src, TensorTraceAxisSpec::new(&[], &[0], &[1]))
             .unwrap();
     assert_eq!(structure.terms().len(), 2);
+    // What: Unique fusion retains the scalar direct path instead of constructing
+    // a fusion-group recoupling matrix.
+    assert_eq!(
+        crate::tensortrace::take_trace_transform_invocations(),
+        src.structure().block_count()
+    );
 
     tensortrace_fusion_execute_with(
         &mut HostTensorOperations,
@@ -737,6 +744,516 @@ fn tensortrace_fusion_su2_includes_quantum_dimension_factor() {
     .unwrap();
 
     assert!((dst.data()[0] - 14.0).abs() < 1.0e-12);
+}
+
+fn scalar_trace_term_oracle<R>(
+    rule: &R,
+    dst_structure: &BlockStructure,
+    src_structure: &BlockStructure,
+    output_axes: &[usize],
+    trace_lhs_axes: &[usize],
+    trace_rhs_axes: &[usize],
+    dst_codomain_rank: usize,
+) -> Vec<(FusionTreeBlockKey, FusionTreeBlockKey, usize, usize, f64)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    use tenet_core::{multiplicity_free_permute_tree_pair, split_fusion_tree};
+
+    let mut codomain_permutation = Vec::with_capacity(dst_codomain_rank + trace_lhs_axes.len());
+    codomain_permutation.extend_from_slice(&output_axes[..dst_codomain_rank]);
+    codomain_permutation.extend_from_slice(trace_lhs_axes);
+    let mut domain_permutation =
+        Vec::with_capacity(output_axes.len() - dst_codomain_rank + trace_rhs_axes.len());
+    domain_permutation.extend_from_slice(&output_axes[dst_codomain_rank..]);
+    domain_permutation.extend_from_slice(trace_rhs_axes);
+
+    let mut terms = Vec::new();
+    for src_block_index in 0..src_structure.block_count() {
+        let src_key = expect_tree_key(src_structure.block(src_block_index).unwrap().key());
+        for (permuted_key, permutation_coefficient) in multiplicity_free_permute_tree_pair(
+            rule,
+            &src_key,
+            &codomain_permutation,
+            &domain_permutation,
+        )
+        .unwrap()
+        {
+            let (dst_codomain_tree, trace_codomain_tree) =
+                split_fusion_tree(rule, permuted_key.codomain_tree(), dst_codomain_rank).unwrap();
+            let (dst_domain_tree, trace_domain_tree) = split_fusion_tree(
+                rule,
+                permuted_key.domain_tree(),
+                output_axes.len() - dst_codomain_rank,
+            )
+            .unwrap();
+            if trace_codomain_tree != trace_domain_tree {
+                continue;
+            }
+
+            let coupled = trace_codomain_tree
+                .coupled()
+                .unwrap_or_else(|| rule.vacuum());
+            let first = trace_codomain_tree.uncoupled()[0];
+            let mut trace_factor = rule.dim_scalar(coupled) * rule.inv_dim_scalar(first);
+            for (&sector, &is_dual) in trace_codomain_tree
+                .uncoupled()
+                .iter()
+                .zip(trace_codomain_tree.is_dual())
+                .skip(1)
+            {
+                if !is_dual {
+                    trace_factor *= rule.twist_scalar(sector);
+                }
+            }
+            let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, dst_domain_tree);
+            let dst_block = dst_structure
+                .find_block_index_by_fusion_tree_key(&dst_key)
+                .unwrap();
+            terms.push((
+                dst_key,
+                src_key.clone(),
+                dst_block,
+                src_block_index,
+                permutation_coefficient * trace_factor,
+            ));
+        }
+    }
+    terms
+}
+
+fn assert_trace_terms_match_scalar_oracle<R, C>(
+    rule: &R,
+    structure: &TensorTraceFusionStructure<f64>,
+    dst: &TensorMap<f64, 1, 1, Trivial, C>,
+    src_structure: &BlockStructure,
+    output_axes: &[usize],
+    trace_lhs_axes: &[usize],
+    trace_rhs_axes: &[usize],
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    C: TensorStorage<f64>,
+{
+    let oracle = scalar_trace_term_oracle(
+        rule,
+        dst.structure(),
+        src_structure,
+        output_axes,
+        trace_lhs_axes,
+        trace_rhs_axes,
+        1,
+    );
+    assert_eq!(structure.terms().len(), oracle.len());
+    for (actual, (dst_key, src_key, dst_block, src_block, coefficient)) in
+        structure.terms().iter().zip(oracle)
+    {
+        // What: block lowering preserves scalar-path term identity and global
+        // source/destination order; only floating reduction may round differently.
+        assert_eq!(actual.dst_key(), &dst_key);
+        assert_eq!(actual.src_key(), &src_key);
+        assert_eq!(actual.dst_block(), dst_block);
+        assert_eq!(actual.src_block(), src_block);
+        assert!((actual.coefficient() - coefficient).abs() <= 1.0e-12 * (1.0 + coefficient.abs()));
+    }
+}
+
+#[test]
+fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
+    let rule = SU2FusionRule;
+    let spin_one = SU2Irrep::from_twice_spin(2).sector_id();
+    let leg = || SectorLeg::new([(spin_one, 1)], false);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let src_key_count = src_hom.fusion_tree_keys(&rule).len();
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+        src_hom.clone(),
+        &rule,
+        (0..src_key_count).map(|_| vec![1, 1, 1, 1]),
+    )
+    .unwrap();
+    let src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; src_space.required_len().unwrap()],
+        src_space,
+    )
+    .unwrap();
+
+    let dst_hom = src_hom.select(&rule, &[1], &[3]).unwrap();
+    let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        dst_hom,
+        &rule,
+        (0..dst_key_count).map(|_| vec![1, 1]),
+    )
+    .unwrap();
+    let dst: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; dst_space.required_len().unwrap()],
+        dst_space,
+    )
+    .unwrap();
+    let group_count = src.structure().fusion_tree_groups().len();
+    assert!(
+        src.structure().block_count() > group_count,
+        "fixture must contain multiple source trees in one fusion group"
+    );
+
+    crate::tensortrace::reset_trace_transform_invocations();
+    let structure = tensortrace_fusion_structure(
+        &rule,
+        &dst,
+        &src,
+        TensorTraceAxisSpec::new(&[1, 3], &[0], &[2]),
+    )
+    .unwrap();
+
+    // What: non-Abelian partial trace walks the recoupling transform once per
+    // external-sector group, not once per source fusion tree.
+    assert_eq!(
+        crate::tensortrace::take_trace_transform_invocations(),
+        group_count
+    );
+    assert_trace_terms_match_scalar_oracle(
+        &rule,
+        &structure,
+        &dst,
+        src.structure(),
+        &[1, 3],
+        &[0],
+        &[2],
+    );
+    assert!(structure
+        .terms()
+        .windows(2)
+        .all(|pair| pair[0].src_block() <= pair[1].src_block()));
+
+    let conjugate_axes = TensorTraceAxisSpec::new_with_conjugation(&[1, 3], &[0], &[2], true);
+    let adjoint_src =
+        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+    let lowered_axes =
+        crate::lowering::lower_tensortrace_source_adjoint_axes::<2, 2>(conjugate_axes).unwrap();
+    let lowered_axes = lowered_axes.as_spec();
+    let conjugate_dst_hom = adjoint_src
+        .homspace()
+        .select(
+            &rule,
+            &lowered_axes.output_axes()[..1],
+            &lowered_axes.output_axes()[1..],
+        )
+        .unwrap();
+    let conjugate_dst_key_count = conjugate_dst_hom.fusion_tree_keys(&rule).len();
+    let conjugate_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        conjugate_dst_hom,
+        &rule,
+        (0..conjugate_dst_key_count).map(|_| vec![1, 1]),
+    )
+    .unwrap();
+    let conjugate_dst: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; conjugate_dst_space.required_len().unwrap()],
+        conjugate_dst_space,
+    )
+    .unwrap();
+    let conjugate_structure =
+        tensortrace_fusion_structure(&rule, &conjugate_dst, &src, conjugate_axes).unwrap();
+    // What: source-conjugate lowering still batches the logical adjoint tree
+    // groups while retaining the scalar adjoint-axis trace semantics.
+    assert_trace_terms_match_scalar_oracle(
+        &rule,
+        &conjugate_structure,
+        &conjugate_dst,
+        adjoint_src.subblock_structure(),
+        lowered_axes.output_axes(),
+        lowered_axes.trace_lhs_axes(),
+        lowered_axes.trace_rhs_axes(),
+    );
+}
+
+#[test]
+fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
+    let left_rule = FpU1Rule::default();
+    let rule = FpU1Su2Rule::default();
+    let odd = SectorId::new(1);
+    let product_sector = |charge| {
+        rule.encode_sector(
+            left_rule.encode_sector(odd, U1Irrep::new(charge).sector_id()),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        )
+    };
+    let a = product_sector(1);
+    let b = product_sector(-1);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([
+            SectorLeg::new([(a, 1)], false),
+            SectorLeg::new([(b, 1)], false),
+        ]),
+        FusionProductSpace::new([
+            SectorLeg::new([(b, 1)], false),
+            SectorLeg::new([(a, 1)], false),
+        ]),
+    );
+    let src_key_count = src_hom.fusion_tree_keys(&rule).len();
+    let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap(),
+        src_hom.clone(),
+        &rule,
+        (0..src_key_count).map(|_| vec![1, 1, 1, 1]),
+    )
+    .unwrap();
+    let src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; src_space.required_len().unwrap()],
+        src_space,
+    )
+    .unwrap();
+    let dst_hom = src_hom.select(&rule, &[1], &[2]).unwrap();
+    let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        dst_hom,
+        &rule,
+        (0..dst_key_count).map(|_| vec![1, 1]),
+    )
+    .unwrap();
+    let dst: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; dst_space.required_len().unwrap()],
+        dst_space,
+    )
+    .unwrap();
+
+    let structure = tensortrace_fusion_structure(
+        &rule,
+        &dst,
+        &src,
+        TensorTraceAxisSpec::new(&[1, 2], &[0], &[3]),
+    )
+    .unwrap();
+
+    assert_trace_terms_match_scalar_oracle(
+        &rule,
+        &structure,
+        &dst,
+        src.structure(),
+        &[1, 2],
+        &[0],
+        &[3],
+    );
+
+    let conjugate_axes = TensorTraceAxisSpec::new_with_conjugation(&[1, 2], &[0], &[3], true);
+    let adjoint_src =
+        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+    let lowered_axes =
+        crate::lowering::lower_tensortrace_source_adjoint_axes::<2, 2>(conjugate_axes).unwrap();
+    let lowered_axes = lowered_axes.as_spec();
+    let conjugate_dst_hom = adjoint_src
+        .homspace()
+        .select(
+            &rule,
+            &lowered_axes.output_axes()[..1],
+            &lowered_axes.output_axes()[1..],
+        )
+        .unwrap();
+    let conjugate_dst_key_count = conjugate_dst_hom.fusion_tree_keys(&rule).len();
+    let conjugate_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        conjugate_dst_hom,
+        &rule,
+        (0..conjugate_dst_key_count).map(|_| vec![1, 1]),
+    )
+    .unwrap();
+    let conjugate_dst: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; conjugate_dst_space.required_len().unwrap()],
+        conjugate_dst_space,
+    )
+    .unwrap();
+    let conjugate_structure =
+        tensortrace_fusion_structure(&rule, &conjugate_dst, &src, conjugate_axes).unwrap();
+
+    // What: the Simple product path preserves source-conjugate adjoint lowering,
+    // asymmetric U(1), half-integer SU(2), and the fZ2 odd supertrace sign.
+    assert_trace_terms_match_scalar_oracle(
+        &rule,
+        &conjugate_structure,
+        &conjugate_dst,
+        adjoint_src.subblock_structure(),
+        lowered_axes.output_axes(),
+        lowered_axes.trace_lhs_axes(),
+        lowered_axes.trace_rhs_axes(),
+    );
+    assert!(
+        conjugate_structure
+            .terms()
+            .iter()
+            .any(|term| *term.coefficient() < 0.0),
+        "odd-sector conjugate trace fixture must retain a negative structural coefficient"
+    );
+}
+
+#[test]
+fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
+    let rule = SU2FusionRule;
+    let spin_zero = SU2Irrep::from_twice_spin(0).sector_id();
+    let spin_one = SU2Irrep::from_twice_spin(2).sector_id();
+    let leg = || SectorLeg::new([(spin_zero, 1), (spin_one, 1)], false);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let key_count = src_hom.fusion_tree_keys(&rule).len();
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+        src_hom.clone(),
+        &rule,
+        (0..key_count).map(|_| vec![1, 1, 1, 1]),
+    )
+    .unwrap();
+    let groups = canonical.subblock_structure().fusion_tree_groups();
+    let first = groups
+        .iter()
+        .position(|group| group.block_indices().len() >= 2)
+        .expect("fixture needs a multi-tree fusion group");
+    let second = (0..groups.len())
+        .find(|&index| index != first)
+        .expect("fixture needs a second fusion group");
+    let leading = [
+        groups[first].block_indices()[0],
+        groups[second].block_indices()[0],
+        groups[first].block_indices()[1],
+    ];
+    let mut order = leading.to_vec();
+    order.extend(
+        (0..canonical.subblock_structure().block_count()).filter(|index| !leading.contains(index)),
+    );
+    let reordered = BlockStructure::from_blocks_with_rank(
+        4,
+        order
+            .into_iter()
+            .map(|index| {
+                let block = canonical.subblock_structure().block(index).unwrap();
+                BlockSpec::with_key(
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    block.strides().to_vec(),
+                    block.offset(),
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let src_space = FusionTensorMapSpace::new_unbound(
+        canonical.dense_space().clone(),
+        src_hom.clone(),
+        reordered,
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; src_space.required_len().unwrap()],
+        src_space,
+    )
+    .unwrap();
+
+    let dst_hom = src_hom.select(&rule, &[0], &[2]).unwrap();
+    let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+        dst_hom,
+        &rule,
+        (0..dst_key_count).map(|_| vec![1, 1]),
+    )
+    .unwrap();
+    let dst: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; dst_space.required_len().unwrap()],
+        dst_space,
+    )
+    .unwrap();
+
+    let structure = tensortrace_fusion_structure(
+        &rule,
+        &dst,
+        &src,
+        TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+    )
+    .unwrap();
+
+    // What: group batching may visit A1,B1,A2 together internally, but published
+    // trace terms retain the original global source-block order.
+    assert!(structure
+        .terms()
+        .windows(2)
+        .all(|pair| pair[0].src_block() <= pair[1].src_block()));
+    assert_trace_terms_match_scalar_oracle(
+        &rule,
+        &structure,
+        &dst,
+        src.structure(),
+        &[0, 2],
+        &[1],
+        &[3],
+    );
+
+    let missing_key = structure
+        .terms()
+        .iter()
+        .find(|term| term.src_block() == 0)
+        .expect("first source block must contribute a trace term")
+        .dst_key()
+        .clone();
+    let incomplete_dst = BlockStructure::from_blocks_with_rank(
+        dst.structure().rank(),
+        (0..dst.structure().block_count())
+            .filter_map(|index| {
+                let block = dst.structure().block(index).unwrap();
+                (block.key() != &BlockKey::from(missing_key.clone())).then(|| {
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect(),
+    )
+    .unwrap();
+    let incomplete_space = FusionTensorMapSpace::new_unbound(
+        dst.fusion_space().unwrap().dense_space().clone(),
+        dst.fusion_space().unwrap().homspace().clone(),
+        incomplete_dst.clone(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    // What: the expert explicit-structure constructor permits incomplete
+    // layouts; ordinary from_degeneracy_shapes construction remains complete.
+    assert_eq!(
+        incomplete_space.subblock_structure().block_count() + 1,
+        dst.structure().block_count()
+    );
+
+    for _ in 0..2 {
+        crate::tensortrace::reset_trace_transform_invocations();
+        let error = crate::tensortrace::build_fusion_trace_terms_for_test(
+            &rule,
+            &incomplete_dst,
+            src.structure(),
+            TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+            1,
+        )
+        .unwrap_err();
+        // What: an earlier source lowering error stops before transforming a
+        // later external-sector group, deterministically across compilations.
+        assert!(matches!(
+            error,
+            OperationError::MissingBlockKey { ref key }
+                if key.as_ref() == &BlockKey::from(missing_key.clone())
+        ));
+        assert_eq!(crate::tensortrace::take_trace_transform_sources(), vec![0]);
+    }
 }
 
 #[test]
