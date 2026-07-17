@@ -1356,6 +1356,17 @@ where
         DDst: TensorStorage<TDst>,
         DSrc: TensorStorage<TSrc>,
     {
+        if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+            // Why-not cache Unique plans: Unique removes fusion multiplicity,
+            // but does not imply a single total destination. Retaining
+            // plan/row state costs more than direct compilation here and
+            // risks process-lifetime growth for cheap keys.
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
+            return Ok(Arc::new(plan.compile(dst, src)?));
+        }
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,
@@ -1439,6 +1450,24 @@ where
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
     {
+        if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+            // Why-not cache Unique plans: Unique removes fusion multiplicity,
+            // but does not imply a single total destination. The storage-only
+            // form still has cheap, layout-specific entries, so retaining a
+            // second structural cache would duplicate state and permit
+            // unbounded entries.
+            self.stats.plan_misses += 1;
+            self.stats.structure_misses += 1;
+            let plan =
+                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+            return Ok(Arc::new(
+                plan.compile_shared_structures_with_storage_conjugation(
+                    Arc::clone(dst_structure),
+                    Arc::clone(src_structure),
+                    storage_conjugate,
+                )?,
+            ));
+        }
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,

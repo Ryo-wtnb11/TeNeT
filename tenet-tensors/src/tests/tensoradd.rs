@@ -735,14 +735,14 @@ fn plain_tensoradd_rejects_fusion_tree_conjugation_without_categorical_adjoint()
 }
 
 fn z2_tensoradd_adjoint_fixture() -> (
-    Z2FusionRule,
+    SU2FusionRule,
     TensorMap<Complex64, 2, 1>,
     TensorMap<Complex64, 1, 2>,
     Vec<Complex64>,
 ) {
-    let rule = Z2FusionRule;
-    let even = SectorId::new(0);
-    let odd = SectorId::new(1);
+    let rule = SU2FusionRule;
+    let even = SU2Irrep::from_twice_spin(0).sector_id();
+    let odd = SU2Irrep::from_twice_spin(0).sector_id();
     let src_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<2, 1>::from_dims([2, 3], [5]).unwrap(),
         FusionTreeHomSpace::new(

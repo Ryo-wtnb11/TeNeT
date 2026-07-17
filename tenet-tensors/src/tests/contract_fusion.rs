@@ -467,8 +467,8 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let rule = U1FusionRule;
-    let leg = || SectorLeg::new([(U1Irrep::new(0).sector_id(), 1)], false);
+    let rule = SU2FusionRule;
+    let leg = || SectorLeg::new([(SU2Irrep::from_twice_spin(0).sector_id(), 1)], false);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(), leg()]),
         FusionProductSpace::new([leg(), leg()]),
