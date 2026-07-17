@@ -4603,7 +4603,7 @@ mod tests {
             }
         }
 
-        // Exercise the direct codomain/codomain form in addition to the four
+        // Exercise the direct codomain/domain form in addition to the four
         // stored-side combinations above.
         let direct_lhs = FusionTreeHomSpace::new(
             FusionProductSpace::new([matched.clone()]),
