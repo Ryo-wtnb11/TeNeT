@@ -1231,7 +1231,7 @@ fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
 }
 
 #[test]
-fn parallel_group_errors_preserve_source_order_and_transaction_state() {
+fn parallel_group_callbacks_expose_reversed_completion_order_and_preserve_transaction_state() {
     use crate::tree_transform::{
         build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
         TreePairRowMemo,
@@ -1310,8 +1310,9 @@ fn parallel_group_errors_preserve_source_order_and_transaction_state() {
                 )
             });
 
-            // What: even when the later group finishes first, every worker
-            // count reports the first source-group error and commits nothing.
+            // What: the integration path remains transactional while the
+            // witness proves the later callback epilogue completed first.
+            // The helper unit test owns collector error-selection semantics.
             assert_eq!(result.unwrap_err(), expected);
             assert!(memo.is_empty());
             assert_eq!((hits, misses), (7, 11));

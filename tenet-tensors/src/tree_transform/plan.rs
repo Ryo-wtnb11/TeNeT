@@ -372,6 +372,10 @@ where
         .into_par_iter()
         .map(|batch| batch.into_iter().map(&build).collect::<Result<Vec<_>, _>>())
         .collect::<Vec<_>>();
+    flatten_ordered_batch_results(batches)
+}
+
+fn flatten_ordered_batch_results<O, E>(batches: Vec<Result<Vec<O>, E>>) -> Result<Vec<O>, E> {
     let mut outputs = Vec::new();
     // Why not collect the parallel iterator directly into `Result<Vec<_>, _>`:
     // Rayon deliberately leaves the winning error nondeterministic when
@@ -381,6 +385,27 @@ where
         outputs.extend(batch?);
     }
     Ok(outputs)
+}
+
+#[cfg(test)]
+mod ordered_batch_tests {
+    use super::flatten_ordered_batch_results;
+
+    #[test]
+    fn flatten_ordered_batches_selects_first_error_and_preserves_success_order() {
+        // What: collector semantics follow source-batch order even when several
+        // worker results contain distinct errors.
+        let errors = vec![Ok(vec![0, 1]), Err("first"), Err("second")];
+        assert_eq!(flatten_ordered_batch_results(errors), Err("first"));
+
+        // What: successful batches flatten without reordering their rows.
+        let successes: Vec<Result<Vec<usize>, &str>> =
+            vec![Ok(vec![0, 1]), Ok(vec![2]), Ok(vec![3, 4])];
+        assert_eq!(
+            flatten_ordered_batch_results(successes),
+            Ok(vec![0, 1, 2, 3, 4])
+        );
+    }
 }
 
 fn partition_staged_groups<I>(inputs: Vec<I>, threads: usize) -> Vec<Vec<I>> {
