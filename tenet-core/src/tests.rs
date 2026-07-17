@@ -5580,33 +5580,83 @@ mod tests {
         );
     }
 
+    fn assert_failed_lowered_build_is_transactional<R>(
+        rule: &R,
+        hom: &FusionTreeHomSpace,
+        expected: FusionAlgebraError,
+    ) where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        reset_core_intern_tables();
+        reset_fusion_tree_layout_probe_side_effect_calls();
+        reset_hom_space_intern_calls();
+        reset_block_structure_intern_calls();
+        let before = fusion_tree_layout_cache_info();
+        let error = hom.try_fusion_tree_keys_lowered(rule).unwrap_err();
+        assert_eq!(error.into_fusion_algebra().unwrap(), expected);
+        assert_eq!(fusion_tree_layout_cache_info(), before);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+        assert_eq!(hom_space_intern_calls(), 0);
+        assert_eq!(block_structure_intern_calls(), 0);
+    }
+
     #[test]
-    fn failed_lowered_algebra_build_does_not_publish_a_layout() {
-        // What: a typed closure failure leaves the shared layout cache entry
-        // count unchanged rather than publishing a partial result.
+    fn failed_lowered_algebra_builds_publish_no_identity_or_cache_state() {
+        // What: invalid built-in U1, SU2, and product closure leaves layout
+        // identity, admission, HomSpace, BlockStructure, and cache state untouched.
         let _guard = test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_core_intern_tables();
-        let hom = FusionTreeHomSpace::new(
+        let u1_overflow = FusionTreeHomSpace::new(
             FusionProductSpace::new([
                 SectorLeg::new([(u1(i32::MAX), 1)], false),
                 SectorLeg::new([(u1(1), 1)], false),
             ]),
             FusionProductSpace::new([]),
         );
-        let before = fusion_tree_layout_cache_info().entries();
-        let error = hom
-            .try_fusion_tree_keys_lowered(&U1FusionRule)
-            .unwrap_err();
-        assert_eq!(
-            error.into_fusion_algebra().unwrap(),
+        assert_failed_lowered_build_is_transactional(
+            &U1FusionRule,
+            &u1_overflow,
             FusionAlgebraError::U1FusionOverflow {
                 left: i32::MAX,
                 right: 1,
-            }
+            },
         );
-        assert_eq!(fusion_tree_layout_cache_info().entries(), before);
+
+        let su2_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(su2(128), 1)], false),
+                SectorLeg::new([(su2(127), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        assert_failed_lowered_build_is_transactional(
+            &SU2FusionRule,
+            &su2_overflow,
+            FusionAlgebraError::FusionNotRepresentable {
+                left: su2(128),
+                right: su2(127),
+            },
+        );
+
+        type Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Codec>;
+        let product_rule = Rule::new(FermionParityFusionRule, U1FusionRule);
+        let product_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(Codec::encode(z2_even(), u1(i32::MAX)), 1)], false),
+                SectorLeg::new([(Codec::encode(z2_odd(), u1(1)), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        assert_failed_lowered_build_is_transactional(
+            &product_rule,
+            &product_overflow,
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            },
+        );
     }
 
     #[test]

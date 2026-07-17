@@ -1,15 +1,16 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockStructure, DegeneracyStructure, FusionProductSpace, FusionTreeBlockKey,
     FusionTreeHomSpace, FusionTreeKey, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorStructure, TensorMap, TensorMapSpace,
+    SectorStructure, TensorMap, TensorMapSpace, U1FusionRule,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    reset_global_operation_caches, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
-    TreeTransformOperation,
+    reset_global_operation_caches, BoundDynamicFusionMapSpace, TreeTransformBuiltinRuleCacheKey,
+    TreeTransformCache, TreeTransformOperation,
 };
 
 struct CountingAllocator;
@@ -192,4 +193,56 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
         assert_eq!(ALLOCATIONS.get(), expected_allocations, "missing={missing}");
         std::hint::black_box(plan);
     }
+}
+
+#[test]
+fn lowered_scratch_hit_matches_encoded_hit_allocation_and_identity() {
+    reset_global_operation_caches();
+    tenet_core::reset_core_intern_tables();
+    let provider = Arc::new(U1FusionRule);
+    let homspace =
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let cold = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        Arc::clone(&provider),
+        homspace,
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+
+    let lowered_homspace = cold.space().homspace().clone();
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        Arc::clone(&provider),
+        lowered_homspace,
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+    COUNTING.set(false);
+    let lowered_allocations = ALLOCATIONS.get();
+
+    let encoded_homspace = cold.space().homspace().clone();
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let encoded = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        provider,
+        encoded_homspace,
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+    COUNTING.set(false);
+    let encoded_allocations = ALLOCATIONS.get();
+
+    // What: the transactional lowered capability preserves the encoded warm
+    // hit's allocation cost and returns the exact retained structure Arc.
+    assert_eq!(lowered_allocations, encoded_allocations);
+    assert!(Arc::ptr_eq(
+        cold.space().structure(),
+        lowered.space().structure()
+    ));
+    assert!(Arc::ptr_eq(
+        cold.space().structure(),
+        encoded.space().structure()
+    ));
+    assert_eq!(lowered.space(), encoded.space());
 }

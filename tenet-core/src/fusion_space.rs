@@ -943,6 +943,16 @@ impl FusionTreeHomSpace {
             .clone()
     }
 
+    /// Returns the already-published semantic identity without initializing it.
+    ///
+    /// Why not call [`Self::id`]: fallible metadata builders must validate
+    /// algebra before publishing process-local identity state.
+    #[doc(hidden)]
+    #[inline]
+    pub fn existing_id(&self) -> Option<HomSpaceId> {
+        self.id.get().cloned()
+    }
+
     pub fn select<R>(
         &self,
         rule: &R,
@@ -1202,10 +1212,11 @@ impl FusionTreeHomSpace {
         drop(read);
 
         let key = Arc::new(key);
+        let keys = build()?;
         let computed = Arc::new(fusion_tree_layout_from_keys(
             rule,
             next_fusion_tree_layout_id(),
-            build()?,
+            keys,
         ));
         let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
         let mut write = cache
