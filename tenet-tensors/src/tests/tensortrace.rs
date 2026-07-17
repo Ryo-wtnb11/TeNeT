@@ -1121,6 +1121,10 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         groups[second].block_indices()[0],
         groups[first].block_indices()[1],
     ];
+    let same_group_later_member = leading
+        .iter()
+        .position(|&index| index == groups[first].block_indices()[1])
+        .unwrap();
     let mut order = leading.to_vec();
     order.extend(
         (0..canonical.subblock_structure().block_count()).filter(|index| !leading.contains(index)),
@@ -1156,7 +1160,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
     )
     .unwrap();
 
-    let dst_hom = src_hom.select(&rule, &[0], &[2]).unwrap();
+    let dst_hom = src_hom.select(&rule, &[0], &[3]).unwrap();
     let dst_key_count = dst_hom.fusion_tree_keys(&rule).len();
     let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
         TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
@@ -1175,7 +1179,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         &rule,
         &dst,
         &src,
-        TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+        TensorTraceAxisSpec::new(&[0, 3], &[1], &[2]),
     )
     .unwrap();
 
@@ -1190,9 +1194,9 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         &structure,
         &dst,
         src.structure(),
-        &[0, 2],
+        &[0, 3],
         &[1],
-        &[3],
+        &[2],
     );
 
     let missing_key = structure
@@ -1241,7 +1245,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
             &rule,
             &incomplete_dst,
             src.structure(),
-            TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+            TensorTraceAxisSpec::new(&[0, 3], &[1], &[2]),
             1,
         )
         .unwrap_err();
@@ -1252,6 +1256,83 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
             OperationError::MissingBlockKey { ref key }
                 if key.as_ref() == &BlockKey::from(missing_key.clone())
         ));
+        assert_eq!(crate::tensortrace::take_trace_transform_sources(), vec![0]);
+    }
+
+    let malformed_structure = BlockStructure::from_blocks_with_rank(
+        src.structure().rank(),
+        (0..src.structure().block_count())
+            .map(|index| {
+                let block = src.structure().block(index).unwrap();
+                let key = if index == same_group_later_member {
+                    let BlockKey::FusionTree(key) = block.key() else {
+                        panic!("fixture source must use fusion-tree keys");
+                    };
+                    let codomain = key.codomain_tree();
+                    FusionTreeBlockKey::pair(
+                        FusionTreeKey::try_new_for_rule(
+                            &rule,
+                            codomain.uncoupled().iter().copied(),
+                            None,
+                            codomain.is_dual().iter().copied(),
+                            codomain.innerlines().iter().copied(),
+                            codomain.vertices().iter().copied(),
+                        )
+                        .unwrap(),
+                        key.domain_tree().clone(),
+                    )
+                    .into()
+                } else {
+                    block.key().clone()
+                };
+                BlockSpec::with_key(
+                    key,
+                    block.shape().to_vec(),
+                    block.strides().to_vec(),
+                    block.offset(),
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let malformed_src_space = FusionTensorMapSpace::new_unbound(
+        src.fusion_space().unwrap().dense_space().clone(),
+        src.fusion_space().unwrap().homspace().clone(),
+        malformed_structure,
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let malformed_src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; malformed_src_space.required_len().unwrap()],
+        malformed_src_space,
+    )
+    .unwrap();
+    let incomplete_dst_tensor: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
+        vec![0.0; incomplete_space.required_len().unwrap()],
+        incomplete_space,
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        crate::tensortrace::reset_trace_transform_invocations();
+        let error = tensortrace_fusion_structure(
+            &rule,
+            &incomplete_dst_tensor,
+            &malformed_src,
+            TensorTraceAxisSpec::new(&[0, 3], &[1], &[2]),
+        )
+        .unwrap_err();
+        // What: a Simple-fusion group transforms atomically, so its later
+        // malformed member is diagnosed before lowering its first member.
+        assert!(
+            matches!(
+                error,
+                OperationError::Core(tenet_core::CoreError::MalformedFusionTree { .. })
+            ),
+            "unexpected block-atomic error: {error:?}"
+        );
         assert_eq!(crate::tensortrace::take_trace_transform_sources(), vec![0]);
     }
 }
