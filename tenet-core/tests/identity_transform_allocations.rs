@@ -4,8 +4,8 @@ use std::hint::black_box;
 
 use tenet_core::{
     multiplicity_free_permute_tree_pair_block, unique_permute_tree, FusionProductSpace,
-    FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey, SectorLeg, U1FusionRule, U1Irrep,
-    Z2FusionRule, Z2Irrep,
+    FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey, SU2FusionRule, SU2Irrep, SectorLeg,
+    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -92,6 +92,50 @@ fn block_identity_permute_allocates_only_owned_output() {
     // outer result and its one owned row, with no level-vector temporaries.
     assert_eq!(transformed, vec![vec![(source, 1.0)]]);
     assert_eq!(ALLOCATIONS.get(), 2);
+}
+
+#[test]
+fn compact_block_warm_allocations_do_not_restore_per_source_scratch() {
+    let rule = SU2FusionRule;
+    let spin_one = SU2Irrep::from_twice_spin(2).sector_id();
+    let codomain: [SectorLeg; 8] = std::array::from_fn(|_| SectorLeg::new([(spin_one, 1)], false));
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new(codomain),
+        FusionProductSpace::new([SectorLeg::new([(spin_one, 1)], false)]),
+    );
+    let keys = hom.fusion_tree_keys(&rule);
+    let sources = &keys[..16];
+    let codomain_permutation = [7usize, 6, 5, 4, 3, 2, 1, 0];
+    let domain_permutation = [8usize];
+    let _ = multiplicity_free_permute_tree_pair_block(
+        &rule,
+        sources,
+        &codomain_permutation,
+        &domain_permutation,
+    )
+    .unwrap();
+
+    let (output, allocations) = measured_allocations(|| {
+        black_box(
+            multiplicity_free_permute_tree_pair_block(
+                &rule,
+                sources,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .unwrap(),
+        )
+    });
+
+    // What: the fixed 16-source non-Abelian warm transform retains one compact
+    // block workspace rather than recreating full-key scratch per source.
+    assert_eq!(output.len(), sources.len());
+    // Why not treat this as a general performance bound: it guards this fixed
+    // regression fixture while release ABBA covers broader ranks and rules.
+    assert!(
+        allocations <= 3072,
+        "compact warm block allocated {allocations} times"
+    );
 }
 
 fn u1_homspace(rank: usize) -> FusionTreeHomSpace {
