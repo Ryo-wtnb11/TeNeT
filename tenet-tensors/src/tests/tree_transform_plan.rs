@@ -985,10 +985,8 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
 
 #[test]
 fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
-    // TensorKit treetransformers.jl:69-90 parity: threaded transformer
-    // construction must produce the same transformer as the serial build.
-    // The parallel path only prefills the tree-row memo; assembly is the
-    // serial code, so the plans must be *equal*, not just numerically close.
+    // What: shared staged-group execution produces the same transformer,
+    // source/group order, and memo accounting for serial and threaded builds.
     use crate::tree_transform::{
         build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
     };
@@ -1052,6 +1050,403 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
     assert_eq!(warm_plan, serial_plan);
     assert_eq!(warm_hits, parallel_misses);
     assert_eq!(warm_misses, 0);
+}
+
+#[test]
+fn all_codomain_duplicate_rows_count_one_lookup_for_every_thread_count() {
+    use crate::tree_transform::{
+        build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
+    };
+
+    let codomain = FusionTreeKey::try_new_for_rule(
+        &SU2FusionRule,
+        [SectorId::new(1), SectorId::new(1)],
+        Some(SectorId::new(0)),
+        [false, false],
+        [],
+        [SectorId::new(1)],
+    )
+    .unwrap();
+    let domain_none = empty_fusion_tree();
+    let domain_vacuum = empty_fusion_tree_with_coupled(Some(0));
+    let keys = [
+        FusionTreeBlockKey::pair(codomain.clone(), domain_none),
+        FusionTreeBlockKey::pair(codomain, domain_vacuum),
+    ];
+    let structure =
+        packed_fixture_structure(2, keys.iter().cloned().map(|key| (key, vec![1, 1]))).unwrap();
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+    for operation in [
+        TreeTransformOperation::braid([0, 1], [], [7, 3], []),
+        TreeTransformOperation::braid([1, 0], [], [0, 1], []),
+    ] {
+        let build = |threads, memo: &mut AllCodomainRowMemo<f64, _>| {
+            let mut hits = 0;
+            let mut misses = 0;
+            let plan = build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+                &SU2FusionRule,
+                &rule_key,
+                operation.clone(),
+                &structure,
+                memo,
+                &mut hits,
+                &mut misses,
+                threads,
+            )
+            .unwrap();
+            (plan, hits, misses)
+        };
+
+        let mut expected_plan = None;
+        for threads in [1, 2, 4] {
+            let mut memo = AllCodomainRowMemo::default();
+            let (cold, hits, misses) = build(threads, &mut memo);
+            // What: both legal empty-domain encodings share one codomain memo
+            // row in identity and general assembly for every worker count.
+            assert_eq!((hits, misses, memo.len()), (0, 1, 1));
+            if let Some(expected) = &expected_plan {
+                assert_eq!(&cold, expected);
+            } else {
+                expected_plan = Some(cold.clone());
+            }
+
+            let (warm, hits, misses) = build(threads, &mut memo);
+            assert_eq!(warm, cold);
+            assert_eq!((hits, misses, memo.len()), (1, 0, 1));
+        }
+    }
+}
+
+#[test]
+fn all_codomain_worker_error_does_not_commit_rows_or_stats() {
+    use crate::tree_transform::{
+        build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
+    };
+
+    let keys = [1, 2].map(|sector| {
+        FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [SectorId::new(sector), SectorId::new(sector)],
+                Some(SectorId::new(0)),
+                [false, false],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            empty_fusion_tree(),
+        )
+    });
+    let structure =
+        packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
+    let invalid_operation = TreeTransformOperation::braid([0, 0], [], [0, 1], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+
+    for threads in [1, 4] {
+        let mut memo = AllCodomainRowMemo::default();
+        let mut hits = 7;
+        let mut misses = 11;
+        let result = build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+            &SU2FusionRule,
+            &rule_key,
+            invalid_operation.clone(),
+            &structure,
+            &mut memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        );
+
+        // What: a worker-side row-transform error across two independently
+        // scheduled groups publishes neither staged misses nor rows.
+        assert!(result.is_err());
+        assert!(memo.is_empty());
+        assert_eq!((hits, misses), (7, 11));
+    }
+}
+
+#[test]
+fn staged_group_scheduler_builds_bounded_balanced_contiguous_batches() {
+    use crate::tree_transform::partition_staged_groups_for_test;
+
+    for (group_count, threads, expected_sizes) in [
+        (3, 2, vec![2, 1]),
+        (5, 2, vec![3, 2]),
+        (3, 8, vec![1, 1, 1]),
+    ] {
+        let batches = partition_staged_groups_for_test((0..group_count).collect(), threads);
+        // What: awkward group/thread ratios still create exactly the bounded
+        // task count rather than relying on Rayon's recursive split heuristic.
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            expected_sizes
+        );
+        assert_eq!(
+            batches.into_iter().flatten().collect::<Vec<_>>(),
+            (0..group_count).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
+        TreePairRowMemo,
+    };
+
+    let keys = [
+        all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]),
+        all_codomain_fusion_tree_test_key([2, 2], Some(0), [false, false], [], [1]),
+    ];
+    let structure =
+        packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+
+    for threads in [1, 4] {
+        let mut memo = TreePairRowMemo::default();
+        let mut hits = 7;
+        let mut misses = 11;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
+                &SU2FusionRule,
+                &rule_key,
+                operation.clone(),
+                &structure,
+                &mut memo,
+                &mut hits,
+                &mut misses,
+                threads,
+                |_, _, _| panic!("injected block-transform panic"),
+            )
+        }));
+
+        // What: unwinding from either scheduler mode with two independent
+        // groups occurs before commit and leaves memo/stat state unchanged.
+        assert!(result.is_err());
+        assert!(memo.is_empty());
+        assert_eq!((hits, misses), (7, 11));
+    }
+}
+
+#[test]
+fn parallel_group_callbacks_expose_reversed_completion_order_and_preserve_transaction_state() {
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
+        TreePairRowMemo,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::{Duration, Instant};
+
+    struct CompletionFlag(Arc<AtomicBool>);
+
+    impl Drop for CompletionFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let keys = [
+        all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]),
+        all_codomain_fusion_tree_test_key([2, 2], Some(0), [false, false], [], [1]),
+    ];
+    let structure =
+        packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+    let expected = OperationError::InvalidArgument {
+        message: "first source-group error",
+    };
+
+    for threads in [1, 2, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for _ in 0..32 {
+            let later_completed = Arc::new(AtomicBool::new(false));
+            let completion_order_observed = Arc::new(AtomicBool::new(false));
+            let mut memo = TreePairRowMemo::default();
+            let mut hits = 7;
+            let mut misses = 11;
+            let result = pool.install(|| {
+                build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
+                    &SU2FusionRule,
+                    &rule_key,
+                    operation.clone(),
+                    &structure,
+                    &mut memo,
+                    &mut hits,
+                    &mut misses,
+                    threads,
+                    |_, _, missing| {
+                        let first_sector = missing[0].codomain_uncoupled()[0].id();
+                        if first_sector == 1 {
+                            if threads > 1 {
+                                let deadline = Instant::now() + Duration::from_secs(5);
+                                while !later_completed.load(Ordering::Acquire) {
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "later source-group closure did not complete"
+                                    );
+                                    std::thread::yield_now();
+                                }
+                                completion_order_observed.store(true, Ordering::Release);
+                            }
+                            Err(OperationError::InvalidArgument {
+                                message: "first source-group error",
+                            })
+                        } else {
+                            let _completion = CompletionFlag(Arc::clone(&later_completed));
+                            Err(OperationError::InvalidArgument {
+                                message: "second source-group error",
+                            })
+                        }
+                    },
+                )
+            });
+
+            // What: the integration path remains transactional while the
+            // witness proves the later callback epilogue completed first.
+            // The helper unit test owns collector error-selection semantics.
+            assert_eq!(result.unwrap_err(), expected);
+            assert!(memo.is_empty());
+            assert_eq!((hits, misses), (7, 11));
+            if threads > 1 {
+                assert!(completion_order_observed.load(Ordering::Acquire));
+            }
+        }
+    }
+}
+
+#[test]
+fn tree_pair_block_transform_runs_once_per_group_for_cold_and_partial_memos() {
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
+        transformed_tree_pair_rows_block, TreePairRowMemo,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let key = |coupled: usize, inner: [usize; 2]| {
+        all_codomain_fusion_tree_test_key(
+            [1, 1, 1, 1],
+            Some(coupled),
+            [false, false, false, false],
+            inner,
+            [1, 1, 1],
+        )
+    };
+    let keys = [
+        key(0, [0, 1]),
+        key(0, [2, 1]),
+        key(2, [2, 1]),
+        key(2, [2, 3]),
+    ];
+    let structure =
+        packed_fixture_structure(4, keys.iter().map(|key| (key.clone(), vec![1usize; 4]))).unwrap();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+    let group_count = structure.fusion_tree_groups().len();
+    let build = |threads, memo: &mut TreePairRowMemo<f64, _>, calls: &AtomicUsize| {
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan =
+            build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
+                &SU2FusionRule,
+                &rule_key,
+                operation.clone(),
+                &structure,
+                memo,
+                &mut hits,
+                &mut misses,
+                threads,
+                |rule, operation, missing| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    transformed_tree_pair_rows_block(rule, operation, missing)
+                },
+            )
+            .unwrap();
+        (plan, hits, misses)
+    };
+    let assert_plan_close = |actual: &TreeTransformGroupPlan<f64>,
+                             expected: &TreeTransformGroupPlan<f64>| {
+        assert_eq!(actual.specs().len(), expected.specs().len());
+        for (actual, expected) in actual.specs().iter().zip(expected.specs()) {
+            assert_eq!(actual.group_key(), expected.group_key());
+            assert_eq!(actual.src_keys(), expected.src_keys());
+            assert_eq!(actual.dst_keys(), expected.dst_keys());
+            assert_eq!(actual.source_axes(), expected.source_axes());
+            let actual_coefficients = actual.recoupling_coefficients_dst_src();
+            let expected_coefficients = expected.recoupling_coefficients_dst_src();
+            assert_eq!(actual_coefficients.len(), expected_coefficients.len());
+            for (actual, expected) in actual_coefficients.iter().zip(expected_coefficients) {
+                assert!((actual - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()));
+            }
+        }
+    };
+
+    let mut oracle_plan = None;
+    let mut oracle_memo = None;
+    for threads in [1, 2, 4] {
+        let calls = AtomicUsize::new(0);
+        let mut memo = TreePairRowMemo::default();
+        let (plan, hits, misses) = build(threads, &mut memo, &calls);
+        // What: worker count never splits one fusion group into source-tree
+        // transforms; cold compilation invokes one block transform per group.
+        assert_eq!(calls.load(Ordering::Relaxed), group_count);
+        assert_eq!((hits, misses), (0, keys.len()));
+        if let Some(expected) = &oracle_plan {
+            assert_plan_close(&plan, expected);
+        } else {
+            oracle_plan = Some(plan);
+            oracle_memo = Some(memo);
+        }
+    }
+
+    let full_memo = oracle_memo.unwrap();
+    let first_key = expect_tree_key(&keys[0]);
+    let first_memo_key = (rule_key.clone(), operation.clone(), first_key);
+    let mut partial_memo = TreePairRowMemo::default();
+    partial_memo.insert(
+        first_memo_key.clone(),
+        Arc::clone(full_memo.get(&first_memo_key).unwrap()),
+    );
+    let warm_keys = partial_memo
+        .keys()
+        .map(|(_, _, key)| key)
+        .collect::<std::collections::HashSet<_>>();
+    let expected_missing_groups = structure
+        .fusion_tree_groups()
+        .iter()
+        .filter(|group| {
+            group.block_indices().iter().any(|&index| {
+                let block = structure.block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    panic!("test expected a fusion-tree key");
+                };
+                !warm_keys.contains(key)
+            })
+        })
+        .count();
+    let calls = AtomicUsize::new(0);
+    let (partial, hits, misses) = build(4, &mut partial_memo, &calls);
+    // What: a partially warm group batches its missing subset once and retains
+    // exact key/order plus coefficient agreement at the numerical contract.
+    assert_eq!(calls.load(Ordering::Relaxed), expected_missing_groups);
+    assert_eq!((hits, misses), (1, keys.len() - 1));
+    assert_plan_close(&partial, oracle_plan.as_ref().unwrap());
+
+    let calls = AtomicUsize::new(0);
+    let (warm, hits, misses) = build(4, &mut partial_memo, &calls);
+    // What: a fully warm group assembles from memo rows without invoking an
+    // empty block transform.
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!((hits, misses), (keys.len(), 0));
+    assert_plan_close(&warm, oracle_plan.as_ref().unwrap());
 }
 
 #[test]
@@ -2334,6 +2729,53 @@ fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() 
     assert!((single_transform_coefficient_for_coupled(&plan, c1) + 1.0).abs() < 1.0e-12);
     plan.compile_structures(dst_structure, src_structure)
         .unwrap();
+}
+
+#[test]
+fn product_tree_pair_plan_is_thread_count_invariant() {
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+    };
+
+    let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+    let rule_key = rule.tree_transform_rule_cache_key();
+    let build = |threads| {
+        let mut memo = TreePairRowMemo::default();
+        let mut hits = 0;
+        let mut misses = 0;
+        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+            &rule,
+            &rule_key,
+            operation.clone(),
+            src_space.subblock_structure(),
+            &mut memo,
+            &mut hits,
+            &mut misses,
+            threads,
+        )
+        .unwrap();
+        (plan, hits, misses)
+    };
+
+    let (serial, serial_hits, serial_misses) = build(1);
+    for threads in [2, 4] {
+        let (threaded, hits, misses) = build(threads);
+        // What: product-symmetry fermionic phases, plan order, and cold row
+        // accounting are identical when scheduling the same fusion groups.
+        assert_eq!(threaded, serial);
+        assert_eq!((hits, misses), (serial_hits, serial_misses));
+        threaded
+            .compile_structures(
+                dst_space.subblock_structure(),
+                src_space.subblock_structure(),
+            )
+            .unwrap();
+    }
+    assert_eq!(serial_hits, 0);
+    assert_eq!(serial_misses, 2);
+    assert!((single_transform_coefficient_for_coupled(&serial, c0) - 1.0).abs() < 1.0e-12);
+    assert!((single_transform_coefficient_for_coupled(&serial, c1) + 1.0).abs() < 1.0e-12);
 }
 
 #[test]

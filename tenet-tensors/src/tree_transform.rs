@@ -24,7 +24,9 @@ pub(crate) use cache::{TreeTransformGroupPlanCache, TreeTransformGroupPlanKey};
 pub(crate) use plan::{
     build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized,
     build_multiplicity_free_tree_pair_transform_group_plan_memoized,
+    build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
-    AllCodomainRowMemo, TreePairRowMemo,
+    partition_staged_groups_for_test, transformed_tree_pair_rows_block, AllCodomainRowMemo,
+    TreePairRowMemo,
 };

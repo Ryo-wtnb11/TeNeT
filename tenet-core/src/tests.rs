@@ -1420,6 +1420,52 @@ mod tests {
     }
 
     #[test]
+    fn fibonacci_elementary_artin_rows_match_tensorkit_coefficients() {
+        // What: the private elementary Artin operation preserves TensorKit's
+        // destination order and the independently substituted F/R coefficients
+        // for both crossing orientations.
+        let rule = FibonacciFusionRule;
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+        let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let cispi = |x: f64| Complex64::from_polar(1.0, std::f64::consts::PI * x);
+
+        let forward =
+            multiplicity_free_artin_braid_at_with_inverse(&rule, &tree, 1, false).unwrap();
+        let inverse =
+            multiplicity_free_artin_braid_at_with_inverse(&rule, &tree, 1, true).unwrap();
+
+        assert_eq!(
+            forward
+                .iter()
+                .map(|(key, _)| key.innerlines()[0].id())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            inverse
+                .iter()
+                .map(|(key, _)| key.innerlines()[0].id())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let forward_expected = [
+            Complex64::new(1.0 / phi.sqrt(), 0.0) * cispi(3.0 / 5.0),
+            Complex64::new(-1.0 / phi, 0.0),
+        ];
+        let inverse_expected = [
+            Complex64::new(1.0 / phi.sqrt(), 0.0) * cispi(-3.0 / 5.0),
+            Complex64::new(-1.0 / phi, 0.0),
+        ];
+        for ((_, actual), expected) in forward.iter().zip(forward_expected) {
+            assert!((*actual - expected).norm() < 1.0e-12);
+        }
+        for ((_, actual), expected) in inverse.iter().zip(inverse_expected) {
+            assert!((*actual - expected).norm() < 1.0e-12);
+        }
+    }
+
+    #[test]
     fn linearize_tree_pair_permutation_matches_tensorkit_zero_based_formula() {
         assert_eq!(
             linearize_tree_pair_permutation(&[0, 1], &[2, 3], 2, 2).unwrap(),
@@ -1488,6 +1534,149 @@ mod tests {
         )
         .unwrap();
         assert_eq!(block, vec![vec![(source, 1.0)]]);
+    }
+
+    #[test]
+    fn braid_tree_block_matches_per_source_su2_rows() {
+        use std::collections::BTreeMap;
+
+        let rule = SU2FusionRule;
+        let sources = [
+            FusionTreeKey::from_sector_ids(
+                [1, 1, 1],
+                Some(1),
+                [false, false, false],
+                [0],
+                [1, 1],
+            ),
+            FusionTreeKey::from_sector_ids(
+                [1, 1, 1],
+                Some(1),
+                [false, false, false],
+                [2],
+                [1, 1],
+            ),
+        ];
+
+        let block =
+            multiplicity_free_braid_tree_block(&rule, &sources, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        assert_eq!(block.len(), sources.len());
+        for (source, block_rows) in sources.iter().zip(&block) {
+            let per_source =
+                multiplicity_free_braid_tree(&rule, source, &[0, 2, 1], &[0, 1, 2]).unwrap();
+            let collect = |rows: &[(FusionTreeKey, f64)]| {
+                let mut coefficients = BTreeMap::<FusionTreeKey, f64>::new();
+                for (key, coefficient) in rows {
+                    *coefficients.entry(key.clone()).or_default() += coefficient;
+                }
+                coefficients
+            };
+            let expected = collect(&per_source);
+            let actual = collect(block_rows);
+
+            // What: the whole-block walk preserves every destination tree and
+            // coefficient produced by independent SU(2) source transforms.
+            assert_eq!(
+                expected.keys().collect::<Vec<_>>(),
+                actual.keys().collect::<Vec<_>>()
+            );
+            for (key, expected_coefficient) in expected {
+                let actual_coefficient = actual[&key];
+                assert!(
+                    (expected_coefficient - actual_coefficient).abs()
+                        <= 1.0e-12 * (1.0 + expected_coefficient.abs())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_block_rejects_mixed_groups_before_symbol_evaluation() {
+        let base =
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let mixed = [
+            FusionTreeKey::from_sector_ids([1, 4], Some(3), [false, false], [], [1]),
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, true], [], [1]),
+            base.clone().with_has_multiplicity(true),
+        ];
+        let expected = CoreError::MalformedFusionTree {
+            message: "fusion-tree keys must share one group",
+        };
+
+        for other in mixed {
+            let sources = [base.clone(), other];
+            // What: identity and general entry paths reject a mixed block
+            // before the panic-on-symbol fixture can evaluate F or R data.
+            assert_eq!(
+                multiplicity_free_braid_tree_block(
+                    &IdentitySymbolPanicRule,
+                    &sources,
+                    &[0, 1],
+                    &[0, 1],
+                )
+                .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                multiplicity_free_permute_tree_block(
+                    &IdentitySymbolPanicRule,
+                    &sources,
+                    &[1, 0],
+                )
+                .unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn tree_block_empty_and_identity_contracts_preserve_source_order() {
+        let empty: &[FusionTreeKey] = &[];
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &IdentitySymbolPanicRule,
+                empty,
+                &[],
+                &[],
+            )
+            .unwrap(),
+            Vec::<Vec<(FusionTreeKey, f64)>>::new()
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_block(&IdentitySymbolPanicRule, empty, &[]).unwrap(),
+            Vec::<Vec<(FusionTreeKey, f64)>>::new()
+        );
+
+        let sources = [
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]),
+            FusionTreeKey::from_sector_ids([1, 2], Some(7), [false, false], [], [1]),
+        ];
+        let expected = sources
+            .iter()
+            .cloned()
+            .map(|source| vec![(source, 1.0)])
+            .collect::<Vec<_>>();
+        // What: distinct coupled labels remain one external-sector group and
+        // the symbol-free identity path returns exact rows in source order.
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &IdentitySymbolPanicRule,
+                &sources,
+                &[0, 1],
+                &[13, 5],
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_block(
+                &IdentitySymbolPanicRule,
+                &sources,
+                &[0, 1],
+            )
+            .unwrap(),
+            expected
+        );
     }
 
     fn tree_pair_group_fixture(
@@ -3381,6 +3570,83 @@ mod tests {
         assert_eq!(out[0].0.domain_is_dual(), &[true]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
         assert_eq!(out[0].0.domain_vertices(), &[]);
+    }
+
+    #[test]
+    fn nested_product_elementary_bend_keeps_the_fermionic_phase() {
+        // What: the elementary bend of an odd fZ2 pair retains the negative
+        // product-category phase independently of the block/per-source runners.
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let coupled =
+            rule.encode_sector(left_rule.encode_sector(z2_even(), u1(0)), su2(1));
+        let odd_half =
+            rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(1));
+        let odd_one =
+            rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(2));
+        let source = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [coupled],
+                Some(coupled),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [odd_half, odd_one],
+                Some(coupled),
+                [false, true],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+        );
+
+        let bent = multiplicity_free_bendleft_tree_pair(&rule, &source).unwrap();
+        assert_eq!(bent.len(), 1);
+        assert!(bent[0].1 < 0.0);
+        let restored = multiplicity_free_bendright_tree_pair(&rule, &bent[0].0).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, source);
+        assert!((bent[0].1 * restored[0].1 - 1.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn bendright_preserves_local_error_precedence_before_missing_duality() {
+        // What: local coupled/innerline errors remain observable before a
+        // missing final duality flag when several malformed fields coexist.
+        let missing_innerline = FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids(
+                [1, 1, 1],
+                Some(1),
+                [false, false],
+                [],
+                [1, 1],
+            ),
+            FusionTreeKey::from_sector_ids([], Some(0), [], [], []),
+        );
+        assert_eq!(
+            multiplicity_free_bendright_tree_pair(&SU2FusionRule, &missing_innerline).unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "bendright requires the last codomain innerline",
+            }
+        );
+
+        let mismatched_coupled = FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids([1, 1], Some(0), [false], [], [1]),
+            FusionTreeKey::from_sector_ids([1], Some(1), [false], [], []),
+        );
+        assert_eq!(
+            multiplicity_free_bendright_tree_pair(&SU2FusionRule, &mismatched_coupled).unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
     }
 
     #[test]
@@ -5385,6 +5651,413 @@ mod tests {
             checked_blocks += 1;
         }
         assert!(checked_blocks > 0, "expected at least one block");
+    }
+
+    fn compact_operator_cohort_fixture<R>(
+        rule: &R,
+        external: SectorId,
+        coupled: SectorId,
+    ) -> Vec<FusionTreeBlockKey>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + MultiplicityFreeFusionRule,
+    {
+        let codomain: [SectorLeg; 8] =
+            std::array::from_fn(|_| SectorLeg::new([(external, 1)], false));
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new([SectorLeg::new([(coupled, 1)], false)]),
+        );
+        let keys = hom.fusion_tree_keys(rule).to_vec();
+        assert!(
+            keys.len() >= 16,
+            "fixture must expose every requested source cohort"
+        );
+        keys
+    }
+
+    fn assert_compact_operator_cohorts<R>(
+        rule: &R,
+        sources: &[FusionTreeBlockKey],
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + MultiplicityFreeFusionRule,
+    {
+        for cohort_len in [1usize, 2, 4, 8, 16] {
+            let cohort = &sources[..cohort_len];
+
+            // What: a direct compact bend-left produces the exact public
+            // full-key rows in source and first-appearance destination order.
+            let basis = CompactMultiplicityFreeTreePairBasis::from_sources(cohort).unwrap();
+            let (basis, columns) = compact_bendleft_block_first(rule, basis).unwrap();
+            let got = scatter_compact_block(basis, columns);
+            let want = cohort
+                .iter()
+                .map(|source| {
+                    multiplicity_free_bendleft_tree_pair(rule, source)
+                        .unwrap()
+                        .into_vec()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(got, want);
+
+            // What: a direct compact bend-right preserves the same one-row
+            // oracle and ordering for every requested block cohort size.
+            let basis = CompactMultiplicityFreeTreePairBasis::from_sources(cohort).unwrap();
+            let (basis, columns) = compact_bendright_block_first(rule, basis).unwrap();
+            let got = scatter_compact_block(basis, columns);
+            let want = cohort
+                .iter()
+                .map(|source| {
+                    multiplicity_free_bendright_tree_pair(rule, source)
+                        .unwrap()
+                        .into_vec()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(got, want);
+
+            // What: compact non-first Artin rows use the public F/R kernel and
+            // retain its channel order for SU(2)-branching source cohorts.
+            let basis = CompactMultiplicityFreeTreePairBasis::from_sources(cohort).unwrap();
+            let (basis, columns) =
+                compact_codomain_artin_block_first(rule, basis, 3, false).unwrap();
+            let got = scatter_compact_block(basis, columns);
+            let want = cohort
+                .iter()
+                .map(|source| {
+                    let domain = source.domain_tree().clone();
+                    multiplicity_free_artin_braid_at_with_inverse(
+                        rule,
+                        source.codomain_tree(),
+                        3,
+                        false,
+                    )
+                    .unwrap()
+                    .into_iter()
+                    .map(|(codomain, coefficient)| {
+                        (
+                            FusionTreeBlockKey::pair(codomain, domain.clone()),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn compact_block_operators_match_su2_cohort_oracles() {
+        let rule = SU2FusionRule;
+        let sources = compact_operator_cohort_fixture(&rule, su2(2), su2(2));
+
+        assert_compact_operator_cohorts(&rule, &sources);
+    }
+
+    #[test]
+    fn compact_block_operators_match_fermionic_product_cohort_oracles() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let external =
+            rule.encode_sector(left.encode_sector(z2_odd(), u1(0)), su2(2));
+        let coupled =
+            rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(2));
+        let sources = compact_operator_cohort_fixture(&rule, external, coupled);
+
+        assert_compact_operator_cohorts(&rule, &sources);
+    }
+
+    fn assert_all_codomain_compact_cohorts<R>(
+        rule: &R,
+        sources: &[FusionTreeKey],
+    ) where
+        R: MultiplicityFreeFusionSymbols<Scalar = f64> + MultiplicityFreeFusionRule,
+    {
+        let cases = [
+            ([1usize, 0, 2, 3, 4, 5, 6, 7], [0usize, 1, 2, 3, 4, 5, 6, 7]),
+            ([2usize, 0, 1, 3, 4, 5, 6, 7], [2usize, 0, 1, 3, 4, 5, 6, 7]),
+        ];
+        for cohort_len in [1usize, 2, 4, 8, 16] {
+            let cohort = &sources[..cohort_len];
+            for (permutation, levels) in cases {
+                let got =
+                    multiplicity_free_braid_tree_block(rule, cohort, &permutation, &levels)
+                        .unwrap();
+                let want = cohort
+                    .iter()
+                    .map(|source| {
+                        multiplicity_free_braid_tree(rule, source, &permutation, &levels)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(got.len(), want.len());
+                for (got_row, want_row) in got.iter().zip(&want) {
+                    // What: compact all-codomain execution preserves the scalar
+                    // kernel's destination order as well as every full key.
+                    assert_eq!(
+                        got_row.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                        want_row.iter().map(|(key, _)| key).collect::<Vec<_>>()
+                    );
+                    assert_eq!(got_row.len(), want_row.len());
+                    for ((_, got_coefficient), (_, want_coefficient)) in
+                        got_row.iter().zip(want_row)
+                    {
+                        assert!(
+                            (got_coefficient - want_coefficient).abs()
+                                <= 1.0e-12 * (1.0 + want_coefficient.abs())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_codomain_compact_block_matches_su2_cohorts() {
+        let rule = SU2FusionRule;
+        let sources = compact_operator_cohort_fixture(&rule, su2(2), su2(2))
+            .into_iter()
+            .map(|source| source.codomain_tree().clone())
+            .collect::<Vec<_>>();
+
+        assert_all_codomain_compact_cohorts(&rule, &sources);
+    }
+
+    #[test]
+    fn all_codomain_compact_block_matches_fermionic_product_cohorts() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let external =
+            rule.encode_sector(left.encode_sector(z2_odd(), u1(0)), su2(2));
+        let coupled =
+            rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(2));
+        let sources = compact_operator_cohort_fixture(&rule, external, coupled)
+            .into_iter()
+            .map(|source| source.codomain_tree().clone())
+            .collect::<Vec<_>>();
+
+        assert_all_codomain_compact_cohorts(&rule, &sources);
+    }
+
+    #[test]
+    fn all_codomain_first_step_preserves_tree_vertex_identity() {
+        let tree = |vertex, has_multiplicity| {
+            FusionTreeKey::from_sector_ids(
+                [2, 2],
+                Some(2),
+                [false, false],
+                [],
+                [vertex],
+            )
+            .with_has_multiplicity(has_multiplicity)
+        };
+
+        // What: the direct-first path coalesces ignored multiplicity-free
+        // vertex payloads without first constructing an identity matrix.
+        let basis =
+            CompactMultiplicityFreeTreeBasis::from_sources(&[tree(1, false), tree(9, false)])
+                .unwrap();
+        let (locals, columns) =
+            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
+                Ok(std::iter::once((local.clone(), 1.0)))
+            })
+            .unwrap();
+        assert_eq!(locals.len(), 1);
+        assert_eq!(columns.num_src, 2);
+        assert_eq!(columns.row(0), &[Some(1.0), Some(1.0)]);
+
+        // What: multiplicity-bearing vertices remain distinct local identities
+        // and materialization restores both their flag and payload.
+        let basis =
+            CompactMultiplicityFreeTreeBasis::from_sources(&[tree(1, true), tree(9, true)])
+                .unwrap();
+        let (locals, columns) =
+            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
+                Ok(std::iter::once((local.clone(), 1.0)))
+            })
+            .unwrap();
+        let rows = scatter_compact_tree_block(
+            CompactMultiplicityFreeTreeBasis {
+                frame: basis.frame,
+                locals,
+            },
+            &columns,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].0.vertices(), &[SectorId::new(1)]);
+        assert_eq!(rows[1][0].0.vertices(), &[SectorId::new(9)]);
+        assert!(rows
+            .iter()
+            .all(|row| row[0].0.has_multiplicity()));
+    }
+
+    #[test]
+    fn compact_first_operator_matches_fusion_tree_vertex_identity() {
+        let tree = |vertex, has_multiplicity| {
+            FusionTreeKey::from_sector_ids(
+                [2, 2],
+                Some(2),
+                [false, false],
+                [],
+                [vertex],
+            )
+            .with_has_multiplicity(has_multiplicity)
+        };
+        let domain = FusionTreeKey::from_sector_ids([2], Some(2), [false], [], []);
+
+        // What: multiplicity-free vertex payloads coalesce to the first
+        // destination row, exactly as FusionTreeKey identity does.
+        let simple_sources = [
+            FusionTreeBlockKey::pair(tree(1, false), domain.clone()),
+            FusionTreeBlockKey::pair(tree(9, false), domain.clone()),
+        ];
+        let basis =
+            CompactMultiplicityFreeTreePairBasis::from_sources(&simple_sources).unwrap();
+        let (locals, columns) =
+            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
+                Ok(std::iter::once((local.clone(), 1.0)))
+            })
+            .unwrap();
+        assert_eq!(locals.len(), 1);
+        let rows = scatter_compact_block(
+            CompactMultiplicityFreeTreePairBasis {
+                frame: basis.frame,
+                locals,
+            },
+            columns,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].1, 1.0);
+        assert_eq!(rows[1][0].1, 1.0);
+        assert_eq!(rows[0][0].0.codomain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(rows[1][0].0.codomain_vertices(), &[SectorId::new(1)]);
+        assert!(!rows[0][0].0.codomain_tree().has_multiplicity());
+
+        // What: unchecked multiplicity-bearing payloads remain distinct and
+        // materialization restores their identity flag and vertex labels.
+        let generic_sources = [
+            FusionTreeBlockKey::pair(tree(1, true), domain.clone()),
+            FusionTreeBlockKey::pair(tree(9, true), domain),
+        ];
+        let basis =
+            CompactMultiplicityFreeTreePairBasis::from_sources(&generic_sources).unwrap();
+        let (locals, columns) =
+            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
+                Ok(std::iter::once((local.clone(), 1.0)))
+            })
+            .unwrap();
+        assert_eq!(locals.len(), 2);
+        let rows = scatter_compact_block(
+            CompactMultiplicityFreeTreePairBasis {
+                frame: basis.frame,
+                locals,
+            },
+            columns,
+        );
+        assert_eq!(rows[0][0].0.codomain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(rows[1][0].0.codomain_vertices(), &[SectorId::new(9)]);
+        assert!(rows
+            .iter()
+            .all(|row| row[0].0.codomain_tree().has_multiplicity()));
+    }
+
+    #[test]
+    fn compact_block_error_does_not_publish_partial_rows() {
+        let rule = SU2FusionRule;
+        let sources = compact_operator_cohort_fixture(&rule, su2(2), su2(2));
+        let valid = sources[..4].to_vec();
+        let permutation = [7usize, 6, 5, 4, 3, 2, 1, 0];
+        let domain = [8usize];
+        let baseline =
+            multiplicity_free_permute_tree_pair_block(&rule, &valid, &permutation, &domain)
+                .unwrap();
+
+        let mut malformed = valid.clone();
+        let source = &valid[1];
+        let codomain = source.codomain_tree();
+        let shortened = FusionTreeKey::new(
+            codomain.uncoupled().iter().copied(),
+            codomain.coupled(),
+            codomain.is_dual().iter().copied(),
+            codomain.innerlines()[..codomain.innerlines().len() - 1]
+                .iter()
+                .copied(),
+            codomain.vertices().iter().copied(),
+        );
+        malformed[1] =
+            FusionTreeBlockKey::pair(shortened, source.domain_tree().clone());
+        let snapshot = malformed.clone();
+
+        // What: an error after earlier source rows were staged leaves caller
+        // keys unchanged and cannot affect a later successful block transform.
+        assert!(multiplicity_free_permute_tree_pair_block(
+            &rule,
+            &malformed,
+            &permutation,
+            &domain,
+        )
+        .is_err());
+        assert_eq!(malformed, snapshot);
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(
+                &rule,
+                &valid,
+                &permutation,
+                &domain,
+            )
+            .unwrap(),
+            baseline
+        );
+    }
+
+    #[test]
+    fn compact_repartition_preserves_source_major_error_precedence() {
+        let codomain = |coupled, innerlines: &[SectorId]| {
+            FusionTreeKey::new(
+                [u1(1), u1(1), u1(1), u1(1)],
+                Some(coupled),
+                [false; 4],
+                innerlines.iter().copied(),
+                [SectorId::new(1); 3],
+            )
+        };
+        let domain = |coupled| {
+            FusionTreeKey::new(
+                [u1(4)],
+                Some(coupled),
+                [false],
+                [],
+                [],
+            )
+        };
+        let sources = [
+            FusionTreeBlockKey::pair(
+                codomain(u1(4), &[u1(2)]),
+                domain(u1(4)),
+            ),
+            FusionTreeBlockKey::pair(
+                codomain(u1(4), &[]),
+                domain(u1(99)),
+            ),
+        ];
+
+        // What: source 0's second-bend failure precedes source 1's first-bend
+        // coupled mismatch, matching the legacy per-source traversal.
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(
+                &U1FusionRule,
+                &sources,
+                &[0, 1],
+                &[4, 3, 2],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "bendright requires the last codomain innerline",
+            }
+        );
     }
 
     #[test]

@@ -34,3 +34,4 @@ lru = "0.12"
 rayon = "1.10"
 num-traits = "0.2"
 num-complex = "0.4"
+smallvec = { version = "1", features = ["const_generics", "union"] }
