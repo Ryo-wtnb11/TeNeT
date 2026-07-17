@@ -1194,6 +1194,66 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         &[1],
         &[3],
     );
+
+    let missing_key = structure
+        .terms()
+        .iter()
+        .find(|term| term.src_block() == 0)
+        .expect("first source block must contribute a trace term")
+        .dst_key()
+        .clone();
+    let incomplete_dst = BlockStructure::from_blocks_with_rank(
+        dst.structure().rank(),
+        (0..dst.structure().block_count())
+            .filter_map(|index| {
+                let block = dst.structure().block(index).unwrap();
+                (block.key() != &BlockKey::from(missing_key.clone())).then(|| {
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect(),
+    )
+    .unwrap();
+    let incomplete_space = FusionTensorMapSpace::new_unbound(
+        dst.fusion_space().unwrap().dense_space().clone(),
+        dst.fusion_space().unwrap().homspace().clone(),
+        incomplete_dst.clone(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    // What: the expert explicit-structure constructor permits incomplete
+    // layouts; ordinary from_degeneracy_shapes construction remains complete.
+    assert_eq!(
+        incomplete_space.subblock_structure().block_count() + 1,
+        dst.structure().block_count()
+    );
+
+    for _ in 0..2 {
+        crate::tensortrace::reset_trace_transform_invocations();
+        let error = crate::tensortrace::build_fusion_trace_terms_for_test(
+            &rule,
+            &incomplete_dst,
+            src.structure(),
+            TensorTraceAxisSpec::new(&[0, 2], &[1], &[3]),
+            1,
+        )
+        .unwrap_err();
+        // What: an earlier source lowering error stops before transforming a
+        // later external-sector group, deterministically across compilations.
+        assert!(matches!(
+            error,
+            OperationError::MissingBlockKey { ref key }
+                if key.as_ref() == &BlockKey::from(missing_key.clone())
+        ));
+        assert_eq!(crate::tensortrace::take_trace_transform_sources(), vec![0]);
+    }
 }
 
 #[test]

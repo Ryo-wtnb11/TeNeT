@@ -113,23 +113,30 @@ pub(crate) const FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING: &str =
 
 #[cfg(test)]
 thread_local! {
-    static TRACE_TRANSFORM_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TRACE_TRANSFORM_SOURCES: std::cell::RefCell<Vec<usize>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
 #[cfg(test)]
 pub(crate) fn reset_trace_transform_invocations() {
-    TRACE_TRANSFORM_INVOCATIONS.set(0);
+    TRACE_TRANSFORM_SOURCES.with_borrow_mut(Vec::clear);
 }
 
 #[cfg(test)]
 pub(crate) fn take_trace_transform_invocations() -> usize {
-    TRACE_TRANSFORM_INVOCATIONS.replace(0)
+    take_trace_transform_sources().len()
+}
+
+#[cfg(test)]
+pub(crate) fn take_trace_transform_sources() -> Vec<usize> {
+    TRACE_TRANSFORM_SOURCES.take()
 }
 
 #[inline]
-fn record_trace_transform_invocation() {
+fn record_trace_transform_invocation(_src_block_index: usize) {
     #[cfg(test)]
-    TRACE_TRANSFORM_INVOCATIONS.set(TRACE_TRANSFORM_INVOCATIONS.get() + 1);
+    TRACE_TRANSFORM_SOURCES.with_borrow_mut(|sources| sources.push(_src_block_index));
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -843,11 +850,31 @@ where
     let mut rows_by_source = (0..source_keys.len())
         .map(|_| None)
         .collect::<Vec<Option<Vec<(FusionTreeBlockKey, R::Scalar)>>>>();
-    if rule.fusion_style() == FusionStyleKind::Unique {
-        // Why not route Unique fusion through the block matrix: every source has
-        // one destination, so its existing scalar transform is the direct path.
-        for (src_block_index, src_key) in source_keys.iter().enumerate() {
-            record_trace_transform_invocation();
+    let is_unique = rule.fusion_style() == FusionStyleKind::Unique;
+    let groups = if is_unique {
+        Vec::new()
+    } else {
+        src_structure.fusion_tree_groups()
+    };
+    let mut group_by_source = if is_unique {
+        Vec::new()
+    } else {
+        vec![None; source_keys.len()]
+    };
+    if !is_unique {
+        for (group_index, group) in groups.iter().enumerate() {
+            for &src_block_index in group.block_indices() {
+                group_by_source[src_block_index] = Some(group_index);
+            }
+        }
+    }
+
+    let mut terms = Vec::new();
+    for (src_block_index, src_key) in source_keys.iter().enumerate() {
+        if is_unique {
+            // Why not route Unique fusion through the block matrix: every source
+            // has one destination, so its existing scalar transform is direct.
+            record_trace_transform_invocation(src_block_index);
             rows_by_source[src_block_index] = Some(
                 multiplicity_free_permute_tree_pair(
                     rule,
@@ -857,17 +884,18 @@ where
                 )
                 .map_err(OperationError::from_core_preserving_context)?,
             );
-        }
-    } else {
-        // Transform each external-sector group once, then index its source
-        // columns by the original structure position.
-        for group in src_structure.fusion_tree_groups() {
+        } else if rows_by_source[src_block_index].is_none() {
+            let group_index =
+                group_by_source[src_block_index].ok_or(OperationError::InvalidArgument {
+                    message: "trace source block was not assigned to a fusion group",
+                })?;
+            let group = &groups[group_index];
             let group_keys = group
                 .block_indices()
                 .iter()
                 .map(|&src_block_index| source_keys[src_block_index].clone())
                 .collect::<Vec<_>>();
-            record_trace_transform_invocation();
+            record_trace_transform_invocation(src_block_index);
             let group_rows = transformed_tree_pair_rows_block(rule, &operation, &group_keys)?;
             if group_rows.len() != group.block_indices().len() {
                 return Err(OperationError::InvalidArgument {
@@ -878,15 +906,18 @@ where
                 rows_by_source[src_block_index] = Some(rows);
             }
         }
-    }
 
-    // Why not lower while visiting groups: groups may interleave in a legal
-    // BlockStructure, while trace accumulation follows global source order.
-    let mut terms = Vec::new();
-    for (src_block_index, (src_key, rows)) in source_keys.iter().zip(rows_by_source).enumerate() {
-        let rows = rows.ok_or(OperationError::InvalidArgument {
-            message: "trace source block was not assigned to a fusion group",
-        })?;
+        // Why not transform every group up front: a later group's symbol error
+        // must not overtake an earlier source's lowering error. The whole current
+        // group stays atomic because per-source replay would duplicate its F/R
+        // traversal; expert incomplete structures can therefore observe changed
+        // error timing only between members of that same group.
+        let rows =
+            rows_by_source[src_block_index]
+                .take()
+                .ok_or(OperationError::InvalidArgument {
+                    message: "trace source block was not assigned to a fusion group",
+                })?;
         lower_fusion_trace_source_rows(
             rule,
             dst_structure,
@@ -899,6 +930,28 @@ where
         )?;
     }
     Ok(terms)
+}
+
+#[cfg(test)]
+pub(crate) fn build_fusion_trace_terms_for_test<R>(
+    rule: &R,
+    dst_structure: &BlockStructure,
+    src_structure: &BlockStructure,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_codomain_rank: usize,
+) -> Result<Vec<TensorTraceFusionStructureTerm<R::Scalar>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    let axis_plan = TensorTraceAxisPlan::compile(src_structure.rank(), dst_structure.rank(), axes)?;
+    build_fusion_trace_terms(
+        rule,
+        dst_structure,
+        src_structure,
+        &axis_plan,
+        dst_codomain_rank,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
