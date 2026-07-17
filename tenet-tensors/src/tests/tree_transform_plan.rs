@@ -3500,7 +3500,7 @@ fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
 
     context
         .all_codomain_tree_transform_into(
-            &UniqueZ2Rule,
+            &Z2FusionRule,
             operation.clone(),
             &mut dst,
             &src,
@@ -3514,7 +3514,7 @@ fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
 
     dst.data_mut().fill(0.0);
     context
-        .all_codomain_tree_transform_into(&UniqueZ2Rule, operation, &mut dst, &src, 1.0, 0.0)
+        .all_codomain_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(dst.data(), &[3.0]);
     assert_eq!(context.cache().plan_len(), 0);
