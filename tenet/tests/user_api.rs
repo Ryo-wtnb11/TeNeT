@@ -107,7 +107,34 @@ fn space_try_dual_reports_u1_boundary_and_preserves_compatibility() {
     assert_eq!(checked, near_minimum.dual());
 
     let ordinary = u1_space();
-    assert_eq!(ordinary.try_dual().unwrap(), ordinary.dual());
+    let ordinary_checked = ordinary.try_dual().unwrap();
+    assert!(ordinary_checked.is_dual());
+    assert_eq!(
+        ordinary_checked.sectors(),
+        vec![
+            (SectorLabel::U1(0), 3),
+            (SectorLabel::U1(-1), 2),
+            (SectorLabel::U1(1), 2),
+        ]
+    );
+    let ordinary_compatibility = ordinary.dual();
+    assert!(ordinary_compatibility.is_dual());
+    assert_eq!(
+        ordinary_compatibility.sectors(),
+        vec![
+            (SectorLabel::U1(0), 3),
+            (SectorLabel::U1(-1), 2),
+            (SectorLabel::U1(1), 2),
+        ]
+    );
+}
+
+#[test]
+#[should_panic(expected = "use Space::try_dual")]
+fn space_dual_compatibility_panics_with_checked_alternative() {
+    // What: the value-returning compatibility method names its checked
+    // alternative when a finite algebra cannot represent the dual.
+    let _ = Space::u1([(i32::MIN, 1)]).dual();
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -138,10 +165,22 @@ fn space_try_dual_preserves_product_child_errors() {
 
 #[test]
 fn space_try_dual_keeps_su3_table_duality_total() {
-    // What: SU3 keeps its dedicated table dual and checked dual is identical
-    // to the existing compatibility method.
-    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    assert_eq!(space.try_dual().unwrap(), space.dual());
+    // What: SU3 checked dual conjugates each Dynkin label, retains exact
+    // degeneracies and table order, toggles variance, and is involutive.
+    let space = Space::su3([((1, 1), 4), ((0, 1), 1), ((1, 0), 2)]).unwrap();
+    assert!(!space.is_dual());
+    assert_eq!(
+        space.su3_sectors().unwrap(),
+        vec![((0, 1), 1), ((1, 0), 2), ((1, 1), 4)]
+    );
+
+    let dual = space.try_dual().unwrap();
+    assert!(dual.is_dual());
+    assert_eq!(
+        dual.su3_sectors().unwrap(),
+        vec![((0, 1), 2), ((1, 0), 1), ((1, 1), 4)]
+    );
+    assert_eq!(dual.try_dual().unwrap(), space);
 }
 
 #[test]
