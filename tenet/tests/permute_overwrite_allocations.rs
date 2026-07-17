@@ -92,7 +92,7 @@ fn cached_owned_rank_nine_permute_does_not_clone_operation_storage() {
     // What: the warmed public owned path pays for its returned tensor but does
     // not add a rank-spilled operation clone before consulting the plan cache.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::u1([(0, 1)]);
+    let space = Space::su2([(0, 1), (1, 1)]);
     let source = Tensor::rand_with_seed(
         &runtime,
         Dtype::F64,
@@ -111,12 +111,5 @@ fn cached_owned_rank_nine_permute_does_not_clone_operation_storage() {
     COUNTING.set(false);
     black_box(output.data());
 
-    // Why-not: llvm-cov instruments this test binary and allocates coverage
-    // bookkeeping during the measured call, so its global allocation count
-    // cannot be compared with the production threshold. The normal test
-    // remains the guard against an operation-storage clone.
-    #[cfg(not(coverage))]
     assert_eq!(ALLOCATIONS.get(), 3);
-    #[cfg(coverage)]
-    assert!(ALLOCATIONS.get() >= 3);
 }
