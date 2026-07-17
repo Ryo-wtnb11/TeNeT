@@ -751,11 +751,22 @@ pub(crate) fn rhs_contract_requires_twist<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    rhs_contract_homspace_requires_twist(rule, rhs.homspace(), axes)
+}
+
+pub(crate) fn rhs_contract_homspace_requires_twist<R>(
+    rule: &R,
+    rhs: &FusionTreeHomSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<bool, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
         return Ok(false);
     }
     for &axis in axes.rhs_contracting_axes() {
-        if external_axis_is_dual(rhs.homspace(), axis)? {
+        if external_axis_is_dual(rhs, axis)? {
             return Ok(true);
         }
     }

@@ -136,10 +136,23 @@ struct FusionTreeCoupledSectorLayout {
 }
 
 #[derive(Clone, Debug)]
-struct FusionTreeHomSpaceLayout {
-    id: FusionTreeLayoutId,
+struct FusionTreeHomSpaceLayoutData {
     keys: Arc<[FusionTreeBlockKey]>,
     sectors: Vec<FusionTreeCoupledSectorLayout>,
+}
+
+#[derive(Clone, Debug)]
+struct FusionTreeHomSpaceLayout {
+    id: FusionTreeLayoutId,
+    data: FusionTreeHomSpaceLayoutData,
+}
+
+impl std::ops::Deref for FusionTreeHomSpaceLayout {
+    type Target = FusionTreeHomSpaceLayoutData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -147,7 +160,33 @@ struct FusionTreeLayoutId(usize);
 
 static FUSION_TREE_LAYOUT_ID: AtomicUsize = AtomicUsize::new(1);
 
+#[cfg(test)]
+std::thread_local! {
+    static FUSION_TREE_LAYOUT_ID_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static FUSION_TREE_LAYOUT_ADMISSIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_fusion_tree_layout_probe_side_effect_calls() {
+    FUSION_TREE_LAYOUT_ID_CALLS.set(0);
+    FUSION_TREE_LAYOUT_ADMISSIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn fusion_tree_layout_probe_side_effect_calls() -> (usize, usize) {
+    (
+        FUSION_TREE_LAYOUT_ID_CALLS.get(),
+        FUSION_TREE_LAYOUT_ADMISSIONS.get(),
+    )
+}
+
 fn next_fusion_tree_layout_id() -> FusionTreeLayoutId {
+    #[cfg(test)]
+    FUSION_TREE_LAYOUT_ID_CALLS.set(FUSION_TREE_LAYOUT_ID_CALLS.get() + 1);
     let id = FUSION_TREE_LAYOUT_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
@@ -240,6 +279,8 @@ impl FusionTreeLayoutCache {
         layout: Arc<FusionTreeHomSpaceLayout>,
         charged_bytes: usize,
     ) -> Arc<FusionTreeHomSpaceLayout> {
+        #[cfg(test)]
+        FUSION_TREE_LAYOUT_ADMISSIONS.set(FUSION_TREE_LAYOUT_ADMISSIONS.get() + 1);
         if let Some(existing) = self.entries.peek(key.as_ref()) {
             return Arc::clone(&existing.layout);
         }
@@ -620,6 +661,21 @@ struct HomSpaceInternTable {
 
 const HOM_SPACE_INTERN_CAP: usize = 8192;
 
+#[cfg(test)]
+std::thread_local! {
+    static HOM_SPACE_INTERN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_hom_space_intern_calls() {
+    HOM_SPACE_INTERN_CALLS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn hom_space_intern_calls() -> usize {
+    HOM_SPACE_INTERN_CALLS.get()
+}
+
 fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
     static TABLE: OnceLock<RwLock<HomSpaceInternTable>> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -632,6 +688,8 @@ fn hom_space_intern_table() -> &'static RwLock<HomSpaceInternTable> {
 }
 
 fn intern_hom_space(codomain: &FusionProductSpace, domain: &FusionProductSpace) -> HomSpaceId {
+    #[cfg(test)]
+    HOM_SPACE_INTERN_CALLS.set(HOM_SPACE_INTERN_CALLS.get() + 1);
     let key = HomSpaceInternKey {
         codomain: codomain.clone(),
         domain: domain.clone(),
@@ -667,6 +725,19 @@ fn fusion_tree_layout_from_keys<R>(
     id: FusionTreeLayoutId,
     keys: Vec<FusionTreeBlockKey>,
 ) -> FusionTreeHomSpaceLayout
+where
+    R: FusionRule,
+{
+    FusionTreeHomSpaceLayout {
+        id,
+        data: fusion_tree_layout_data_from_keys(rule, keys),
+    }
+}
+
+fn fusion_tree_layout_data_from_keys<R>(
+    rule: &R,
+    keys: Vec<FusionTreeBlockKey>,
+) -> FusionTreeHomSpaceLayoutData
 where
     R: FusionRule,
 {
@@ -709,11 +780,7 @@ where
         });
         run_start = run_end;
     }
-    FusionTreeHomSpaceLayout {
-        id,
-        keys,
-        sectors,
-    }
+    FusionTreeHomSpaceLayoutData { keys, sectors }
 }
 
 impl FusionTreeHomSpace {
@@ -1142,6 +1209,31 @@ impl FusionTreeHomSpace {
             &layout,
             |key| self.degeneracy_shape_for_key(key),
         )
+    }
+
+    #[doc(hidden)]
+    pub fn coupled_subblock_layout_probe_uncached<R>(
+        &self,
+        rule: &R,
+        source: &BlockStructure,
+    ) -> Result<(usize, bool), CoreError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let layout =
+            fusion_tree_layout_data_from_keys(rule, self.fusion_tree_keys_uncached(rule));
+        let (sector, degeneracy) = coupled_subblock_parts_from_layout(
+            self,
+            self.codomain.len(),
+            &layout,
+            |key| self.degeneracy_shape_for_key(key),
+        )?;
+        let required_len = degeneracy.required_len()?;
+        Ok((
+            required_len,
+            source.sector_structure() == &sector
+                && source.degeneracy_structure() == &degeneracy,
+        ))
     }
 
     /// Multiplicity-aware sibling of
@@ -1634,8 +1726,22 @@ fn coupled_subblock_structure_from_layout<F>(
     homspace: &FusionTreeHomSpace,
     nout: usize,
     layout: &FusionTreeHomSpaceLayout,
-    mut shape_for_key: F,
+    shape_for_key: F,
 ) -> Result<Arc<BlockStructure>, CoreError>
+where
+    F: FnMut(&FusionTreeBlockKey) -> Result<DimVec, CoreError>,
+{
+    let (sector, degeneracy) =
+        coupled_subblock_parts_from_layout(homspace, nout, layout, shape_for_key)?;
+    BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+}
+
+fn coupled_subblock_parts_from_layout<F>(
+    homspace: &FusionTreeHomSpace,
+    nout: usize,
+    layout: &FusionTreeHomSpaceLayoutData,
+    mut shape_for_key: F,
+) -> Result<(SectorStructure, DegeneracyStructure), CoreError>
 where
     F: FnMut(&FusionTreeBlockKey) -> Result<DimVec, CoreError>,
 {
@@ -1758,8 +1864,7 @@ where
         SectorStructure::from_keys(rank, layout.keys.iter().cloned().map(BlockKey::from))?;
     let degeneracy_structure =
         DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
-    BlockStructure::from_parts(sector_structure, degeneracy_structure)
-        .map(BlockStructure::into_shared)
+    Ok((sector_structure, degeneracy_structure))
 }
 
 /// Computes coupled-sector matrix block specs for fusion-tree subblocks.

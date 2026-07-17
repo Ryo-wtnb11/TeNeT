@@ -4036,6 +4036,49 @@ mod tests {
     }
 
     #[test]
+    fn uncached_coupled_layout_probe_does_not_publish_identity_or_cache_state() {
+        // What: the cold cost probe computes layout size/equality without
+        // interning BlockStructure content or publishing a fusion-layout entry.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rule = Z2FusionRule;
+        let leg = || {
+            SectorLeg::new(
+                [(Z2Irrep::EVEN.sector_id(), 2), (Z2Irrep::ODD.sector_id(), 3)],
+                false,
+            )
+        };
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let source = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&rule)
+            .unwrap();
+
+        crate::reset_block_structure_intern_calls();
+        crate::reset_fusion_tree_layout_probe_side_effect_calls();
+        crate::reset_hom_space_intern_calls();
+        let (required_len, source_matches) = homspace
+            .coupled_subblock_layout_probe_uncached(&rule, source.as_ref())
+            .unwrap();
+
+        assert_eq!(required_len, source.required_len().unwrap());
+        assert!(source_matches);
+        assert_eq!(crate::block_structure_intern_calls(), 0);
+        assert_eq!(
+            crate::fusion_tree_layout_probe_side_effect_calls(),
+            (0, 0)
+        );
+        assert_eq!(crate::hom_space_intern_calls(), 0);
+        let cached_again = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&rule)
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&source, &cached_again));
+    }
+
+    #[test]
     fn unique_homspace_builds_subblock_key_from_external_sectors() {
         let rule = Z2FusionRule;
         let hom = FusionTreeHomSpace::from_sector_ids([(1, 1)], [(1, 1)]);

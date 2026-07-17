@@ -7,6 +7,21 @@ use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 use super::super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use super::super::structure::TensorContractAxisPlan;
 
+#[cfg(test)]
+std::thread_local! {
+    static CANDIDATE_SCORE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_candidate_score_calls() {
+    CANDIDATE_SCORE_CALLS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_score_calls() -> usize {
+    CANDIDATE_SCORE_CALLS.get()
+}
+
 /// A paired ordering of the contracted axes.
 ///
 /// The two vectors are a single permutation: entries at the same position
@@ -32,12 +47,11 @@ impl ContractAxisOrderCandidate {
     }
 }
 
-/// Build the canonical and side-sorted candidates for a contraction.
+/// Build the side-sorted candidates for a contraction.
 ///
 /// Sorting is stable and always applies the same permutation to both sides.
-/// The canonical candidate is first and is therefore the authority until a
-/// layout-aware cost model is introduced. No fermionic sign is computed here:
-/// that belongs to the tree-transform execution of the selected candidate.
+/// No fermionic sign is computed here: that belongs to the tree-transform
+/// execution of the selected candidate.
 pub(crate) fn contracted_axis_order_candidates(
     lhs: &[usize],
     rhs: &[usize],
@@ -47,10 +61,6 @@ pub(crate) fn contracted_axis_order_candidates(
         rhs.len(),
         "paired contraction axes must have equal length"
     );
-    let canonical = ContractAxisOrderCandidate {
-        lhs: lhs.to_vec(),
-        rhs: rhs.to_vec(),
-    };
     let mut lhs_order = (0..lhs.len()).collect::<Vec<_>>();
     lhs_order.sort_by_key(|&i| lhs[i]);
     let lhs_sorted = ContractAxisOrderCandidate {
@@ -63,10 +73,7 @@ pub(crate) fn contracted_axis_order_candidates(
         lhs: rhs_order.iter().map(|&i| lhs[i]).collect(),
         rhs: rhs_order.iter().map(|&i| rhs[i]).collect(),
     };
-    let mut candidates = vec![canonical];
-    if !candidates.contains(&lhs_sorted) {
-        candidates.push(lhs_sorted);
-    }
+    let mut candidates = vec![lhs_sorted];
     if !candidates.contains(&rhs_sorted) {
         candidates.push(rhs_sorted);
     }
@@ -253,7 +260,7 @@ where
     } else {
         rhs
     };
-    prepare_tensorcontract_fusion_plan_from_spaces(
+    select_tensorcontract_fusion_plan_from_spaces(
         rule,
         dst,
         lhs,
@@ -291,7 +298,7 @@ where
         axes.rhs_contracting_axes(),
         axes.output_permutation(),
     );
-    prepare_tensorcontract_fusion_plan_from_spaces(
+    select_tensorcontract_fusion_plan_from_spaces(
         rule,
         dst,
         lhs,
@@ -340,7 +347,182 @@ where
         axes.lhs_conjugate(),
         axes.rhs_conjugate(),
     );
-    prepare_tensorcontract_fusion_plan_dyn_raw(rule, dst, lhs, rhs, candidate_axes)
+    prepare_tensorcontract_fusion_plan_dyn_raw_fixed(rule, dst, lhs, rhs, candidate_axes)
+}
+
+#[cfg(test)]
+fn prepare_tensorcontract_fusion_plan_dyn_raw_fixed<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
+    let lowered_axes =
+        lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
+    let lhs_adjoint;
+    let lhs = if axes.lhs_conjugate() {
+        lhs_adjoint = lhs.adjoint_view()?;
+        &lhs_adjoint
+    } else {
+        lhs
+    };
+    let rhs_adjoint;
+    let rhs = if axes.rhs_conjugate() {
+        rhs_adjoint = rhs.adjoint_view()?;
+        &rhs_adjoint
+    } else {
+        rhs
+    };
+    prepare_tensorcontract_fusion_plan_from_spaces(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        lowered_axes.as_spec(),
+        lowered_axes.lhs_storage_conjugate(),
+        lowered_axes.rhs_storage_conjugate(),
+    )
+}
+
+fn select_tensorcontract_fusion_plan_from_spaces<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes)?;
+    let candidates =
+        contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
+    let mut best = None;
+    for candidate in candidates {
+        let candidate_axes =
+            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
+        let plan = prepare_tensorcontract_fusion_plan_from_spaces(
+            rule,
+            dst,
+            lhs,
+            rhs,
+            candidate_axes,
+            lhs_source_conjugate,
+            rhs_source_conjugate,
+        )?;
+        let cost = plan_allocation_elements(rule, dst, lhs, rhs, &plan)?;
+        if best
+            .as_ref()
+            .is_none_or(|(best_cost, _): &(usize, FusionContractPlan)| cost < *best_cost)
+        {
+            best = Some((cost, plan));
+        }
+    }
+    Ok(best
+        .expect("paired contraction always has at least the LHS-sorted candidate")
+        .1)
+}
+
+fn plan_allocation_elements<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    plan: &FusionContractPlan,
+) -> Result<usize, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    #[cfg(test)]
+    CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
+    let lhs_core = lhs.transformed_layout_probe(rule, plan.lhs_transform())?;
+    let rhs_core = rhs.transformed_layout_probe(rule, plan.rhs_transform())?;
+    let lhs_borrowed = super::super::dynamic::source_layout_metadata_is_borrowable(
+        lhs,
+        lhs_core.nout,
+        lhs_core.homspace.rank(),
+        || lhs_core.homspace == *lhs.homspace(),
+        plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
+    ) && lhs_core.source_structure_matches;
+    let rhs_twisted = super::super::resolution::rhs_contract_homspace_requires_twist(
+        rule,
+        &rhs_core.homspace,
+        plan.core_axes().as_spec(),
+    )?;
+    let rhs_borrowed = super::super::dynamic::source_layout_metadata_is_borrowable(
+        rhs,
+        rhs_core.nout,
+        rhs_core.homspace.rank(),
+        || rhs_core.homspace == *rhs.homspace(),
+        plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
+    ) && rhs_core.source_structure_matches
+        && !rhs_twisted;
+    let mut elements = 0usize;
+    if !lhs_borrowed {
+        elements = elements.checked_add(lhs_core.required_len).ok_or_else(|| {
+            OperationError::from_core_preserving_context(
+                tenet_core::CoreError::ElementCountOverflow,
+            )
+        })?;
+    }
+    if !rhs_borrowed {
+        elements = elements.checked_add(rhs_core.required_len).ok_or_else(|| {
+            OperationError::from_core_preserving_context(
+                tenet_core::CoreError::ElementCountOverflow,
+            )
+        })?;
+    }
+    if !plan.output_transform_is_identity() {
+        elements = elements
+            .checked_add(
+                dst.required_len()
+                    .map_err(OperationError::from_core_preserving_context)?,
+            )
+            .ok_or_else(|| {
+                OperationError::from_core_preserving_context(
+                    tenet_core::CoreError::ElementCountOverflow,
+                )
+            })?;
+    }
+    Ok(elements)
+}
+
+fn validate_tensorcontract_fusion_plan_inputs<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs.homspace(),
+        rhs.homspace(),
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axis_plan.output_axes.as_slice(),
+        dst.nout(),
+    )
+    .map_err(OperationError::from_core_preserving_context)?;
+    if &expected_homspace != dst.homspace() {
+        return Err(OperationError::StructureMismatch { tensor: "dst" });
+    }
+    Ok(())
 }
 
 fn prepare_tensorcontract_fusion_plan_from_spaces<R>(
@@ -410,18 +592,75 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::contracted_axis_order_candidates;
+    use super::{
+        contracted_axis_order_candidates, plan_allocation_elements,
+        prepare_tensorcontract_fusion_plan_dyn_raw,
+    };
+    use crate::contract::DynamicFusionMapSpace;
+    use crate::TreeTransformOperation;
+    use tenet_core::{
+        BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMapSpace,
+        U1FusionRule,
+    };
+    use tenet_operations::{OutputAxisOrder, TensorContractSpec};
+
+    fn single_sector_space(rule: &U1FusionRule, dimensions: [usize; 4]) -> DynamicFusionMapSpace {
+        let homspace = FusionTreeHomSpace::from_sector_ids(
+            [(0, dimensions[0]), (0, dimensions[1])],
+            [(0, dimensions[2]), (0, dimensions[3])],
+        );
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, [dimensions]).unwrap()
+    }
+
+    fn selected_contract_axes(
+        lhs_dimensions: [usize; 4],
+        rhs_dimensions: [usize; 4],
+    ) -> (Vec<usize>, Vec<usize>) {
+        let rule = U1FusionRule;
+        let lhs = single_sector_space(&rule, lhs_dimensions);
+        let rhs = single_sector_space(&rule, rhs_dimensions);
+        let dst = single_sector_space(
+            &rule,
+            [
+                lhs_dimensions[0],
+                lhs_dimensions[1],
+                rhs_dimensions[2],
+                rhs_dimensions[3],
+            ],
+        );
+        let plan = prepare_tensorcontract_fusion_plan_dyn_raw(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]),
+        )
+        .unwrap();
+        let TreeTransformOperation::Permute {
+            domain_permutation: lhs_contract,
+            ..
+        } = plan.lhs_transform()
+        else {
+            panic!("lhs lowering must be a permutation");
+        };
+        let TreeTransformOperation::Permute {
+            codomain_permutation: rhs_contract,
+            ..
+        } = plan.rhs_transform()
+        else {
+            panic!("rhs lowering must be a permutation");
+        };
+        (lhs_contract.to_vec(), rhs_contract.to_vec())
+    }
 
     #[test]
     fn candidates_keep_lhs_rhs_pairs_intact() {
         let candidates = contracted_axis_order_candidates(&[3, 1, 2], &[6, 8, 4]);
-        assert_eq!(candidates[0].lhs(), &[3, 1, 2]);
-        assert_eq!(candidates[0].rhs(), &[6, 8, 4]);
-        assert_eq!(candidates[1].lhs(), &[1, 2, 3]);
-        assert_eq!(candidates[1].rhs(), &[8, 4, 6]);
-        assert_eq!(candidates[2].lhs(), &[2, 3, 1]);
-        assert_eq!(candidates[2].rhs(), &[4, 6, 8]);
-        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].lhs(), &[1, 2, 3]);
+        assert_eq!(candidates[0].rhs(), &[8, 4, 6]);
+        assert_eq!(candidates[1].lhs(), &[2, 3, 1]);
+        assert_eq!(candidates[1].rhs(), &[4, 6, 8]);
+        assert_eq!(candidates.len(), 2);
     }
 
     #[test]
@@ -435,7 +674,104 @@ mod tests {
     #[test]
     fn duplicate_axis_values_use_stable_pair_order() {
         let candidates = contracted_axis_order_candidates(&[2, 1, 2], &[7, 3, 5]);
-        assert_eq!(candidates[1].lhs(), &[1, 2, 2]);
-        assert_eq!(candidates[1].rhs(), &[3, 7, 5]);
+        assert_eq!(candidates[0].lhs(), &[1, 2, 2]);
+        assert_eq!(candidates[0].rhs(), &[3, 7, 5]);
+    }
+
+    #[test]
+    fn lhs_sorted_candidate_wins_when_rhs_is_the_smaller_replay() {
+        // What: crossed pairs lower to the LHS-sorted plan when only the small RHS is materialized.
+        assert_eq!(
+            selected_contract_axes([16, 16, 2, 3], [3, 2, 1, 1]),
+            (vec![2, 3], vec![1, 0])
+        );
+    }
+
+    #[test]
+    fn rhs_sorted_candidate_wins_when_lhs_is_the_smaller_replay() {
+        // What: the same crossed pairs lower to the RHS-sorted plan after operand sizes reverse.
+        assert_eq!(
+            selected_contract_axes([1, 1, 2, 3], [3, 2, 16, 16]),
+            (vec![3, 2], vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn equal_cost_keeps_lhs_first_across_repeats_and_thread_counts() {
+        // What: an equal allocation cost always selects the stable LHS-sorted candidate.
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for _ in 0..4 {
+                assert_eq!(
+                    pool.install(|| selected_contract_axes([1, 1, 2, 3], [3, 2, 1, 1])),
+                    (vec![2, 3], vec![1, 0])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selector_cost_materializes_identity_operand_with_missing_structural_zero() {
+        // What: an identity-axis operand with an incomplete SU2 tree grid is
+        // charged for the complete core layout instead of treated as borrowed.
+        let rule = SU2FusionRule;
+        let lhs_typed = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([], []),
+            &rule,
+            [vec![]],
+        )
+        .unwrap();
+        let rhs_hom = FusionTreeHomSpace::from_sector_ids([], [(1, 1), (1, 1), (1, 1), (1, 1)]);
+        let rhs_keys = rhs_hom.fusion_tree_keys(&rule);
+        assert_eq!(rhs_keys.len(), 2);
+        let rhs_typed = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<0, 4>::from_dims([], [1, 1, 1, 1]).unwrap(),
+            rhs_hom.clone(),
+            crate::tests::packed_fixture_structure(
+                4,
+                [(BlockKey::from(rhs_keys[0].clone()), vec![1, 1, 1, 1])],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let dst_hom = rhs_hom.permute(&rule, &[0, 1, 2, 3], &[]).unwrap();
+        let dst_keys = dst_hom.fusion_tree_keys(&rule);
+        let dst_typed = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap(),
+            dst_hom,
+            crate::tests::packed_fixture_structure(
+                4,
+                dst_keys
+                    .iter()
+                    .cloned()
+                    .map(|key| (BlockKey::from(key), vec![1, 1, 1, 1])),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let lhs = DynamicFusionMapSpace::from_typed(&lhs_typed);
+        let rhs = DynamicFusionMapSpace::from_typed(&rhs_typed);
+        let dst = DynamicFusionMapSpace::from_typed(&dst_typed);
+        let plan = prepare_tensorcontract_fusion_plan_dyn_raw(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan_allocation_elements(&rule, &dst, &lhs, &rhs, &plan).unwrap(),
+            4
+        );
     }
 }

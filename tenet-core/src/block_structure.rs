@@ -1017,10 +1017,29 @@ fn block_structure_intern_table() -> &'static RwLock<BlockStructureInternTable> 
 /// counter cannot realistically overflow.
 static BLOCK_STRUCTURE_CONTENT_ID: AtomicUsize = AtomicUsize::new(1);
 
+#[cfg(test)]
+std::thread_local! {
+    static BLOCK_STRUCTURE_INTERN_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_block_structure_intern_calls() {
+    BLOCK_STRUCTURE_INTERN_CALLS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn block_structure_intern_calls() -> usize {
+    BLOCK_STRUCTURE_INTERN_CALLS.get()
+}
+
 fn intern_block_structure_content(
     sector: &SectorStructure,
     degeneracy: &DegeneracyStructure,
 ) -> Arc<BlockStructureContent> {
+    #[cfg(test)]
+    BLOCK_STRUCTURE_INTERN_CALLS.set(BLOCK_STRUCTURE_INTERN_CALLS.get() + 1);
     let mut blocks = Vec::with_capacity(sector.block_count());
     for index in 0..sector.block_count() {
         let sector_key = sector
