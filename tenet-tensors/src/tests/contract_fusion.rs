@@ -2655,6 +2655,30 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert_eq!(context.contraction_resolution_cache_hits(), 0);
     assert!(context.contraction_resolution_cache_misses() >= 1);
 
+    let pinned = context
+        .prepare_tensorcontract_fusion(&rule, &context_dst, &lhs, &rhs, axes)
+        .unwrap();
+    context.set_cache_policy(OperationCachePolicy::NoCache);
+    context_dst
+        .data_mut()
+        .copy_from_slice(&initial_dst_for_context_replay);
+    context
+        .execute_prepared_tensorcontract_fusion(
+            &pinned,
+            &rule,
+            &mut context_dst,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        )
+        .unwrap();
+    for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
+        assert!((actual - expected).abs() < 1.0e-10);
+    }
+    assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
+    context.set_cache_policy(OperationCachePolicy::TaskLocal);
+
     context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
@@ -4815,7 +4839,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     let charged = sector(1, 0, 1);
     let leg = |dual| SectorLeg::new([(vacuum, 1), (charged, 1)], dual);
     let provider = Arc::new(rule);
-    let bind = |homspace: FusionTreeHomSpace| {
+    let bind_encoded = |homspace: FusionTreeHomSpace| {
         let count = homspace.fusion_tree_keys(provider.as_ref()).len();
         BoundDynamicFusionMapSpace::from_degeneracy_shapes(
             Arc::clone(&provider),
@@ -4824,18 +4848,36 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         )
         .unwrap()
     };
-    let lhs = bind(FusionTreeHomSpace::new(
+    let bind_lowered = |homspace: FusionTreeHomSpace| {
+        let count = homspace
+            .try_fusion_tree_keys_lowered(provider.as_ref())
+            .unwrap()
+            .len();
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::clone(&provider),
+            homspace,
+            vec![vec![1; 3]; count],
+        )
+        .unwrap()
+    };
+    let lhs_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(false), leg(true)]),
         FusionProductSpace::new([leg(false)]),
-    ));
-    let rhs = bind(FusionTreeHomSpace::new(
+    );
+    let rhs_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(true)]),
         FusionProductSpace::new([leg(true), leg(false)]),
-    ));
-    let lhs_data = (0..lhs.space().required_len().unwrap())
+    );
+    let encoded_lhs = bind_encoded(lhs_hom.clone());
+    let encoded_rhs = bind_encoded(rhs_hom.clone());
+    let lowered_lhs = bind_lowered(lhs_hom);
+    let lowered_rhs = bind_lowered(rhs_hom);
+    assert_eq!(encoded_lhs.space(), lowered_lhs.space());
+    assert_eq!(encoded_rhs.space(), lowered_rhs.space());
+    let lhs_data = (0..encoded_lhs.space().required_len().unwrap())
         .map(|index| index as f64 + 1.0)
         .collect::<Vec<_>>();
-    let rhs_data = (0..rhs.space().required_len().unwrap())
+    let rhs_data = (0..encoded_rhs.space().required_len().unwrap())
         .map(|index| 0.5 * index as f64 - 2.0)
         .collect::<Vec<_>>();
     let direct_axes =
@@ -4844,8 +4886,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
     let encoded_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-        &lhs,
-        &rhs,
+        &encoded_lhs,
+        &encoded_rhs,
         direct_axes.lhs_contracting_axes(),
         direct_axes.rhs_contracting_axes(),
         direct_axes.output_permutation(),
@@ -4854,8 +4896,8 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
     let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
-        &lhs,
-        &rhs,
+        &lowered_lhs,
+        &lowered_rhs,
         direct_axes.lhs_contracting_axes(),
         direct_axes.rhs_contracting_axes(),
         direct_axes.output_permutation(),
@@ -4877,9 +4919,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             .tensorcontract_fusion_dyn_into(
                 &encoded_dst,
                 &mut encoded,
-                &lhs,
+                &encoded_lhs,
                 &lhs_data,
-                &rhs,
+                &encoded_rhs,
                 &rhs_data,
                 direct_axes,
                 1.0,
@@ -4897,9 +4939,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             .tensorcontract_fusion_dyn_into_lowered(
                 &lowered_dst,
                 &mut lowered,
-                &lhs,
+                &lowered_lhs,
                 &lhs_data,
-                &rhs,
+                &lowered_rhs,
                 &rhs_data,
                 direct_axes,
                 1.0,
@@ -4915,9 +4957,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             .tensorcontract_fusion_dyn_into_lowered(
                 &lowered_dst,
                 &mut warm,
-                &lhs,
+                &lowered_lhs,
                 &lhs_data,
-                &rhs,
+                &lowered_rhs,
                 &rhs_data,
                 direct_axes,
                 1.0,
@@ -4941,10 +4983,10 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
 
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    let (eager_lhs, eager_lhs_data) = crate::adjoint_bound_dyn(&lhs, &lhs_data).unwrap();
+    let (eager_lhs, eager_lhs_data) = crate::adjoint_bound_dyn(&encoded_lhs, &lhs_data).unwrap();
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    let lazy_lhs = crate::adjoint_bound_space_dyn_lowered(&lhs).unwrap();
+    let lazy_lhs = crate::adjoint_bound_space_dyn_lowered(&lowered_lhs).unwrap();
     assert_eq!(eager_lhs.space(), lazy_lhs.space());
     let lazy_axes = TensorContractSpec::new_with_conjugation(
         &[1],
@@ -4957,7 +4999,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     tenet_core::reset_core_intern_tables();
     let encoded_lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &eager_lhs,
-        &rhs,
+        &encoded_rhs,
         lazy_axes.lhs_contracting_axes(),
         lazy_axes.rhs_contracting_axes(),
         lazy_axes.output_permutation(),
@@ -4967,7 +5009,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     tenet_core::reset_core_intern_tables();
     let lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
         &lazy_lhs,
-        &rhs,
+        &lowered_rhs,
         lazy_axes.lhs_contracting_axes(),
         lazy_axes.rhs_contracting_axes(),
         lazy_axes.output_permutation(),
@@ -4985,7 +5027,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             &mut eager,
             &eager_lhs,
             &eager_lhs_data,
-            &rhs,
+            &encoded_rhs,
             &rhs_data,
             TensorContractSpec::new(
                 lazy_axes.lhs_contracting_axes(),
@@ -5011,9 +5053,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             .tensorcontract_fusion_dyn_prelowered_into(
                 &encoded_lazy_dst,
                 &mut encoded_lazy,
-                FusionOperand::prelowered_adjoint(eager_lhs.space(), lhs.space()).unwrap(),
+                FusionOperand::prelowered_adjoint(eager_lhs.space(), encoded_lhs.space()).unwrap(),
                 &lhs_data,
-                FusionOperand::direct(rhs.space()),
+                FusionOperand::direct(encoded_rhs.space()),
                 &rhs_data,
                 lazy_axes,
                 1.0,
@@ -5034,9 +5076,10 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
                 context.tensorcontract_fusion_dyn_prelowered_into_lowered(
                     &lazy_dst,
                     output,
-                    FusionOperand::prelowered_adjoint(lazy_lhs.space(), lhs.space()).unwrap(),
+                    FusionOperand::prelowered_adjoint(lazy_lhs.space(), lowered_lhs.space())
+                        .unwrap(),
                     &lhs_data,
-                    FusionOperand::direct(rhs.space()),
+                    FusionOperand::direct(lowered_rhs.space()),
                     &rhs_data,
                     lazy_axes,
                     1.0,

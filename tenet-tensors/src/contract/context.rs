@@ -1111,23 +1111,30 @@ where
         {
             self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         }
-        self.execute_resolution_dyn(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
             &resolution,
             rule,
             Some(dst_space),
             dst_space.structure(),
-            dst_data,
             Some(lhs_space),
             None,
             lhs_space.structure(),
-            lhs_data,
             Some(rhs_space),
             None,
+            rhs_space.structure(),
+            layout_primer,
+        )?;
+        self.execute_resolution_dyn(
+            &resolution,
+            dynamic_artifact.as_ref(),
+            dst_space.structure(),
+            dst_data,
+            lhs_space.structure(),
+            lhs_data,
             rhs_space.structure(),
             rhs_data,
             alpha,
             beta,
-            layout_primer,
         )
     }
 
@@ -1268,23 +1275,30 @@ where
         {
             self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         }
-        self.execute_resolution_dyn(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
             &resolution,
             rule,
             Some(dst_space.space()),
             dst_space.space().structure(),
-            dst_data,
             Some(lhs.logical_space()),
             Some(lhs.storage_space()),
             lhs.storage_space().structure(),
-            lhs_data,
             Some(rhs.logical_space()),
             Some(rhs.storage_space()),
+            rhs.storage_space().structure(),
+            layout_primer,
+        )?;
+        self.execute_resolution_dyn(
+            &resolution,
+            dynamic_artifact.as_ref(),
+            dst_space.space().structure(),
+            dst_data,
+            lhs.storage_space().structure(),
+            lhs_data,
             rhs.storage_space().structure(),
             rhs_data,
             alpha,
             beta,
-            layout_primer,
         )
     }
 
@@ -1480,6 +1494,69 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_dynamic_execution_artifact<R>(
+        &mut self,
+        resolution: &Resolution,
+        rule: &R,
+        dst_space: Option<&DynamicFusionMapSpace>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_space: Option<&DynamicFusionMapSpace>,
+        lhs_storage_space: Option<&DynamicFusionMapSpace>,
+        lhs_structure: &Arc<BlockStructure>,
+        rhs_space: Option<&DynamicFusionMapSpace>,
+        rhs_storage_space: Option<&DynamicFusionMapSpace>,
+        rhs_structure: &Arc<BlockStructure>,
+        layout_primer: LayoutKeyBuilder<R>,
+    ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar,
+    {
+        let Resolution::DynamicTree(plan) = resolution else {
+            return Ok(None);
+        };
+        let missing = || OperationError::Core(CoreError::MissingFusionSpace);
+        let dst_space = dst_space.ok_or_else(missing)?;
+        let lhs_space = lhs_space.ok_or_else(missing)?;
+        let rhs_space = rhs_space.ok_or_else(missing)?;
+        if let Some(artifact) = self.dynamic_space_cache.get_execution_artifact(
+            plan,
+            dst_structure,
+            lhs_structure,
+            lhs_storage_space,
+            rhs_structure,
+            rhs_storage_space,
+        ) {
+            return Ok(Some(artifact));
+        }
+        let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact(
+            &mut self.tree_context,
+            &mut self.dynamic_space_cache,
+            &mut self.resolution_cache,
+            rule,
+            layout_primer,
+            plan.as_ref(),
+            dst_space,
+            lhs_space,
+            lhs_storage_space,
+            lhs_structure,
+            rhs_space,
+            rhs_storage_space,
+            rhs_structure,
+        )?);
+        self.dynamic_space_cache.insert_execution_artifact(
+            Arc::clone(plan),
+            dst_structure,
+            lhs_structure,
+            lhs_storage_space,
+            rhs_structure,
+            rhs_storage_space,
+            Arc::clone(&artifact),
+        );
+        Ok(Some(artifact))
+    }
+
     /// Executes a resolved contraction on raw slices; shared by the
     /// dynamic-rank entry point and the typed facade / prepared-handle path.
     ///
@@ -1492,27 +1569,20 @@ where
     /// they are optional: a typed tensor without a fusion space errors
     /// there and only there (as before the merge).
     #[allow(clippy::too_many_arguments)]
-    fn execute_resolution_dyn<R>(
+    fn execute_resolution_dyn(
         &mut self,
         resolution: &Resolution,
-        rule: &R,
-        dst_space: Option<&DynamicFusionMapSpace>,
+        dynamic_artifact: Option<&Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
         dst_structure: &Arc<BlockStructure>,
         dst_data: &mut [D],
-        lhs_space: Option<&DynamicFusionMapSpace>,
-        lhs_storage_space: Option<&DynamicFusionMapSpace>,
         lhs_structure: &Arc<BlockStructure>,
         lhs_data: &[D],
-        rhs_space: Option<&DynamicFusionMapSpace>,
-        rhs_storage_space: Option<&DynamicFusionMapSpace>,
         rhs_structure: &Arc<BlockStructure>,
         rhs_data: &[D],
         alpha: D,
         beta: D,
-        layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
         match resolution {
@@ -1544,42 +1614,29 @@ where
                     beta,
                 )
             }
-            Resolution::DynamicTree(plan) => {
-                let missing = || OperationError::Core(CoreError::MissingFusionSpace);
-                let dst_space = dst_space.ok_or_else(missing)?;
-                let lhs_space = lhs_space.ok_or_else(missing)?;
-                let rhs_space = rhs_space.ok_or_else(missing)?;
+            Resolution::DynamicTree(_) => {
                 let Self {
                     tree_context,
-                    dynamic_space_cache,
-                    resolution_cache,
                     contract_backend,
                     contract_workspace,
                     fusion_block_workspace,
                     fusion_scratch,
                     ..
                 } = self;
-                super::dynamic::tensorcontract_fusion_dynamic_plan_dyn_into_context(
+                let artifact =
+                    dynamic_artifact.ok_or(OperationError::UnsupportedTensorContractScope {
+                        message: "dynamic-tree resolution requires a compiled execution artifact",
+                    })?;
+                super::dynamic::execute_dynamic_tree_execution_artifact(
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    dynamic_space_cache,
-                    resolution_cache,
                     fusion_block_workspace,
                     fusion_scratch,
-                    rule,
-                    layout_primer,
-                    plan.as_ref(),
-                    dst_space,
+                    artifact,
                     dst_structure,
                     dst_data,
-                    lhs_space,
-                    lhs_storage_space,
-                    lhs_structure,
                     lhs_data,
-                    rhs_space,
-                    rhs_storage_space,
-                    rhs_structure,
                     rhs_data,
                     alpha,
                     beta,
@@ -1648,23 +1705,30 @@ where
         let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
         let rhs_structure = Arc::clone(rhs.structure());
-        self.execute_resolution_dyn(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
             resolution,
             rule,
             dst_space.as_ref(),
             &dst_structure,
-            dst.data_mut(),
             lhs_space.as_ref(),
             None,
             &lhs_structure,
-            lhs.data(),
             rhs_space.as_ref(),
             None,
+            &rhs_structure,
+            encoded_layout_primer::<R>,
+        )?;
+        self.execute_resolution_dyn(
+            resolution,
+            dynamic_artifact.as_ref(),
+            &dst_structure,
+            dst.data_mut(),
+            &lhs_structure,
+            lhs.data(),
             &rhs_structure,
             rhs.data(),
             alpha,
             beta,
-            encoded_layout_primer::<R>,
         )
     }
 
@@ -1731,12 +1795,29 @@ where
                     .map(Arc::new)
             },
         )?;
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
+            &resolution,
+            rule,
+            Some(&dst_dynamic),
+            &dst_structure,
+            Some(&lhs_dynamic),
+            None,
+            &lhs_structure,
+            Some(&rhs_dynamic),
+            None,
+            &rhs_structure,
+            encoded_layout_primer::<R>,
+        )?;
         Ok(PreparedTensorContractFusion {
             rule: rule.tree_transform_rule_cache_key(),
             dst_fusion_space_ptr: Arc::as_ptr(dst_fusion) as usize,
             lhs_fusion_space_ptr: Arc::as_ptr(lhs_fusion) as usize,
             rhs_fusion_space_ptr: Arc::as_ptr(rhs_fusion) as usize,
             resolution,
+            dynamic_artifact,
         })
     }
 
@@ -1800,8 +1881,21 @@ where
                 tensor: "prepared contraction",
             });
         }
-        let resolution = prepared.resolution.clone();
-        self.execute_resolution(&resolution, rule, dst, lhs, rhs, alpha, beta)
+        let dst_structure = Arc::clone(dst.structure());
+        let lhs_structure = Arc::clone(lhs.structure());
+        let rhs_structure = Arc::clone(rhs.structure());
+        self.execute_resolution_dyn(
+            &prepared.resolution,
+            prepared.dynamic_artifact.as_ref(),
+            &dst_structure,
+            dst.data_mut(),
+            &lhs_structure,
+            lhs.data(),
+            &rhs_structure,
+            rhs.data(),
+            alpha,
+            beta,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2240,4 +2334,5 @@ pub struct PreparedTensorContractFusion<RuleKey> {
     lhs_fusion_space_ptr: usize,
     rhs_fusion_space_ptr: usize,
     resolution: Resolution,
+    dynamic_artifact: Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>,
 }

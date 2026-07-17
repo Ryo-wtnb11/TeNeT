@@ -20,6 +20,7 @@ use crate::{
     RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperation,
     TreeTransformRuleCacheKey, TreeTransformStructure, TreeTransformWorkspace,
 };
+use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
@@ -495,6 +496,7 @@ where
 /// tree-pair transforms, core coupled GEMM, optional output transform. All
 /// operands are (space, storage structure, raw slice) triples.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, BC, R, D>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     contract_backend: &mut BC,
@@ -526,6 +528,70 @@ where
     BC: TensorContractBackend<D, f64>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let artifact = compile_dynamic_tree_execution_artifact(
+        tree_context,
+        dynamic_space_cache,
+        fusion_block_cache,
+        rule,
+        layout_primer,
+        plan,
+        dst_space,
+        lhs_space,
+        lhs_storage_space,
+        lhs_structure,
+        rhs_space,
+        rhs_storage_space,
+        rhs_structure,
+    )?;
+    execute_dynamic_tree_execution_artifact(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        scratch,
+        &artifact,
+        dst_structure,
+        dst_data,
+        lhs_data,
+        rhs_data,
+        alpha,
+        beta,
+    )
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicTreeExecutionArtifact {
+    lhs_transform: DynamicFusionTransformedSourceEntry,
+    rhs_transform: DynamicFusionTransformedSourceEntry,
+    lhs_borrowed: bool,
+    rhs_borrowed: bool,
+    rhs_twist: Arc<[RhsTwistAction]>,
+    core_dst: Option<DynamicFusionCoreDstEntry>,
+    block_plan: Arc<FusionBlockContractPlan>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
+    rule: &R,
+    layout_primer: LayoutKeyBuilder<R>,
+    plan: &FusionContractPlan,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_space: &DynamicFusionMapSpace,
+    lhs_storage_space: Option<&DynamicFusionMapSpace>,
+    lhs_structure: &Arc<BlockStructure>,
+    rhs_space: &DynamicFusionMapSpace,
+    rhs_storage_space: Option<&DynamicFusionMapSpace>,
+    rhs_structure: &Arc<BlockStructure>,
+) -> Result<DynamicTreeExecutionArtifact, OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar,
 {
     let lhs_transform = match lhs_storage_space {
         Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
@@ -587,6 +653,73 @@ where
         plan.rhs_source_conjugate(),
         plan.core_axes().as_spec(),
     )?;
+    let rhs_twist = compile_rhs_contract_twist(
+        rule,
+        &rhs_core_space,
+        plan.core_axes().as_spec().rhs_contracting_axes(),
+    )?;
+
+    let core_dst = if plan.output_transform_is_identity() {
+        None
+    } else {
+        Some(dynamic_space_cache.get_or_compile_core_dst(
+            tree_context,
+            rule,
+            &lhs_core_space,
+            &rhs_core_space,
+            plan,
+            dst_space,
+            layout_primer,
+        )?)
+    };
+    let block_dst_space = core_dst
+        .as_ref()
+        .map_or(dst_space, |entry| entry.space.as_ref());
+    let block_plan = fusion_block_cache.get_or_compile_core_plan(
+        rule,
+        block_dst_space,
+        &lhs_core_space,
+        &rhs_core_space,
+        plan.core_axes().as_spec(),
+    )?;
+    Ok(DynamicTreeExecutionArtifact {
+        lhs_transform,
+        rhs_transform,
+        lhs_borrowed,
+        rhs_borrowed,
+        rhs_twist,
+        core_dst,
+        block_plan,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact<RuleKey, BT, BC, D>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let lhs_transform = &artifact.lhs_transform;
+    let rhs_transform = &artifact.rhs_transform;
+    let lhs_borrowed = artifact.lhs_borrowed;
+    let rhs_borrowed = artifact.rhs_borrowed;
+    let lhs_core_space = lhs_transform.space.clone();
+    let rhs_core_space = rhs_transform.space.clone();
 
     if !lhs_borrowed {
         let lhs_dst_structure = std::sync::Arc::clone(lhs_core_space.structure());
@@ -611,32 +744,23 @@ where
             rhs_data,
             D::one(),
         )?;
-        apply_rhs_contract_twist(
+        execute_rhs_contract_twist(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
                 tree_context.backend().transpose_backend(),
             ),
-            rule,
-            &rhs_core_space,
             rhs_scratch.data_mut(),
-            plan.core_axes().as_spec().rhs_contracting_axes(),
+            &artifact.rhs_twist,
         )?;
     }
 
-    if plan.output_transform_is_identity() {
-        let block_plan = fusion_block_cache.get_or_compile_core_plan(
-            rule,
-            dst_space,
-            &lhs_core_space,
-            &rhs_core_space,
-            plan.core_axes().as_spec(),
-        )?;
+    if artifact.core_dst.is_none() {
         let lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
             CoreSource::from_host_scratch(scratch.lhs())
         });
         let rhs_core = select_core_source(rhs_borrowed, &rhs_core_space, rhs_data, || {
             CoreSource::from_host_scratch(scratch.rhs())
         });
-        return block_plan.execute_raw(
+        return artifact.block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
                 tree_context.backend().transpose_backend(),
             ),
@@ -656,30 +780,18 @@ where
         );
     }
 
-    let core_dst = dynamic_space_cache.get_or_compile_core_dst(
-        tree_context,
-        rule,
-        &lhs_core_space,
-        &rhs_core_space,
-        plan,
-        dst_space,
-        layout_primer,
-    )?;
+    let core_dst = artifact
+        .core_dst
+        .as_ref()
+        .expect("non-identity output artifact carries its destination transform");
     let core_dst_space = core_dst.space.clone();
-    let block_plan = fusion_block_cache.get_or_compile_core_plan(
-        rule,
-        &core_dst_space,
-        &lhs_core_space,
-        &rhs_core_space,
-        plan.core_axes().as_spec(),
-    )?;
     let core_dst_structure = std::sync::Arc::clone(core_dst_space.structure());
     scratch.prepare_dst(core_dst_space.clone())?;
     {
         let mut execute = |lhs_core: CoreSource<'_, D>,
                            rhs_core: CoreSource<'_, D>,
                            core_dst: &mut DynamicFusionScratch<D>| {
-            block_plan.execute_raw(
+            artifact.block_plan.execute_raw(
                 &mut crate::StridedHostKernelAdapter::with_transpose_backend(
                     tree_context.backend().transpose_backend(),
                 ),
@@ -1277,6 +1389,9 @@ impl DynamicFusionSpaceCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
+    last_execution_artifact: Option<DynamicTreeExecutionArtifactLastEntry>,
+    execution_artifacts:
+        FxHashMap<DynamicTreeExecutionArtifactKey, DynamicTreeExecutionArtifactCacheEntry>,
     last_transformed_sources: Vec<DynamicFusionTransformedSourceLastEntry<RuleKey>>,
     fast_transformed_sources: FxHashMap<
         DynamicFusionTransformedSourceFastKey<RuleKey>,
@@ -1307,9 +1422,53 @@ struct DynamicFusionCoreDstEntry {
     output_transform_structure: Arc<TreeTransformStructure<f64>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct DynamicTreeExecutionArtifactKey {
+    plan: usize,
+    dst_structure: usize,
+    lhs_structure: usize,
+    lhs_storage_structure: Option<usize>,
+    rhs_structure: usize,
+    rhs_storage_structure: Option<usize>,
+}
+
+impl DynamicTreeExecutionArtifactKey {
+    fn new(
+        plan: &Arc<FusionContractPlan>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_storage_space: Option<&DynamicFusionMapSpace>,
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_storage_space: Option<&DynamicFusionMapSpace>,
+    ) -> Self {
+        Self {
+            plan: Arc::as_ptr(plan) as usize,
+            dst_structure: dst_structure.content_id(),
+            lhs_structure: lhs_structure.content_id(),
+            lhs_storage_structure: lhs_storage_space.map(|space| space.structure().content_id()),
+            rhs_structure: rhs_structure.content_id(),
+            rhs_storage_structure: rhs_storage_space.map(|space| space.structure().content_id()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DynamicTreeExecutionArtifactCacheEntry {
+    _plan: Arc<FusionContractPlan>,
+    artifact: Arc<DynamicTreeExecutionArtifact>,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicTreeExecutionArtifactLastEntry {
+    key: DynamicTreeExecutionArtifactKey,
+    entry: DynamicTreeExecutionArtifactCacheEntry,
+}
+
 impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
     fn default() -> Self {
         Self {
+            last_execution_artifact: None,
+            execution_artifacts: FxHashMap::default(),
             last_transformed_sources: Vec::new(),
             fast_transformed_sources: FxHashMap::default(),
             transformed_sources: FxHashMap::default(),
@@ -1423,7 +1582,7 @@ where
 {
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.transformed_sources.len() + self.core_dsts.len()
+        self.execution_artifacts.len() + self.transformed_sources.len() + self.core_dsts.len()
     }
 
     #[inline]
@@ -1435,6 +1594,7 @@ where
         self.policy = policy;
         self.clear_fast_entries();
         if !policy.stores_entries() {
+            self.execution_artifacts.clear();
             self.transformed_sources.clear();
             self.lru_order.clear();
             self.core_dsts.clear();
@@ -1445,6 +1605,7 @@ where
     }
 
     fn clear_fast_entries(&mut self) {
+        self.last_execution_artifact = None;
         self.last_transformed_sources.clear();
         self.fast_transformed_sources.clear();
         self.last_core_dst = None;
@@ -1453,6 +1614,12 @@ where
 
     fn rebuild_lru_order(&mut self) {
         self.lru_order.clear();
+        self.lru_order.extend(
+            self.execution_artifacts
+                .keys()
+                .copied()
+                .map(DynamicFusionSpaceCacheEntryKey::ExecutionArtifact),
+        );
         self.lru_order.extend(
             self.transformed_sources
                 .keys()
@@ -1538,6 +1705,7 @@ where
     }
 
     fn enforce_lru_limit(&mut self, max_entries: usize) {
+        let mut evicted_execution_artifact = false;
         let mut evicted_transformed_source = false;
         let mut evicted_core_dst = false;
         while self.len() > max_entries {
@@ -1545,6 +1713,9 @@ where
                 break;
             };
             match oldest {
+                DynamicFusionSpaceCacheEntryKey::ExecutionArtifact(key) => {
+                    evicted_execution_artifact |= self.execution_artifacts.remove(&key).is_some();
+                }
                 DynamicFusionSpaceCacheEntryKey::TransformedSource(key) => {
                     evicted_transformed_source |= self.transformed_sources.remove(&key).is_some();
                 }
@@ -1553,6 +1724,9 @@ where
                 }
             }
         }
+        if evicted_execution_artifact {
+            self.last_execution_artifact = None;
+        }
         if evicted_transformed_source {
             self.last_transformed_sources.clear();
             self.fast_transformed_sources.clear();
@@ -1560,6 +1734,86 @@ where
         if evicted_core_dst {
             self.last_core_dst = None;
             self.fast_core_dsts.clear();
+        }
+    }
+
+    pub(crate) fn get_execution_artifact(
+        &mut self,
+        plan: &Arc<FusionContractPlan>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_storage_space: Option<&DynamicFusionMapSpace>,
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_storage_space: Option<&DynamicFusionMapSpace>,
+    ) -> Option<Arc<DynamicTreeExecutionArtifact>> {
+        if !self.policy.stores_entries() {
+            return None;
+        }
+        let key = DynamicTreeExecutionArtifactKey::new(
+            plan,
+            dst_structure,
+            lhs_structure,
+            lhs_storage_space,
+            rhs_structure,
+            rhs_storage_space,
+        );
+        if let Some(last) = &self.last_execution_artifact {
+            if last.key == key {
+                self.stats.hits += 1;
+                self.stats.fast_hits += 1;
+                return Some(Arc::clone(&last.entry.artifact));
+            }
+        }
+        let entry = self.execution_artifacts.get(&key)?.clone();
+        self.stats.hits += 1;
+        if self.policy.max_entries().is_some() {
+            touch_lru_key(
+                &mut self.lru_order,
+                &DynamicFusionSpaceCacheEntryKey::ExecutionArtifact(key),
+            );
+        }
+        self.last_execution_artifact = Some(DynamicTreeExecutionArtifactLastEntry {
+            key,
+            entry: entry.clone(),
+        });
+        Some(entry.artifact)
+    }
+
+    pub(crate) fn insert_execution_artifact(
+        &mut self,
+        plan: Arc<FusionContractPlan>,
+        dst_structure: &Arc<BlockStructure>,
+        lhs_structure: &Arc<BlockStructure>,
+        lhs_storage_space: Option<&DynamicFusionMapSpace>,
+        rhs_structure: &Arc<BlockStructure>,
+        rhs_storage_space: Option<&DynamicFusionMapSpace>,
+        artifact: Arc<DynamicTreeExecutionArtifact>,
+    ) {
+        if !self.policy.stores_entries() {
+            return;
+        }
+        let key = DynamicTreeExecutionArtifactKey::new(
+            &plan,
+            dst_structure,
+            lhs_structure,
+            lhs_storage_space,
+            rhs_structure,
+            rhs_storage_space,
+        );
+        let entry = DynamicTreeExecutionArtifactCacheEntry {
+            _plan: plan,
+            artifact,
+        };
+        self.execution_artifacts.insert(key, entry.clone());
+        self.last_execution_artifact = Some(DynamicTreeExecutionArtifactLastEntry { key, entry });
+        if self.policy.max_entries().is_some() {
+            touch_lru_key(
+                &mut self.lru_order,
+                &DynamicFusionSpaceCacheEntryKey::ExecutionArtifact(key),
+            );
+        }
+        if let Some(max_entries) = self.policy.max_entries() {
+            self.enforce_lru_limit(max_entries);
         }
     }
 
@@ -2030,6 +2284,7 @@ where
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DynamicFusionSpaceCacheEntryKey<RuleKey> {
+    ExecutionArtifact(DynamicTreeExecutionArtifactKey),
     TransformedSource(DynamicFusionTransformedSourceSpaceKey<RuleKey>),
     CoreDst(DynamicFusionCoreDstSpaceKey<RuleKey>),
 }
@@ -2144,26 +2399,27 @@ where
     }
 }
 
-/// Final step of core rhs materialization: apply the fermionic
-/// supertrace twist per codomain tree. TensorKit folds this twist into the
-/// transform that @tensor inserts before `mul!`; keeping it here means the
-/// core GEMM plans stay coefficient-free (mul! parity).
-fn apply_rhs_contract_twist<A, R, D>(
-    kernels: &mut A,
+#[derive(Clone, Debug)]
+struct RhsTwistAction {
+    shape: Vec<usize>,
+    strides: Vec<isize>,
+    offset: isize,
+    factor: f64,
+}
+
+fn compile_rhs_contract_twist<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
-    data: &mut [D],
     rhs_contracting_axes: &[usize],
-) -> Result<(), OperationError>
+) -> Result<Arc<[RhsTwistAction]>, OperationError>
 where
-    A: crate::HostKernelAdapter<D>,
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
     if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
-        return Ok(());
+        return Ok(Arc::from([]));
     }
     let structure = std::sync::Arc::clone(space.structure());
+    let mut actions = Vec::new();
     for index in 0..structure.block_count() {
         let block = structure
             .block(index)
@@ -2178,17 +2434,53 @@ where
             key.codomain_tree(),
         )?;
         if factor != 1.0 {
-            let shape = block.shape().to_vec();
-            let strides = tenet_operations::strided::strides_to_isize(block.strides())?;
-            let offset = tenet_operations::strided::offset_to_isize(block.offset())?;
-            kernels.scale_strided(
-                data,
-                &shape,
-                &strides,
-                offset,
-                D::coefficient_as_data(factor),
-            )?;
+            actions.push(RhsTwistAction {
+                shape: block.shape().to_vec(),
+                strides: tenet_operations::strided::strides_to_isize(block.strides())?,
+                offset: tenet_operations::strided::offset_to_isize(block.offset())?,
+                factor,
+            });
         }
+    }
+    Ok(actions.into())
+}
+
+fn apply_rhs_contract_twist<A, R, D>(
+    kernels: &mut A,
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    rhs_contracting_axes: &[usize],
+) -> Result<(), OperationError>
+where
+    A: crate::HostKernelAdapter<D>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let actions = compile_rhs_contract_twist(rule, space, rhs_contracting_axes)?;
+    execute_rhs_contract_twist(kernels, data, &actions)
+}
+
+/// Applies the fermionic supertrace actions compiled with the tree artifact.
+/// Why not retain the rule here: numerical replay must not re-enter categorical
+/// coefficient evaluation or rebuild strided descriptors.
+fn execute_rhs_contract_twist<A, D>(
+    kernels: &mut A,
+    data: &mut [D],
+    actions: &[RhsTwistAction],
+) -> Result<(), OperationError>
+where
+    A: crate::HostKernelAdapter<D>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    for action in actions {
+        kernels.scale_strided(
+            data,
+            &action.shape,
+            &action.strides,
+            action.offset,
+            D::coefficient_as_data(action.factor),
+        )?;
     }
     Ok(())
 }
@@ -2524,7 +2816,86 @@ mod tests {
                 0.0,
             )
             .unwrap();
-        assert!(execution_primer_calls() > 0);
+        let cold_calls = execution_primer_calls();
+        assert!(cold_calls > 0);
+        context
+            .tensorcontract_fusion_dyn_into(
+                &output_bound,
+                &mut dst_data,
+                &counted_source,
+                &lhs_data,
+                &scalar_bound,
+                &rhs_data,
+                axes,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        assert_eq!(execution_primer_calls(), cold_calls);
+
+        let mut no_cache_context = crate::TensorContractFusionExecutionContext::<
+            f64,
+            crate::TreeTransformBuiltinRuleCacheKey,
+        >::default();
+        no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
+        reset_execution_primer_calls();
+        for expected_minimum in 1..=2 {
+            no_cache_context
+                .tensorcontract_fusion_dyn_into(
+                    &output_bound,
+                    &mut dst_data,
+                    &counted_source,
+                    &lhs_data,
+                    &scalar_bound,
+                    &rhs_data,
+                    axes,
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+            assert!(execution_primer_calls() >= expected_minimum);
+            assert_eq!(no_cache_context.dynamic_fusion_space_cache_len(), 0);
+        }
+
+        let other_axes =
+            TensorContractSpec::new(&[], &[], OutputAxisOrder::from_axes(&[1, 0, 2, 3]));
+        let other_output = super::super::dynamic_space::BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &source_bound,
+            &scalar_bound,
+            other_axes.lhs_contracting_axes(),
+            other_axes.rhs_contracting_axes(),
+            other_axes.output_permutation(),
+        )
+        .unwrap();
+        let mut other_dst_data = vec![0.0; other_output.space().required_len().unwrap()];
+        let mut lru_context = crate::TensorContractFusionExecutionContext::<
+            f64,
+            crate::TreeTransformBuiltinRuleCacheKey,
+        >::default();
+        lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
+        reset_execution_primer_calls();
+        macro_rules! execute_lru {
+            ($output:expr, $data:expr, $axes:expr) => {{
+                lru_context
+                    .tensorcontract_fusion_dyn_into(
+                        $output,
+                        $data,
+                        &counted_source,
+                        &lhs_data,
+                        &scalar_bound,
+                        &rhs_data,
+                        $axes,
+                        1.0,
+                        0.0,
+                    )
+                    .unwrap();
+                assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
+            }};
+        }
+        execute_lru!(&output_bound, &mut dst_data, axes);
+        execute_lru!(&other_output, &mut other_dst_data, other_axes);
+        execute_lru!(&output_bound, &mut dst_data, axes);
+        assert!(execution_primer_calls() >= 3);
     }
 
     #[test]
