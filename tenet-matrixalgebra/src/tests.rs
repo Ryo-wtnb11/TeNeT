@@ -1836,8 +1836,9 @@ where
 }
 
 #[test]
-fn typed_factor_dims_include_sectors_without_populated_trees() {
-    // What: typed factor axes retain the complete leg space, including a sector absent from all blocks.
+fn svd_compact_factor_dims_include_sectors_without_populated_trees() {
+    // What: public compact SVD retains the complete original leg space,
+    // including a sector absent from every populated fusion block.
     let rule = U1FusionRule;
     let neutral = U1Irrep::new(0).sector_id();
     let positive = U1Irrep::new(1).sector_id();
@@ -1853,14 +1854,68 @@ fn typed_factor_dims_include_sectors_without_populated_trees() {
     )
     .unwrap();
     let tensor = TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 3.0, 4.0], space).unwrap();
-    let dynamic_space = dyn_space_of(&tensor).unwrap();
+    let original_homspace = tensor.fusion_space().unwrap().homspace().clone();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
-    let rebuilt =
-        typed_from_dyn::<_, _, 1, 1>(&rule, (dynamic_space, tensor.data().to_vec())).unwrap();
+    let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
-    assert_eq!(rebuilt.space().dims(), &[5, 2]);
-    assert_eq!(rebuilt.fusion_space(), tensor.fusion_space());
-    assert_eq!(rebuilt.data(), tensor.data());
+    assert_eq!(result.u.tensor().space().dims(), &[5, 2]);
+    assert_eq!(result.vh.tensor().space().dims(), &[2, 2]);
+    assert_eq!(
+        result
+            .u
+            .tensor()
+            .fusion_space()
+            .unwrap()
+            .homspace()
+            .codomain(),
+        original_homspace.codomain()
+    );
+    assert_eq!(
+        result
+            .vh
+            .tensor()
+            .fusion_space()
+            .unwrap()
+            .homspace()
+            .domain(),
+        original_homspace.domain()
+    );
+}
+
+#[test]
+fn typed_factor_axis_sum_overflow_is_exact_without_storage_materialization() {
+    // What: an axis whose structural-zero degeneracies exceed usize reports
+    // the exact checked error without allocating storage for those dimensions.
+    let rule = U1FusionRule;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new(
+            [
+                (U1Irrep::new(1).sector_id(), usize::MAX),
+                (U1Irrep::new(2).sector_id(), 1),
+            ],
+            false,
+        )]),
+        FusionProductSpace::new([]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
+        homspace,
+        &rule,
+        Vec::<Vec<usize>>::new(),
+    )
+    .unwrap();
+
+    let error = typed_from_dyn::<_, f64, 1, 0>(
+        &rule,
+        (
+            tenet_tensors::DynamicFusionMapSpace::from_typed(&space),
+            Vec::new(),
+        ),
+    )
+    .unwrap_err();
+
+    assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
 }
 
 fn u1_minimum_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
