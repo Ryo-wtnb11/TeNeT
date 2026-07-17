@@ -24,6 +24,8 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
+#[cfg(test)]
+use super::dynamic_space::PreparedLayoutKeys;
 use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
 use super::fusion::{prepare_tensorcontract_fusion_plan, FusionContractPlan};
 use super::fusion_block::{
@@ -2676,7 +2678,7 @@ mod tests {
     fn counting_su2_primer(
         rule: &SU2FusionRule,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<Option<Arc<[tenet_core::FusionTreeBlockKey]>>, OperationError> {
+    ) -> Result<PreparedLayoutKeys, OperationError> {
         EXECUTION_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
         lowered_layout_primer(rule, homspace)
     }

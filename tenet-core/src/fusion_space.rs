@@ -121,6 +121,16 @@ fn fusion_product_space_signature(space: &FusionProductSpace) -> Vec<FusionTreeL
         .collect()
 }
 
+fn fusion_product_space_matches_signature(
+    space: &FusionProductSpace,
+    signature: &[FusionTreeLegSetSignature],
+) -> bool {
+    space.legs().len() == signature.len()
+        && space.legs().iter().zip(signature).all(|(leg, expected)| {
+            leg.is_dual() == expected.is_dual && leg.sectors() == expected.sectors.as_slice()
+        })
+}
+
 #[derive(Clone, Debug)]
 struct FusionTreeBlockLayoutEntry {
     row: usize,
@@ -145,6 +155,125 @@ struct FusionTreeHomSpaceLayoutData {
 struct FusionTreeHomSpaceLayout {
     id: FusionTreeLayoutId,
     data: FusionTreeHomSpaceLayoutData,
+}
+
+#[derive(Debug)]
+enum PreparedLoweredFusionTreeLayoutState {
+    Cached {
+        key: FusionTreeHomSpaceCacheKey,
+        layout: Arc<FusionTreeHomSpaceLayout>,
+    },
+    Cold {
+        key: FusionTreeHomSpaceCacheKey,
+        data: FusionTreeHomSpaceLayoutData,
+    },
+}
+
+/// Checked fusion-tree metadata staged without publishing process-local state.
+///
+/// This is an expert transaction boundary for downstream builders that still
+/// have fallible shape or storage work. Call [`Self::commit`] only after that
+/// work succeeds.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct PreparedLoweredFusionTreeLayout {
+    state: PreparedLoweredFusionTreeLayoutState,
+}
+
+impl PreparedLoweredFusionTreeLayout {
+    fn cache_key(&self) -> &FusionTreeHomSpaceCacheKey {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { key, .. }
+            | PreparedLoweredFusionTreeLayoutState::Cold { key, .. } => key,
+        }
+    }
+
+    fn layout_data(&self) -> &FusionTreeHomSpaceLayoutData {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout,
+            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data,
+        }
+    }
+
+    pub fn keys(&self) -> &[FusionTreeBlockKey] {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
+            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data.keys.as_ref(),
+        }
+    }
+
+    pub fn keys_arc(&self) -> Arc<[FusionTreeBlockKey]> {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
+            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
+        }
+    }
+
+    /// Builds final coupled storage directly from authoritative leg
+    /// degeneracies while keeping this prepared layout unpublished.
+    pub fn build_from_leg_degeneracies(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<BlockStructure>, CoreError> {
+        let key = self.cache_key();
+        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
+            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            });
+        }
+        // Why not call the cached public builder: downstream validation must
+        // finish before this transaction publishes a layout ID or admission,
+        // and the prepared data already owns the one checked enumeration.
+        // Degeneracies are deliberately absent from the signature: the target
+        // HomSpace is their authority, while sectors and duality select keys.
+        let (sector, degeneracy) = coupled_subblock_parts_from_layout(
+            homspace,
+            homspace.codomain().len(),
+            self.layout_data(),
+            |key| homspace.degeneracy_shape_for_key(key),
+        )?;
+        BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+    }
+
+    /// Publishes the prepared layout and returns its shared key storage.
+    ///
+    /// Why no fallible return: checked enumeration and layout-data formation
+    /// completed in `prepare`; the remaining cache race check, monotonic ID,
+    /// and bounded admission are process-local publication only.
+    pub fn commit(self) -> Arc<[FusionTreeBlockKey]> {
+        match self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { key, layout } => {
+                let cache = fusion_tree_layout_cache();
+                let mut write = cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(existing) = write.lookup(&key) {
+                    return Arc::clone(&existing.keys);
+                }
+                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+                let admitted = write.admit(Arc::new(key), layout, charged_bytes);
+                Arc::clone(&admitted.keys)
+            }
+            PreparedLoweredFusionTreeLayoutState::Cold { key, data } => {
+                let cache = fusion_tree_layout_cache();
+                let mut write = cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(existing) = write.lookup(&key) {
+                    return Arc::clone(&existing.keys);
+                }
+                let computed = Arc::new(FusionTreeHomSpaceLayout {
+                    id: next_fusion_tree_layout_id(),
+                    data,
+                });
+                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
+                let admitted = write.admit(Arc::new(key), computed, charged_bytes);
+                Arc::clone(&admitted.keys)
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for FusionTreeHomSpaceLayout {
@@ -943,6 +1072,16 @@ impl FusionTreeHomSpace {
             .clone()
     }
 
+    /// Returns the already-published semantic identity without initializing it.
+    ///
+    /// Why not call [`Self::id`]: fallible metadata builders must validate
+    /// algebra before publishing process-local identity state.
+    #[doc(hidden)]
+    #[inline]
+    pub fn existing_id(&self) -> Option<HomSpaceId> {
+        self.id.get().cloned()
+    }
+
     pub fn select<R>(
         &self,
         rule: &R,
@@ -1134,9 +1273,39 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        Ok(Arc::clone(
-            &self.try_cached_fusion_tree_layout_lowered(rule)?.keys,
-        ))
+        Ok(self.prepare_fusion_tree_layout_lowered(rule)?.commit())
+    }
+
+    /// Stages checked keys and coupled-sector metadata without issuing a
+    /// layout ID or changing cache admission/accounting.
+    #[doc(hidden)]
+    pub fn prepare_fusion_tree_layout_lowered<R>(
+        &self,
+        rule: &R,
+    ) -> Result<PreparedLoweredFusionTreeLayout, LoweredFusionTreeBuildError>
+    where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
+        let cache = fusion_tree_layout_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(layout) = read.lookup(&key) {
+            return Ok(PreparedLoweredFusionTreeLayout {
+                state: PreparedLoweredFusionTreeLayoutState::Cached { key, layout },
+            });
+        }
+        drop(read);
+
+        let keys = self.try_fusion_tree_keys_uncached_lowered(rule)?;
+        let data = fusion_tree_layout_data_from_keys(rule, keys);
+        Ok(PreparedLoweredFusionTreeLayout {
+            state: PreparedLoweredFusionTreeLayoutState::Cold {
+                key,
+                data,
+            },
+        })
     }
 
     pub fn try_for_each_fusion_tree_key<R, F, E>(&self, rule: &R, mut f: F) -> Result<(), E>
@@ -1170,6 +1339,7 @@ impl FusionTreeHomSpace {
         .unwrap_or_else(|error| match error {})
     }
 
+    #[cfg(test)]
     fn try_cached_fusion_tree_layout_lowered<R>(
         &self,
         rule: &R,
@@ -1177,9 +1347,15 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        self.try_cached_fusion_tree_layout_with(rule, || {
-            self.try_fusion_tree_keys_uncached_lowered(rule)
-        })
+        self.prepare_fusion_tree_layout_lowered(rule)?.commit();
+        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
+        let cache = fusion_tree_layout_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(read
+            .lookup(&key)
+            .expect("committed lowered layout must be cache-resident"))
     }
 
     fn try_cached_fusion_tree_layout_with<R, E, F>(
@@ -1202,10 +1378,11 @@ impl FusionTreeHomSpace {
         drop(read);
 
         let key = Arc::new(key);
+        let keys = build()?;
         let computed = Arc::new(fusion_tree_layout_from_keys(
             rule,
             next_fusion_tree_layout_id(),
-            build()?,
+            keys,
         ));
         let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
         let mut write = cache

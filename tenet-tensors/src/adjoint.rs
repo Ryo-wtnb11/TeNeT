@@ -16,7 +16,10 @@ use tenet_core::{
 
 use crate::cache::registered_operation_cache;
 #[cfg(test)]
-use crate::contract::{encoded_layout_primer, lowered_layout_primer};
+use crate::contract::{
+    encoded_layout_primer, lowered_layout_primer, reset_scratch_publication_observations,
+    scratch_publication_observations, PreparedLayoutKeys,
+};
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
@@ -152,8 +155,8 @@ where
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
 
     let structure = Arc::clone(space.structure());
-    primer(rule, &adjoint_hom)?;
-    let keys = adjoint_hom.fusion_tree_keys(rule);
+    let prepared = primer(rule, &adjoint_hom)?;
+    let keys = prepared.keys(rule, &adjoint_hom);
     let shapes = keys
         .iter()
         .map(|key| {
@@ -181,11 +184,12 @@ where
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
 
-    Ok(DynamicFusionMapSpace::from_degeneracy_shapes(
+    DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
         rule,
         adjoint_hom,
         shapes,
-    )?)
+        move |_, _| Ok(prepared),
+    )
 }
 
 /// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
@@ -652,9 +656,10 @@ mod cache_tests {
     use crate::tree_transform::TreeTransformBuiltinRuleCacheKey;
     use std::cell::Cell;
     use tenet_core::{
-        FermionParityFusionRule, FusionProductSpace, Fz2SectorLayout, PackedProductCodec,
-        ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
-        SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+        BlockStructure, FermionParityFusionRule, FusionProductSpace, Fz2SectorLayout,
+        PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout,
+        SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep,
+        U1SectorLayout, Z2Irrep,
     };
 
     type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -700,7 +705,7 @@ mod cache_tests {
     fn counting_primer(
         rule: &TripleRule,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<Option<Arc<[tenet_core::FusionTreeBlockKey]>>, OperationError> {
+    ) -> Result<PreparedLayoutKeys, OperationError> {
         LOWERED_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
         lowered_layout_primer(rule, homspace)
     }
@@ -797,5 +802,43 @@ mod cache_tests {
         let (encoded_space, encoded_data) = adjoint_dyn(&rule, &source, &data).unwrap();
         assert_eq!(lowered_space, encoded_space);
         assert_eq!(lowered_data, encoded_data);
+    }
+
+    #[test]
+    fn lowered_adjoint_missing_source_key_abandons_prepared_layout() {
+        // What: adjoint source-key mapping fails before its checked target
+        // layout receives an ID or cache admission.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = U1FusionRule;
+        let one = U1Irrep::new(1).sector_id();
+        let two = U1Irrep::new(2).sector_id();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(one, 1)], false),
+                SectorLeg::new([(one, 1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(two, 1)], false)]),
+        );
+        let typed = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap(),
+            homspace,
+            BlockStructure::from_blocks_with_rank(3, Vec::new()).unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let source = DynamicFusionMapSpace::from_typed(&typed);
+        reset_scratch_publication_observations();
+
+        let error =
+            adjoint_space_dyn_with_primer(&rule, &source, lowered_layout_primer::<U1FusionRule>)
+                .unwrap_err();
+
+        assert!(matches!(error, OperationError::MissingBlockKey { .. }));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
     }
 }

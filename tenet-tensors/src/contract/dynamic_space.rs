@@ -7,15 +7,45 @@ use tenet_core::{
     BlockKey, BlockStructure, CoreError, DimVec, FusionRule, FusionTensorMapSpace,
     FusionTreeBlockKey, FusionTreeHomSpace, HomSpaceId, LoweredFusionTreeBuildError,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
-    RuleIdentity,
+    PreparedLoweredFusionTreeLayout, RuleIdentity,
 };
 
 use crate::cache::registered_operation_cache;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
+#[derive(Debug)]
+pub(crate) enum PreparedLayoutKeys {
+    Encoded,
+    Lowered(PreparedLoweredFusionTreeLayout),
+}
+
+impl PreparedLayoutKeys {
+    pub(crate) fn keys<R>(
+        &self,
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) -> Arc<[FusionTreeBlockKey]>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        match self {
+            Self::Encoded => homspace.fusion_tree_keys(rule),
+            Self::Lowered(prepared) => prepared.keys_arc(),
+        }
+    }
+
+    fn commit(self) {
+        if let Self::Lowered(prepared) = self {
+            #[cfg(test)]
+            LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
+            prepared.commit();
+        }
+    }
+}
+
 pub(crate) type LayoutKeyBuilder<R> =
-    fn(&R, &FusionTreeHomSpace) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError>;
+    fn(&R, &FusionTreeHomSpace) -> Result<PreparedLayoutKeys, OperationError>;
 
 struct LayoutBuildCapability<R> {
     prime: LayoutKeyBuilder<R>,
@@ -37,21 +67,17 @@ impl<R> LayoutBuildCapability<R> {
     }
 
     fn prime(self, rule: &R, homspace: &FusionTreeHomSpace) -> Result<(), OperationError> {
-        (self.prime)(rule, homspace).map(|_| ())
+        let prepared = (self.prime)(rule, homspace)?;
+        prepared.commit();
+        Ok(())
     }
 
-    fn keys(
+    fn prepare(
         self,
         rule: &R,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<Arc<[FusionTreeBlockKey]>, OperationError>
-    where
-        R: MultiplicityFreeFusionRule,
-    {
-        match (self.prime)(rule, homspace)? {
-            Some(keys) => Ok(keys),
-            None => Ok(homspace.fusion_tree_keys(rule)),
-        }
+    ) -> Result<PreparedLayoutKeys, OperationError> {
+        (self.prime)(rule, homspace)
     }
 }
 
@@ -69,8 +95,8 @@ where
 pub(crate) fn encoded_layout_primer<R>(
     _rule: &R,
     _homspace: &FusionTreeHomSpace,
-) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError> {
-    Ok(None)
+) -> Result<PreparedLayoutKeys, OperationError> {
+    Ok(PreparedLayoutKeys::Encoded)
 }
 
 fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
@@ -85,13 +111,13 @@ fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> Operatio
 pub(crate) fn lowered_layout_primer<R>(
     rule: &R,
     homspace: &FusionTreeHomSpace,
-) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError>
+) -> Result<PreparedLayoutKeys, OperationError>
 where
     R: LoweredMultiplicityFreeAlgebra,
 {
     homspace
-        .try_fusion_tree_keys_lowered(rule)
-        .map(Some)
+        .prepare_fusion_tree_layout_lowered(rule)
+        .map(PreparedLayoutKeys::Lowered)
         .map_err(lowered_build_operation_error)
 }
 
@@ -146,6 +172,21 @@ thread_local! {
     static FINAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static PER_TREE_SHAPE_BATCH_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static SCRATCH_STRUCTURE_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static SCRATCH_STRUCTURE_ADMISSIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static SCRATCH_HOMSPACE_ID_REQUESTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LOWERED_LAYOUT_COMMITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 #[inline]
@@ -162,6 +203,35 @@ fn reset_final_result_layout_builds() {
 #[cfg(test)]
 fn final_result_layout_builds() -> usize {
     FINAL_RESULT_LAYOUT_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_per_tree_shape_batch_builds() {
+    PER_TREE_SHAPE_BATCH_BUILDS.with(|builds| builds.set(0));
+}
+
+#[cfg(test)]
+fn per_tree_shape_batch_builds() -> usize {
+    PER_TREE_SHAPE_BATCH_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_scratch_publication_observations() {
+    SCRATCH_STRUCTURE_BUILDS.set(0);
+    SCRATCH_STRUCTURE_ADMISSIONS.set(0);
+    SCRATCH_HOMSPACE_ID_REQUESTS.set(0);
+    LOWERED_LAYOUT_COMMITS.set(0);
+}
+
+#[cfg(test)]
+/// `(scratch builds, scratch admissions, HomSpace ID requests, layout commits)`.
+pub(crate) fn scratch_publication_observations() -> (usize, usize, usize, usize) {
+    (
+        SCRATCH_STRUCTURE_BUILDS.get(),
+        SCRATCH_STRUCTURE_ADMISSIONS.get(),
+        SCRATCH_HOMSPACE_ID_REQUESTS.get(),
+        LOWERED_LAYOUT_COMMITS.get(),
+    )
 }
 
 /// Identity of a rule-specific coupled-storage layout: the fusion rule's
@@ -244,6 +314,8 @@ fn scratch_subblock_structure<R>(
 where
     R: FusionRule,
 {
+    #[cfg(test)]
+    SCRATCH_STRUCTURE_BUILDS.set(SCRATCH_STRUCTURE_BUILDS.get() + 1);
     let mut tree_blocks = Vec::with_capacity(blocks.len());
     for (index, (key, shape)) in blocks.iter().enumerate() {
         match key {
@@ -513,11 +585,7 @@ where
             provider.as_ref(),
             homspace,
             shapes,
-            |rule, homspace| {
-                homspace
-                    .try_fusion_tree_keys_lowered(rule)
-                    .map_err(lowered_build_operation_error)
-            },
+            move |rule, homspace| layout_build.prepare(rule, homspace),
         )?;
         Self::from_derived_with_capability(provider, space, layout_build)
     }
@@ -713,13 +781,14 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     {
         let layout_build = LayoutBuildCapability::lowered();
-        let keys = layout_build.keys(provider.as_ref(), &homspace)?;
+        let prepared = layout_build.prepare(provider.as_ref(), &homspace)?;
+        let keys = prepared.keys(provider.as_ref(), &homspace);
         let shapes = DynamicFusionMapSpace::degeneracy_shapes_for_keys(&homspace, &keys)?;
-        let space = DynamicFusionMapSpace::from_selected_degeneracy_shapes(
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
             provider.as_ref(),
             homspace,
-            keys,
             shapes,
+            move |_, _| Ok(prepared),
         )?;
         Self::from_derived_with_capability(provider, space, layout_build)
     }
@@ -867,13 +936,16 @@ where
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
-        let keys = self.layout_build.keys(self.provider.as_ref(), &homspace)?;
+        let prepared = self
+            .layout_build
+            .prepare(self.provider.as_ref(), &homspace)?;
+        let keys = prepared.keys(self.provider.as_ref(), &homspace);
         let shapes = build_shapes(keys.as_ref())?;
         let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
             self.provider.as_ref(),
             homspace,
             shapes,
-            move |_, _| Ok(keys),
+            move |_, _| Ok(prepared),
         )?;
         Self::from_derived_like(self, space)
     }
@@ -895,7 +967,7 @@ where
             self.provider.as_ref(),
             homspace,
             shapes,
-            move |rule, homspace| layout_build.keys(rule, homspace),
+            move |rule, homspace| layout_build.prepare(rule, homspace),
         )?;
         Self::from_derived_like(self, space)
     }
@@ -909,13 +981,16 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        let keys = self.layout_build.keys(self.provider.as_ref(), &homspace)?;
+        let prepared = self
+            .layout_build
+            .prepare(self.provider.as_ref(), &homspace)?;
+        let keys = prepared.keys(self.provider.as_ref(), &homspace);
         let shapes = DynamicFusionMapSpace::degeneracy_shapes_for_keys(&homspace, &keys)?;
-        let space = DynamicFusionMapSpace::from_selected_degeneracy_shapes(
+        let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
             self.provider.as_ref(),
             homspace,
-            keys,
             shapes,
+            move |_, _| Ok(prepared),
         )?;
         Self::from_derived_like(self, space)
     }
@@ -958,6 +1033,8 @@ impl DynamicFusionMapSpace {
         homspace: &FusionTreeHomSpace,
         keys: &[FusionTreeBlockKey],
     ) -> Result<Vec<Vec<usize>>, OperationError> {
+        #[cfg(test)]
+        PER_TREE_SHAPE_BATCH_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let rank = homspace.rank();
         let mut shapes = Vec::with_capacity(keys.len());
         for key in keys {
@@ -994,18 +1071,6 @@ impl DynamicFusionMapSpace {
         Ok(shapes)
     }
 
-    fn from_selected_degeneracy_shapes<R>(
-        rule: &R,
-        homspace: FusionTreeHomSpace,
-        keys: Arc<[FusionTreeBlockKey]>,
-        shapes: Vec<Vec<usize>>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    {
-        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, move |_, _| Ok(keys))
-    }
-
     fn from_final_homspace<R>(
         rule: &R,
         homspace: FusionTreeHomSpace,
@@ -1025,7 +1090,27 @@ impl DynamicFusionMapSpace {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         observe_final_result_layout_build();
-        primer(rule, &homspace)?;
+        let prepared = primer(rule, &homspace)?;
+        if let PreparedLayoutKeys::Lowered(prepared) = prepared {
+            let nout = homspace.codomain().len();
+            let nin = homspace.domain().len();
+            let subblock_structure = prepared
+                .build_from_leg_degeneracies(&homspace)
+                .map_err(OperationError::from_core_preserving_context)?;
+            // All fallible final-storage work is complete. Why not commit
+            // before building: malformed leg degeneracies or extent overflow
+            // must leave process-local layout identity untouched.
+            #[cfg(test)]
+            LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
+            prepared.commit();
+            return Ok(Self {
+                nout,
+                nin,
+                homspace: Arc::new(homspace),
+                subblock_structure,
+                rule_identity: Some(rule.rule_identity()),
+            });
+        }
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         let subblock_structure = homspace
@@ -1123,12 +1208,12 @@ impl DynamicFusionMapSpace {
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
-        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, |rule, homspace| {
-            Ok(homspace.fusion_tree_keys(rule))
+        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, |_, _| {
+            Ok(PreparedLayoutKeys::Encoded)
         })
     }
 
-    fn from_degeneracy_shapes_with_key_builder<R, Shapes, BuildKeys>(
+    pub(crate) fn from_degeneracy_shapes_with_key_builder<R, Shapes, BuildKeys>(
         rule: &R,
         homspace: FusionTreeHomSpace,
         shapes: Shapes,
@@ -1138,8 +1223,7 @@ impl DynamicFusionMapSpace {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
-        BuildKeys:
-            FnOnce(&R, &FusionTreeHomSpace) -> Result<Arc<[FusionTreeBlockKey]>, OperationError>,
+        BuildKeys: FnOnce(&R, &FusionTreeHomSpace) -> Result<PreparedLayoutKeys, OperationError>,
     {
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
@@ -1148,31 +1232,35 @@ impl DynamicFusionMapSpace {
             .into_iter()
             .map(Into::into)
             .collect::<Vec<Vec<usize>>>();
-        let cache_key = ScratchStructureKey {
+        let shape_key: Arc<[DimVec]> = shapes
+            .iter()
+            .map(|shape| shape.iter().copied().collect())
+            .collect();
+        let existing_cache_key = homspace.existing_id().map(|homspace| ScratchStructureKey {
             layout: LayoutId {
                 rule: rule.rule_identity(),
-                homspace: homspace.id(),
+                homspace,
             },
             nout,
             rank,
-            shapes: shapes.iter().map(|s| s.iter().copied().collect()).collect(),
-        };
-        let cache = scratch_structure_cache();
-        if let Ok(mut guard) = cache.write() {
-            if let Some(subblock_structure) = guard.entries.get(&cache_key).cloned() {
-                return Ok(Self {
-                    nout,
-                    nin,
-                    homspace: Arc::new(homspace),
-                    subblock_structure,
-                    rule_identity: Some(rule.rule_identity()),
-                });
-            }
+            shapes: Arc::clone(&shape_key),
+        });
+        if let Some(cache_key) = existing_cache_key.as_ref() {
+            let cache = scratch_structure_cache();
+            if let Ok(mut guard) = cache.write() {
+                if let Some(subblock_structure) = guard.entries.get(cache_key).cloned() {
+                    return Ok(Self {
+                        nout,
+                        nin,
+                        homspace: Arc::new(homspace),
+                        subblock_structure,
+                        rule_identity: Some(rule.rule_identity()),
+                    });
+                }
+            };
         }
-        // Why not invoke another builder after selecting the authority keys:
-        // even when both routes converge on one cache entry, that repeats the
-        // lookup. Reuse this Arc for shape validation and storage construction.
-        let keys = build_keys(rule, &homspace)?;
+        let prepared = build_keys(rule, &homspace)?;
+        let keys = prepared.keys(rule, &homspace);
         if keys.len() != shapes.len() {
             return Err(OperationError::from_core_preserving_context(
                 CoreError::BlockCountMismatch {
@@ -1191,10 +1279,31 @@ impl DynamicFusionMapSpace {
             .zip(shapes)
             .collect::<Vec<_>>();
         let built = Arc::new(scratch_subblock_structure(rule, nout, rank, blocks)?);
+        // All Result-returning work is complete. Why not publish earlier:
+        // checked algebra, caller shapes, and block extents can still fail.
+        // The remaining monotonic IDs and bounded cache insertions are
+        // logically infallible, so cross-cache rollback is unnecessary.
+        prepared.commit();
+        let cache_key = existing_cache_key.unwrap_or_else(|| {
+            #[cfg(test)]
+            SCRATCH_HOMSPACE_ID_REQUESTS.set(SCRATCH_HOMSPACE_ID_REQUESTS.get() + 1);
+            ScratchStructureKey {
+                layout: LayoutId {
+                    rule: rule.rule_identity(),
+                    homspace: homspace.id(),
+                },
+                nout,
+                rank,
+                shapes: shape_key,
+            }
+        });
+        let cache = scratch_structure_cache();
         let subblock_structure = if let Ok(mut guard) = cache.write() {
             if let Some(existing) = guard.entries.get(&cache_key).cloned() {
                 existing
             } else {
+                #[cfg(test)]
+                SCRATCH_STRUCTURE_ADMISSIONS.set(SCRATCH_STRUCTURE_ADMISSIONS.get() + 1);
                 guard.entries.put(cache_key, Arc::clone(&built));
                 built
             }
@@ -1881,7 +1990,7 @@ mod lowered_metadata_tests {
     fn counting_primer(
         rule: &TripleRule,
         homspace: &FusionTreeHomSpace,
-    ) -> Result<Option<Arc<[FusionTreeBlockKey]>>, OperationError> {
+    ) -> Result<PreparedLayoutKeys, OperationError> {
         PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
         lowered_layout_primer(rule, homspace)
     }
@@ -1955,6 +2064,56 @@ mod lowered_metadata_tests {
         let encoded =
             DynamicFusionMapSpace::from_final_homspace(rule.as_ref(), homspace()).unwrap();
         assert_eq!(derived.space(), &encoded);
+    }
+
+    #[test]
+    fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
+        // What: the lowered final builder matches the encoded single-pass
+        // layout, never materializes the legacy per-tree shape batch, and an
+        // extent failure reaches no layout commit or scratch publication.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = rule();
+        reset_primer_calls();
+        reset_per_tree_shape_batch_builds();
+
+        let lowered = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            &rule,
+            homspace(),
+            counting_primer,
+        )
+        .unwrap();
+        assert_eq!(primer_calls(), 1);
+        assert_eq!(per_tree_shape_batch_builds(), 0);
+
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let encoded = DynamicFusionMapSpace::from_final_homspace(&rule, homspace()).unwrap();
+        assert_eq!(lowered, encoded);
+
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let vacuum = U1Irrep::new(0).sector_id();
+        let overflowing = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
+        );
+        reset_scratch_publication_observations();
+        let error = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            &U1FusionRule,
+            overflowing,
+            lowered_layout_primer::<U1FusionRule>,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
+        // Why not compare process-global cache totals: coverage runs unit
+        // tests in parallel. These counters attribute publication to this
+        // failing transaction only.
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
     }
 
     #[test]
@@ -2072,6 +2231,335 @@ mod lowered_metadata_tests {
                 .and_then(|source| source.downcast_ref::<FusionAlgebraError>()),
             Some(&expected)
         );
+    }
+
+    fn assert_lowered_root_failure<R>(
+        rule: Arc<R>,
+        homspace: FusionTreeHomSpace,
+        expected: FusionAlgebraError,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
+    {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        reset_scratch_publication_observations();
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            rule,
+            homspace,
+            Vec::<Vec<usize>>::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error, OperationError::FusionAlgebra(Box::new(expected)));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn failed_lowered_roots_build_and_admit_no_scratch() {
+        // What: invalid U1, SU2, and product algebra reaches its exact typed
+        // cause before scratch construction, identity, or admission.
+        let u1_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(U1Irrep::new(i32::MAX).sector_id(), 1)], false),
+                SectorLeg::new([(U1Irrep::new(1).sector_id(), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        assert_lowered_root_failure(
+            Arc::new(U1FusionRule),
+            u1_overflow,
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            },
+        );
+
+        let su2_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(SU2Irrep::from_twice_spin(128).sector_id(), 1)], false),
+                SectorLeg::new([(SU2Irrep::from_twice_spin(127).sector_id(), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        assert_lowered_root_failure(
+            Arc::new(SU2FusionRule),
+            su2_overflow,
+            FusionAlgebraError::FusionNotRepresentable {
+                left: SU2Irrep::from_twice_spin(128).sector_id(),
+                right: SU2Irrep::from_twice_spin(127).sector_id(),
+            },
+        );
+
+        let product_rule = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
+        let product_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new(
+                    [(
+                        Fz2U1Codec::encode(
+                            Z2Irrep::EVEN.sector_id(),
+                            U1Irrep::new(i32::MAX).sector_id(),
+                        ),
+                        1,
+                    )],
+                    false,
+                ),
+                SectorLeg::new(
+                    [(
+                        Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(1).sector_id()),
+                        1,
+                    )],
+                    false,
+                ),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        assert_lowered_root_failure(
+            product_rule,
+            product_overflow,
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn lowered_builder_runs_before_homspace_intern() {
+        // What: a no-ID HomSpace reaches its exact lowered algebra failure while
+        // the key builder still observes that no semantic identity was published.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(U1Irrep::new(i32::MAX).sector_id(), 1)], false),
+                SectorLeg::new([(U1Irrep::new(1).sector_id(), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        reset_scratch_publication_observations();
+        let error = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            &U1FusionRule,
+            overflow,
+            Vec::<Vec<usize>>::new(),
+            |rule, homspace| {
+                assert!(homspace.existing_id().is_none());
+                lowered_layout_primer(rule, homspace)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }))
+        );
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn lowered_shape_validation_runs_before_homspace_intern() {
+        // What: valid U1 lowering followed by an invalid shape reports the exact
+        // rank cause before HomSpace identity or scratch publication.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let homspace =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        reset_scratch_publication_observations();
+        let error = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            &U1FusionRule,
+            homspace,
+            [vec![1]],
+            |rule, homspace| {
+                assert!(homspace.existing_id().is_none());
+                lowered_layout_primer(rule, homspace)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::Core(tenet_core::CoreError::StructureRankMismatch {
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn lowered_count_failure_builds_and_admits_no_scratch() {
+        // What: one valid scalar key paired with zero caller shapes reports
+        // the exact count error and abandons its cold prepared layout.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let homspace =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        reset_scratch_publication_observations();
+
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::new(U1FusionRule),
+            homspace,
+            Vec::<Vec<usize>>::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(tenet_core::CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn lowered_extent_overflow_precedes_identity_and_scratch_admission() {
+        // What: valid U1 keys and shapes whose block extent overflows usize
+        // fail locally before layout, HomSpace, or scratch publication.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let vacuum = U1Irrep::new(0).sector_id();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
+        );
+        reset_scratch_publication_observations();
+
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::new(U1FusionRule),
+            homspace,
+            [vec![usize::MAX, 2]],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(tenet_core::CoreError::ElementCountOverflow)
+        );
+        assert_eq!(scratch_publication_observations(), (1, 0, 0, 0));
+    }
+
+    #[test]
+    fn cached_layout_shape_failure_is_observationally_read_only() {
+        // What: a core-layout hit followed by invalid caller shapes performs
+        // no scratch build, layout commit, HomSpace identity, or admission.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let homspace =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        homspace
+            .try_fusion_tree_keys_lowered(&U1FusionRule)
+            .unwrap();
+        assert!(homspace.existing_id().is_none());
+        reset_scratch_publication_observations();
+
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::new(U1FusionRule),
+            homspace,
+            [vec![1]],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(tenet_core::CoreError::StructureRankMismatch {
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn existing_id_failure_builds_and_admits_no_scratch() {
+        // What: an existing HomSpace ID that misses scratch lookup and then
+        // fails lowered algebra builds and admits no scratch structure.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(U1Irrep::new(i32::MAX).sector_id(), 1)], false),
+                SectorLeg::new([(U1Irrep::new(1).sector_id(), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let _ = overflow.id();
+        reset_scratch_publication_observations();
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::new(U1FusionRule),
+            overflow,
+            Vec::<Vec<usize>>::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }))
+        );
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn validated_scratch_hit_skips_lowered_key_builder() {
+        // What: a successful warm scratch hit returns the same interned
+        // BlockStructure without invoking the lowered key builder again.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let homspace =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        let builds = Cell::new(0);
+        let first = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            &U1FusionRule,
+            homspace,
+            [Vec::<usize>::new()],
+            |rule, homspace| {
+                builds.set(builds.get() + 1);
+                lowered_layout_primer(rule, homspace)
+            },
+        )
+        .unwrap();
+        assert_eq!(builds.get(), 1);
+
+        builds.set(0);
+        let second = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            &U1FusionRule,
+            first.homspace().clone(),
+            [Vec::<usize>::new()],
+            |rule, homspace| {
+                builds.set(builds.get() + 1);
+                lowered_layout_primer(rule, homspace)
+            },
+        )
+        .unwrap();
+        assert_eq!(builds.get(), 0);
+        assert!(Arc::ptr_eq(first.structure(), second.structure()));
+        assert_eq!(first, second);
     }
 }
 
