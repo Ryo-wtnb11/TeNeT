@@ -5768,6 +5768,132 @@ mod tests {
         assert_compact_operator_cohorts(&rule, &sources);
     }
 
+    fn assert_all_codomain_compact_cohorts<R>(
+        rule: &R,
+        sources: &[FusionTreeKey],
+    ) where
+        R: MultiplicityFreeFusionSymbols<Scalar = f64> + MultiplicityFreeFusionRule,
+    {
+        let cases = [
+            ([1usize, 0, 2, 3, 4, 5, 6, 7], [0usize, 1, 2, 3, 4, 5, 6, 7]),
+            ([2usize, 0, 1, 3, 4, 5, 6, 7], [2usize, 0, 1, 3, 4, 5, 6, 7]),
+        ];
+        for cohort_len in [1usize, 2, 4, 8, 16] {
+            let cohort = &sources[..cohort_len];
+            for (permutation, levels) in cases {
+                let got =
+                    multiplicity_free_braid_tree_block(rule, cohort, &permutation, &levels)
+                        .unwrap();
+                let want = cohort
+                    .iter()
+                    .map(|source| {
+                        multiplicity_free_braid_tree(rule, source, &permutation, &levels)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(got.len(), want.len());
+                for (got_row, want_row) in got.iter().zip(&want) {
+                    // What: compact all-codomain execution preserves the scalar
+                    // kernel's destination order as well as every full key.
+                    assert_eq!(
+                        got_row.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                        want_row.iter().map(|(key, _)| key).collect::<Vec<_>>()
+                    );
+                    assert_eq!(got_row.len(), want_row.len());
+                    for ((_, got_coefficient), (_, want_coefficient)) in
+                        got_row.iter().zip(want_row)
+                    {
+                        assert!(
+                            (got_coefficient - want_coefficient).abs()
+                                <= 1.0e-12 * (1.0 + want_coefficient.abs())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_codomain_compact_block_matches_su2_cohorts() {
+        let rule = SU2FusionRule;
+        let sources = compact_operator_cohort_fixture(&rule, su2(2), su2(2))
+            .into_iter()
+            .map(|source| source.codomain_tree().clone())
+            .collect::<Vec<_>>();
+
+        assert_all_codomain_compact_cohorts(&rule, &sources);
+    }
+
+    #[test]
+    fn all_codomain_compact_block_matches_fermionic_product_cohorts() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let external =
+            rule.encode_sector(left.encode_sector(z2_odd(), u1(0)), su2(2));
+        let coupled =
+            rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(2));
+        let sources = compact_operator_cohort_fixture(&rule, external, coupled)
+            .into_iter()
+            .map(|source| source.codomain_tree().clone())
+            .collect::<Vec<_>>();
+
+        assert_all_codomain_compact_cohorts(&rule, &sources);
+    }
+
+    #[test]
+    fn all_codomain_first_step_preserves_tree_vertex_identity() {
+        let tree = |vertex, has_multiplicity| {
+            FusionTreeKey::from_sector_ids(
+                [2, 2],
+                Some(2),
+                [false, false],
+                [],
+                [vertex],
+            )
+            .with_has_multiplicity(has_multiplicity)
+        };
+
+        // What: the direct-first path coalesces ignored multiplicity-free
+        // vertex payloads without first constructing an identity matrix.
+        let basis =
+            CompactMultiplicityFreeTreeBasis::from_sources(&[tree(1, false), tree(9, false)])
+                .unwrap();
+        let (locals, columns) =
+            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
+                Ok(std::iter::once((local.clone(), 1.0)))
+            })
+            .unwrap();
+        assert_eq!(locals.len(), 1);
+        assert_eq!(columns.num_src, 2);
+        assert_eq!(columns.row(0), &[Some(1.0), Some(1.0)]);
+
+        // What: multiplicity-bearing vertices remain distinct local identities
+        // and materialization restores both their flag and payload.
+        let basis =
+            CompactMultiplicityFreeTreeBasis::from_sources(&[tree(1, true), tree(9, true)])
+                .unwrap();
+        let (locals, columns) =
+            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
+                Ok(std::iter::once((local.clone(), 1.0)))
+            })
+            .unwrap();
+        let rows = scatter_compact_tree_block(
+            CompactMultiplicityFreeTreeBasis {
+                frame: basis.frame,
+                locals,
+            },
+            &columns,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].0.vertices(), &[SectorId::new(1)]);
+        assert_eq!(rows[1][0].0.vertices(), &[SectorId::new(9)]);
+        assert!(rows
+            .iter()
+            .all(|row| row[0].0.has_multiplicity()));
+    }
+
     #[test]
     fn compact_first_operator_matches_fusion_tree_vertex_identity() {
         let tree = |vertex, has_multiplicity| {

@@ -3,9 +3,9 @@ use std::cell::Cell;
 use std::hint::black_box;
 
 use tenet_core::{
-    multiplicity_free_permute_tree_pair_block, unique_permute_tree, FusionProductSpace,
-    FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey, SU2FusionRule, SU2Irrep, SectorLeg,
-    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
+    unique_permute_tree, FusionProductSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -136,6 +136,94 @@ fn compact_block_warm_allocations_do_not_restore_per_source_scratch() {
         allocations <= 3072,
         "compact warm block allocated {allocations} times"
     );
+}
+
+#[test]
+fn shared_frame_decode_does_not_allocate_per_source_above_inline_rank() {
+    for (rank, expected_per_extra_source) in [(9usize, 5usize), (16, 11)] {
+        let even = Z2Irrep::EVEN.sector_id();
+        let source = FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            std::iter::repeat_n(even, rank),
+            Some(even),
+            std::iter::repeat_n(false, rank),
+            std::iter::repeat_n(even, rank.saturating_sub(2)),
+            std::iter::repeat_n(SectorId::new(1), rank.saturating_sub(1)),
+        )
+        .unwrap();
+        let single = [source.clone()];
+        let cohort = std::iter::repeat_n(source, 16).collect::<Vec<_>>();
+        let mut permutation = (0..rank).collect::<Vec<_>>();
+        permutation.swap(0, 1);
+        let levels = (0..rank).collect::<Vec<_>>();
+
+        let run = |sources: &[FusionTreeKey]| {
+            multiplicity_free_braid_tree_block(&Z2FusionRule, sources, &permutation, &levels)
+                .unwrap()
+        };
+        black_box(run(&single));
+        black_box(run(&cohort));
+        let (_, single_allocations) = measured_allocations(|| black_box(run(&single)));
+        let (_, cohort_allocations) = measured_allocations(|| black_box(run(&cohort)));
+
+        // What: duplicate rank-9/16 sources reuse one owned external frame.
+        // The exact slope includes the intentional owned output and local
+        // scratch costs. A reconstructed compact codomain frame would add two
+        // allocations per source at either rank, so this equality detects it.
+        assert_eq!(
+            cohort_allocations - single_allocations,
+            expected_per_extra_source * (cohort.len() - single.len()),
+            "rank-{rank} shared-frame allocation slope changed"
+        );
+    }
+}
+
+#[test]
+fn tree_pair_shared_frames_do_not_allocate_per_source_above_inline_rank() {
+    for (rank, expected_per_extra_source) in [(9usize, 5usize), (16, 11)] {
+        let even = Z2Irrep::EVEN.sector_id();
+        let codomain = FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            std::iter::repeat_n(even, rank),
+            Some(even),
+            std::iter::repeat_n(false, rank),
+            std::iter::repeat_n(even, rank.saturating_sub(2)),
+            std::iter::repeat_n(SectorId::new(1), rank.saturating_sub(1)),
+        )
+        .unwrap();
+        let domain = FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            std::iter::empty(),
+            Some(even),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+        )
+        .unwrap();
+        let source = FusionTreeBlockKey::pair(codomain, domain);
+        let single = [source.clone()];
+        let cohort = std::iter::repeat_n(source, 16).collect::<Vec<_>>();
+        let mut permutation = (0..rank).collect::<Vec<_>>();
+        permutation.swap(0, 1);
+
+        let run = |sources: &[FusionTreeBlockKey]| {
+            multiplicity_free_permute_tree_pair_block(&Z2FusionRule, sources, &permutation, &[])
+                .unwrap()
+        };
+        black_box(run(&single));
+        black_box(run(&cohort));
+        let (_, single_allocations) = measured_allocations(|| black_box(run(&single)));
+        let (_, cohort_allocations) = measured_allocations(|| black_box(run(&cohort)));
+
+        // What: both codomain and domain frames are borrowed-matched for every
+        // tree-pair source after the first; the exact slope excludes rebuilding
+        // either frame while retaining the public owned-output costs.
+        assert_eq!(
+            cohort_allocations - single_allocations,
+            expected_per_extra_source * (cohort.len() - single.len()),
+            "rank-{rank} tree-pair shared-frame allocation slope changed"
+        );
+    }
 }
 
 fn u1_homspace(rank: usize) -> FusionTreeHomSpace {

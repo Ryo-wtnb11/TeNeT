@@ -1778,58 +1778,31 @@ where
     Ok((next_basis, next_columns))
 }
 
-fn compose_fusion_tree_block_terms<R, F, I>(
-    rule: &R,
-    basis: &[FusionTreeKey],
-    columns: &DenseColumns<R::Scalar>,
-    mut transform: F,
-) -> Result<(Vec<FusionTreeKey>, DenseColumns<R::Scalar>), CoreError>
-where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-    F: FnMut(&R, &FusionTreeKey) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (FusionTreeKey, R::Scalar)>,
-{
-    // Why not share the tree-pair composer: #83 keeps that path compact and
-    // block-local, while this fusion-only path has no pair-local frame yet.
-    let num_src = columns.num_src;
-    let mut index = FxHashMap::<FusionTreeKey, usize>::default();
-    let mut next_columns = DenseColumns::with_capacity(num_src, basis.len());
-    for (source_row, source_key) in basis.iter().enumerate() {
-        for (destination_key, step_coefficient) in transform(rule, source_key)? {
-            let row = match index.get(&destination_key) {
-                Some(&row) => row,
-                None => {
-                    let row = next_columns.push_empty_row();
-                    index.insert(destination_key, row);
-                    row
-                }
-            };
-            let source_column = columns.row(source_row);
-            let destination_column = next_columns.row_mut(row);
-            for (src, source_coefficient) in source_column.iter().enumerate() {
-                let Some(source_coefficient) = source_coefficient else {
-                    continue;
-                };
-                let contribution = step_coefficient.clone() * source_coefficient.clone();
-                destination_column[src] = Some(match destination_column[src].take() {
-                    Some(existing) => existing + contribution,
-                    None => contribution,
+struct CompactMultiplicityFreeTreeBasis {
+    frame: MultiplicityFreeTreeFrame,
+    locals: Vec<MultiplicityFreeTreeLocal>,
+}
+
+impl CompactMultiplicityFreeTreeBasis {
+    fn from_sources(src_keys: &[FusionTreeKey]) -> Result<Self, CoreError> {
+        let (frame, first_local) =
+            MultiplicityFreeTreeFrame::split(src_keys.first().ok_or(
+                CoreError::MalformedFusionTree {
+                    message: "compact block basis requires at least one source",
+                },
+            )?);
+        let mut locals = Vec::with_capacity(src_keys.len());
+        locals.push(first_local);
+        for source in &src_keys[1..] {
+            if !frame.matches_tree(source) {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "fusion-tree keys must share one group",
                 });
             }
+            locals.push(MultiplicityFreeTreeLocal::from_tree(source));
         }
+        Ok(Self { frame, locals })
     }
-    let mut slots = (0..index.len())
-        .map(|_| None)
-        .collect::<Vec<Option<FusionTreeKey>>>();
-    for (key, row) in index {
-        slots[row] = Some(key);
-    }
-    let basis = slots
-        .into_iter()
-        .map(|key| key.expect("dense rows 0..len are all filled"))
-        .collect();
-    Ok((basis, next_columns))
 }
 
 struct CompactMultiplicityFreeTreePairBasis {
@@ -1850,41 +1823,32 @@ impl CompactMultiplicityFreeTreePairBasis {
         let mut locals = Vec::with_capacity(src_keys.len());
         locals.push(first_local);
         for source in &src_keys[1..] {
-            let (source_frame, source_local) = MultiplicityFreeTreePairFrame::split(source);
-            if source_frame != frame {
+            if !frame.matches_tree_pair(source) {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
                 });
             }
-            locals.push(source_local);
+            locals.push(MultiplicityFreeTreePairLocal::from_tree_pair(source));
         }
         Ok(Self { frame, locals })
     }
 }
 
-fn compose_compact_block_terms<R, F, I>(
+fn compose_compact_block_terms<R, K, F, I>(
     rule: &R,
-    basis: &[MultiplicityFreeTreePairLocal],
+    basis: &[K],
     columns: &DenseColumns<R::Scalar>,
     mut transform: F,
-) -> Result<
-    (
-        Vec<MultiplicityFreeTreePairLocal>,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
+) -> Result<(Vec<K>, DenseColumns<R::Scalar>), CoreError>
 where
-    R: MultiplicityFreeRigidSymbols,
+    R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-    F: FnMut(
-        &R,
-        &MultiplicityFreeTreePairLocal,
-    ) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (MultiplicityFreeTreePairLocal, R::Scalar)>,
+    K: Eq + Hash,
+    F: FnMut(&R, &K) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (K, R::Scalar)>,
 {
     let num_src = columns.num_src;
-    let mut index: FxHashMap<MultiplicityFreeTreePairLocal, usize> = FxHashMap::default();
+    let mut index: FxHashMap<K, usize> = FxHashMap::default();
     let mut next_columns = DenseColumns::with_capacity(num_src, basis.len());
     for (source_row, source_local) in basis.iter().enumerate() {
         for (destination_local, step_coefficient) in transform(rule, source_local)? {
@@ -1910,8 +1874,7 @@ where
             }
         }
     }
-    let mut slots: Vec<Option<MultiplicityFreeTreePairLocal>> =
-        (0..index.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<K>> = (0..index.len()).map(|_| None).collect();
     for (local, row) in index {
         slots[row] = Some(local);
     }
@@ -1922,27 +1885,19 @@ where
     Ok((locals, next_columns))
 }
 
-fn apply_first_compact_block_terms<R, F, I>(
+fn apply_first_compact_block_terms<R, K, F, I>(
     rule: &R,
-    basis: &[MultiplicityFreeTreePairLocal],
+    basis: &[K],
     mut transform: F,
-) -> Result<
-    (
-        Vec<MultiplicityFreeTreePairLocal>,
-        DenseColumns<R::Scalar>,
-    ),
-    CoreError,
->
+) -> Result<(Vec<K>, DenseColumns<R::Scalar>), CoreError>
 where
-    R: MultiplicityFreeRigidSymbols,
+    R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar>,
-    F: FnMut(
-        &R,
-        &MultiplicityFreeTreePairLocal,
-    ) -> Result<I, CoreError>,
-    I: IntoIterator<Item = (MultiplicityFreeTreePairLocal, R::Scalar)>,
+    K: Eq + Hash,
+    F: FnMut(&R, &K) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (K, R::Scalar)>,
 {
-    let mut index: FxHashMap<MultiplicityFreeTreePairLocal, usize> = FxHashMap::default();
+    let mut index: FxHashMap<K, usize> = FxHashMap::default();
     let mut columns = DenseColumns::with_capacity(basis.len(), basis.len());
     for (source, source_local) in basis.iter().enumerate() {
         for (destination_local, coefficient) in transform(rule, source_local)? {
@@ -1961,8 +1916,7 @@ where
             });
         }
     }
-    let mut slots: Vec<Option<MultiplicityFreeTreePairLocal>> =
-        (0..index.len()).map(|_| None).collect();
+    let mut slots: Vec<Option<K>> = (0..index.len()).map(|_| None).collect();
     for (local, row) in index {
         slots[row] = Some(local);
     }
@@ -1971,6 +1925,88 @@ where
         .map(|local| local.expect("dense rows 0..len are all filled"))
         .collect();
     Ok((locals, columns))
+}
+
+fn compact_artin_tree_block_first<R>(
+    rule: &R,
+    basis: CompactMultiplicityFreeTreeBasis,
+    index: usize,
+    inverse: bool,
+) -> Result<
+    (
+        CompactMultiplicityFreeTreeBasis,
+        DenseColumns<R::Scalar>,
+    ),
+    CoreError,
+>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let prepared = prepare_multiplicity_free_artin(rule, &basis.frame, index, inverse)?;
+    let (locals, columns) =
+        apply_first_compact_block_terms(rule, &basis.locals, |rule, local| {
+            prepared.apply(rule, local)
+        })?;
+    Ok((
+        CompactMultiplicityFreeTreeBasis {
+            frame: prepared.output_frame,
+            locals,
+        },
+        columns,
+    ))
+}
+
+fn compact_artin_tree_block_step<R>(
+    rule: &R,
+    basis: CompactMultiplicityFreeTreeBasis,
+    columns: &DenseColumns<R::Scalar>,
+    index: usize,
+    inverse: bool,
+) -> Result<
+    (
+        CompactMultiplicityFreeTreeBasis,
+        DenseColumns<R::Scalar>,
+    ),
+    CoreError,
+>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let prepared = prepare_multiplicity_free_artin(rule, &basis.frame, index, inverse)?;
+    let (locals, next_columns) =
+        compose_compact_block_terms(rule, &basis.locals, columns, |rule, local| {
+            prepared.apply(rule, local)
+        })?;
+    Ok((
+        CompactMultiplicityFreeTreeBasis {
+            frame: prepared.output_frame,
+            locals,
+        },
+        next_columns,
+    ))
+}
+
+fn scatter_compact_tree_block<S>(
+    basis: CompactMultiplicityFreeTreeBasis,
+    columns: &DenseColumns<S>,
+) -> Vec<Vec<(FusionTreeKey, S)>>
+where
+    S: Clone,
+{
+    let mut rows_per_source = vec![Vec::new(); columns.num_src];
+    for (destination_row, destination_local) in basis.locals.into_iter().enumerate() {
+        // Why not materialize in each source column: the full external frame is
+        // identical for the row and must be rebuilt only once at the API edge.
+        let destination_key = basis.frame.materialize(destination_local);
+        for (source, coefficient) in columns.row(destination_row).iter().enumerate() {
+            if let Some(coefficient) = coefficient {
+                rows_per_source[source].push((destination_key.clone(), coefficient.clone()));
+            }
+        }
+    }
+    rows_per_source
 }
 
 fn compact_bendright_block_first<R>(
@@ -2416,34 +2452,25 @@ where
     }
 
     let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
-    let num_src = src_keys.len();
-    let mut basis = src_keys.to_vec();
-    let mut columns = DenseColumns::with_capacity(num_src, num_src);
-    for source in 0..num_src {
-        let row = columns.push_empty_row();
-        columns.row_mut(row)[source] = Some(rule.scalar_one());
-    }
+    let mut basis = CompactMultiplicityFreeTreeBasis::from_sources(src_keys)?;
+    let mut columns = None;
     let mut current_levels = levels.to_vec();
     for swap in swaps {
         let inverse = current_levels[swap] > current_levels[swap + 1];
-        let (next_basis, next_columns) =
-            compose_fusion_tree_block_terms(rule, &basis, &columns, |rule, key| {
-                multiplicity_free_artin_braid_at_with_inverse(rule, key, swap, inverse)
-            })?;
+        let (next_basis, next_columns) = match &columns {
+            Some(columns) => {
+                compact_artin_tree_block_step(rule, basis, columns, swap, inverse)?
+            }
+            None => compact_artin_tree_block_first(rule, basis, swap, inverse)?,
+        };
         basis = next_basis;
-        columns = next_columns;
+        columns = Some(next_columns);
         current_levels.swap(swap, swap + 1);
     }
 
-    let mut rows_per_source = vec![Vec::new(); num_src];
-    for (destination_row, destination_key) in basis.iter().enumerate() {
-        for (source, coefficient) in columns.row(destination_row).iter().enumerate() {
-            if let Some(coefficient) = coefficient {
-                rows_per_source[source].push((destination_key.clone(), coefficient.clone()));
-            }
-        }
-    }
-    Ok(rows_per_source)
+    // A validated non-identity permutation always contains at least one swap.
+    let columns = columns.expect("non-identity permutation produces an Artin step");
+    Ok(scatter_compact_tree_block(basis, &columns))
 }
 
 /// Symmetric-braiding convenience wrapper for
@@ -3373,20 +3400,37 @@ impl Eq for MultiplicityFreeTreeLocal {}
 
 type MultiplicityFreeArtinTerms<S> = SmallVec<[(MultiplicityFreeTreeLocal, S); 2]>;
 
+impl MultiplicityFreeTreeLocal {
+    fn from_tree(tree: &FusionTreeKey) -> Self {
+        Self {
+            coupled: tree.coupled(),
+            innerlines: tree.innerlines().iter().copied().collect(),
+            vertices: tree.vertices().iter().copied().collect(),
+            has_multiplicity: tree.has_multiplicity(),
+        }
+    }
+}
+
 impl MultiplicityFreeTreeFrame {
+    fn from_tree(tree: &FusionTreeKey) -> Self {
+        Self {
+            uncoupled: tree.uncoupled().iter().copied().collect(),
+            is_dual: tree.is_dual().iter().copied().collect(),
+        }
+    }
+
     fn split(tree: &FusionTreeKey) -> (Self, MultiplicityFreeTreeLocal) {
         (
-            Self {
-                uncoupled: tree.uncoupled().iter().copied().collect(),
-                is_dual: tree.is_dual().iter().copied().collect(),
-            },
-            MultiplicityFreeTreeLocal {
-                coupled: tree.coupled(),
-                innerlines: tree.innerlines().iter().copied().collect(),
-                vertices: tree.vertices().iter().copied().collect(),
-                has_multiplicity: tree.has_multiplicity(),
-            },
+            Self::from_tree(tree),
+            MultiplicityFreeTreeLocal::from_tree(tree),
         )
+    }
+
+    fn matches_tree(&self, tree: &FusionTreeKey) -> bool {
+        // Why not split and compare frames: every source shares these slices,
+        // while collecting rank > 8 frames would allocate once per source.
+        self.uncoupled.as_slice() == tree.uncoupled()
+            && self.is_dual.as_slice() == tree.is_dual()
     }
 
     fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
@@ -3413,19 +3457,28 @@ struct MultiplicityFreeTreePairLocal {
     domain: MultiplicityFreeTreeLocal,
 }
 
+impl MultiplicityFreeTreePairLocal {
+    fn from_tree_pair(tree_pair: &FusionTreeBlockKey) -> Self {
+        Self {
+            codomain: MultiplicityFreeTreeLocal::from_tree(tree_pair.codomain_tree()),
+            domain: MultiplicityFreeTreeLocal::from_tree(tree_pair.domain_tree()),
+        }
+    }
+}
+
 impl MultiplicityFreeTreePairFrame {
     fn split(tree_pair: &FusionTreeBlockKey) -> (Self, MultiplicityFreeTreePairLocal) {
-        let (codomain, codomain_local) =
-            MultiplicityFreeTreeFrame::split(tree_pair.codomain_tree());
-        let (domain, domain_local) =
-            MultiplicityFreeTreeFrame::split(tree_pair.domain_tree());
+        let codomain = MultiplicityFreeTreeFrame::from_tree(tree_pair.codomain_tree());
+        let domain = MultiplicityFreeTreeFrame::from_tree(tree_pair.domain_tree());
         (
             Self { codomain, domain },
-            MultiplicityFreeTreePairLocal {
-                codomain: codomain_local,
-                domain: domain_local,
-            },
+            MultiplicityFreeTreePairLocal::from_tree_pair(tree_pair),
         )
+    }
+
+    fn matches_tree_pair(&self, tree_pair: &FusionTreeBlockKey) -> bool {
+        self.codomain.matches_tree(tree_pair.codomain_tree())
+            && self.domain.matches_tree(tree_pair.domain_tree())
     }
 
     fn materialize(&self, local: MultiplicityFreeTreePairLocal) -> FusionTreeBlockKey {
