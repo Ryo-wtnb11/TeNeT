@@ -2599,15 +2599,133 @@ where
     Ok((braided, coefficient))
 }
 
-fn multiplicity_free_artin_braid_at_with_inverse<R>(
-    rule: &R,
-    tree: &FusionTreeKey,
+trait MultiplicityFreeTreeLocalData {
+    fn coupled(&self) -> Option<SectorId>;
+    fn innerlines(&self) -> &[SectorId];
+    fn vertices(&self) -> &[SectorId];
+}
+
+impl MultiplicityFreeTreeLocalData for FusionTreeKey {
+    #[inline]
+    fn coupled(&self) -> Option<SectorId> {
+        self.coupled()
+    }
+
+    #[inline]
+    fn innerlines(&self) -> &[SectorId] {
+        self.innerlines()
+    }
+
+    #[inline]
+    fn vertices(&self) -> &[SectorId] {
+        self.vertices()
+    }
+}
+
+trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
+    fn uncoupled(&self) -> &[SectorId];
+    fn is_dual(&self) -> &[bool];
+}
+
+impl MultiplicityFreeTreeData for FusionTreeKey {
+    #[inline]
+    fn uncoupled(&self) -> &[SectorId] {
+        self.uncoupled()
+    }
+
+    #[inline]
+    fn is_dual(&self) -> &[bool] {
+        self.is_dual()
+    }
+}
+
+#[derive(Clone)]
+struct MultiplicityFreeTreeFrame {
+    uncoupled: SectorVec,
+    is_dual: DualVec,
+}
+
+#[derive(Clone)]
+struct MultiplicityFreeTreeLocal {
+    coupled: Option<SectorId>,
+    innerlines: SectorVec,
+    vertices: SectorVec,
+}
+
+type MultiplicityFreeArtinTerms<S> = SmallVec<[(MultiplicityFreeTreeLocal, S); 2]>;
+
+impl MultiplicityFreeTreeFrame {
+    fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
+        FusionTreeKey::new(
+            self.uncoupled.iter().copied(),
+            local.coupled,
+            self.is_dual.iter().copied(),
+            local.innerlines,
+            local.vertices,
+        )
+    }
+}
+
+trait MultiplicityFreeTreePairData {
+    type Tree: MultiplicityFreeTreeData + ?Sized;
+
+    fn codomain_tree(&self) -> &Self::Tree;
+    fn domain_tree(&self) -> &Self::Tree;
+}
+
+impl MultiplicityFreeTreePairData for FusionTreeBlockKey {
+    type Tree = FusionTreeKey;
+
+    #[inline]
+    fn codomain_tree(&self) -> &Self::Tree {
+        self.codomain_tree()
+    }
+
+    #[inline]
+    fn domain_tree(&self) -> &Self::Tree {
+        self.domain_tree()
+    }
+}
+
+#[derive(Clone)]
+struct MultiplicityFreeTreePairFrame {
+    codomain: MultiplicityFreeTreeFrame,
+    domain: MultiplicityFreeTreeFrame,
+}
+
+struct MultiplicityFreeTreePairLocal {
+    codomain: MultiplicityFreeTreeLocal,
+    domain: MultiplicityFreeTreeLocal,
+}
+
+impl MultiplicityFreeTreePairFrame {
+    fn materialize(&self, local: MultiplicityFreeTreePairLocal) -> FusionTreeBlockKey {
+        FusionTreeBlockKey::pair(
+            self.codomain.materialize(local.codomain),
+            self.domain.materialize(local.domain),
+        )
+    }
+}
+
+struct PreparedMultiplicityFreeArtin {
+    output_frame: MultiplicityFreeTreeFrame,
+    rank: usize,
+    first: SectorId,
     index: usize,
     inverse: bool,
-) -> Result<SmallVec<[(FusionTreeKey, R::Scalar); 2]>, CoreError>
+    left: SectorId,
+    right: SectorId,
+}
+
+fn prepare_multiplicity_free_artin<R, T>(
+    rule: &R,
+    tree: &T,
+    index: usize,
+    inverse: bool,
+) -> Result<PreparedMultiplicityFreeArtin, CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
+    T: MultiplicityFreeTreeData,
 {
     if !rule.fusion_style().is_multiplicity_free() {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -2629,112 +2747,191 @@ where
     uncoupled.swap(index, index + 1);
     let mut is_dual: DualVec = tree.is_dual().iter().copied().collect();
     is_dual.swap(index, index + 1);
+    let frame = MultiplicityFreeTreeFrame {
+        uncoupled,
+        is_dual,
+    };
 
-    if left == rule.vacuum() || right == rule.vacuum() {
-        let mut innerlines = tree.innerlines().to_vec();
-        let mut vertices = tree.vertices().to_vec();
-        if index > 0 {
-            let inner_source = if left == rule.vacuum() {
-                inner_extended_sector(tree, index + 1)?
-            } else {
-                inner_extended_sector(tree, index - 1)?
-            };
-            *innerlines
-                .get_mut(index - 1)
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "unit braid past the first adjacent pair requires an innerline",
-                })? = inner_source;
-            if vertices.len() <= index {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "unit braid past the first adjacent pair requires adjacent vertices",
-                });
-            }
-            vertices.swap(index - 1, index);
-        }
-        let mut out = SmallVec::new();
-        out.push((
-            FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices),
-            rule.scalar_one(),
-        ));
-        return Ok(out);
-    }
-
-    if !rule.braiding_style().has_braiding() {
+    if left != rule.vacuum()
+        && right != rule.vacuum()
+        && !rule.braiding_style().has_braiding()
+    {
         return Err(CoreError::UnsupportedSectorBraid {
             left,
             right,
             style: rule.braiding_style(),
         });
     }
+    Ok(PreparedMultiplicityFreeArtin {
+        output_frame: frame,
+        rank,
+        first: tree.uncoupled()[0],
+        index,
+        inverse,
+        left,
+        right,
+    })
+}
 
-    if index == 0 {
-        let coupled = if rank > 2 {
-            tree.innerlines()
-                .first()
-                .copied()
-                .ok_or(CoreError::MalformedFusionTree {
-                    message: "first braid of a rank > 2 tree requires the first innerline",
-                })?
-        } else {
-            tree.coupled().ok_or(CoreError::MalformedFusionTree {
-                message: "first braid of a rank 2 tree requires a coupled sector",
-            })?
-        };
-        let coefficient = if inverse {
-            rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
-        } else {
-            rule.r_symbol_scalar(left, right, coupled)
-        };
-        let mut out = SmallVec::new();
-        out.push((
-            FusionTreeKey::new(
-                uncoupled,
-                tree.coupled(),
-                is_dual,
-                tree.innerlines().iter().copied(),
-                tree.vertices().iter().copied(),
-            ),
-            coefficient,
-        ));
-        return Ok(out);
-    }
-
-    let a = inner_extended_sector(tree, index - 1)?;
-    let b = left;
-    let c = inner_extended_sector(tree, index)?;
-    let d = right;
-    let e = inner_extended_sector(tree, index + 1)?;
-    let mut terms: SmallVec<[(FusionTreeKey, R::Scalar); 2]> = SmallVec::new();
-    for c_prime in rule.fusion_channels(a, d) {
-        if rule.nsymbol(c_prime, b, e) == 0 {
-            continue;
+impl PreparedMultiplicityFreeArtin {
+    // External frame data stays out of this kernel: the block runner must enumerate
+    // locals from this prepared frame rather than rebuilding full tree keys.
+    fn apply<R, T>(
+        &self,
+        rule: &R,
+        tree: &T,
+    ) -> Result<MultiplicityFreeArtinTerms<R::Scalar>, CoreError>
+    where
+        R: MultiplicityFreeFusionSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+        T: MultiplicityFreeTreeLocalData,
+    {
+        let index = self.index;
+        let left = self.left;
+        let right = self.right;
+        if left == rule.vacuum() || right == rule.vacuum() {
+            let mut innerlines = tree.innerlines().to_vec();
+            let mut vertices = tree.vertices().to_vec();
+            if index > 0 {
+                let inner_source = if left == rule.vacuum() {
+                    self.inner_extended(tree, index + 1)?
+                } else {
+                    self.inner_extended(tree, index - 1)?
+                };
+                *innerlines
+                    .get_mut(index - 1)
+                    .ok_or(CoreError::MalformedFusionTree {
+                        message: "unit braid past the first adjacent pair requires an innerline",
+                    })? = inner_source;
+                if vertices.len() <= index {
+                    return Err(CoreError::MalformedFusionTree {
+                        message: "unit braid past the first adjacent pair requires adjacent vertices",
+                    });
+                }
+                vertices.swap(index - 1, index);
+            }
+            let mut terms = SmallVec::new();
+            terms.push((
+                MultiplicityFreeTreeLocal {
+                    coupled: tree.coupled(),
+                    innerlines: innerlines.into_iter().collect(),
+                    vertices: vertices.into_iter().collect(),
+                },
+                rule.scalar_one(),
+            ));
+            return Ok(terms);
         }
-        let mut innerlines: SectorVec = tree.innerlines().iter().copied().collect();
-        *innerlines
-            .get_mut(index - 1)
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "non-first braid requires an innerline to update",
-            })? = c_prime;
-        let braided = FusionTreeKey::new(
-            uncoupled.clone(),
-            tree.coupled(),
-            is_dual.clone(),
-            innerlines,
-            tree.vertices().iter().copied(),
-        );
-        let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
-        let coefficient = if inverse {
-            let left = rule.r_symbol_scalar(d, c, e);
-            let right = rule.r_symbol_scalar(d, a, c_prime);
-            rule.scalar_conj(left * f_symbol) * right
-        } else {
-            let left = rule.r_symbol_scalar(c, d, e);
-            let right = rule.r_symbol_scalar(a, d, c_prime);
-            left * rule.scalar_conj(f_symbol * right)
-        };
-        terms.push((braided, coefficient));
+
+        if index == 0 {
+            let coupled = if self.rank > 2 {
+                tree.innerlines()
+                    .first()
+                    .copied()
+                    .ok_or(CoreError::MalformedFusionTree {
+                        message: "first braid of a rank > 2 tree requires the first innerline",
+                    })?
+            } else {
+                tree.coupled().ok_or(CoreError::MalformedFusionTree {
+                    message: "first braid of a rank 2 tree requires a coupled sector",
+                })?
+            };
+            let coefficient = if self.inverse {
+                rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+            } else {
+                rule.r_symbol_scalar(left, right, coupled)
+            };
+            let mut terms = SmallVec::new();
+            terms.push((
+                MultiplicityFreeTreeLocal {
+                    coupled: tree.coupled(),
+                    innerlines: tree.innerlines().iter().copied().collect(),
+                    vertices: tree.vertices().iter().copied().collect(),
+                },
+                coefficient,
+            ));
+            return Ok(terms);
+        }
+
+        let a = self.inner_extended(tree, index - 1)?;
+        let b = left;
+        let c = self.inner_extended(tree, index)?;
+        let d = right;
+        let e = self.inner_extended(tree, index + 1)?;
+        let mut terms: MultiplicityFreeArtinTerms<R::Scalar> = SmallVec::new();
+        for c_prime in rule.fusion_channels(a, d) {
+            if rule.nsymbol(c_prime, b, e) == 0 {
+                continue;
+            }
+            let mut innerlines: SectorVec = tree.innerlines().iter().copied().collect();
+            *innerlines
+                .get_mut(index - 1)
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "non-first braid requires an innerline to update",
+                })? = c_prime;
+            let braided = MultiplicityFreeTreeLocal {
+                coupled: tree.coupled(),
+                innerlines,
+                vertices: tree.vertices().iter().copied().collect(),
+            };
+            let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
+            let coefficient = if self.inverse {
+                let left = rule.r_symbol_scalar(d, c, e);
+                let right = rule.r_symbol_scalar(d, a, c_prime);
+                rule.scalar_conj(left * f_symbol) * right
+            } else {
+                let left = rule.r_symbol_scalar(c, d, e);
+                let right = rule.r_symbol_scalar(a, d, c_prime);
+                left * rule.scalar_conj(f_symbol * right)
+            };
+            terms.push((braided, coefficient));
+        }
+        Ok(terms)
     }
-    Ok(terms)
+
+    fn inner_extended<T>(&self, tree: &T, index: usize) -> Result<SectorId, CoreError>
+    where
+        T: MultiplicityFreeTreeLocalData + ?Sized,
+    {
+        if index == 0 {
+            return Ok(self.first);
+        }
+        if index + 1 == self.rank {
+            return tree.coupled().ok_or(CoreError::MalformedFusionTree {
+                message: "inner-extended tree requires a coupled sector",
+            });
+        }
+        tree.innerlines()
+            .get(index - 1)
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "inner-extended tree is missing an innerline",
+            })
+    }
+}
+
+fn multiplicity_free_artin_braid_at_with_inverse<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    index: usize,
+    inverse: bool,
+) -> Result<SmallVec<[(FusionTreeKey, R::Scalar); 2]>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    // Why not keep a second full-key formula for block transforms: the compact
+    // block basis must reuse exactly the same F/R ordering and error gates.
+    let prepared = prepare_multiplicity_free_artin(rule, tree, index, inverse)?;
+    let terms = prepared.apply(rule, tree)?;
+    Ok(terms
+        .into_iter()
+        .map(|(local, coefficient)| {
+            (
+                prepared.output_frame.materialize(local),
+                coefficient,
+            )
+        })
+        .collect())
 }
 
 /// Elementary Artin braid of neighbouring uncoupled legs `index` and `index+1`
@@ -3089,13 +3286,171 @@ where
     Ok(current)
 }
 
-fn multiplicity_free_bendright_tree_pair<R>(
-    rule: &R,
-    tree_pair: &FusionTreeBlockKey,
-) -> Result<SmallVec<[(FusionTreeBlockKey, R::Scalar); 1]>, CoreError>
+struct SwappedTreePair<'a, P>(&'a P);
+
+impl<P> MultiplicityFreeTreePairData for SwappedTreePair<'_, P>
+where
+    P: MultiplicityFreeTreePairData,
+{
+    type Tree = P::Tree;
+
+    fn codomain_tree(&self) -> &Self::Tree {
+        self.0.domain_tree()
+    }
+
+    fn domain_tree(&self) -> &Self::Tree {
+        self.0.codomain_tree()
+    }
+}
+
+struct PreparedMultiplicityFreeBendRight {
+    codomain_rank: usize,
+    domain_rank: usize,
+    codomain_first: SectorId,
+    domain_nonempty: bool,
+    bent_sector: SectorId,
+    bent_is_dual: Option<bool>,
+    output_codomain_uncoupled: SectorVec,
+    output_codomain_is_dual: DualVec,
+    output_domain_uncoupled_prefix: SectorVec,
+    output_domain_is_dual_prefix: DualVec,
+}
+
+struct ValidatedMultiplicityFreeBendRightLocal {
+    local: MultiplicityFreeTreePairLocal,
+    coupled: SectorId,
+    left_coupled: SectorId,
+    bent_is_dual: bool,
+}
+
+impl PreparedMultiplicityFreeBendRight {
+    fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
+    where
+        R: FusionRule,
+    {
+        let bent_is_dual = self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing a duality flag",
+        })?;
+        let mut domain_uncoupled = self.output_domain_uncoupled_prefix.clone();
+        domain_uncoupled.push(rule.dual(self.bent_sector));
+        let mut domain_is_dual = self.output_domain_is_dual_prefix.clone();
+        domain_is_dual.push(!bent_is_dual);
+        Ok(MultiplicityFreeTreePairFrame {
+            codomain: MultiplicityFreeTreeFrame {
+                uncoupled: self.output_codomain_uncoupled.clone(),
+                is_dual: self.output_codomain_is_dual.clone(),
+            },
+            domain: MultiplicityFreeTreeFrame {
+                uncoupled: domain_uncoupled,
+                is_dual: domain_is_dual,
+            },
+        })
+    }
+
+    fn validate_local<R, C, D>(
+        &self,
+        rule: &R,
+        codomain: &C,
+        domain: &D,
+    ) -> Result<ValidatedMultiplicityFreeBendRightLocal, CoreError>
+    where
+        R: FusionRule,
+        C: MultiplicityFreeTreeLocalData + ?Sized,
+        D: MultiplicityFreeTreeLocalData + ?Sized,
+    {
+        let coupled = coupled_or_vacuum(rule, codomain);
+        if self.domain_nonempty {
+            let domain_coupled = coupled_or_vacuum(rule, domain);
+            if domain_coupled != coupled {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "fusion tree pair requires matching coupled sectors",
+                });
+            }
+        }
+
+        let left_coupled = match self.codomain_rank {
+            1 => rule.vacuum(),
+            2 => self.codomain_first,
+            _ => codomain.innerlines().last().copied().ok_or(
+                CoreError::MalformedFusionTree {
+                    message: "bendright requires the last codomain innerline",
+                },
+            )?,
+        };
+        let bent_is_dual = self.bent_is_dual.ok_or(CoreError::MalformedFusionTree {
+            message: "codomain tree is missing a duality flag",
+        })?;
+
+        let cod_inner = codomain.innerlines();
+        let new_codomain_innerlines: &[SectorId] = if self.codomain_rank > 2 {
+            &cod_inner[..cod_inner.len() - 1]
+        } else {
+            &[]
+        };
+        let cod_vertices = codomain.vertices();
+        let new_codomain_vertices: &[SectorId] = if self.codomain_rank > 1 {
+            &cod_vertices[..cod_vertices.len() - 1]
+        } else {
+            &[]
+        };
+        Ok(ValidatedMultiplicityFreeBendRightLocal {
+            local: MultiplicityFreeTreePairLocal {
+                codomain: MultiplicityFreeTreeLocal {
+                    coupled: Some(left_coupled),
+                    innerlines: new_codomain_innerlines.iter().copied().collect(),
+                    vertices: new_codomain_vertices.iter().copied().collect(),
+                },
+                domain: MultiplicityFreeTreeLocal {
+                    coupled: Some(left_coupled),
+                    innerlines: domain
+                        .innerlines()
+                        .iter()
+                        .copied()
+                        .chain((self.domain_rank > 1).then_some(coupled))
+                        .collect(),
+                    vertices: domain
+                        .vertices()
+                        .iter()
+                        .copied()
+                        .chain((self.domain_rank > 0).then_some(SectorId::new(1)))
+                        .collect(),
+                },
+            },
+            coupled,
+            left_coupled,
+            bent_is_dual,
+        })
+    }
+
+    fn coefficient<R>(
+        &self,
+        rule: &R,
+        local: &ValidatedMultiplicityFreeBendRightLocal,
+    ) -> R::Scalar
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+    {
+        let mut coefficient = rule.sqrt_dim_scalar(local.coupled)
+            * rule.inv_sqrt_dim_scalar(local.left_coupled)
+            * rule.b_symbol_scalar(local.left_coupled, self.bent_sector, local.coupled);
+        if local.bent_is_dual {
+            coefficient = coefficient
+                * rule.scalar_conj(
+                    rule.frobenius_schur_phase_scalar(rule.dual(self.bent_sector)),
+                );
+        }
+        coefficient
+    }
+}
+
+fn prepare_multiplicity_free_bendright<R, P>(
+    _rule: &R,
+    tree_pair: &P,
+) -> Result<PreparedMultiplicityFreeBendRight, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Mul<Output = R::Scalar>,
+    P: MultiplicityFreeTreePairData,
 {
     let codomain = tree_pair.codomain_tree();
     let domain = tree_pair.domain_tree();
@@ -3106,96 +3461,114 @@ where
         });
     }
 
-    let coupled = coupled_or_vacuum(rule, codomain);
-    if !domain.uncoupled().is_empty() {
-        let domain_coupled = coupled_or_vacuum(rule, domain);
-        if domain_coupled != coupled {
-            return Err(CoreError::MalformedFusionTree {
-                message: "fusion tree pair requires matching coupled sectors",
-            });
-        }
-    }
-
-    let left_coupled = match codomain_rank {
-        1 => rule.vacuum(),
-        2 => codomain.uncoupled()[0],
-        _ => codomain
-            .innerlines()
-            .last()
-            .copied()
-            .ok_or(CoreError::MalformedFusionTree {
-                message: "bendright requires the last codomain innerline",
-            })?,
-    };
     let bent_sector = codomain.uncoupled()[codomain_rank - 1];
-    let bent_is_dual = codomain.is_dual().get(codomain_rank - 1).copied().ok_or(
-        CoreError::MalformedFusionTree {
-            message: "codomain tree is missing a duality flag",
-        },
-    )?;
-
-    // Build the new trees straight from slice iterators: `FusionTreeKey::new`
-    // collects into inline `SmallVec`, so passing iterators (not `.to_vec()`)
-    // keeps small trees stack-resident — the intermediate heap `Vec`s here were
-    // a large share of the cold recoupling-compile malloc traffic.
-    let cod_inner = codomain.innerlines();
-    let new_codomain_innerlines: &[SectorId] = if codomain_rank > 2 {
-        &cod_inner[..cod_inner.len() - 1]
-    } else {
-        &[]
-    };
-    let cod_vertices = codomain.vertices();
-    let new_codomain_vertices: &[SectorId] = if codomain_rank > 1 {
-        &cod_vertices[..cod_vertices.len() - 1]
-    } else {
-        &[]
-    };
-    let new_codomain = FusionTreeKey::new(
-        codomain.uncoupled()[..codomain_rank - 1].iter().copied(),
-        Some(left_coupled),
-        codomain.is_dual()[..codomain_rank - 1].iter().copied(),
-        new_codomain_innerlines.iter().copied(),
-        new_codomain_vertices.iter().copied(),
-    );
-
+    let bent_is_dual = codomain.is_dual().get(codomain_rank - 1).copied();
+    let output_codomain_uncoupled = codomain.uncoupled()[..codomain_rank - 1]
+        .iter()
+        .copied()
+        .collect();
+    let output_codomain_is_dual = codomain
+        .is_dual()
+        .iter()
+        .copied()
+        .take(codomain_rank - 1)
+        .collect();
     let domain_rank = domain.uncoupled().len();
-    let new_domain = FusionTreeKey::new(
-        domain
-            .uncoupled()
-            .iter()
-            .copied()
-            .chain(std::iter::once(rule.dual(bent_sector))),
-        Some(left_coupled),
-        domain
-            .is_dual()
-            .iter()
-            .copied()
-            .chain(std::iter::once(!bent_is_dual)),
-        domain
-            .innerlines()
-            .iter()
-            .copied()
-            .chain((domain_rank > 1).then_some(coupled)),
-        domain
-            .vertices()
-            .iter()
-            .copied()
-            .chain((domain_rank > 0).then_some(SectorId::new(1))),
-    );
+    Ok(PreparedMultiplicityFreeBendRight {
+        codomain_rank,
+        domain_rank,
+        codomain_first: codomain.uncoupled()[0],
+        domain_nonempty: domain_rank != 0,
+        bent_sector,
+        bent_is_dual,
+        output_codomain_uncoupled,
+        output_codomain_is_dual,
+        output_domain_uncoupled_prefix: domain.uncoupled().iter().copied().collect(),
+        output_domain_is_dual_prefix: domain.is_dual().iter().copied().collect(),
+    })
+}
 
-    let mut coefficient = rule.sqrt_dim_scalar(coupled)
-        * rule.inv_sqrt_dim_scalar(left_coupled)
-        * rule.b_symbol_scalar(left_coupled, bent_sector, coupled);
-    if bent_is_dual {
-        coefficient = coefficient
-            * rule.scalar_conj(rule.frobenius_schur_phase_scalar(rule.dual(bent_sector)));
+struct PreparedMultiplicityFreeBendLeft {
+    right: PreparedMultiplicityFreeBendRight,
+}
+
+impl PreparedMultiplicityFreeBendLeft {
+    fn output_frame<R>(&self, rule: &R) -> Result<MultiplicityFreeTreePairFrame, CoreError>
+    where
+        R: FusionRule,
+    {
+        let frame = self.right.output_frame(rule)?;
+        Ok(MultiplicityFreeTreePairFrame {
+            codomain: frame.domain,
+            domain: frame.codomain,
+        })
     }
-    let mut out = SmallVec::new();
-    out.push((
-        FusionTreeBlockKey::pair(new_codomain, new_domain),
-        coefficient,
-    ));
-    Ok(out)
+
+    fn validate_local<R, C, D>(
+        &self,
+        rule: &R,
+        codomain: &C,
+        domain: &D,
+    ) -> Result<ValidatedMultiplicityFreeBendRightLocal, CoreError>
+    where
+        R: FusionRule,
+        C: MultiplicityFreeTreeLocalData + ?Sized,
+        D: MultiplicityFreeTreeLocalData + ?Sized,
+    {
+        self.right.validate_local(rule, domain, codomain)
+    }
+
+    fn finish_local<R>(
+        &self,
+        rule: &R,
+        validated: ValidatedMultiplicityFreeBendRightLocal,
+    ) -> (MultiplicityFreeTreePairLocal, R::Scalar)
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+    {
+        let coefficient = rule.scalar_conj(self.right.coefficient(rule, &validated));
+        (
+            MultiplicityFreeTreePairLocal {
+                codomain: validated.local.domain,
+                domain: validated.local.codomain,
+            },
+            coefficient,
+        )
+    }
+}
+
+fn prepare_multiplicity_free_bendleft<R, P>(
+    rule: &R,
+    tree_pair: &P,
+) -> Result<PreparedMultiplicityFreeBendLeft, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    P: MultiplicityFreeTreePairData,
+{
+    Ok(PreparedMultiplicityFreeBendLeft {
+        right: prepare_multiplicity_free_bendright(rule, &SwappedTreePair(tree_pair))?,
+    })
+}
+
+fn multiplicity_free_bendright_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreeBlockKey,
+) -> Result<SmallVec<[(FusionTreeBlockKey, R::Scalar); 1]>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    // Why not duplicate bend surgery in the future block runner: duality and
+    // Frobenius-Schur phases must stay identical to the per-source operation.
+    let prepared = prepare_multiplicity_free_bendright(rule, tree_pair)?;
+    let validated =
+        prepared.validate_local(rule, tree_pair.codomain_tree(), tree_pair.domain_tree())?;
+    let frame = prepared.output_frame(rule)?;
+    let coefficient = prepared.coefficient(rule, &validated);
+    let mut terms = SmallVec::new();
+    terms.push((frame.materialize(validated.local), coefficient));
+    Ok(terms)
 }
 
 fn multiplicity_free_bendleft_tree_pair<R>(
@@ -3206,19 +3579,14 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let swapped = FusionTreeBlockKey::pair(
-        tree_pair.domain_tree().clone(),
-        tree_pair.codomain_tree().clone(),
-    );
-    Ok(multiplicity_free_bendright_tree_pair(rule, &swapped)?
-        .into_iter()
-        .map(|(bent, coefficient)| {
-            (
-                FusionTreeBlockKey::pair(bent.domain_tree().clone(), bent.codomain_tree().clone()),
-                rule.scalar_conj(coefficient),
-            )
-        })
-        .collect())
+    let prepared = prepare_multiplicity_free_bendleft(rule, tree_pair)?;
+    let validated =
+        prepared.validate_local(rule, tree_pair.codomain_tree(), tree_pair.domain_tree())?;
+    let frame = prepared.output_frame(rule)?;
+    let (local, coefficient) = prepared.finish_local(rule, validated);
+    let mut terms = SmallVec::new();
+    terms.push((frame.materialize(local), coefficient));
+    Ok(terms)
 }
 
 /// Generic-fusion (outer multiplicity) `bendright`: map the final splitting
@@ -4563,9 +4931,10 @@ fn fusion_tree_vertex_neighbors(
     Ok((left, right))
 }
 
-fn coupled_or_vacuum<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
+fn coupled_or_vacuum<R, T>(rule: &R, tree: &T) -> SectorId
 where
     R: FusionRule,
+    T: MultiplicityFreeTreeLocalData + ?Sized,
 {
     tree.coupled().unwrap_or_else(|| rule.vacuum())
 }
@@ -4630,7 +4999,10 @@ fn permutation_to_adjacent_swaps(
     Ok(swaps)
 }
 
-fn inner_extended_sector(tree: &FusionTreeKey, index: usize) -> Result<SectorId, CoreError> {
+fn inner_extended_sector<T>(tree: &T, index: usize) -> Result<SectorId, CoreError>
+where
+    T: MultiplicityFreeTreeData + ?Sized,
+{
     let rank = tree.uncoupled().len();
     if index == 0 {
         return tree

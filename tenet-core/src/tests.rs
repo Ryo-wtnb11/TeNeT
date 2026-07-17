@@ -1420,6 +1420,52 @@ mod tests {
     }
 
     #[test]
+    fn fibonacci_elementary_artin_rows_match_tensorkit_coefficients() {
+        // What: the private elementary Artin operation preserves TensorKit's
+        // destination order and the independently substituted F/R coefficients
+        // for both crossing orientations.
+        let rule = FibonacciFusionRule;
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+        let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let cispi = |x: f64| Complex64::from_polar(1.0, std::f64::consts::PI * x);
+
+        let forward =
+            multiplicity_free_artin_braid_at_with_inverse(&rule, &tree, 1, false).unwrap();
+        let inverse =
+            multiplicity_free_artin_braid_at_with_inverse(&rule, &tree, 1, true).unwrap();
+
+        assert_eq!(
+            forward
+                .iter()
+                .map(|(key, _)| key.innerlines()[0].id())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            inverse
+                .iter()
+                .map(|(key, _)| key.innerlines()[0].id())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let forward_expected = [
+            Complex64::new(1.0 / phi.sqrt(), 0.0) * cispi(3.0 / 5.0),
+            Complex64::new(-1.0 / phi, 0.0),
+        ];
+        let inverse_expected = [
+            Complex64::new(1.0 / phi.sqrt(), 0.0) * cispi(-3.0 / 5.0),
+            Complex64::new(-1.0 / phi, 0.0),
+        ];
+        for ((_, actual), expected) in forward.iter().zip(forward_expected) {
+            assert!((*actual - expected).norm() < 1.0e-12);
+        }
+        for ((_, actual), expected) in inverse.iter().zip(inverse_expected) {
+            assert!((*actual - expected).norm() < 1.0e-12);
+        }
+    }
+
+    #[test]
     fn linearize_tree_pair_permutation_matches_tensorkit_zero_based_formula() {
         assert_eq!(
             linearize_tree_pair_permutation(&[0, 1], &[2, 3], 2, 2).unwrap(),
@@ -3381,6 +3427,83 @@ mod tests {
         assert_eq!(out[0].0.domain_is_dual(), &[true]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
         assert_eq!(out[0].0.domain_vertices(), &[]);
+    }
+
+    #[test]
+    fn nested_product_elementary_bend_keeps_the_fermionic_phase() {
+        // What: the elementary bend of an odd fZ2 pair retains the negative
+        // product-category phase independently of the block/per-source runners.
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left_rule = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let coupled =
+            rule.encode_sector(left_rule.encode_sector(z2_even(), u1(0)), su2(1));
+        let odd_half =
+            rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(1));
+        let odd_one =
+            rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(2));
+        let source = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [coupled],
+                Some(coupled),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [odd_half, odd_one],
+                Some(coupled),
+                [false, true],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+        );
+
+        let bent = multiplicity_free_bendleft_tree_pair(&rule, &source).unwrap();
+        assert_eq!(bent.len(), 1);
+        assert!(bent[0].1 < 0.0);
+        let restored = multiplicity_free_bendright_tree_pair(&rule, &bent[0].0).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, source);
+        assert!((bent[0].1 * restored[0].1 - 1.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn bendright_preserves_local_error_precedence_before_missing_duality() {
+        // What: local coupled/innerline errors remain observable before a
+        // missing final duality flag when several malformed fields coexist.
+        let missing_innerline = FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids(
+                [1, 1, 1],
+                Some(1),
+                [false, false],
+                [],
+                [1, 1],
+            ),
+            FusionTreeKey::from_sector_ids([], Some(0), [], [], []),
+        );
+        assert_eq!(
+            multiplicity_free_bendright_tree_pair(&SU2FusionRule, &missing_innerline).unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "bendright requires the last codomain innerline",
+            }
+        );
+
+        let mismatched_coupled = FusionTreeBlockKey::pair(
+            FusionTreeKey::from_sector_ids([1, 1], Some(0), [false], [], [1]),
+            FusionTreeKey::from_sector_ids([1], Some(1), [false], [], []),
+        );
+        assert_eq!(
+            multiplicity_free_bendright_tree_pair(&SU2FusionRule, &mismatched_coupled).unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
     }
 
     #[test]
