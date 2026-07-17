@@ -3566,6 +3566,46 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 }
 
 #[test]
+fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
+    let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, true], [], [1]);
+    let dst_key = all_codomain_fusion_tree_test_key([0, 1], Some(1), [true, false], [], [1]);
+    let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
+    let dst_structure = packed_fixture_structure(2, [(dst_key, vec![1, 1])]).unwrap();
+    let src_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![3.0], src_space, src_structure)
+        .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
+            .unwrap();
+    let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
+    let mut context =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    context
+        .all_codomain_tree_transform_into(
+            &Z2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(dst.data(), &[3.0]);
+    assert_eq!(context.cache().plan_len(), 0);
+    assert_eq!(context.cache().structure_len(), 0);
+
+    dst.data_mut().fill(0.0);
+    context
+        .all_codomain_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
+        .unwrap();
+    assert_eq!(dst.data(), &[3.0]);
+    assert_eq!(context.cache().plan_len(), 0);
+    assert_eq!(context.cache().structure_len(), 0);
+}
+
+#[test]
 fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
     let src_key = all_codomain_fusion_tree_test_key([1, 0], Some(1), [false, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
