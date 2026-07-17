@@ -2655,10 +2655,14 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
         [],
         [1],
     ));
-    assert_eq!(U1FusionRule.fusion_style(), FusionStyleKind::Unique);
+    // The cache API requires the built-in rule-key marker and rigid symbols;
+    // use the production Z2 rule, whose semantics match the local UniqueZ2
+    // oracle while satisfying both bounds without adding test-only adapters.
+    let rule = Z2FusionRule;
+    assert_eq!(rule.fusion_style(), FusionStyleKind::Unique);
     let src_tree = expect_tree_key(&src_key);
     let operation = TreeTransformOperation::permute([0, 2], [1]);
-    let (dst_tree, _) = unique_permute_tree_pair(&U1FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
+    let (dst_tree, _) = unique_permute_tree_pair(&rule, &src_tree, &[0, 2], &[1]).unwrap();
     let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let dst_structure =
         packed_fixture_structure(3, [(BlockKey::from(dst_tree), vec![1, 1, 1])]).unwrap();
@@ -2671,21 +2675,21 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
     let first = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
+        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
         .unwrap();
     let second = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation, &dst, &src)
+        .get_or_compile_tree_pair(&rule, operation, &dst, &src)
         .unwrap();
     assert_eq!(first.as_ref(), second.as_ref());
     assert_eq!(cache.plan_len(), 0);
     assert_eq!(cache.structure_len(), 0);
-    assert_eq!(cache.stats().plan_hits, 0);
-    assert_eq!(cache.stats().structure_hits, 0);
+    assert_eq!(cache.stats().plan_hits(), 0);
+    assert_eq!(cache.stats().structure_hits(), 0);
 
     let dst_structure = Arc::new(dst.structure().clone());
     let src_structure = Arc::new(src.structure().clone());
     let direct_plan = build_tree_pair_transform_group_plan(
-        &U1FusionRule,
+        &rule,
         TreeTransformOperation::permute([0, 2], [1]),
         &src_structure,
     )
@@ -2699,7 +2703,7 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
         .unwrap();
     let _ = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            &U1FusionRule,
+            &rule,
             TreeTransformOperation::permute([0, 2], [1]),
             &dst_structure,
             &src_structure,
@@ -2710,7 +2714,7 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
     // numerical result relative to the direct compiler.
     let cached_storage = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation(
-            &U1FusionRule,
+            &rule,
             TreeTransformOperation::permute([0, 2], [1]),
             &dst_structure,
             &src_structure,
