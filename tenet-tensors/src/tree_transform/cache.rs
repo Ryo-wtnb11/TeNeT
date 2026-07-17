@@ -26,8 +26,7 @@ use super::operation::{
 };
 use super::plan::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    build_tree_pair_transform_group_plan, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

@@ -3486,14 +3486,11 @@ fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
     let dst_structure = packed_fixture_structure(2, [(dst_key, vec![1, 1])]).unwrap();
     let src_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
-        vec![3.0], src_space, src_structure,
-    )
-    .unwrap();
-    let mut dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
-        vec![0.0], dst_space, dst_structure,
-    )
-    .unwrap();
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![3.0], src_space, src_structure)
+        .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
+            .unwrap();
     let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
     let mut context =
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
