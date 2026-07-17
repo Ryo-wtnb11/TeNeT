@@ -368,11 +368,19 @@ where
 
     use rayon::prelude::*;
 
-    partition_staged_groups(inputs, threads)
+    let batches = partition_staged_groups(inputs, threads)
         .into_par_iter()
         .map(|batch| batch.into_iter().map(&build).collect::<Result<Vec<_>, _>>())
-        .collect::<Result<Vec<_>, _>>()
-        .map(|batches| batches.into_iter().flatten().collect())
+        .collect::<Vec<_>>();
+    let mut outputs = Vec::new();
+    // Why not collect the parallel iterator directly into `Result<Vec<_>, _>`:
+    // Rayon deliberately leaves the winning error nondeterministic when
+    // several batches fail. Folding ordered batch results here preserves the
+    // serial source-group error precedence without publishing partial state.
+    for batch in batches {
+        outputs.extend(batch?);
+    }
+    Ok(outputs)
 }
 
 fn partition_staged_groups<I>(inputs: Vec<I>, threads: usize) -> Vec<Vec<I>> {

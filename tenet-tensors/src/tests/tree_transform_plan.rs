@@ -1231,6 +1231,77 @@ fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
 }
 
 #[test]
+fn parallel_group_errors_preserve_source_order_and_transaction_state() {
+    use crate::tree_transform::{
+        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
+        TreePairRowMemo,
+    };
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    let keys = [
+        all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]),
+        all_codomain_fusion_tree_test_key([2, 2], Some(0), [false, false], [], [1]),
+    ];
+    let structure =
+        packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
+    let expected = OperationError::InvalidArgument {
+        message: "first source-group error",
+    };
+
+    for threads in [1, 2, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for _ in 0..8 {
+            let barrier = Arc::new(Barrier::new(if threads > 1 { 2 } else { 1 }));
+            let mut memo = TreePairRowMemo::default();
+            let mut hits = 7;
+            let mut misses = 11;
+            let result = pool.install(|| {
+                build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
+                    &SU2FusionRule,
+                    &rule_key,
+                    operation.clone(),
+                    &structure,
+                    &mut memo,
+                    &mut hits,
+                    &mut misses,
+                    threads,
+                    |_, _, missing| {
+                        let first_sector = missing[0].codomain_uncoupled()[0].id();
+                        if threads > 1 {
+                            barrier.wait();
+                        }
+                        if first_sector == 1 {
+                            if threads > 1 {
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Err(OperationError::InvalidArgument {
+                                message: "first source-group error",
+                            })
+                        } else {
+                            Err(OperationError::InvalidArgument {
+                                message: "second source-group error",
+                            })
+                        }
+                    },
+                )
+            });
+
+            // What: even when the later group finishes first, every worker
+            // count reports the first source-group error and commits nothing.
+            assert_eq!(result.unwrap_err(), expected);
+            assert!(memo.is_empty());
+            assert_eq!((hits, misses), (7, 11));
+        }
+    }
+}
+
+#[test]
 fn tree_pair_block_transform_runs_once_per_group_for_cold_and_partial_memos() {
     use crate::tree_transform::{
         build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
