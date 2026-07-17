@@ -594,6 +594,21 @@ impl<'a> OrientedLegView<'a> {
         }
     }
 
+    fn try_mapped_sector<R>(
+        self,
+        rule: &R,
+        sector: SectorId,
+    ) -> Result<SectorId, FusionAlgebraError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        if self.dualize {
+            rule.try_dual_sector(sector)
+        } else {
+            Ok(sector)
+        }
+    }
+
     fn materialize<R>(self, rule: &R) -> SectorLeg
     where
         R: FusionRule,
@@ -602,6 +617,17 @@ impl<'a> OrientedLegView<'a> {
             self.source.dual(rule)
         } else {
             self.source.clone()
+        }
+    }
+
+    fn try_materialize<R>(self, rule: &R) -> Result<SectorLeg, FusionAlgebraError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        if self.dualize {
+            self.source.try_dual(rule)
+        } else {
+            Ok(self.source.clone())
         }
     }
 }
@@ -652,6 +678,31 @@ impl<'a> HomSpaceDescriptor<'a> {
                     .map(|view| view.materialize(rule)),
             ),
         )
+    }
+
+    fn try_materialize<R>(
+        &self,
+        rule: &R,
+    ) -> Result<FusionTreeHomSpace, FusionAlgebraError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let codomain = self
+            .codomain()
+            .iter()
+            .copied()
+            .map(|view| view.try_materialize(rule))
+            .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
+        let domain = self
+            .domain()
+            .iter()
+            .copied()
+            .map(|view| view.try_materialize(rule))
+            .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
+        Ok(FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new(domain),
+        ))
     }
 }
 
@@ -901,17 +952,23 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        validate_axis_selection(codomain_axes, domain_axes, self.rank())?;
-
-        let descriptor = HomSpaceDescriptor::new(
-            codomain_axes
-                .iter()
-                .map(|&axis| self.external_axis_leg_view(axis)),
-            domain_axes
-                .iter()
-                .map(|&axis| self.external_axis_leg_view(axis).toggled()),
-        );
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
         Ok(descriptor.materialize(rule))
+    }
+
+    /// Checked sibling of [`Self::select`] for finite or encoded fusion
+    /// algebras whose dual operation may not be representable.
+    pub fn try_select_checked<R>(
+        &self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
+        descriptor.try_materialize(rule).map_err(Into::into)
     }
 
     pub fn permute<R>(
@@ -928,6 +985,41 @@ impl FusionTreeHomSpace {
         axes.extend_from_slice(domain_axes);
         validate_permutation_inline(&axes, self.rank())?;
         self.select(rule, codomain_axes, domain_axes)
+    }
+
+    /// Checked sibling of [`Self::permute`] for finite or encoded fusion
+    /// algebras whose dual operation may not be representable.
+    pub fn try_permute_checked<R>(
+        &self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let mut axes = SmallVec::<[usize; 8]>::new();
+        axes.extend_from_slice(codomain_axes);
+        axes.extend_from_slice(domain_axes);
+        validate_permutation_inline(&axes, self.rank())?;
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
+        descriptor.try_materialize(rule).map_err(Into::into)
+    }
+
+    fn select_descriptor<'a>(
+        &'a self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<HomSpaceDescriptor<'a>, CoreError> {
+        validate_axis_selection(codomain_axes, domain_axes, self.rank())?;
+        Ok(HomSpaceDescriptor::new(
+            codomain_axes
+                .iter()
+                .map(|&axis| self.external_axis_leg_view(axis)),
+            domain_axes
+                .iter()
+                .map(|&axis| self.external_axis_leg_view(axis).toggled()),
+        ))
     }
 
     pub fn compose<R>(rule: &R, lhs: &Self, rhs: &Self) -> Result<Self, CoreError>
@@ -969,30 +1061,14 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        if lhs_contracting_axes.len() != rhs_contracting_axes.len() {
-            return Err(CoreError::DimensionMismatch {
-                expected: lhs_contracting_axes.len(),
-                actual: rhs_contracting_axes.len(),
-            });
-        }
-
-        let lhs_seen = validate_axis_subset_inline(lhs_contracting_axes, lhs.rank())?;
-        let rhs_seen = validate_axis_subset_inline(rhs_contracting_axes, rhs.rank())?;
-        let lhs_open_axes = (0..lhs.rank())
-            .filter(|&axis| !lhs_seen[axis])
-            .collect::<SmallVec<[usize; 8]>>();
-        let rhs_open_axes = (0..rhs.rank())
-            .filter(|&axis| !rhs_seen[axis])
-            .collect::<SmallVec<[usize; 8]>>();
-        let output_rank = lhs_open_axes.len() + rhs_open_axes.len();
-        validate_permutation_inline(output_axes, output_rank)?;
-        if dst_codomain_rank > output_rank {
-            return Err(CoreError::StructureRankMismatch {
-                expected: output_rank,
-                actual: dst_codomain_rank,
-            });
-        }
-
+        let descriptor = tensorcontract_descriptor(
+            lhs,
+            rhs,
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst_codomain_rank,
+        )?;
         for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
             validate_oriented_composed_leg(
                 rule,
@@ -1000,31 +1076,40 @@ impl FusionTreeHomSpace {
                 rhs.external_axis_leg_view(rhs_axis),
             )?;
         }
-
-        let mut open_legs = SmallVec::<[OrientedLegView<'_>; 8]>::new();
-        open_legs.extend(
-            lhs_open_axes
-                .iter()
-                .map(|&axis| lhs.external_axis_leg_view(axis)),
-        );
-        open_legs.extend(
-            rhs_open_axes
-                .iter()
-                .map(|&axis| rhs.external_axis_leg_view(axis)),
-        );
-        // Why not materialize `(lhs open <- contracted)`, `(contracted <-
-        // rhs open)`, and their composition: pAB only observes the final open
-        // external legs. Selecting those views directly preserves the old
-        // sequence while materializing one final lightweight HomSpace.
-        let descriptor = HomSpaceDescriptor::new(
-            output_axes[..dst_codomain_rank]
-                .iter()
-                .map(|&axis| open_legs[axis]),
-            output_axes[dst_codomain_rank..]
-                .iter()
-                .map(|&axis| open_legs[axis].toggled()),
-        );
         Ok(descriptor.materialize(rule))
+    }
+
+    /// Checked sibling of [`Self::tensorcontract_homspace`] for finite or
+    /// encoded fusion algebras whose dual operation may not be representable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_tensorcontract_homspace_checked<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+    ) -> Result<Self, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let descriptor = tensorcontract_descriptor(
+            lhs,
+            rhs,
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst_codomain_rank,
+        )?;
+        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
+            validate_oriented_composed_leg_checked(
+                rule,
+                lhs.external_axis_leg_view(lhs_axis).toggled(),
+                rhs.external_axis_leg_view(rhs_axis),
+            )?;
+        }
+        descriptor.try_materialize(rule).map_err(Into::into)
     }
 
     /// The cached fusion-tree block keys, shared in O(1) (`Arc::clone`): the
@@ -1607,6 +1692,64 @@ where
     leg.dual(rule)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn tensorcontract_descriptor<'a>(
+    lhs: &'a FusionTreeHomSpace,
+    rhs: &'a FusionTreeHomSpace,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+    output_axes: &[usize],
+    dst_codomain_rank: usize,
+) -> Result<HomSpaceDescriptor<'a>, CoreError> {
+    if lhs_contracting_axes.len() != rhs_contracting_axes.len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: lhs_contracting_axes.len(),
+            actual: rhs_contracting_axes.len(),
+        });
+    }
+
+    let lhs_seen = validate_axis_subset_inline(lhs_contracting_axes, lhs.rank())?;
+    let rhs_seen = validate_axis_subset_inline(rhs_contracting_axes, rhs.rank())?;
+    let lhs_open_axes = (0..lhs.rank())
+        .filter(|&axis| !lhs_seen[axis])
+        .collect::<SmallVec<[usize; 8]>>();
+    let rhs_open_axes = (0..rhs.rank())
+        .filter(|&axis| !rhs_seen[axis])
+        .collect::<SmallVec<[usize; 8]>>();
+    let output_rank = lhs_open_axes.len() + rhs_open_axes.len();
+    validate_permutation_inline(output_axes, output_rank)?;
+    if dst_codomain_rank > output_rank {
+        return Err(CoreError::StructureRankMismatch {
+            expected: output_rank,
+            actual: dst_codomain_rank,
+        });
+    }
+
+    let mut open_legs = SmallVec::<[OrientedLegView<'a>; 8]>::new();
+    open_legs.extend(
+        lhs_open_axes
+            .iter()
+            .map(|&axis| lhs.external_axis_leg_view(axis)),
+    );
+    open_legs.extend(
+        rhs_open_axes
+            .iter()
+            .map(|&axis| rhs.external_axis_leg_view(axis)),
+    );
+    // Why not materialize two permuted operands and their composition: output
+    // ordering observes only these final external views, and doing so would
+    // repeat orientation arithmetic before the final HomSpace exists.
+    let descriptor = HomSpaceDescriptor::new(
+        output_axes[..dst_codomain_rank]
+            .iter()
+            .map(|&axis| open_legs[axis]),
+        output_axes[dst_codomain_rank..]
+            .iter()
+            .map(|&axis| open_legs[axis].toggled()),
+    );
+    Ok(descriptor)
+}
+
 fn validate_axis_subset_inline(
     axes: &[usize],
     rank: usize,
@@ -1720,6 +1863,52 @@ where
         &lhs_domain.materialize(rule),
         &rhs_codomain.materialize(rule),
     )
+}
+
+fn validate_oriented_composed_leg_checked<R>(
+    rule: &R,
+    lhs_domain: OrientedLegView<'_>,
+    rhs_codomain: OrientedLegView<'_>,
+) -> Result<(), CheckedFusionSpaceError>
+where
+    R: CheckedFusionAlgebra,
+{
+    if lhs_domain.is_dual() != rhs_codomain.is_dual() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "contracted fusion leg duality flags do not match",
+        }
+        .into());
+    }
+    if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: lhs_domain.source.sectors().len(),
+            actual: rhs_codomain.source.sectors().len(),
+        }
+        .into());
+    }
+    let mut valid = true;
+    for (sector, degeneracy) in lhs_domain.source.iter() {
+        let expected = lhs_domain.try_mapped_sector(rule, sector)?;
+        let rhs_source_sector = if rhs_codomain.dualize {
+            rule.try_dual_sector(expected)?
+        } else {
+            expected
+        };
+        if rhs_codomain.source.degeneracy(rhs_source_sector) != Some(degeneracy) {
+            valid = false;
+            break;
+        }
+    }
+    if valid {
+        return Ok(());
+    }
+    // Why not fall back to the infallible materializer: malformed-space error
+    // detail must not turn a representability failure into an unwind.
+    validate_composed_leg(
+        &lhs_domain.try_materialize(rule)?,
+        &rhs_codomain.try_materialize(rule)?,
+    )
+    .map_err(Into::into)
 }
 
 fn coupled_subblock_structure_from_layout<F>(
