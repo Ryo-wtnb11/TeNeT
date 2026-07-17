@@ -10983,6 +10983,33 @@ mod tests {
     }
 
     #[test]
+    fn lowered_su2_success_stays_below_the_sector_id_boundary() {
+        // What: validated lowered irreps compute channel bounds and
+        // multiplicity without revalidating or re-encoding SectorIds.
+        reset_su2_id_boundary_observations();
+        let rule = SU2FusionRule;
+        let left = SU2Irrep::from_twice_spin(2);
+        let right = SU2Irrep::from_twice_spin(1);
+        let mut channels = Vec::new();
+        rule.try_for_each_lowered_channel(left, right, &mut |channel| {
+            channels.push(channel.twice_spin());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(channels, vec![1, 3]);
+        assert_eq!(
+            rule.try_lowered_nsymbol(left, right, SU2Irrep::from_twice_spin(1)),
+            Ok(1)
+        );
+        assert_eq!(su2_id_boundary_observations(), (0, 0));
+
+        assert!(rule
+            .try_fusion_channels(left.sector_id(), right.sector_id())
+            .is_ok());
+        assert_eq!(su2_id_boundary_observations(), (2, 0));
+    }
+
+    #[test]
     fn checked_fibonacci_matches_valid_operations_and_rejects_unknown_sectors() {
         // What: Fibonacci's checked companion preserves every valid operation
         // and rejects IDs outside the two-sector algebra with the exact input.

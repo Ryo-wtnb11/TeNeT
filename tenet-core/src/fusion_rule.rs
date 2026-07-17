@@ -2539,24 +2539,60 @@ impl FusionRule for SU2FusionRule {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static CHECKED_SU2_ID_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LOWERED_SU2_ID_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_su2_id_boundary_observations() {
+    CHECKED_SU2_ID_VALIDATIONS.with(|count| count.set(0));
+    LOWERED_SU2_ID_ENCODINGS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn su2_id_boundary_observations() -> (usize, usize) {
+    (
+        CHECKED_SU2_ID_VALIDATIONS.with(std::cell::Cell::get),
+        LOWERED_SU2_ID_ENCODINGS.with(std::cell::Cell::get),
+    )
+}
+
 fn checked_su2_irrep(sector: SectorId) -> Result<SU2Irrep, FusionAlgebraError> {
+    #[cfg(test)]
+    CHECKED_SU2_ID_VALIDATIONS.with(|count| count.set(count.get() + 1));
     SU2Irrep::try_from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Su2FusionClosureError;
+
+fn su2_channel_bounds(
+    left: SU2Irrep,
+    right: SU2Irrep,
+) -> Result<(usize, usize), Su2FusionClosureError> {
+    let left_spin = left.twice_spin();
+    let right_spin = right.twice_spin();
+    let max = left_spin + right_spin;
+    if max > SU2_MAX_DOUBLED_SPIN {
+        return Err(Su2FusionClosureError);
+    }
+    Ok((left_spin.abs_diff(right_spin), max))
 }
 
 fn checked_su2_channels(
     left: SectorId,
     right: SectorId,
 ) -> Result<(usize, usize), FusionAlgebraError> {
-    let left_spin = checked_su2_irrep(left)?.twice_spin();
-    let right_spin = checked_su2_irrep(right)?.twice_spin();
-    let max = left_spin + right_spin;
-    if max > SU2_MAX_DOUBLED_SPIN {
-        return Err(FusionAlgebraError::FusionNotRepresentable {
+    let left_irrep = checked_su2_irrep(left)?;
+    let right_irrep = checked_su2_irrep(right)?;
+    su2_channel_bounds(left_irrep, right_irrep).map_err(|_| {
+        FusionAlgebraError::FusionNotRepresentable {
             left,
             right,
-        });
-    }
-    Ok((left_spin.abs_diff(right_spin), max))
+        }
+    })
 }
 
 impl CheckedFusionAlgebra for SU2FusionRule {
@@ -2610,6 +2646,8 @@ impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
         &self,
         sector: Self::Sector,
     ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        #[cfg(test)]
+        LOWERED_SU2_ID_ENCODINGS.with(|count| count.set(count.get() + 1));
         Ok(sector.into())
     }
 
@@ -2633,8 +2671,14 @@ impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
     where
         F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
     {
-        let (min, max) = checked_su2_channels(left.sector_id(), right.sector_id())
-            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
+        let (min, max) = su2_channel_bounds(left, right).map_err(|_| {
+            LoweredFusionTreeBuildError::fusion_algebra(
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: left.sector_id(),
+                    right: right.sector_id(),
+                },
+            )
+        })?;
         for twice_spin in (min..=max).step_by(2) {
             emit(SU2Irrep::from_twice_spin(twice_spin))?;
         }
@@ -2647,8 +2691,14 @@ impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
         right: Self::Sector,
         coupled: Self::Sector,
     ) -> Result<usize, LoweredFusionTreeBuildError> {
-        let (min, max) = checked_su2_channels(left.sector_id(), right.sector_id())
-            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
+        let (min, max) = su2_channel_bounds(left, right).map_err(|_| {
+            LoweredFusionTreeBuildError::fusion_algebra(
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: left.sector_id(),
+                    right: right.sector_id(),
+                },
+            )
+        })?;
         let coupled = coupled.twice_spin();
         Ok(usize::from(coupled >= min && coupled <= max && (coupled - min) % 2 == 0))
     }
