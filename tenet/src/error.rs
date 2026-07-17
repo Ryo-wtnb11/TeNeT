@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use tenet_core::CoreError;
+use tenet_core::{CoreError, FusionAlgebraError};
 use tenet_tensors::OperationError;
 
 /// Error produced by the user-layer [`crate::prelude::Tensor`] /
@@ -20,6 +20,9 @@ pub enum Error {
     /// Execution error bubbled up from the expert operation layer (boxed,
     /// same reason).
     Operation(Box<OperationError>),
+    /// A finite encoded fusion algebra cannot represent the requested
+    /// mathematical dual or fusion output.
+    FusionAlgebra(Box<FusionAlgebraError>),
     /// The operands carry different fusion rules (e.g. U1 vs Z2).
     RuleMismatch,
     /// The operands belong to different [`crate::prelude::Runtime`]s.
@@ -52,6 +55,7 @@ impl fmt::Display for Error {
         match self {
             Self::Core(err) => write!(f, "core error: {err}"),
             Self::Operation(err) => write!(f, "operation error: {err}"),
+            Self::FusionAlgebra(err) => write!(f, "fusion algebra error: {err}"),
             Self::RuleMismatch => write!(f, "operands use different fusion rules"),
             Self::RuntimeMismatch => write!(f, "operands belong to different runtimes"),
             Self::DtypeMismatch => write!(f, "operands store different scalar types"),
@@ -70,7 +74,16 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Core(err) => Some(err.as_ref()),
+            Self::Operation(err) => Some(err.as_ref()),
+            Self::FusionAlgebra(err) => Some(err.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<CoreError> for Error {
     fn from(err: CoreError) -> Self {
@@ -81,5 +94,11 @@ impl From<CoreError> for Error {
 impl From<OperationError> for Error {
     fn from(err: OperationError) -> Self {
         Self::Operation(Box::new(err))
+    }
+}
+
+impl From<FusionAlgebraError> for Error {
+    fn from(err: FusionAlgebraError) -> Self {
+        Self::FusionAlgebra(Box::new(err))
     }
 }
