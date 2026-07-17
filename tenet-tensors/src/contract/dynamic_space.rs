@@ -170,6 +170,9 @@ thread_local! {
     static FINAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static PER_TREE_SHAPE_BATCH_BUILDS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 #[inline]
@@ -186,6 +189,16 @@ fn reset_final_result_layout_builds() {
 #[cfg(test)]
 fn final_result_layout_builds() -> usize {
     FINAL_RESULT_LAYOUT_BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_per_tree_shape_batch_builds() {
+    PER_TREE_SHAPE_BATCH_BUILDS.with(|builds| builds.set(0));
+}
+
+#[cfg(test)]
+fn per_tree_shape_batch_builds() -> usize {
+    PER_TREE_SHAPE_BATCH_BUILDS.with(std::cell::Cell::get)
 }
 
 /// Identity of a rule-specific coupled-storage layout: the fusion rule's
@@ -985,6 +998,8 @@ impl DynamicFusionMapSpace {
         homspace: &FusionTreeHomSpace,
         keys: &[FusionTreeBlockKey],
     ) -> Result<Vec<Vec<usize>>, OperationError> {
+        #[cfg(test)]
+        PER_TREE_SHAPE_BATCH_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let rank = homspace.rank();
         let mut shapes = Vec::with_capacity(keys.len());
         for key in keys {
@@ -1041,15 +1056,23 @@ impl DynamicFusionMapSpace {
     {
         observe_final_result_layout_build();
         let prepared = primer(rule, &homspace)?;
-        if !matches!(&prepared, PreparedLayoutKeys::Encoded) {
-            let keys = prepared.keys(rule, &homspace);
-            let shapes = Self::degeneracy_shapes_for_keys(&homspace, &keys)?;
-            return Self::from_degeneracy_shapes_with_key_builder(
-                rule,
-                homspace,
-                shapes,
-                move |_, _| Ok(prepared),
-            );
+        if let PreparedLayoutKeys::Lowered(prepared) = prepared {
+            let nout = homspace.codomain().len();
+            let nin = homspace.domain().len();
+            let subblock_structure = prepared
+                .build_from_leg_degeneracies(&homspace)
+                .map_err(OperationError::from_core_preserving_context)?;
+            // All fallible final-storage work is complete. Why not commit
+            // before building: malformed leg degeneracies or extent overflow
+            // must leave process-local layout identity untouched.
+            prepared.commit();
+            return Ok(Self {
+                nout,
+                nin,
+                homspace: Arc::new(homspace),
+                subblock_structure,
+                rule_identity: Some(rule.rule_identity()),
+            });
         }
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
@@ -1998,6 +2021,55 @@ mod lowered_metadata_tests {
         let encoded =
             DynamicFusionMapSpace::from_final_homspace(rule.as_ref(), homspace()).unwrap();
         assert_eq!(derived.space(), &encoded);
+    }
+
+    #[test]
+    fn lowered_final_homspace_keeps_single_pass_and_publishes_only_success() {
+        // What: the lowered final builder matches the encoded single-pass
+        // layout, never materializes the legacy per-tree shape batch, and an
+        // extent failure publishes neither layout nor scratch state.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = rule();
+        reset_primer_calls();
+        reset_per_tree_shape_batch_builds();
+
+        let lowered = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            &rule,
+            homspace(),
+            counting_primer,
+        )
+        .unwrap();
+        assert_eq!(primer_calls(), 1);
+        assert_eq!(per_tree_shape_batch_builds(), 0);
+
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let encoded = DynamicFusionMapSpace::from_final_homspace(&rule, homspace()).unwrap();
+        assert_eq!(lowered, encoded);
+
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let vacuum = U1Irrep::new(0).sector_id();
+        let overflowing = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
+        );
+        let before_layout = tenet_core::fusion_tree_layout_cache_info();
+        let before_scratch = scratch_cache_state();
+        let error = DynamicFusionMapSpace::from_final_homspace_with_primer(
+            &U1FusionRule,
+            overflowing,
+            lowered_layout_primer::<U1FusionRule>,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
+        assert_eq!(tenet_core::fusion_tree_layout_cache_info(), before_layout);
+        assert_eq!(scratch_cache_state(), before_scratch);
     }
 
     #[test]

@@ -5492,6 +5492,102 @@ mod tests {
     }
 
     #[test]
+    fn prepared_lowered_final_structure_reuses_one_checked_enumeration() {
+        // What: cold lowered preparation and the direct leg-degeneracy builder
+        // match the established single-pass structure without a second
+        // decode/channel enumeration or early cache publication.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hom = singleton_rank_hom(su2(1), 5);
+        reset_core_intern_tables();
+        let expected = hom
+            .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+            .unwrap();
+
+        reset_core_intern_tables();
+        reset_lowered_layout_build_observations();
+        let prepared = hom
+            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        let prepare_work = lowered_layout_build_observations();
+        assert!(prepare_work.0 > 0);
+        assert!(prepare_work.1 > 0);
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+
+        reset_lowered_layout_build_observations();
+        let actual = prepared.build_from_leg_degeneracies(&hom).unwrap();
+        assert_eq!(lowered_layout_build_observations(), (0, 0));
+        assert_eq!(actual, expected);
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+
+        prepared.commit();
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 1);
+    }
+
+    #[test]
+    fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneracies() {
+        // What: a prepared layout rejects another same-rank sector signature
+        // without publication, while the same sectors/duality with different
+        // degeneracies are accepted as the target structure authority.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let source = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 3)], true)]),
+        );
+        let prepared = source
+            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .unwrap();
+        let mismatched = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(2), 2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(2), 3)], true)]),
+        );
+
+        let error = prepared
+            .build_from_leg_degeneracies(&mismatched)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            }
+        );
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+        let duality_mismatched = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 2)], true)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 3)], true)]),
+        );
+        assert_eq!(
+            prepared
+                .build_from_leg_degeneracies(&duality_mismatched)
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            }
+        );
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+
+        let target = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 5)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(1), 7)], true)]),
+        );
+        let structure = prepared.build_from_leg_degeneracies(&target).unwrap();
+        assert_eq!(
+            structure
+                .degeneracy_structure()
+                .blocks()
+                .first()
+                .unwrap()
+                .shape(),
+            &[5, 7]
+        );
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 0);
+    }
+
+    #[test]
     fn cached_lowered_preparation_is_observationally_read_only() {
         // What: preparing an already-cached layout performs no enumeration,
         // ID issue, admission, or cache-accounting mutation when abandoned.

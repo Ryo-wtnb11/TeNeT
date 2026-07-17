@@ -121,6 +121,16 @@ fn fusion_product_space_signature(space: &FusionProductSpace) -> Vec<FusionTreeL
         .collect()
 }
 
+fn fusion_product_space_matches_signature(
+    space: &FusionProductSpace,
+    signature: &[FusionTreeLegSetSignature],
+) -> bool {
+    space.legs().len() == signature.len()
+        && space.legs().iter().zip(signature).all(|(leg, expected)| {
+            leg.is_dual() == expected.is_dual && leg.sectors() == expected.sectors.as_slice()
+        })
+}
+
 #[derive(Clone, Debug)]
 struct FusionTreeBlockLayoutEntry {
     row: usize,
@@ -171,6 +181,20 @@ pub struct PreparedLoweredFusionTreeLayout {
 }
 
 impl PreparedLoweredFusionTreeLayout {
+    fn cache_key(&self) -> &FusionTreeHomSpaceCacheKey {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { key, .. }
+            | PreparedLoweredFusionTreeLayoutState::Cold { key, .. } => key,
+        }
+    }
+
+    fn layout_data(&self) -> &FusionTreeHomSpaceLayoutData {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout,
+            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data,
+        }
+    }
+
     pub fn keys(&self) -> &[FusionTreeBlockKey] {
         match &self.state {
             PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
@@ -183,6 +207,34 @@ impl PreparedLoweredFusionTreeLayout {
             PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
             PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
         }
+    }
+
+    /// Builds final coupled storage directly from authoritative leg
+    /// degeneracies while keeping this prepared layout unpublished.
+    pub fn build_from_leg_degeneracies(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<BlockStructure>, CoreError> {
+        let key = self.cache_key();
+        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
+            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            });
+        }
+        // Why not call the cached public builder: downstream validation must
+        // finish before this transaction publishes a layout ID or admission,
+        // and the prepared data already owns the one checked enumeration.
+        // Degeneracies are deliberately absent from the signature: the target
+        // HomSpace is their authority, while sectors and duality select keys.
+        let (sector, degeneracy) = coupled_subblock_parts_from_layout(
+            homspace,
+            homspace.codomain().len(),
+            self.layout_data(),
+            |key| homspace.degeneracy_shape_for_key(key),
+        )?;
+        BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
     }
 
     /// Publishes the prepared layout and returns its shared key storage.
