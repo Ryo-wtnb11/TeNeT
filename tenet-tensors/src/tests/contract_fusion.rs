@@ -2242,9 +2242,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(context.contract_cache().structure_len(), 0);
-    assert_eq!(context.contract_cache().stats().structure_hits(), 0);
-    assert_eq!(context.contract_cache().stats().structure_misses(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert_eq!(context.contraction_resolution_cache_hits(), 0);
     assert!(context.contraction_resolution_cache_misses() >= 1);
@@ -2273,18 +2270,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(automatic_context.contract_cache().structure_len(), 0);
-    assert_eq!(
-        automatic_context.contract_cache().stats().structure_hits(),
-        0
-    );
-    assert_eq!(
-        automatic_context
-            .contract_cache()
-            .stats()
-            .structure_misses(),
-        0
-    );
     assert!(automatic_context.contraction_resolution_cache_len() >= 1);
     assert_eq!(automatic_context.contraction_resolution_cache_hits(), 0);
     assert!(automatic_context.contraction_resolution_cache_misses() >= 1);
@@ -2302,17 +2287,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         .tensorcontract_fusion_into(&rule, &mut beta_only_dst, &lhs, &rhs, axes, 0.0, 3.0)
         .unwrap();
     assert_eq!(beta_only_dst.data(), &[21.0, 33.0]);
-    assert_eq!(
-        automatic_context.contract_cache().stats().structure_hits(),
-        0
-    );
-    assert_eq!(
-        automatic_context
-            .contract_cache()
-            .stats()
-            .structure_misses(),
-        0
-    );
     assert!(automatic_context.contraction_resolution_cache_len() >= 1);
     assert!(automatic_context.contraction_resolution_cache_hits() >= 1);
     assert!(automatic_context.contraction_resolution_cache_fast_hits() >= 1);
@@ -2737,9 +2711,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     }
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
-    assert_eq!(context.contract_cache().structure_len(), 0);
-    assert_eq!(context.contract_cache().stats().structure_hits(), 0);
-    assert_eq!(context.contract_cache().stats().structure_misses(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert_eq!(context.contraction_resolution_cache_hits(), 0);
     assert!(context.contraction_resolution_cache_misses() >= 1);
@@ -2792,9 +2763,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     }
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
-    assert_eq!(context.contract_cache().structure_len(), 0);
-    assert_eq!(context.contract_cache().stats().structure_hits(), 0);
-    assert_eq!(context.contract_cache().stats().structure_misses(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert!(context.contraction_resolution_cache_hits() >= 1);
     assert!(context.contraction_resolution_cache_fast_hits() >= 1);
@@ -2847,21 +2815,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             .structure_misses()
             > 0
     );
-    // The automatic fusion contraction uses the TensorKit-style core
-    // fusion-block pack/GEMM/scatter replay shape, not the generic dense
-    // TensorContractStructure cache.
-    assert_eq!(automatic_context.contract_cache().structure_len(), 0);
-    assert_eq!(
-        automatic_context.contract_cache().stats().structure_hits(),
-        0
-    );
-    assert_eq!(
-        automatic_context
-            .contract_cache()
-            .stats()
-            .structure_misses(),
-        0
-    );
     assert!(automatic_context.contraction_resolution_cache_len() >= 1);
     assert_eq!(automatic_context.contraction_resolution_cache_hits(), 0);
     assert!(automatic_context.contraction_resolution_cache_misses() >= 1);
@@ -2895,7 +2848,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         previous_dynamic_misses = dynamic_misses;
         assert_eq!(no_cache_context.contraction_resolution_cache_len(), 0);
         assert_eq!(no_cache_context.contraction_resolution_cache_len(), 0);
-        assert_eq!(no_cache_context.contract_cache().structure_len(), 0);
         assert_eq!(no_cache_context.contraction_resolution_cache_len(), 0);
         no_cache_dst
             .data_mut()
@@ -2919,7 +2871,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
     assert!(warm_policy_context.contraction_resolution_cache_len() <= 1);
     assert!(warm_policy_context.contraction_resolution_cache_len() <= 1);
-    assert!(warm_policy_context.contract_cache().structure_len() <= 1);
     assert!(warm_policy_context.contraction_resolution_cache_len() <= 1);
 
     let mut lru_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -2944,7 +2895,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
     assert!(lru_context.contraction_resolution_cache_len() <= 1);
     assert!(lru_context.contraction_resolution_cache_len() <= 1);
-    assert!(lru_context.contract_cache().structure_len() <= 1);
     assert!(lru_context.contraction_resolution_cache_len() <= 1);
 
     let mut split_backend_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -3004,18 +2954,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     );
     assert!(automatic_context.dynamic_fusion_space_cache_hits() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_fast_hits() > 0);
-    assert_eq!(automatic_context.contract_cache().structure_len(), 0);
-    assert_eq!(
-        automatic_context.contract_cache().stats().structure_hits(),
-        0
-    );
-    assert_eq!(
-        automatic_context
-            .contract_cache()
-            .stats()
-            .structure_misses(),
-        0
-    );
     assert!(automatic_context.contraction_resolution_cache_len() >= 1);
     assert!(automatic_context.contraction_resolution_cache_hits() >= 1);
     assert!(automatic_context.contraction_resolution_cache_fast_hits() >= 1);
@@ -3180,7 +3118,6 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     assert!(context.tree_context().cache().stats().structure_misses() >= 3);
     assert!(context.dynamic_fusion_space_cache_hits() > 0);
     assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
-    assert_eq!(context.contract_cache().structure_len(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert!(context.contraction_resolution_cache_len() >= 1);
@@ -3265,7 +3202,6 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
         }
     }
     assert!(context.tree_context().cache().stats().structure_misses() > 0);
-    assert_eq!(context.contract_cache().structure_len(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert!(context.contraction_resolution_cache_misses() >= 1);
@@ -3872,10 +3808,6 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
             "actual {actual} expected {expected}"
         );
     }
-    // This path uses core fusion-block pack/GEMM/scatter directly; the
-    // generic TensorContractStructure cache is only used by dense/block-spec
-    // contraction paths.
-    assert_eq!(context.contract_cache().structure_len(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert_eq!(context.contraction_resolution_cache_hits(), 0);
     assert!(context.contraction_resolution_cache_misses() >= 1);
@@ -3886,7 +3818,6 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     context
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
-    assert_eq!(context.contract_cache().stats().structure_hits(), 0);
     assert!(context.contraction_resolution_cache_len() >= 1);
     assert!(context.contraction_resolution_cache_hits() >= 1);
     assert!(context.contraction_resolution_cache_misses() >= 1);

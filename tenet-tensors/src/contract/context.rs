@@ -1,7 +1,6 @@
-use rustc_hash::FxHashMap;
 use std::any::Any;
 use std::hash::Hash;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tenet_core::{
     BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
@@ -10,8 +9,7 @@ use tenet_core::{
 };
 
 use crate::cache::{
-    typed_global_map, OperationCachePolicy, TensorContractStructureCache,
-    TensorContractStructureCacheKey,
+    OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
 };
 use crate::lowering::adjoint_fusion_space_view;
 use crate::storage_scratch::StorageTensorContractWorkspace;
@@ -42,18 +40,8 @@ use super::fusion::{
 use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::{ContractionResolutionCache, Resolution};
 use super::scratch::DynamicFusionScratchWorkspace;
-use super::structure::{TensorContractAxisPlan, TensorContractBlockSpec, TensorContractStructure};
+use super::structure::{TensorContractAxisPlan, TensorContractStructure};
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
-
-type GlobalTensorContractStructureMap<PlanKey> =
-    RwLock<FxHashMap<TensorContractStructureCacheKey<PlanKey>, Arc<TensorContractStructure<f64>>>>;
-
-fn global_tensor_contract_structures<PlanKey>() -> Arc<GlobalTensorContractStructureMap<PlanKey>>
-where
-    PlanKey: 'static + Clone + Eq + Hash + Send + Sync,
-{
-    typed_global_map()
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractPlanKey {
@@ -82,86 +70,6 @@ impl TensorContractPlanKey {
     #[inline]
     pub fn axes(&self) -> &TensorContractSpecOwned {
         &self.axes
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct TensorContractBlockPlanKey {
-    axes: TensorContractSpecOwned,
-    block_specs: Vec<TensorContractBlockPlanTerm>,
-}
-
-impl TensorContractBlockPlanKey {
-    pub fn from_block_specs(
-        lhs_rank: usize,
-        rhs_rank: usize,
-        dst_rank: usize,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
-    ) -> Result<Self, OperationError> {
-        let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
-        Ok(Self {
-            axes: TensorContractSpecOwned::new_with_conjugation(
-                axis_plan.lhs_contracting_axes,
-                axis_plan.rhs_contracting_axes,
-                axis_plan.output_axes,
-                axis_plan.lhs_conjugate,
-                axis_plan.rhs_conjugate,
-            ),
-            block_specs: block_specs
-                .iter()
-                .map(TensorContractBlockPlanTerm::from_block_spec)
-                .collect(),
-        })
-    }
-
-    #[inline]
-    pub fn axes(&self) -> &TensorContractSpecOwned {
-        &self.axes
-    }
-
-    #[inline]
-    pub fn block_specs(&self) -> &[TensorContractBlockPlanTerm] {
-        &self.block_specs
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct TensorContractBlockPlanTerm {
-    dst_block: usize,
-    lhs_block: usize,
-    rhs_block: usize,
-    coefficient_bits: u64,
-}
-
-impl TensorContractBlockPlanTerm {
-    fn from_block_spec(spec: &TensorContractBlockSpec) -> Self {
-        Self {
-            dst_block: spec.dst_block(),
-            lhs_block: spec.lhs_block(),
-            rhs_block: spec.rhs_block(),
-            coefficient_bits: spec.coefficient().to_bits(),
-        }
-    }
-
-    #[inline]
-    pub fn dst_block(&self) -> usize {
-        self.dst_block
-    }
-
-    #[inline]
-    pub fn lhs_block(&self) -> usize {
-        self.lhs_block
-    }
-
-    #[inline]
-    pub fn rhs_block(&self) -> usize {
-        self.rhs_block
-    }
-
-    #[inline]
-    pub fn coefficient_bits(&self) -> u64 {
-        self.coefficient_bits
     }
 }
 
@@ -306,125 +214,13 @@ impl TensorContractCache<TensorContractPlanKey> {
             self.structures.touch(&structure_key);
         } else {
             self.stats.structure_misses += 1;
-            let global = global_tensor_contract_structures::<TensorContractPlanKey>();
-            let structure = global
-                .read()
-                .expect("global tensor contract structure cache poisoned")
-                .get(&structure_key)
-                .cloned();
-            if let Some(structure) = structure {
-                self.structures
-                    .insert_arc(structure_key.clone(), Arc::clone(&structure));
-            } else {
-                let structure = Arc::new(TensorContractStructure::compile(
-                    dst,
-                    lhs,
-                    rhs,
-                    plan_key.axes().as_spec(),
-                )?);
-                global
-                    .write()
-                    .expect("global tensor contract structure cache poisoned")
-                    .entry(structure_key.clone())
-                    .or_insert_with(|| Arc::clone(&structure));
-                self.structures.insert_arc(structure_key.clone(), structure);
-            }
-        }
-        Ok(self
-            .structures
-            .get(&structure_key)
-            .expect("tensor contract structure inserted before replay"))
-    }
-}
-
-impl TensorContractCache<TensorContractBlockPlanKey> {
-    pub fn get_or_compile_with_block_specs<
-        TDst,
-        TLhs,
-        TRhs,
-        const DST_NOUT: usize,
-        const DST_NIN: usize,
-        const LHS_NOUT: usize,
-        const LHS_NIN: usize,
-        const RHS_NOUT: usize,
-        const RHS_NIN: usize,
-        SDst,
-        SLhs,
-        SRhs,
-        DDst,
-        DLhs,
-        DRhs,
-    >(
-        &mut self,
-        dst: &TensorMap<TDst, DST_NOUT, DST_NIN, SDst, DDst>,
-        lhs: &TensorMap<TLhs, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-        rhs: &TensorMap<TRhs, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-        axes: TensorContractSpec<'_>,
-        block_specs: &[TensorContractBlockSpec],
-    ) -> Result<&TensorContractStructure, OperationError>
-    where
-        DDst: TensorStorage<TDst>,
-        DLhs: TensorStorage<TLhs>,
-        DRhs: TensorStorage<TRhs>,
-    {
-        let plan_key = TensorContractBlockPlanKey::from_block_specs(
-            lhs.structure().rank(),
-            rhs.structure().rank(),
-            dst.structure().rank(),
-            axes,
-            block_specs,
-        )?;
-        let structure_key = TensorContractStructureCacheKey::from_structures(
-            plan_key.clone(),
-            dst.structure(),
-            lhs.structure(),
-            rhs.structure(),
-        )?;
-        if !self.structures.policy().stores_entries() {
-            self.stats.structure_misses += 1;
-            let structure = TensorContractStructure::compile_with_block_specs(
+            let structure = Arc::new(TensorContractStructure::compile(
                 dst,
                 lhs,
                 rhs,
                 plan_key.axes().as_spec(),
-                block_specs,
-            )?;
-            self.ephemeral_structure = Some((structure_key, structure));
-            return Ok(&self
-                .ephemeral_structure
-                .as_ref()
-                .expect("ephemeral tensor contract structure inserted before replay")
-                .1);
-        }
-        if self.structures.get(&structure_key).is_some() {
-            self.stats.structure_hits += 1;
-            self.structures.touch(&structure_key);
-        } else {
-            self.stats.structure_misses += 1;
-            let global = global_tensor_contract_structures::<TensorContractBlockPlanKey>();
-            let structure = global
-                .read()
-                .expect("global tensor contract structure cache poisoned")
-                .get(&structure_key)
-                .cloned();
-            if let Some(structure) = structure {
-                self.structures
-                    .insert_arc(structure_key.clone(), Arc::clone(&structure));
-            } else {
-                let structure = Arc::new(TensorContractStructure::compile_with_block_specs(
-                    dst,
-                    lhs,
-                    rhs,
-                    plan_key.axes().as_spec(),
-                    block_specs,
-                )?);
-                global
-                    .write()
-                    .expect("global tensor contract structure cache poisoned")
-                    .entry(structure_key.clone())
-                    .or_insert_with(|| Arc::clone(&structure));
-                self.structures.insert_arc(structure_key.clone(), structure);
-            }
+            )?);
+            self.structures.insert_arc(structure_key.clone(), structure);
         }
         Ok(self
             .structures
@@ -665,7 +461,6 @@ pub struct TensorContractFusionExecutionContext<
     resolution_cache: ContractionResolutionCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
-    contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
     #[cfg(test)]
@@ -690,7 +485,6 @@ where
         tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         contract_backend: BC,
         contract_workspace: BC::Workspace,
-        contract_cache: TensorContractCache<TensorContractBlockPlanKey>,
     ) -> Self {
         Self {
             tree_context,
@@ -698,7 +492,6 @@ where
             resolution_cache: ContractionResolutionCache::default(),
             contract_backend,
             contract_workspace,
-            contract_cache,
             fusion_block_workspace: FusionBlockContractWorkspace::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
             #[cfg(test)]
@@ -751,11 +544,6 @@ where
         &self.contract_workspace
     }
 
-    #[inline]
-    pub fn contract_cache(&self) -> &TensorContractCache<TensorContractBlockPlanKey> {
-        &self.contract_cache
-    }
-
     /// Entries in the unified contraction resolution cache (route + plan
     /// resolve together; one entry per (rule, spaces, axes)).
     #[inline]
@@ -787,7 +575,6 @@ where
         self.tree_context.set_cache_policy(policy);
         self.dynamic_space_cache.set_policy(policy);
         self.resolution_cache.set_policy(policy);
-        self.contract_cache.set_policy(policy);
     }
 
     pub fn into_parts(
@@ -796,13 +583,11 @@ where
         TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         BC,
         BC::Workspace,
-        TensorContractCache<TensorContractBlockPlanKey>,
     ) {
         (
             self.tree_context,
             self.contract_backend,
             self.contract_workspace,
-            self.contract_cache,
         )
     }
 }
@@ -870,7 +655,6 @@ where
             TreeTransformExecutionContext::new(tree_backend),
             contract_backend,
             BC::Workspace::default(),
-            TensorContractCache::new(),
         )
     }
 }

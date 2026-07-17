@@ -29,9 +29,8 @@ pub use backend::{
 };
 pub use context::{
     tensorcontract_into_with_context, HostTreeFusionExecutionContext, PreparedTensorContractFusion,
-    TensorContractBlockPlanKey, TensorContractBlockPlanTerm, TensorContractCache,
-    TensorContractCacheStats, TensorContractExecutionContext, TensorContractFusionExecutionContext,
-    TensorContractPlanKey,
+    TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
+    TensorContractFusionExecutionContext, TensorContractPlanKey,
 };
 pub(crate) use dynamic_space::LayoutKeyBuilder;
 #[cfg(test)]

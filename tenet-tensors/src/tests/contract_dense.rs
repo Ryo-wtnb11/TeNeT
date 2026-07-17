@@ -699,6 +699,30 @@ fn tensorcontract_execution_context_replays_without_recompiling() {
 }
 
 #[test]
+fn tensorcontract_structure_caches_do_not_promote_across_contexts() {
+    // What: ordinary contraction structures remain local to the cache that
+    // compiled them while each cache still replays its own entry.
+    let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
+    let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
+    let lhs = TensorMap::<f64, 2, 0>::filled(1.0, lhs_space).unwrap();
+    let rhs = TensorMap::<f64, 2, 0>::filled(1.0, rhs_space).unwrap();
+    let dst = TensorMap::<f64, 2, 0>::filled(0.0, dst_space).unwrap();
+    let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
+
+    let mut first = TensorContractCache::new();
+    let first_ptr = first.get_or_compile(&dst, &lhs, &rhs, axes).unwrap() as *const _;
+    let mut second = TensorContractCache::new();
+    let second_ptr = second.get_or_compile(&dst, &lhs, &rhs, axes).unwrap() as *const _;
+    assert_ne!(first_ptr, second_ptr);
+    assert_eq!(first.stats().structure_misses(), 1);
+    assert_eq!(second.stats().structure_misses(), 1);
+    let replay_ptr = first.get_or_compile(&dst, &lhs, &rhs, axes).unwrap() as *const _;
+    assert_eq!(first_ptr, replay_ptr);
+    assert_eq!(first.stats().structure_hits(), 1);
+}
+
+#[test]
 fn tensorcontract_execution_context_no_cache_recompiles_without_retaining_structure() {
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
