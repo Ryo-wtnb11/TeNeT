@@ -78,7 +78,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                         f64,
                         f64,
                     >>::Workspace::default(),
-                    tenet_tensors::TensorContractCache::new(),
                 ),
             c64: Ctx::with_parts(
                 tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
@@ -89,7 +88,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     Complex64,
                     f64,
                 >>::Workspace::default(),
-                tenet_tensors::TensorContractCache::new(),
             ),
         })
     }

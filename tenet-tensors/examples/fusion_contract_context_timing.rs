@@ -111,12 +111,6 @@ fn bench_su2_non_core_form_source() {
         context.tree_context().cache().structure_len()
     );
     println!(
-        "contract_structure_cache,hits={},misses={},len={}",
-        context.contract_cache().stats().structure_hits(),
-        context.contract_cache().stats().structure_misses(),
-        context.contract_cache().structure_len()
-    );
-    println!(
         "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
         context.dynamic_fusion_space_cache_hits(),
         context.dynamic_fusion_space_cache_fast_hits(),
@@ -174,12 +168,6 @@ fn bench_su2_output_scratch() {
         context.tree_context().cache().stats().structure_hits(),
         context.tree_context().cache().stats().structure_misses(),
         context.tree_context().cache().structure_len()
-    );
-    println!(
-        "contract_structure_cache,hits={},misses={},len={}",
-        context.contract_cache().stats().structure_hits(),
-        context.contract_cache().stats().structure_misses(),
-        context.contract_cache().structure_len()
     );
     println!(
         "dynamic_fusion_space_cache,hits={},fast_hits={},misses={},len={}",
@@ -245,12 +233,6 @@ fn bench_product_complex() {
         context.dynamic_fusion_space_cache_fast_hits(),
         context.dynamic_fusion_space_cache_misses(),
         context.dynamic_fusion_space_cache_len()
-    );
-    println!(
-        "contract_structure_cache,hits={},misses={},len={}",
-        context.contract_cache().stats().structure_hits(),
-        context.contract_cache().stats().structure_misses(),
-        context.contract_cache().structure_len()
     );
     println!(
         "fusion_block_contract_cache,hits={},fast_hits={},misses={},len={}",
