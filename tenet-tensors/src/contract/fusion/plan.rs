@@ -1,11 +1,76 @@
-use tenet_core::{FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
+use tenet_core::{
+    CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionTensorMapSpace,
+    FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols,
+};
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
-use super::super::dynamic_space::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
+use super::super::dynamic_space::{
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder, TransformedLayoutProbe,
+};
 use super::super::structure::TensorContractAxisPlan;
+
+type HomSpaceBuilder<R> = fn(
+    &R,
+    &FusionTreeHomSpace,
+    &FusionTreeHomSpace,
+    &[usize],
+    &[usize],
+    &[usize],
+    usize,
+) -> Result<FusionTreeHomSpace, OperationError>;
+
+fn encoded_homspace_builder<R: FusionRule>(
+    rule: &R,
+    lhs: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+    dst_rank: usize,
+) -> Result<FusionTreeHomSpace, OperationError> {
+    FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_axes,
+        dst_rank,
+    )
+    .map_err(OperationError::from_core_preserving_context)
+}
+
+fn lowered_homspace_builder<R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra>(
+    rule: &R,
+    lhs: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+    dst_rank: usize,
+) -> Result<FusionTreeHomSpace, OperationError> {
+    FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+        rule,
+        lhs,
+        rhs,
+        lhs_axes,
+        rhs_axes,
+        output_axes,
+        dst_rank,
+    )
+    .map_err(|error| match error {
+        CheckedFusionSpaceError::Core(error) => {
+            OperationError::from_core_preserving_context(*error)
+        }
+        CheckedFusionSpaceError::FusionAlgebra(error) => OperationError::FusionAlgebra(error),
+        _ => OperationError::InvalidArgument {
+            message: "unknown checked fusion metadata error",
+        },
+    })
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -231,6 +296,57 @@ where
     )
 }
 
+#[cfg(test)]
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_lowered<R>(
+    dst: &BoundDynamicFusionMapSpace<R>,
+    lhs: &BoundDynamicFusionMapSpace<R>,
+    rhs: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + CheckedFusionAlgebra,
+{
+    let rule = lhs.provider();
+    dst.space().validate_rule(rule)?;
+    lhs.space().validate_rule(rule)?;
+    rhs.space().validate_rule(rule)?;
+    let lowered_axes = lower_tensorcontract_adjoint_axes(
+        lhs.space().nout(),
+        lhs.space().nin(),
+        rhs.space().nout(),
+        rhs.space().nin(),
+        axes,
+    )?;
+    let lhs_adjoint;
+    let lhs_space = if axes.lhs_conjugate() {
+        lhs_adjoint = lhs.space().adjoint_view()?;
+        &lhs_adjoint
+    } else {
+        lhs.space()
+    };
+    let rhs_adjoint;
+    let rhs_space = if axes.rhs_conjugate() {
+        rhs_adjoint = rhs.space().adjoint_view()?;
+        &rhs_adjoint
+    } else {
+        rhs.space()
+    };
+    select_tensorcontract_fusion_plan_from_spaces_with_probe(
+        rule,
+        dst.space(),
+        lhs_space,
+        rhs_space,
+        lowered_axes.as_spec(),
+        lowered_axes.lhs_storage_conjugate(),
+        lowered_axes.rhs_storage_conjugate(),
+        lowered_layout_probe::<R>,
+        lowered_homspace_builder::<R>,
+        Some(dst.layout_primer()),
+    )
+}
+
 pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -403,7 +519,71 @@ fn select_tensorcontract_fusion_plan_from_spaces<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes)?;
+    select_tensorcontract_fusion_plan_from_spaces_with_probe(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        lhs_source_conjugate,
+        rhs_source_conjugate,
+        encoded_layout_probe::<R>,
+        encoded_homspace_builder::<R>,
+        None,
+    )
+}
+
+type LayoutProbeBuilder<R> = for<'a> fn(
+    &'a R,
+    &'a DynamicFusionMapSpace,
+    &'a TreeTransformOperation,
+    Option<LayoutKeyBuilder<R>>,
+) -> Result<TransformedLayoutProbe, OperationError>;
+
+fn encoded_layout_probe<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    operation: &TreeTransformOperation,
+    _primer: Option<LayoutKeyBuilder<R>>,
+) -> Result<TransformedLayoutProbe, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    space.transformed_layout_probe(rule, operation)
+}
+
+fn lowered_layout_probe<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    operation: &TreeTransformOperation,
+    primer: Option<LayoutKeyBuilder<R>>,
+) -> Result<TransformedLayoutProbe, OperationError>
+where
+    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+{
+    space.transformed_layout_probe_with_primer(
+        rule,
+        operation,
+        primer.expect("lowered layout probe requires metadata primer"),
+    )
+}
+
+fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+    probe: LayoutProbeBuilder<R>,
+    homspace_builder: HomSpaceBuilder<R>,
+    primer: Option<LayoutKeyBuilder<R>>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
     let candidates =
         contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
     let mut best = None;
@@ -419,7 +599,7 @@ where
             lhs_source_conjugate,
             rhs_source_conjugate,
         )?;
-        let cost = plan_allocation_elements(rule, dst, lhs, rhs, &plan)?;
+        let cost = plan_allocation_elements(rule, dst, lhs, rhs, &plan, probe, primer)?;
         if best
             .as_ref()
             .is_none_or(|(best_cost, _): &(usize, FusionContractPlan)| cost < *best_cost)
@@ -432,20 +612,66 @@ where
         .1)
 }
 
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_storage_conjugate: bool,
+    rhs_storage_conjugate: bool,
+    primer: LayoutKeyBuilder<R>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + CheckedFusionAlgebra,
+{
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
+    if axes.lhs_conjugate() != lhs_storage_conjugate
+        || axes.rhs_conjugate() != rhs_storage_conjugate
+    {
+        return Err(OperationError::InvalidArgument {
+            message: "prelowered operand flags must match the contraction cache key",
+        });
+    }
+    let logical_axes = TensorContractSpec::new(
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axes.output_permutation(),
+    );
+    select_tensorcontract_fusion_plan_from_spaces_with_probe(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        logical_axes,
+        lhs_storage_conjugate,
+        rhs_storage_conjugate,
+        lowered_layout_probe::<R>,
+        lowered_homspace_builder::<R>,
+        Some(primer),
+    )
+}
+
 fn plan_allocation_elements<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     plan: &FusionContractPlan,
+    probe: LayoutProbeBuilder<R>,
+    primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<usize, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     #[cfg(test)]
     CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
-    let lhs_core = lhs.transformed_layout_probe(rule, plan.lhs_transform())?;
-    let rhs_core = rhs.transformed_layout_probe(rule, plan.rhs_transform())?;
+    let lhs_core = probe(rule, lhs, plan.lhs_transform(), primer)?;
+    let rhs_core = probe(rule, rhs, plan.rhs_transform(), primer)?;
     let lhs_borrowed = super::super::dynamic::source_layout_metadata_is_borrowable(
         lhs,
         lhs_core.nout,
@@ -504,12 +730,13 @@ fn validate_tensorcontract_fusion_plan_inputs<R>(
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
+    homspace_builder: HomSpaceBuilder<R>,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+    let expected_homspace = homspace_builder(
         rule,
         lhs.homspace(),
         rhs.homspace(),
@@ -517,8 +744,7 @@ where
         axes.rhs_contracting_axes(),
         axis_plan.output_axes.as_slice(),
         dst.nout(),
-    )
-    .map_err(OperationError::from_core_preserving_context)?;
+    )?;
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
@@ -593,7 +819,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        contracted_axis_order_candidates, plan_allocation_elements,
+        contracted_axis_order_candidates, encoded_layout_probe, plan_allocation_elements,
         prepare_tensorcontract_fusion_plan_dyn_raw,
     };
     use crate::contract::DynamicFusionMapSpace;
@@ -770,7 +996,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            plan_allocation_elements(&rule, &dst, &lhs, &rhs, &plan).unwrap(),
+            plan_allocation_elements(
+                &rule,
+                &dst,
+                &lhs,
+                &rhs,
+                &plan,
+                encoded_layout_probe::<SU2FusionRule>,
+                None,
+            )
+            .unwrap(),
             4
         );
     }

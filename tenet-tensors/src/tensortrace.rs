@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, split_fusion_tree, BlockKey, BlockStructure, FusionRule,
-    FusionStyleKind, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    multiplicity_free_permute_tree_pair, split_fusion_tree, BlockKey, BlockStructure,
+    CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
     HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, SectorLeg, TensorMap,
     TensorStorage,
 };
@@ -1124,6 +1125,29 @@ where
     leg.dual(rule)
 }
 
+fn outward_axis_leg_checked<R>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+    axis: usize,
+) -> Result<SectorLeg, OperationError>
+where
+    R: FusionRule + CheckedFusionAlgebra,
+{
+    if axis < homspace.codomain().len() {
+        Ok(homspace.codomain().legs()[axis].clone())
+    } else if axis < homspace.rank() {
+        homspace.domain().legs()[axis - homspace.codomain().len()]
+            .try_dual(rule)
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))
+    } else {
+        Err(OperationError::InvalidAxisSet {
+            tensor: "trace source",
+            axes: vec![axis],
+            rank: homspace.rank(),
+        })
+    }
+}
+
 pub(crate) fn tensortrace_structure_with_strided_kernel<
     T,
     const DST_NOUT: usize,
@@ -1277,6 +1301,45 @@ where
     )
 }
 
+/// Checked lowered dynamic trace. Built-in lowered rules should use this
+/// entry point when typed machine-boundary errors are required; the legacy
+/// wrapper above remains available to custom fusion rules.
+#[allow(clippy::too_many_arguments)]
+pub fn tensortrace_fusion_dyn_into_checked<R, D>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    dst_data: &mut [D],
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    tensortrace_fusion_dyn_into_checked_raw(
+        src_space.provider(),
+        dst_space.space(),
+        dst_data,
+        src_space.space(),
+        src_data,
+        axes,
+        alpha,
+        beta,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensortrace_fusion_dyn_into_raw<R, D>(
     rule: &R,
@@ -1323,6 +1386,73 @@ where
         )?;
     }
     Ok(())
+}
+
+/// Checked lowered trace entry point. The legacy dynamic API intentionally
+/// keeps its `MultiplicityFreeRigidSymbols` bound for custom rules; lowered
+/// built-in callers use this wrapper to validate metadata before compilation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensortrace_fusion_dyn_into_checked_raw<R, D>(
+    rule: &R,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src_space: &DynamicFusionMapSpace,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    // Checked preflight closes the machine-integer boundary before the legacy
+    // structural compiler traverses metadata. Why not widen the public API:
+    // encoded/custom rules retain their established infallible contract.
+    let axis_plan = TensorTraceAxisPlan::compile(
+        src_space.structure().rank(),
+        dst_space.structure().rank(),
+        axes,
+    )?;
+    src_space
+        .homspace()
+        .try_select_checked(
+            rule,
+            &axis_plan.output_axes[..dst_space.nout()],
+            &axis_plan.output_axes[dst_space.nout()..],
+        )
+        .map_err(|error| match error {
+            CheckedFusionSpaceError::FusionAlgebra(error) => OperationError::FusionAlgebra(error),
+            CheckedFusionSpaceError::Core(error) => OperationError::Core(*error),
+            _ => OperationError::InvalidArgument {
+                message: "checked trace metadata error",
+            },
+        })?;
+    for (&lhs_axis, &rhs_axis) in axis_plan
+        .trace_lhs_axes
+        .iter()
+        .zip(axis_plan.trace_rhs_axes.iter())
+    {
+        let lhs = outward_axis_leg_checked(rule, src_space.homspace(), lhs_axis)?;
+        let rhs = outward_axis_leg_checked(rule, src_space.homspace(), rhs_axis)?;
+        rhs.try_dual(rule)
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
+        lhs.try_dual(rule)
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
+    }
+    tensortrace_fusion_dyn_into_raw(
+        rule, dst_space, dst_data, src_space, src_data, axes, alpha, beta,
+    )
 }
 
 fn scale_trace_destination<T>(dst: &mut [T], beta: T)

@@ -20,9 +20,13 @@ pub use block_specs::{
     tensorcontract_fusion_block_specs, tensorcontract_fusion_structure,
     tensorcontract_fusion_structure_dyn,
 };
+#[cfg(test)]
+pub(crate) use plan::prepare_tensorcontract_fusion_plan_dyn_lowered;
 pub use plan::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn, FusionContractPlan,
 };
 pub(crate) use plan::{
-    prepare_tensorcontract_fusion_plan_dyn_prelowered, prepare_tensorcontract_fusion_plan_dyn_raw,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer,
+    prepare_tensorcontract_fusion_plan_dyn_raw,
 };

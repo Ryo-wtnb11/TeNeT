@@ -3,9 +3,10 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
-    HostWritableStorage, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement,
-    ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
+    BlockStructure, CheckedFusionAlgebra, CoreError, FusionRule, FusionTensorMapSpace,
+    HostReadableStorage, HostWritableStorage, LoweredMultiplicityFreeAlgebra,
+    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
+    TensorStorage,
 };
 
 use crate::cache::{
@@ -33,15 +34,68 @@ use super::dynamic_space::{
 };
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
-    tensorcontract_fusion_structure, tensorcontract_fusion_structure_dyn_prelowered,
-    FusionContractPlan, EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST,
-    SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer, tensorcontract_fusion_structure,
+    tensorcontract_fusion_structure_dyn_prelowered, FusionContractPlan,
+    EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::FusionBlockContractWorkspace;
 use super::resolution::{ContractionResolutionCache, Resolution};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
+
+fn prelowered_plan_builder<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+    _primer: LayoutKeyBuilder<R>,
+) -> Result<Arc<FusionContractPlan>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    prepare_tensorcontract_fusion_plan_dyn_prelowered(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        lhs_conjugate,
+        rhs_conjugate,
+    )
+    .map(Arc::new)
+}
+
+fn lowered_prelowered_plan_builder<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+    primer: LayoutKeyBuilder<R>,
+) -> Result<Arc<FusionContractPlan>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + CheckedFusionAlgebra,
+{
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        lhs_conjugate,
+        rhs_conjugate,
+        primer,
+    )
+    .map(Arc::new)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TensorContractPlanKey {
@@ -803,6 +857,7 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + LoweredMultiplicityFreeAlgebra
+            + CheckedFusionAlgebra
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
@@ -946,7 +1001,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        self.tensorcontract_fusion_dyn_prelowered_into_with_primer(
+        self.tensorcontract_fusion_dyn_prelowered_into_core(
             dst_space,
             dst_data,
             lhs,
@@ -957,6 +1012,7 @@ where
             alpha,
             beta,
             dst_space.layout_primer(),
+            prelowered_plan_builder::<R>,
         )
     }
 
@@ -978,16 +1034,27 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
             + LoweredMultiplicityFreeAlgebra
+            + CheckedFusionAlgebra
             + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        self.tensorcontract_fusion_dyn_prelowered_into(
-            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
+        self.tensorcontract_fusion_dyn_prelowered_into_core(
+            dst_space,
+            dst_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            axes,
+            alpha,
+            beta,
+            dst_space.layout_primer(),
+            lowered_prelowered_plan_builder::<R>,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn tensorcontract_fusion_dyn_prelowered_into_with_primer<R>(
+    fn tensorcontract_fusion_dyn_prelowered_into_core<R>(
         &mut self,
         dst_space: &BoundDynamicFusionMapSpace<R>,
         dst_data: &mut [D],
@@ -999,6 +1066,16 @@ where
         alpha: D,
         beta: D,
         layout_primer: LayoutKeyBuilder<R>,
+        plan_builder: fn(
+            &R,
+            &DynamicFusionMapSpace,
+            &DynamicFusionMapSpace,
+            &DynamicFusionMapSpace,
+            TensorContractSpec<'_>,
+            bool,
+            bool,
+            LayoutKeyBuilder<R>,
+        ) -> Result<Arc<FusionContractPlan>, OperationError>,
     ) -> Result<(), OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1044,7 +1121,7 @@ where
                 Err(err) => Err(err),
             },
             || {
-                prepare_tensorcontract_fusion_plan_dyn_prelowered(
+                plan_builder(
                     rule,
                     dst_space.space(),
                     lhs.logical_space(),
@@ -1052,8 +1129,8 @@ where
                     axes,
                     lhs.storage_conjugate(),
                     rhs.storage_conjugate(),
+                    layout_primer,
                 )
-                .map(Arc::new)
             },
         )?;
         #[cfg(test)]
