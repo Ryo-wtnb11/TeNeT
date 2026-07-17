@@ -324,15 +324,17 @@ where
         return Ok((sources, Vec::new()));
     }
 
-    let missing_positions = sources
-        .iter()
-        .enumerate()
-        .filter_map(|(position, (_, rows))| rows.is_none().then_some(position))
-        .collect::<Vec<_>>();
-    let missing_keys = missing_positions
-        .iter()
-        .map(|&position| sources[position].0.clone())
-        .collect::<Vec<_>>();
+    let missing_count = sources.iter().filter(|(_, rows)| rows.is_none()).count();
+    let mut missing_keys = Vec::with_capacity(missing_count);
+    // Collect owned keys exactly once for the block API. Why not inline them:
+    // tree-pair keys are large and groups above four sources are ordinary
+    // non-Abelian blocks, so SmallVec would move substantial storage onto
+    // every worker stack without bounding the general case.
+    missing_keys.extend(
+        sources
+            .iter()
+            .filter_map(|(key, rows)| rows.is_none().then(|| (*key).clone())),
+    );
     let batched = block_transform(&missing_keys)?;
     if batched.len() != missing_keys.len() {
         return Err(OperationError::CoefficientCountMismatch {
@@ -342,14 +344,85 @@ where
     }
 
     let mut computed = Vec::with_capacity(missing_keys.len());
-    // Why not rebuild a key map: preflight makes staged sources unique, and
-    // the block API preserves source order exactly as recoupling columns do.
-    for ((position, key), rows) in missing_positions.into_iter().zip(missing_keys).zip(batched) {
+    let mut missing_rows = missing_keys.into_iter().zip(batched);
+    // Rescan the short source group in order so publishing each computed row
+    // needs no separately owned position list.
+    for (_, slot) in &mut sources {
+        if slot.is_some() {
+            continue;
+        }
+        // Why not rebuild a key map: preflight makes staged sources unique,
+        // and the block API preserves source order exactly as recoupling
+        // columns do.
+        let (key, rows) = missing_rows
+            .next()
+            .expect("validated block result covers every missing source");
         let rows = Arc::new(rows);
-        sources[position].1 = Some(Arc::clone(&rows));
+        *slot = Some(Arc::clone(&rows));
         computed.push((key, rows));
     }
+    debug_assert!(missing_rows.next().is_none());
     Ok((sources, computed))
+}
+
+#[cfg(test)]
+mod staged_row_resolution_tests {
+    use super::{resolve_staged_group_rows, StagedSources};
+    use std::sync::Arc;
+    use tenet_operations::OperationError;
+
+    #[test]
+    fn partial_misses_resolve_in_source_order_without_changing_hits() {
+        let keys = [0usize, 1, 2, 3];
+        let hit_zero = Arc::new(vec![(10usize, 1i32)]);
+        let hit_two = Arc::new(vec![(20usize, 2i32)]);
+        let mut sources = StagedSources::new();
+        sources.push((&keys[0], Some(Arc::clone(&hit_zero))));
+        sources.push((&keys[1], None));
+        sources.push((&keys[2], Some(Arc::clone(&hit_two))));
+        sources.push((&keys[3], None));
+
+        let (resolved, computed) = resolve_staged_group_rows(sources, |missing| {
+            // What: partial misses reach one block transform in original
+            // source order, independently of the intervening memo hits.
+            assert_eq!(missing, &[1, 3]);
+            Ok(vec![vec![(11, 3)], vec![(31, 4)]])
+        })
+        .unwrap();
+
+        assert!(Arc::ptr_eq(resolved[0].1.as_ref().unwrap(), &hit_zero));
+        assert!(Arc::ptr_eq(resolved[2].1.as_ref().unwrap(), &hit_two));
+        assert_eq!(resolved[1].1.as_deref().unwrap(), &[(11, 3)]);
+        assert_eq!(resolved[3].1.as_deref().unwrap(), &[(31, 4)]);
+        assert_eq!(
+            computed.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            [1, 3]
+        );
+    }
+
+    #[test]
+    fn coefficient_count_mismatch_does_not_publish_partial_rows() {
+        let keys = [0usize, 1];
+        let mut sources = StagedSources::new();
+        sources.push((&keys[0], None));
+        sources.push((&keys[1], None));
+
+        let error = resolve_staged_group_rows(sources, |missing| {
+            // What: validating the complete block result remains before any
+            // staged row publication.
+            assert_eq!(missing, &[0, 1]);
+            Ok(vec![vec![(10, 1i32)]])
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::CoefficientCountMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
 }
 
 fn execute_staged_groups<I, O, F>(

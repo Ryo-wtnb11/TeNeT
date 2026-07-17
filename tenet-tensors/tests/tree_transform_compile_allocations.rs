@@ -2,11 +2,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use tenet_core::{
-    BlockKey, BlockStructure, DegeneracyStructure, FusionTreeBlockKey, FusionTreeKey,
-    SU2FusionRule, SectorId, SectorStructure,
+    BlockKey, BlockStructure, DegeneracyStructure, FusionProductSpace, FusionTreeBlockKey,
+    FusionTreeHomSpace, FusionTreeKey, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    SectorStructure, TensorMap, TensorMapSpace,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
+    reset_global_operation_caches, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
     TreeTransformOperation,
 };
 
@@ -103,4 +105,91 @@ fn su2_tree_pair_f_move_compile_has_no_per_destination_coefficient_rows() {
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src().len(), 4);
     assert!(ALLOCATIONS.get() <= 52, "allocations={}", ALLOCATIONS.get());
+}
+
+#[test]
+fn missing_position_rescan_removes_cardinality_dependent_metadata_allocations() {
+    for (missing, expected_removed_calls) in [(1, 1), (2, 1), (4, 1), (5, 2), (8, 2), (9, 3)] {
+        let sources = vec![None::<()>; missing];
+
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let positions = sources
+            .iter()
+            .enumerate()
+            .filter_map(|(position, rows)| rows.is_none().then_some(position))
+            .collect::<Vec<_>>();
+        COUNTING.set(false);
+        let old_calls = ALLOCATIONS.get();
+
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let missing_count = sources.iter().filter(|rows| rows.is_none()).count();
+        COUNTING.set(false);
+        let rescan_calls = ALLOCATIONS.get();
+
+        // What: replacing the old position Vec with ordered rescans removes
+        // every allocation/reallocation at and above its growth boundaries.
+        assert_eq!(positions.len(), missing);
+        assert_eq!(missing_count, missing);
+        assert_eq!(old_calls, expected_removed_calls);
+        assert_eq!(rescan_calls, 0);
+    }
+}
+
+fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 8, 0>) {
+    let half = SU2Irrep::from_twice_spin(1).sector_id();
+    let leg = || SectorLeg::new([(half, 1)], false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new((0..8).map(|_| leg())),
+        FusionProductSpace::new([]),
+    );
+    let keys = hom
+        .fusion_tree_keys(&SU2FusionRule)
+        .iter()
+        .take(count)
+        .cloned()
+        .map(BlockKey::from)
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), count);
+    let structure = BlockStructure::from_parts(
+        SectorStructure::from_keys(8, keys).unwrap(),
+        DegeneracyStructure::packed_column_major(8, (0..count).map(|_| vec![1usize; 8])).unwrap(),
+    )
+    .unwrap();
+    let space = TensorMapSpace::<8, 0>::from_dims([1; 8], []).unwrap();
+    let src =
+        TensorMap::from_vec_with_structure(vec![1.0; count], space.clone(), structure.clone())
+            .unwrap();
+    let dst = TensorMap::from_vec_with_structure(vec![0.0; count], space, structure).unwrap();
+    (dst, src)
+}
+
+#[test]
+fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
+    for (missing, expected_allocations) in
+        [(1, 72), (2, 84), (4, 110), (5, 128), (8, 160), (9, 180)]
+    {
+        reset_global_operation_caches();
+        let (dst, src) = rank_eight_su2_subset(missing);
+        let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+        cache.set_recoupling_threads(1);
+
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let plan = cache
+            .get_or_compile_tree_pair(
+                &SU2FusionRule,
+                TreeTransformOperation::permute(0..8, []),
+                &dst,
+                &src,
+            )
+            .unwrap();
+        COUNTING.set(false);
+
+        // What: the public cold memoized path removes every allocation and
+        // reallocation formerly paid by its missing-position Vec.
+        assert_eq!(ALLOCATIONS.get(), expected_allocations, "missing={missing}");
+        std::hint::black_box(plan);
+    }
 }

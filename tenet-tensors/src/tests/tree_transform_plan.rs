@@ -1142,7 +1142,7 @@ fn all_codomain_worker_error_does_not_commit_rows_or_stats() {
     let invalid_operation = TreeTransformOperation::braid([0, 0], [], [0, 1], []);
     let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
 
-    for threads in [1, 4] {
+    for threads in [1, 2, 4] {
         let mut memo = AllCodomainRowMemo::default();
         let mut hits = 7;
         let mut misses = 11;
@@ -1204,7 +1204,7 @@ fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
 
-    for threads in [1, 4] {
+    for threads in [1, 2, 4] {
         let mut memo = TreePairRowMemo::default();
         let mut hits = 7;
         let mut misses = 11;
