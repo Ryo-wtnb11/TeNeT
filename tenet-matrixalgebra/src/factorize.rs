@@ -553,26 +553,28 @@ where
             actual: space.rank(),
         });
     }
-    let structure = space.structure();
-    let rank = NOUT + NIN;
-    let mut per_axis: Vec<HashMap<SectorId, usize>> = vec![HashMap::new(); rank];
-    for index in 0..structure.block_count() {
-        let block = structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sectors = key.external_sectors(rule);
-        for (axis, (&sector, &dim)) in sectors.iter().zip(block.shape()).enumerate() {
-            per_axis[axis].entry(sector).or_insert(dim);
-        }
-    }
-    let dims: Vec<usize> = per_axis.iter().map(|axis| axis.values().sum()).collect();
+    let axis_dim = |leg: &SectorLeg| {
+        leg.degeneracies().iter().try_fold(0usize, |total, &dim| {
+            total
+                .checked_add(dim)
+                .ok_or(CoreError::ElementCountOverflow)
+        })
+    };
     let mut codomain_dims = [0usize; NOUT];
-    codomain_dims.copy_from_slice(&dims[..NOUT]);
+    for (dim, leg) in codomain_dims
+        .iter_mut()
+        .zip(space.homspace().codomain().legs())
+    {
+        *dim = axis_dim(leg).map_err(OperationError::from_core_preserving_context)?;
+    }
     let mut domain_dims = [0usize; NIN];
-    domain_dims.copy_from_slice(&dims[NOUT..]);
+    for (dim, leg) in domain_dims.iter_mut().zip(space.homspace().domain().legs()) {
+        *dim = axis_dim(leg).map_err(OperationError::from_core_preserving_context)?;
+    }
+    // Why not recover axis dimensions from populated fusion-tree blocks:
+    // SectorLeg is the complete axis-space authority, including sectors with
+    // no participating tree. External relabeling is irrelevant to a dimension
+    // sum and can fail for a finite encoded dual after dense factorization.
     let typed_space = FusionTensorMapSpace::from_shared_subblock_structure(
         TensorMapSpace::<NOUT, NIN>::from_dims(codomain_dims, domain_dims)
             .map_err(OperationError::from_core_preserving_context)?,

@@ -11,7 +11,7 @@ use tenet_tensors::{
     TreeTransformRuleCacheKey,
 };
 
-use crate::factorize::{dyn_space_of, truncate_svd, BoundTensorMap};
+use crate::factorize::{dyn_space_of, truncate_svd, typed_from_dyn, BoundTensorMap};
 use crate::*;
 use num_complex::Complex32;
 use std::sync::{Arc, Mutex};
@@ -1833,6 +1833,213 @@ where
         space,
     )
     .unwrap()
+}
+
+#[test]
+fn typed_factor_dims_include_sectors_without_populated_trees() {
+    // What: typed factor axes retain the complete leg space, including a sector absent from all blocks.
+    let rule = U1FusionRule;
+    let neutral = U1Irrep::new(0).sector_id();
+    let positive = U1Irrep::new(1).sector_id();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(neutral, 2), (positive, 3)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(neutral, 2)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([5], [2]).unwrap(),
+        homspace,
+        &rule,
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let tensor = TensorMap::from_vec_with_fusion_space(vec![1.0, 2.0, 3.0, 4.0], space).unwrap();
+    let dynamic_space = dyn_space_of(&tensor).unwrap();
+
+    let rebuilt =
+        typed_from_dyn::<_, _, 1, 1>(&rule, (dynamic_space, tensor.data().to_vec())).unwrap();
+
+    assert_eq!(rebuilt.space().dims(), &[5, 2]);
+    assert_eq!(rebuilt.fusion_space(), tensor.fusion_space());
+    assert_eq!(rebuilt.data(), tensor.data());
+}
+
+fn u1_minimum_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
+    let rule = U1FusionRule;
+    let minimum = U1Irrep::new(i32::MIN).sector_id();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(minimum, rows)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(minimum, cols)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+        homspace,
+        &rule,
+        [vec![rows, cols]],
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..rows * cols)
+            .map(|index| ((index * 7 + 3) % 17) as f64 - 5.0)
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+fn assert_matrix_product(
+    expected: &[f64],
+    rows: usize,
+    inner: usize,
+    cols: usize,
+    left: &[f64],
+    right: &[f64],
+) {
+    for col in 0..cols {
+        for row in 0..rows {
+            let actual = (0..inner)
+                .map(|index| left[row + rows * index] * right[index + inner * col])
+                .sum::<f64>();
+            assert!(
+                (actual - expected[row + rows * col]).abs() < 1e-10,
+                "matrix product differs at ({row}, {col}): {actual} != {}",
+                expected[row + rows * col]
+            );
+        }
+    }
+}
+
+#[test]
+fn compact_factors_do_not_relabel_u1_minimum_domain_sectors() {
+    // What: compact SVD, QR, and LQ return correctly oriented factors at the finite U(1) dual boundary.
+    let rule = U1FusionRule;
+    let tensor = u1_minimum_matrix(3, 2);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(svd.u.tensor().space().dims(), &[3, 2]);
+    assert_eq!(svd.s.tensor().space().dims(), &[2, 2]);
+    assert_eq!(svd.vh.tensor().space().dims(), &[2, 2]);
+    let singular = &svd.singular_values[0].values;
+    let mut scaled_vh = svd.vh.data().to_vec();
+    for col in 0..2 {
+        for row in 0..2 {
+            scaled_vh[row + 2 * col] *= singular[row];
+        }
+    }
+    assert_matrix_product(tensor.data(), 3, 2, 2, svd.u.data(), &scaled_vh);
+
+    let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(q.tensor().space().dims(), &[3, 2]);
+    assert_eq!(r.tensor().space().dims(), &[2, 2]);
+    assert_matrix_product(tensor.data(), 3, 2, 2, q.data(), r.data());
+
+    let (l, q) = lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_eq!(l.tensor().space().dims(), &[3, 2]);
+    assert_eq!(q.tensor().space().dims(), &[2, 2]);
+    assert_matrix_product(tensor.data(), 3, 2, 2, l.data(), q.data());
+}
+
+#[test]
+fn eigh_full_does_not_relabel_u1_minimum_domain_sectors() {
+    // What: full EIGH preserves the eigen equation and factor orientation at the finite U(1) dual boundary.
+    let rule = U1FusionRule;
+    let minimum = U1Irrep::new(i32::MIN).sector_id();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(minimum, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(minimum, 2)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+        homspace,
+        &rule,
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let tensor = TensorMap::from_vec_with_fusion_space(vec![4.0, 1.0, 1.0, 3.0], space).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
+    assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
+    let values = &result.eigenvalues[0].values;
+    for col in 0..2 {
+        for row in 0..2 {
+            let lhs = (0..2)
+                .map(|index| tensor.data()[row + 2 * index] * result.v.data()[index + 2 * col])
+                .sum::<f64>();
+            let rhs = result.v.data()[row + 2 * col] * values[col];
+            assert!((lhs - rhs).abs() < 1e-10);
+        }
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn compact_factorizations_do_not_relabel_product_minimum_domain_sectors() {
+    // What: product-sector factors inherit the no-relabel contract for compact SVD, QR, LQ, and full EIGH.
+    let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+    let minimum = rule
+        .try_encode_sector(SectorId::new(1), U1Irrep::new(i32::MIN).sector_id())
+        .unwrap();
+    let matrix = |rows: usize, cols: usize, data: Vec<f64>| {
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(minimum, rows)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(minimum, cols)], false)]),
+        );
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+            homspace,
+            &rule,
+            [vec![rows, cols]],
+        )
+        .unwrap();
+        TensorMap::from_vec_with_fusion_space(data, space).unwrap()
+    };
+    let rectangular = matrix(3, 2, vec![-2.0, 5.0, 1.0, 4.0, -3.0, 2.0]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let svd = svd_compact(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
+    )
+    .unwrap();
+    assert_eq!(svd.u.tensor().space().dims(), &[3, 2]);
+    assert_eq!(svd.s.tensor().space().dims(), &[2, 2]);
+    assert_eq!(svd.vh.tensor().space().dims(), &[2, 2]);
+
+    let (q, r) = qr_compact(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
+    )
+    .unwrap();
+    assert_eq!(q.tensor().space().dims(), &[3, 2]);
+    assert_eq!(r.tensor().space().dims(), &[2, 2]);
+    assert_matrix_product(rectangular.data(), 3, 2, 2, q.data(), r.data());
+
+    let (l, q) = lq_compact(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule.clone()), &rectangular),
+    )
+    .unwrap();
+    assert_eq!(l.tensor().space().dims(), &[3, 2]);
+    assert_eq!(q.tensor().space().dims(), &[2, 2]);
+    assert_matrix_product(rectangular.data(), 3, 2, 2, l.data(), q.data());
+
+    let hermitian = matrix(2, 2, vec![4.0, 1.0, 1.0, 3.0]);
+    let result = eigh_full(&mut dense, &bound_tensor_ref!(Arc::new(rule), &hermitian)).unwrap();
+    assert_eq!(result.v.tensor().space().dims(), &[2, 2]);
+    assert_eq!(result.d.tensor().space().dims(), &[2, 2]);
+    let values = &result.eigenvalues[0].values;
+    for col in 0..2 {
+        for row in 0..2 {
+            let lhs = (0..2)
+                .map(|index| hermitian.data()[row + 2 * index] * result.v.data()[index + 2 * col])
+                .sum::<f64>();
+            let rhs = result.v.data()[row + 2 * col] * values[col];
+            assert!((lhs - rhs).abs() < 1e-10);
+        }
+    }
 }
 
 #[test]
