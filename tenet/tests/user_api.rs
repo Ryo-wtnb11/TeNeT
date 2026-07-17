@@ -2,8 +2,8 @@
 //! including elementwise cross-checks against the expert layer.
 
 use tenet::core::{
-    FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorId, SectorLeg, TensorMap,
-    TensorMapSpace, U1FusionRule, U1Irrep,
+    FusionAlgebraError, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorId,
+    SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet::operations::{
     OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
@@ -82,6 +82,66 @@ fn space_dual_roundtrip_and_dim() {
     assert_eq!(v.dual().dual(), v);
     // SU2 dims are quantum-dimension weighted: 2*1 + 2*2 + 1*3.
     assert_eq!(su2_space().dim(), 9);
+}
+
+#[test]
+fn space_try_dual_reports_u1_boundary_and_preserves_compatibility() {
+    // What: the checked public dual reports finite-U1 nonclosure without
+    // mutating its input, while every representable dual matches dual().
+    let minimum = Space::u1([(i32::MIN, 3)]);
+    let unchanged = minimum.clone();
+    let expected = FusionAlgebraError::U1DualOverflow { charge: i32::MIN };
+    let error = minimum.try_dual().unwrap_err();
+    assert_eq!(error, Error::FusionAlgebra(Box::new(expected.clone())));
+    assert_eq!(
+        std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<FusionAlgebraError>()),
+        Some(&expected)
+    );
+    assert_eq!(minimum, unchanged);
+
+    let near_minimum = Space::u1([(i32::MIN + 1, 2)]);
+    let checked = near_minimum.try_dual().unwrap();
+    assert!(checked.is_dual());
+    assert_eq!(checked.sectors(), vec![(SectorLabel::U1(i32::MAX), 2)]);
+    assert_eq!(checked, near_minimum.dual());
+
+    let ordinary = u1_space();
+    assert_eq!(ordinary.try_dual().unwrap(), ordinary.dual());
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn space_try_dual_preserves_product_child_errors() {
+    // What: checked product duals expose the U1 component's exact closure
+    // failure and leave both packed product inputs unchanged.
+    let pair = Space::product([((i32::MIN, 1), 2)]).unwrap();
+    let pair_before = pair.clone();
+    assert_eq!(
+        pair.try_dual(),
+        Err(Error::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+        )))
+    );
+    assert_eq!(pair, pair_before);
+
+    let triple = Space::fz2_u1_su2([((1, i32::MIN, 1), 2)]).unwrap();
+    let triple_before = triple.clone();
+    assert_eq!(
+        triple.try_dual(),
+        Err(Error::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+        )))
+    );
+    assert_eq!(triple, triple_before);
+}
+
+#[test]
+fn space_try_dual_keeps_su3_table_duality_total() {
+    // What: SU3 keeps its dedicated table dual and checked dual is identical
+    // to the existing compatibility method.
+    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+    assert_eq!(space.try_dual().unwrap(), space.dual());
 }
 
 #[test]
@@ -1198,6 +1258,81 @@ fn space_fuse_u1_is_charge_convolution() {
 }
 
 #[test]
+fn space_fuse_reports_u1_boundary_and_preserves_valid_extremes() {
+    // What: positive and negative finite-U1 nonclosure are exact errors,
+    // while the asymmetric representable endpoint sum remains charge -1.
+    for (left_charge, right_charge) in [(i32::MAX, 1), (i32::MIN, -1)] {
+        let left = Space::u1([(left_charge, 2)]);
+        let right = Space::u1([(right_charge, 3)]);
+        let left_before = left.clone();
+        let right_before = right.clone();
+        assert_eq!(
+            left.fuse(&right),
+            Err(Error::FusionAlgebra(Box::new(
+                FusionAlgebraError::U1FusionOverflow {
+                    left: left_charge,
+                    right: right_charge,
+                }
+            )))
+        );
+        assert_eq!(left, left_before);
+        assert_eq!(right, right_before);
+    }
+
+    let maximum = Space::u1([(i32::MAX, 2)]);
+    let minimum = Space::u1([(i32::MIN, 3)]);
+    let fused = maximum.fuse(&minimum).unwrap();
+    assert_eq!(fused.sectors(), vec![(SectorLabel::U1(-1), 6)]);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn space_fuse_preserves_product_child_errors() {
+    // What: both public packed product families preserve the exact U1 child
+    // failure instead of converting it to a codec or generic argument error.
+    let pair_left = Space::product([((i32::MAX, 0), 1)]).unwrap();
+    let pair_right = Space::product([((1, 1), 1)]).unwrap();
+    assert_eq!(
+        pair_left.fuse(&pair_right),
+        Err(Error::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        )))
+    );
+
+    let triple_left = Space::fz2_u1_su2([((0, i32::MAX, 0), 1)]).unwrap();
+    let triple_right = Space::fz2_u1_su2([((1, 1, 1), 1)]).unwrap();
+    assert_eq!(
+        triple_left.fuse(&triple_right),
+        Err(Error::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        )))
+    );
+}
+
+#[test]
+fn space_fuse_reports_su2_output_outside_supported_domain() {
+    // What: valid SU2 input labels whose output exceeds the supported table
+    // return closure failure rather than being misclassified as invalid input.
+    let left = Space::su2([(128, 1)]);
+    let right = Space::su2([(127, 1)]);
+    assert_eq!(
+        left.fuse(&right),
+        Err(Error::FusionAlgebra(Box::new(
+            FusionAlgebraError::FusionNotRepresentable {
+                left: SectorId::new(128),
+                right: SectorId::new(127),
+            }
+        )))
+    );
+}
+
+#[test]
 fn space_fuse_su2_half_times_half() {
     // TensorKit: fuse(SU2Space(1/2=>1), same) == Rep[SU2](0=>1, 1=>1).
     let half = Space::su2([(1, 1)]);
@@ -1297,6 +1432,32 @@ fn space_fuse_all_matches_pairwise_fold() {
     );
 
     assert!(Space::fuse_all(&[]).is_err());
+}
+
+#[test]
+fn space_fuse_all_propagates_checked_errors_in_fold_order() {
+    // What: variadic fusion returns the first deterministic algebra failure
+    // and retains the existing empty and rule-mismatch error contracts.
+    let maximum = Space::u1([(i32::MAX, 1)]);
+    let one = Space::u1([(1, 1)]);
+    let zero = Space::u1([(0, 1)]);
+    assert_eq!(
+        Space::fuse_all(&[&zero, &maximum, &one]),
+        Err(Error::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        )))
+    );
+    assert_eq!(
+        Space::fuse_all(&[&zero, &Space::z2([(0, 1)])]),
+        Err(Error::RuleMismatch)
+    );
+    assert!(matches!(
+        Space::fuse_all(&[]),
+        Err(Error::InvalidArgument(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------

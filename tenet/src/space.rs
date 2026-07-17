@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    FermionParityFusionRule, FusionRule, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
-    ProductSectorCodec, ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule,
-    Z2Irrep,
+    CheckedFusionAlgebra, FermionParityFusionRule, FusionRule, Fz2SectorLayout, PackedProductCodec,
+    ProductFusionRule, ProductSectorCodec, ProductSectorLayout, RuleIdentity, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule, U1Irrep,
+    U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 
 use crate::error::Error;
@@ -463,11 +463,14 @@ impl Space {
         ))
     }
 
-    /// The dual space: every sector is replaced by its dual and the dual
+    /// Checked dual space: every sector is replaced by its dual and the dual
     /// flag is flipped, mirroring TensorKit's `V'`.
-    pub fn dual(&self) -> Self {
-        // Su3 is Generic, so it cannot ride the mult-free `with_rule!` binding;
-        // `dual` needs only `FusionRule::dual`, handled directly.
+    ///
+    /// Returns [`Error::FusionAlgebra`] when the finite encoded algebra cannot
+    /// represent a mathematical dual, such as U(1) charge `i32::MIN`.
+    pub fn try_dual(&self) -> Result<Self, Error> {
+        // Why not force Su3 through the checked companion: its bounded table
+        // dual is total, while checked generic-fusion semantics remain deferred.
         if let UserRuleContext::Su3(rule) = self.context.as_ref() {
             let mut sectors: Vec<(SectorId, usize)> = self
                 .sectors
@@ -475,31 +478,45 @@ impl Space {
                 .map(|&(sector, deg)| (rule.dual(sector), deg))
                 .collect();
             sectors.sort_by_key(|(sector, _)| *sector);
-            return Self {
+            return Ok(Self {
                 context: Arc::clone(&self.context),
                 sectors,
                 dual: !self.dual,
-            };
+            });
         }
         let sectors = with_rule!(self.context.as_ref(), rule, {
-            fn dualize<R: FusionRule>(
+            fn dualize<R: CheckedFusionAlgebra>(
                 rule: &R,
                 sectors: &[(SectorId, usize)],
-            ) -> Vec<(SectorId, usize)> {
+            ) -> Result<Vec<(SectorId, usize)>, tenet_core::FusionAlgebraError> {
                 sectors
                     .iter()
-                    .map(|&(sector, deg)| (rule.dual(sector), deg))
+                    .map(|&(sector, deg)| Ok((rule.try_dual_sector(sector)?, deg)))
                     .collect()
             }
             dualize(rule, &self.sectors)
-        });
+        })?;
         let mut sectors = sectors;
         sectors.sort_by_key(|(sector, _)| *sector);
-        Self {
+        Ok(Self {
             context: Arc::clone(&self.context),
             sectors,
             dual: !self.dual,
-        }
+        })
+    }
+
+    /// The dual space, mirroring TensorKit's `V'`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the finite encoded algebra cannot represent a mathematical
+    /// dual. Use [`Self::try_dual`] for labels at an algebra boundary.
+    pub fn dual(&self) -> Self {
+        // Why not change this established signature: ordinary TensorKit-style
+        // expressions rely on a value-returning dual; checked callers opt into
+        // the explicit sibling without perturbing valid call sites.
+        self.try_dual()
+            .expect("Space::dual output is not representable; use Space::try_dual")
     }
 
     /// Total dimension: the sum of `degeneracy * dim(sector)` over all
@@ -754,23 +771,24 @@ impl Space {
             });
         }
         let fused = with_rule!(self.context.as_ref(), rule, {
-            fn fuse_sectors<R: FusionRule>(
+            fn fuse_sectors<R: CheckedFusionAlgebra>(
                 rule: &R,
                 left: &[(SectorId, usize)],
                 right: &[(SectorId, usize)],
-            ) -> Vec<(SectorId, usize)> {
+            ) -> Result<Vec<(SectorId, usize)>, tenet_core::FusionAlgebraError> {
                 let mut out = std::collections::BTreeMap::<SectorId, usize>::new();
                 for &(a, deg_a) in left {
                     for &(b, deg_b) in right {
-                        for c in rule.fusion_channels(a, b) {
-                            *out.entry(c).or_insert(0) += rule.nsymbol(a, b, c) * deg_a * deg_b;
+                        for c in rule.try_fusion_channels(a, b)? {
+                            *out.entry(c).or_insert(0) +=
+                                rule.try_nsymbol(a, b, c)? * deg_a * deg_b;
                         }
                     }
                 }
-                out.into_iter().collect()
+                Ok(out.into_iter().collect())
             }
             fuse_sectors(rule, &self.sectors, &other.sectors)
-        });
+        })?;
         Ok(Self {
             context: Arc::clone(&self.context),
             sectors: fused,
