@@ -700,10 +700,13 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
     {
         let layout_build = LayoutBuildCapability::lowered();
-        let space = DynamicFusionMapSpace::from_final_homspace_with_primer(
+        let keys = layout_build.keys(provider.as_ref(), &homspace)?;
+        let shapes = DynamicFusionMapSpace::degeneracy_shapes_for_keys(&homspace, &keys)?;
+        let space = DynamicFusionMapSpace::from_selected_degeneracy_shapes(
             provider.as_ref(),
             homspace,
-            layout_build.prime,
+            keys,
+            shapes,
         )?;
         Self::from_derived_with_capability(provider, space, layout_build)
     }
@@ -893,10 +896,13 @@ where
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        let space = DynamicFusionMapSpace::from_final_homspace_with_primer(
+        let keys = self.layout_build.keys(self.provider.as_ref(), &homspace)?;
+        let shapes = DynamicFusionMapSpace::degeneracy_shapes_for_keys(&homspace, &keys)?;
+        let space = DynamicFusionMapSpace::from_selected_degeneracy_shapes(
             self.provider.as_ref(),
             homspace,
-            self.layout_build.prime,
+            keys,
+            shapes,
         )?;
         Self::from_derived_like(self, space)
     }
@@ -935,6 +941,58 @@ where
 }
 
 impl DynamicFusionMapSpace {
+    fn degeneracy_shapes_for_keys(
+        homspace: &FusionTreeHomSpace,
+        keys: &[FusionTreeBlockKey],
+    ) -> Result<Vec<Vec<usize>>, OperationError> {
+        let rank = homspace.rank();
+        let mut shapes = Vec::with_capacity(keys.len());
+        for key in keys {
+            if key.codomain_uncoupled().len() != homspace.codomain().len()
+                || key.domain_uncoupled().len() != homspace.domain().len()
+            {
+                return Err(OperationError::from_core_preserving_context(
+                    CoreError::StructureRankMismatch {
+                        expected: rank,
+                        actual: key.codomain_uncoupled().len() + key.domain_uncoupled().len(),
+                    },
+                ));
+            }
+            let mut shape = Vec::with_capacity(rank);
+            for (leg, &sector) in homspace
+                .codomain()
+                .legs()
+                .iter()
+                .chain(homspace.domain().legs())
+                .zip(
+                    key.codomain_uncoupled()
+                        .iter()
+                        .chain(key.domain_uncoupled()),
+                )
+            {
+                shape.push(leg.degeneracy(sector).ok_or_else(|| {
+                    OperationError::from_core_preserving_context(CoreError::MalformedFusionTree {
+                        message: "fusion tree uses a sector absent from its leg",
+                    })
+                })?);
+            }
+            shapes.push(shape);
+        }
+        Ok(shapes)
+    }
+
+    fn from_selected_degeneracy_shapes<R>(
+        rule: &R,
+        homspace: FusionTreeHomSpace,
+        keys: Arc<[FusionTreeBlockKey]>,
+        shapes: Vec<Vec<usize>>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, move |_, _| Ok(keys))
+    }
+
     fn from_final_homspace<R>(
         rule: &R,
         homspace: FusionTreeHomSpace,
@@ -1098,9 +1156,9 @@ impl DynamicFusionMapSpace {
                 });
             }
         }
-        // Why not prime one layout and call the encoded constructor afterward:
-        // lowered and encoded enumeration have independent caches. Selecting
-        // the key builder on this cache miss keeps one root construction pass.
+        // Why not invoke another builder after selecting the authority keys:
+        // even when both routes converge on one cache entry, that repeats the
+        // lookup. Reuse this Arc for shape validation and storage construction.
         let keys = build_keys(rule, &homspace)?;
         if keys.len() != shapes.len() {
             return Err(OperationError::from_core_preserving_context(
@@ -1833,6 +1891,31 @@ mod lowered_metadata_tests {
             assert_eq!(shape_builds.get(), 1);
             assert!(derived.space().structure().block_count() > 0);
         }
+    }
+
+    #[test]
+    fn final_derived_layout_selects_authority_keys_once() {
+        // What: a final built-in layout derives both degeneracy shapes and
+        // storage ordering from one authority-selected key Arc.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = Arc::new(rule());
+        let authority = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            source(rule.as_ref()),
+            Arc::clone(&rule),
+        )
+        .unwrap()
+        .with_test_layout_primer(counting_primer);
+
+        reset_primer_calls();
+        let derived = authority.derive_from_final_homspace(homspace()).unwrap();
+        assert_eq!(primer_calls(), 1);
+        let encoded =
+            DynamicFusionMapSpace::from_final_homspace(rule.as_ref(), homspace()).unwrap();
+        assert_eq!(derived.space(), &encoded);
     }
 
     #[test]
