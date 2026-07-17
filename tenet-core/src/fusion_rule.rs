@@ -239,6 +239,96 @@ pub trait FusionRule: 'static {
     }
 }
 
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FusionAlgebraError {
+    /// An input ID does not name a sector in the rule's representable domain.
+    InvalidSector {
+        sector: SectorId,
+    },
+    U1DualOverflow {
+        charge: i32,
+    },
+    U1FusionOverflow {
+        left: i32,
+        right: i32,
+    },
+    /// Both inputs are valid, but at least one output channel cannot be represented.
+    FusionNotRepresentable {
+        left: SectorId,
+        right: SectorId,
+    },
+    ProductCodec(ProductSectorCodecError),
+    MultiplicityOverflow {
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    },
+}
+
+impl fmt::Display for FusionAlgebraError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSector { sector } => write!(formatter, "invalid fusion sector {sector:?}"),
+            Self::U1DualOverflow { charge } => {
+                write!(formatter, "U(1) dual charge -({charge}) is not representable")
+            }
+            Self::U1FusionOverflow { left, right } => write!(
+                formatter,
+                "U(1) fusion charge {left} + {right} is not representable"
+            ),
+            Self::FusionNotRepresentable { left, right } => write!(
+                formatter,
+                "fusion output for {left:?} x {right:?} is not representable"
+            ),
+            Self::ProductCodec(error) => error.fmt(formatter),
+            Self::MultiplicityOverflow {
+                left,
+                right,
+                coupled,
+            } => write!(
+                formatter,
+                "fusion multiplicity overflows usize for {left:?} x {right:?} -> {coupled:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FusionAlgebraError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ProductCodec(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<ProductSectorCodecError> for FusionAlgebraError {
+    fn from(error: ProductSectorCodecError) -> Self {
+        Self::ProductCodec(error)
+    }
+}
+
+/// Checked companion for finite or encoded fusion algebras.
+///
+/// The infallible [`FusionRule`] methods remain the validated expert hot path.
+pub trait CheckedFusionAlgebra: FusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError>;
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError>;
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError>;
+}
+
 pub trait MultiplicityFreeFusionRule: FusionRule {}
 
 mod lowered_multiplicity_free_sealed {
@@ -1185,6 +1275,17 @@ impl<LeftRule, RightRule, Codec> ProductFusionRule<LeftRule, RightRule, Codec> {
         Codec::encode(left, right)
     }
 
+    pub fn try_encode_sector(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorId, FusionAlgebraError>
+    where
+        Codec: ProductSectorCodec,
+    {
+        Codec::encode_checked(left, right).map_err(FusionAlgebraError::ProductCodec)
+    }
+
     pub fn decode_sector(&self, sector: SectorId) -> Option<(SectorId, SectorId)>
     where
         Codec: ProductSectorCodec,
@@ -1314,6 +1415,72 @@ where
     RightRule: MultiplicityFreeFusionRule,
     Codec: ProductSectorCodec + 'static,
 {
+}
+
+impl<LeftRule, RightRule, Codec> CheckedFusionAlgebra
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: CheckedFusionAlgebra,
+    RightRule: CheckedFusionAlgebra,
+    Codec: ProductSectorCodec + 'static,
+{
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        let (left, right) =
+            Codec::decode_checked(sector).map_err(FusionAlgebraError::ProductCodec)?;
+        self.try_encode_sector(
+            self.left.try_dual_sector(left)?,
+            self.right.try_dual_sector(right)?,
+        )
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        let (left_left, left_right) =
+            Codec::decode_checked(left).map_err(FusionAlgebraError::ProductCodec)?;
+        let (right_left, right_right) =
+            Codec::decode_checked(right).map_err(FusionAlgebraError::ProductCodec)?;
+        let left_channels = self
+            .left
+            .try_fusion_channels(left_left, right_left)?;
+        let right_channels = self
+            .right
+            .try_fusion_channels(left_right, right_right)?;
+        let mut channels = SectorVec::new();
+        for right_channel in right_channels {
+            for &left_channel in &left_channels {
+                channels.push(self.try_encode_sector(left_channel, right_channel)?);
+            }
+        }
+        Ok(channels)
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        let (left_left, left_right) =
+            Codec::decode_checked(left).map_err(FusionAlgebraError::ProductCodec)?;
+        let (right_left, right_right) =
+            Codec::decode_checked(right).map_err(FusionAlgebraError::ProductCodec)?;
+        let (coupled_left, coupled_right) =
+            Codec::decode_checked(coupled).map_err(FusionAlgebraError::ProductCodec)?;
+        self.left
+            .try_nsymbol(left_left, right_left, coupled_left)?
+            .checked_mul(
+                self.right
+                    .try_nsymbol(left_right, right_right, coupled_right)?,
+            )
+            .ok_or(FusionAlgebraError::MultiplicityOverflow {
+                left,
+                right,
+                coupled,
+            })
+    }
 }
 
 impl<LeftRule, RightRule, LeftLayout, RightLayout>
@@ -1613,6 +1780,41 @@ impl FusionRule for Z2FusionRule {
     }
 }
 
+fn checked_z2_irrep(sector: SectorId) -> Result<Z2Irrep, FusionAlgebraError> {
+    Z2Irrep::from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+}
+
+impl CheckedFusionAlgebra for Z2FusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        checked_z2_irrep(sector)?;
+        Ok(sector)
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        let left = checked_z2_irrep(left)?;
+        let right = checked_z2_irrep(right)?;
+        Ok(core::iter::once(Z2Irrep::new(left.parity() ^ right.parity()).into()).collect())
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        let left = checked_z2_irrep(left)?;
+        let right = checked_z2_irrep(right)?;
+        let coupled = checked_z2_irrep(coupled)?;
+        Ok(usize::from(
+            coupled.parity() == (left.parity() ^ right.parity()),
+        ))
+    }
+}
+
 impl MultiplicityFreeFusionRule for Z2FusionRule {}
 
 impl lowered_multiplicity_free_sealed::Sealed for Z2FusionRule {}
@@ -1775,6 +1977,29 @@ impl FusionRule for FermionParityFusionRule {
     }
 }
 
+impl CheckedFusionAlgebra for FermionParityFusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        Z2FusionRule.try_dual_sector(sector)
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        Z2FusionRule.try_fusion_channels(left, right)
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Z2FusionRule.try_nsymbol(left, right, coupled)
+    }
+}
+
 impl MultiplicityFreeFusionRule for FermionParityFusionRule {}
 
 impl lowered_multiplicity_free_sealed::Sealed for FermionParityFusionRule {}
@@ -1927,26 +2152,38 @@ impl U1Irrep {
     }
 
     pub const fn sector_id(self) -> SectorId {
-        let charge = self.charge as i64;
-        if charge >= 0 {
-            SectorId::new((charge as usize) * 2)
-        } else {
-            SectorId::new(((-charge) as usize) * 2 - 1)
-        }
+        SectorId::new(u1_charge_to_zigzag_u32(self.charge) as usize)
     }
 
     pub fn from_sector_id(sector: SectorId) -> Option<Self> {
-        let id = sector.id();
-        if id > u32::MAX as usize {
-            return None;
-        }
-        let charge = if id % 2 == 0 {
-            i64::try_from(id / 2).ok()?
-        } else {
-            -i64::try_from((id + 1) / 2).ok()?
-        };
-        i32::try_from(charge).ok().map(Self::new)
+        u32::try_from(sector.id())
+            .ok()
+            .map(u1_charge_from_zigzag_u32)
+            .map(Self::new)
     }
+}
+
+const fn u1_charge_to_zigzag_u32(charge: i32) -> u32 {
+    ((charge as u32) << 1) ^ ((charge >> 31) as u32)
+}
+
+const fn u1_charge_from_zigzag_u32(encoded: u32) -> i32 {
+    ((encoded >> 1) as i32) ^ -((encoded & 1) as i32)
+}
+
+fn checked_u1_irrep(sector: SectorId) -> Result<U1Irrep, FusionAlgebraError> {
+    U1Irrep::from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+}
+
+fn checked_u1_dual_charge(charge: i32) -> Result<i32, FusionAlgebraError> {
+    charge
+        .checked_neg()
+        .ok_or(FusionAlgebraError::U1DualOverflow { charge })
+}
+
+fn checked_u1_fusion_charge(left: i32, right: i32) -> Result<i32, FusionAlgebraError> {
+    left.checked_add(right)
+        .ok_or(FusionAlgebraError::U1FusionOverflow { left, right })
 }
 
 impl From<U1Irrep> for SectorId {
@@ -1979,10 +2216,7 @@ impl FusionRule for U1FusionRule {
     fn dual(&self, sector: SectorId) -> SectorId {
         let sector = U1Irrep::from_sector_id(sector).expect("U(1) dual received an invalid sector");
         U1Irrep::new(
-            sector
-                .charge()
-                .checked_neg()
-                .expect("U(1) dual charge overflow"),
+            checked_u1_dual_charge(sector.charge()).expect("U(1) dual charge overflow"),
         )
         .into()
     }
@@ -1992,13 +2226,43 @@ impl FusionRule for U1FusionRule {
         let right = U1Irrep::from_sector_id(right).expect("U(1) fusion received an invalid sector");
         core::iter::once(
             U1Irrep::new(
-                left.charge()
-                    .checked_add(right.charge())
+                checked_u1_fusion_charge(left.charge(), right.charge())
                     .expect("U(1) fusion charge overflow"),
             )
             .into(),
         )
         .collect()
+    }
+}
+
+impl CheckedFusionAlgebra for U1FusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        let charge = checked_u1_irrep(sector)?.charge();
+        Ok(U1Irrep::new(checked_u1_dual_charge(charge)?).into())
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        let left = checked_u1_irrep(left)?.charge();
+        let right = checked_u1_irrep(right)?.charge();
+        Ok(core::iter::once(U1Irrep::new(checked_u1_fusion_charge(left, right)?).into()).collect())
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        let left = checked_u1_irrep(left)?.charge();
+        let right = checked_u1_irrep(right)?.charge();
+        let coupled = checked_u1_irrep(coupled)?.charge();
+        Ok(usize::from(
+            coupled == checked_u1_fusion_charge(left, right)?,
+        ))
     }
 }
 
@@ -2032,11 +2296,9 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
         &self,
         sector: Self::Sector,
     ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
-        sector
-            .charge()
-            .checked_neg()
+        checked_u1_dual_charge(sector.charge())
             .map(U1Irrep::new)
-            .ok_or_else(|| {
+            .map_err(|_| {
                 LoweredFusionTreeBuildError::algebra_closure(
                     "U(1) dual charge exceeds the representable algebra",
                 )
@@ -2052,10 +2314,7 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
     where
         F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
     {
-        let charge = left
-            .charge()
-            .checked_add(right.charge())
-            .ok_or_else(|| {
+        let charge = checked_u1_fusion_charge(left.charge(), right.charge()).map_err(|_| {
                 LoweredFusionTreeBuildError::algebra_closure(
                     "U(1) fusion charge exceeds the representable algebra",
                 )
@@ -2069,10 +2328,7 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
         right: Self::Sector,
         coupled: Self::Sector,
     ) -> Result<usize, LoweredFusionTreeBuildError> {
-        let charge = left
-            .charge()
-            .checked_add(right.charge())
-            .ok_or_else(|| {
+        let charge = checked_u1_fusion_charge(left.charge(), right.charge()).map_err(|_| {
                 LoweredFusionTreeBuildError::algebra_closure(
                     "U(1) fusion charge exceeds the representable algebra",
                 )
@@ -2136,6 +2392,24 @@ impl MultiplicityFreeRigidSymbols for U1FusionRule {
     }
 
     fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn a_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn b_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
         1.0
     }
 }
@@ -2244,6 +2518,58 @@ impl FusionRule for SU2FusionRule {
             .step_by(2)
             .map(|twice_spin| SU2Irrep::from_twice_spin(twice_spin).into())
             .collect()
+    }
+}
+
+fn checked_su2_irrep(sector: SectorId) -> Result<SU2Irrep, FusionAlgebraError> {
+    SU2Irrep::try_from_sector_id(sector).ok_or(FusionAlgebraError::InvalidSector { sector })
+}
+
+fn checked_su2_channels(
+    left: SectorId,
+    right: SectorId,
+) -> Result<(usize, usize), FusionAlgebraError> {
+    let left_spin = checked_su2_irrep(left)?.twice_spin();
+    let right_spin = checked_su2_irrep(right)?.twice_spin();
+    let max = left_spin + right_spin;
+    if max > SU2_MAX_DOUBLED_SPIN {
+        return Err(FusionAlgebraError::FusionNotRepresentable {
+            left,
+            right,
+        });
+    }
+    Ok((left_spin.abs_diff(right_spin), max))
+}
+
+impl CheckedFusionAlgebra for SU2FusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        checked_su2_irrep(sector)?;
+        Ok(sector)
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        let (min, max) = checked_su2_channels(left, right)?;
+        Ok((min..=max)
+            .step_by(2)
+            .map(|twice_spin| SU2Irrep::from_twice_spin(twice_spin).into())
+            .collect())
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        let coupled = checked_su2_irrep(coupled)?.twice_spin();
+        let (min, max) = checked_su2_channels(left, right)?;
+        Ok(usize::from(
+            coupled >= min && coupled <= max && (coupled - min) % 2 == 0,
+        ))
     }
 }
 
@@ -2482,6 +2808,41 @@ impl FusionRule for FibonacciFusionRule {
             // `FibonacciAnyonProdIterator` iteration order (anyons.jl:96-109).
             (true, true) => smallvec![SectorId::new(0), SectorId::new(1)],
         }
+    }
+}
+
+fn checked_fibonacci_sector(sector: SectorId) -> Result<(), FusionAlgebraError> {
+    (sector.id() <= 1)
+        .then_some(())
+        .ok_or(FusionAlgebraError::InvalidSector { sector })
+}
+
+impl CheckedFusionAlgebra for FibonacciFusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        checked_fibonacci_sector(sector)?;
+        Ok(sector)
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        checked_fibonacci_sector(left)?;
+        checked_fibonacci_sector(right)?;
+        Ok(self.fusion_channels(left, right))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        checked_fibonacci_sector(left)?;
+        checked_fibonacci_sector(right)?;
+        checked_fibonacci_sector(coupled)?;
+        Ok(self.nsymbol(left, right, coupled))
     }
 }
 

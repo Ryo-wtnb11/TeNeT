@@ -3509,7 +3509,7 @@ mod tests {
         assert_eq!(out[0].1, 1.0);
         assert_eq!(out[0].0.codomain_uncoupled(), &[]);
         assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(0)));
-        assert_eq!(out[0].0.codomain_is_dual(), &[]);
+        assert_eq!(out[0].0.codomain_is_dual(), &[] as &[bool]);
         assert_eq!(out[0].0.codomain_innerlines(), &[]);
         assert_eq!(out[0].0.codomain_vertices(), &[]);
         assert_eq!(out[0].0.domain_uncoupled(), &[u1(3), u1(-2), u1(-1)]);
@@ -3543,7 +3543,7 @@ mod tests {
         );
         assert_eq!(out[0].0.domain_uncoupled(), &[]);
         assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(0)));
-        assert_eq!(out[0].0.domain_is_dual(), &[]);
+        assert_eq!(out[0].0.domain_is_dual(), &[] as &[bool]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
         assert_eq!(out[0].0.domain_vertices(), &[]);
     }
@@ -10807,6 +10807,193 @@ mod tests {
         assert!(
             id_after > id_before,
             "reset must not reuse content ids, got before={id_before} after={id_after}"
+        );
+    }
+
+    #[test]
+    fn u1_zigzag_roundtrips_native_and_simulated_32_bit_extremes() {
+        // What: every i32 charge, including both asymmetric endpoints, has
+        // the historical u32 zigzag ID without target-width arithmetic.
+        let cases = [
+            (i32::MIN, u32::MAX),
+            (-1, 1),
+            (0, 0),
+            (1, 2),
+            (i32::MAX, u32::MAX - 1),
+        ];
+        for (charge, encoded) in cases {
+            assert_eq!(u1_charge_to_zigzag_u32(charge), encoded);
+            assert_eq!(u1_charge_from_zigzag_u32(encoded), charge);
+            let sector = U1Irrep::new(charge).sector_id();
+            assert_eq!(sector.id(), encoded as usize);
+            assert_eq!(U1Irrep::from_sector_id(sector), Some(U1Irrep::new(charge)));
+        }
+    }
+
+    #[test]
+    fn checked_u1_reports_nonclosure_and_preserves_valid_boundaries() {
+        // What: finite-i32 nonclosure is typed, while boundary sums that
+        // remain representable are identical to the expert infallible path.
+        let rule = U1FusionRule;
+        assert_eq!(
+            rule.try_dual_sector(u1(i32::MIN)),
+            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+        );
+        for (left, right) in [(i32::MAX, 1), (i32::MIN, -1)] {
+            assert_eq!(
+                rule.try_fusion_channels(u1(left), u1(right)),
+                Err(FusionAlgebraError::U1FusionOverflow { left, right })
+            );
+        }
+        for (left, right, expected) in [
+            (i32::MAX, 0, i32::MAX),
+            (i32::MIN, 0, i32::MIN),
+            (i32::MAX, i32::MIN, -1),
+        ] {
+            let checked = rule.try_fusion_channels(u1(left), u1(right)).unwrap();
+            assert_eq!(checked.as_slice(), &[u1(expected)]);
+            assert_eq!(checked, rule.fusion_channels(u1(left), u1(right)));
+            assert_eq!(
+                rule.try_nsymbol(u1(left), u1(right), u1(expected)),
+                Ok(rule.nsymbol(u1(left), u1(right), u1(expected)))
+            );
+        }
+        assert_eq!(
+            rule.try_dual_sector(u1(i32::MAX)).unwrap(),
+            rule.dual(u1(i32::MAX))
+        );
+    }
+
+    #[test]
+    fn checked_su2_distinguishes_invalid_inputs_from_unrepresentable_fusion() {
+        // What: valid SU2 inputs whose output exceeds the supported algebra
+        // report closure failure, while the exact boundary matches the hot path.
+        let rule = SU2FusionRule;
+        let boundary = rule
+            .try_fusion_channels(su2(127), su2(127))
+            .unwrap();
+        assert_eq!(boundary, rule.fusion_channels(su2(127), su2(127)));
+        assert_eq!(
+            rule.try_fusion_channels(su2(128), su2(127)),
+            Err(FusionAlgebraError::FusionNotRepresentable {
+                left: su2(128),
+                right: su2(127),
+            })
+        );
+        assert_eq!(
+            rule.try_fusion_channels(SectorId::new(255), su2(0)),
+            Err(FusionAlgebraError::InvalidSector {
+                sector: SectorId::new(255),
+            })
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn checked_products_preserve_child_u1_errors_and_distinguish_codec_errors() {
+        // What: recursive products retain the exact U1 closure cause, while
+        // malformed packed IDs remain a distinct codec failure.
+        type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+        type Fz2U1Rule =
+            ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+        type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+        type TripleLayout = ProductSectorLayout<Fz2U1Layout, Su2SectorLayout>;
+        type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+
+        let pair = Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule);
+        let pair_min = pair.try_encode_sector(z2_odd(), u1(i32::MIN)).unwrap();
+        assert_eq!(
+            pair.try_dual_sector(pair_min),
+            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+        );
+        let pair_max = pair.try_encode_sector(z2_even(), u1(i32::MAX)).unwrap();
+        let pair_one = pair.try_encode_sector(z2_odd(), u1(1)).unwrap();
+        assert_eq!(
+            pair.try_fusion_channels(pair_max, pair_one),
+            Err(FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            })
+        );
+
+        let triple = TripleRule::new(pair, SU2FusionRule);
+        let triple_min = triple.try_encode_sector(pair_min, su2(1)).unwrap();
+        assert_eq!(
+            triple.try_dual_sector(triple_min),
+            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+        );
+        let invalid = SectorId::new(1usize << TripleLayout::BITS);
+        assert!(matches!(
+            triple.try_dual_sector(invalid),
+            Err(FusionAlgebraError::ProductCodec(
+                ProductSectorCodecError::InvalidHighBits { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn checked_fusion_algebra_is_object_safe_and_matches_closed_builtins() {
+        // What: callers can use checked algebra through one provider object,
+        // and closed built-ins retain their infallible results exactly.
+        let checked: &dyn CheckedFusionAlgebra = &U1FusionRule;
+        assert_eq!(checked.try_dual_sector(u1(7)), Ok(u1(-7)));
+        for rule in [
+            &Z2FusionRule as &dyn CheckedFusionAlgebra,
+            &FermionParityFusionRule,
+            &SU2FusionRule,
+        ] {
+            let left = rule.vacuum();
+            let right = rule.vacuum();
+            assert_eq!(rule.try_dual_sector(left), Ok(rule.dual(left)));
+            assert_eq!(
+                rule.try_fusion_channels(left, right),
+                Ok(rule.fusion_channels(left, right))
+            );
+            assert_eq!(
+                rule.try_nsymbol(left, right, rule.vacuum()),
+                Ok(rule.nsymbol(left, right, rule.vacuum()))
+            );
+        }
+    }
+
+    #[test]
+    fn lowered_u1_errors_keep_the_existing_closure_classification() {
+        // What: the lowered hot builder keeps its existing static closure
+        // classification while sharing checked arithmetic internally.
+        let dual = U1FusionRule
+            .try_lowered_dual(U1Irrep::new(i32::MIN))
+            .unwrap_err();
+        assert_eq!(
+            dual.static_message(),
+            "U(1) dual charge exceeds the representable algebra"
+        );
+        let mut emit = |_sector| Ok(());
+        let fusion = U1FusionRule
+            .try_for_each_lowered_channel(
+                U1Irrep::new(i32::MAX),
+                U1Irrep::new(1),
+                &mut emit,
+            )
+            .unwrap_err();
+        assert_eq!(
+            fusion.static_message(),
+            "U(1) fusion charge exceeds the representable algebra"
+        );
+    }
+
+    #[test]
+    fn u1_trivial_a_b_symbols_accept_min_charge_valid_triples() {
+        // What: trivial U1 rigidity symbols remain exactly one for valid
+        // MIN-containing triples without requiring an unrepresentable dual.
+        let rule = U1FusionRule;
+        assert_eq!(
+            rule.a_symbol_scalar(u1(i32::MIN), u1(0), u1(i32::MIN)),
+            1.0
+        );
+        assert_eq!(
+            rule.b_symbol_scalar(u1(0), u1(i32::MIN), u1(i32::MIN)),
+            1.0
         );
     }
 }
