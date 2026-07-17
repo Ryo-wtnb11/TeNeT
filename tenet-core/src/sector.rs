@@ -215,6 +215,24 @@ impl SectorLeg {
         )
     }
 
+    /// The dual leg, returning a finite-algebra error when any sector has no
+    /// representable dual.
+    pub fn try_dual<R>(&self, rule: &R) -> Result<Self, FusionAlgebraError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let sectors = self
+            .iter()
+            .map(|(sector, degeneracy)| {
+                rule.try_dual_sector(sector)
+                    .map(|dual| (dual, degeneracy))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Why not mutate a cloned leg as sectors succeed: a later failure must
+        // leave no partially dualized value available to callers.
+        Ok(Self::new(sectors, !self.is_dual))
+    }
+
     #[inline]
     pub const fn is_dual(&self) -> bool {
         self.is_dual

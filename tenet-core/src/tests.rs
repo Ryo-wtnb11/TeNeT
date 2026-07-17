@@ -4574,6 +4574,33 @@ mod tests {
         }
     }
 
+    impl<R> CheckedFusionAlgebra for DualCountingRule<R>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            self.dual_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.try_dual_sector(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            self.inner.try_fusion_channels(left, right)
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            self.inner.try_nsymbol(left, right, coupled)
+        }
+    }
+
     fn assert_oriented_validation_dual_calls_are_linear<R>(
         rule: &DualCountingRule<R>,
         sectors: impl IntoIterator<Item = (SectorId, usize)>,
@@ -11271,5 +11298,222 @@ mod tests {
             rule.b_symbol_scalar(u1(0), u1(i32::MIN), u1(i32::MIN)),
             1.0
         );
+    }
+
+    #[test]
+    fn checked_sector_leg_dual_is_transactional_and_preserves_exact_causes() {
+        // What: a checked dual either returns the complete dual leg or the exact
+        // algebra failure without changing the source leg.
+        let source = SectorLeg::new([(u1(i32::MIN), 2), (u1(1), 3)], false);
+        let before = source.clone();
+        assert_eq!(
+            source.try_dual(&U1FusionRule),
+            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+        );
+        assert_eq!(source, before);
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            type Rule = ProductFusionRule<U1FusionRule, Z2FusionRule, TensorKitProductCodec>;
+            let rule = Rule::new(U1FusionRule, Z2FusionRule);
+            let min = TensorKitProductCodec::encode(u1(i32::MIN), z2_odd());
+            let product = SectorLeg::new([(min, 1)], false);
+            assert_eq!(
+                product.try_dual(&rule),
+                Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+            );
+        }
+    }
+
+    #[test]
+    fn checked_select_and_permute_report_orientation_failure_without_extra_duals() {
+        // What: moving a legal MIN codomain leg across the HomSpace boundary
+        // reports its algebra error, while same-side selection and identity
+        // permutation perform no dual operation.
+        let min_leg = SectorLeg::new([(u1(i32::MIN), 2)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([min_leg]),
+            FusionProductSpace::new([]),
+        );
+        let rule = DualCountingRule::new(U1FusionRule);
+
+        let same_side = hom.try_select_checked(&rule, &[0], &[]).unwrap();
+        assert_eq!(same_side, hom);
+        assert_eq!(rule.dual_calls(), 0);
+        let identity = hom.try_permute_checked(&rule, &[0], &[]).unwrap();
+        assert_eq!(identity, hom);
+        assert_eq!(rule.dual_calls(), 0);
+
+        assert_eq!(
+            hom.try_select_checked(&rule, &[], &[0]),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+            )))
+        );
+        assert_eq!(rule.dual_calls(), 1);
+    }
+
+    #[test]
+    fn checked_orientation_validates_axes_before_dual_arithmetic() {
+        // What: malformed axis requests retain Core validation precedence even
+        // when the first legal orientation mapping would overflow.
+        let min_leg = SectorLeg::new([(u1(i32::MIN), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([min_leg]),
+            FusionProductSpace::new([]),
+        );
+        let rule = DualCountingRule::new(U1FusionRule);
+        assert_eq!(
+            hom.try_select_checked(&rule, &[], &[1]),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::InvalidPermutation {
+                    permutation: vec![1],
+                    rank: 1,
+                }
+            )))
+        );
+        assert_eq!(rule.dual_calls(), 0);
+        assert_eq!(
+            hom.try_permute_checked(&rule, &[], &[]),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::InvalidPermutation {
+                    permutation: vec![],
+                    rank: 1,
+                }
+            )))
+        );
+        assert_eq!(rule.dual_calls(), 0);
+
+        let scalar = FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([]),
+        );
+        assert_eq!(
+            FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                &rule,
+                &hom,
+                &scalar,
+                &[],
+                &[],
+                &[1],
+                0,
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::InvalidPermutation {
+                    permutation: vec![1],
+                    rank: 1,
+                }
+            )))
+        );
+        assert_eq!(rule.dual_calls(), 0);
+    }
+
+    #[test]
+    fn checked_tensorcontract_separates_pair_validation_and_output_orientation_failures() {
+        // What: checked contraction reports the exact dual failure both while
+        // validating a contracted pair and while materializing an open output
+        // leg on the domain side.
+        let min_leg = || SectorLeg::new([(u1(i32::MIN), 1)], false);
+        let scalar = || {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([]),
+                FusionProductSpace::new([]),
+            )
+        };
+        let lhs =
+            FusionTreeHomSpace::new(FusionProductSpace::new([min_leg()]), FusionProductSpace::new([]));
+        let rhs =
+            FusionTreeHomSpace::new(FusionProductSpace::new([min_leg()]), FusionProductSpace::new([]));
+        let expected = CheckedFusionSpaceError::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1DualOverflow { charge: i32::MIN },
+        ));
+        assert_eq!(
+            FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                &U1FusionRule,
+                &lhs,
+                &rhs,
+                &[0],
+                &[0],
+                &[],
+                0,
+            ),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                &U1FusionRule,
+                &lhs,
+                &scalar(),
+                &[],
+                &[],
+                &[0],
+                0,
+            ),
+            Err(expected)
+        );
+    }
+
+    fn assert_checked_contract_matches_infallible<R>(rule: &R, sector: SectorId)
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let leg = SectorLeg::new([(sector, 2)], false);
+        let lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg]),
+            FusionProductSpace::new([]),
+        );
+        let rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([]),
+        );
+        let expected =
+            FusionTreeHomSpace::tensorcontract_homspace(rule, &lhs, &rhs, &[], &[], &[0], 0)
+                .unwrap();
+        let actual = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            &lhs,
+            &rhs,
+            &[],
+            &[],
+            &[0],
+            0,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn checked_tensorcontract_matches_closed_builtin_orientation() {
+        // What: checked orientation is semantically identical to the established
+        // infallible path for every closed built-in algebra and a product rule.
+        assert_checked_contract_matches_infallible(&Z2FusionRule, z2_odd());
+        assert_checked_contract_matches_infallible(&FermionParityFusionRule, z2_odd());
+        assert_checked_contract_matches_infallible(&U1FusionRule, u1(7));
+        assert_checked_contract_matches_infallible(&SU2FusionRule, su2(3));
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            type Rule = ProductFusionRule<U1FusionRule, Z2FusionRule, TensorKitProductCodec>;
+            let rule = Rule::new(U1FusionRule, Z2FusionRule);
+            let sector = TensorKitProductCodec::encode(u1(4), z2_odd());
+            assert_checked_contract_matches_infallible(&rule, sector);
+        }
+    }
+
+    #[test]
+    fn checked_fusion_space_error_exposes_its_typed_source() {
+        // What: callers can inspect either the structural or algebraic source
+        // through the standard error chain without parsing display text.
+        let core = CheckedFusionSpaceError::from(CoreError::DimensionMismatch {
+            expected: 1,
+            actual: 2,
+        });
+        assert!(std::error::Error::source(&core)
+            .is_some_and(|source| source.downcast_ref::<CoreError>().is_some()));
+        let algebra = CheckedFusionSpaceError::from(FusionAlgebraError::U1DualOverflow {
+            charge: i32::MIN,
+        });
+        assert!(std::error::Error::source(&algebra)
+            .is_some_and(|source| source.downcast_ref::<FusionAlgebraError>().is_some()));
     }
 }

@@ -210,6 +210,49 @@ impl fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+/// Failure while deriving a fusion space through checked finite-algebra
+/// operations.
+///
+/// The established [`CoreError`] remains the structural error vocabulary.
+/// Checked algebra failures stay separate so expert infallible APIs do not
+/// acquire a new error variant or a stronger fusion-rule bound.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedFusionSpaceError {
+    Core(Box<CoreError>),
+    FusionAlgebra(Box<FusionAlgebraError>),
+}
+
+impl fmt::Display for CheckedFusionSpaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Core(error) => error.fmt(formatter),
+            Self::FusionAlgebra(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CheckedFusionSpaceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Core(error) => Some(error.as_ref()),
+            Self::FusionAlgebra(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<CoreError> for CheckedFusionSpaceError {
+    fn from(error: CoreError) -> Self {
+        Self::Core(Box::new(error))
+    }
+}
+
+impl From<FusionAlgebraError> for CheckedFusionSpaceError {
+    fn from(error: FusionAlgebraError) -> Self {
+        Self::FusionAlgebra(Box::new(error))
+    }
+}
+
 pub fn validate_layout(layout: BlockLayout<'_>) -> Result<(), CoreError> {
     if layout.shape.len() != layout.strides.len() {
         return Err(CoreError::RankMismatch {
