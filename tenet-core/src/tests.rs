@@ -10888,6 +10888,158 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checked_fibonacci_matches_valid_operations_and_rejects_unknown_sectors() {
+        // What: Fibonacci's checked companion preserves every valid operation
+        // and rejects IDs outside the two-sector algebra with the exact input.
+        let rule = FibonacciFusionRule;
+        let vacuum = SectorId::new(0);
+        let tau = SectorId::new(1);
+        assert_eq!(rule.try_dual_sector(tau), Ok(rule.dual(tau)));
+        assert_eq!(
+            rule.try_fusion_channels(tau, tau),
+            Ok(rule.fusion_channels(tau, tau))
+        );
+        for coupled in [vacuum, tau] {
+            assert_eq!(
+                rule.try_nsymbol(tau, tau, coupled),
+                Ok(rule.nsymbol(tau, tau, coupled))
+            );
+        }
+        let invalid = SectorId::new(2);
+        assert_eq!(
+            rule.try_dual_sector(invalid),
+            Err(FusionAlgebraError::InvalidSector { sector: invalid })
+        );
+        assert_eq!(
+            rule.try_fusion_channels(tau, invalid),
+            Err(FusionAlgebraError::InvalidSector { sector: invalid })
+        );
+        assert_eq!(
+            rule.try_nsymbol(tau, tau, invalid),
+            Err(FusionAlgebraError::InvalidSector { sector: invalid })
+        );
+    }
+
+    #[test]
+    fn checked_recursive_product_preserves_channel_order_and_valid_multiplicity() {
+        // What: recursive checked products retain the established
+        // right-outer/left-inner channel order and valid nsymbol products.
+        type Pair = ProductFusionRule<FibonacciFusionRule, FibonacciFusionRule>;
+        type Triple = ProductFusionRule<Pair, FibonacciFusionRule>;
+
+        let pair = Pair::new(FibonacciFusionRule, FibonacciFusionRule);
+        let pair_tau = pair.try_encode_sector(SectorId::new(1), SectorId::new(1)).unwrap();
+        let triple = Triple::new(pair, FibonacciFusionRule);
+        let input = triple
+            .try_encode_sector(pair_tau, SectorId::new(1))
+            .unwrap();
+        let checked = triple.try_fusion_channels(input, input).unwrap();
+        let infallible = triple.fusion_channels(input, input);
+        assert_eq!(checked, infallible);
+
+        let mut expected = SectorVec::new();
+        for right in [SectorId::new(0), SectorId::new(1)] {
+            for pair_right in [SectorId::new(0), SectorId::new(1)] {
+                for pair_left in [SectorId::new(0), SectorId::new(1)] {
+                    let pair_channel = triple
+                        .left_rule()
+                        .try_encode_sector(pair_left, pair_right)
+                        .unwrap();
+                    expected.push(triple.try_encode_sector(pair_channel, right).unwrap());
+                }
+            }
+        }
+        assert_eq!(checked, expected);
+        for coupled in checked {
+            assert_eq!(
+                triple.try_nsymbol(input, input, coupled),
+                Ok(triple.nsymbol(input, input, coupled))
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct CheckedMultiplicityRule<const N: usize>;
+
+    impl<const N: usize> FusionRule for CheckedMultiplicityRule<N> {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(0)).collect()
+        }
+
+        fn nsymbol(&self, _left: SectorId, _right: SectorId, _coupled: SectorId) -> usize {
+            N
+        }
+    }
+
+    impl<const N: usize> CheckedFusionAlgebra for CheckedMultiplicityRule<N> {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            if sector == SectorId::new(0) {
+                Ok(sector)
+            } else {
+                Err(FusionAlgebraError::InvalidSector { sector })
+            }
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            self.try_dual_sector(left)?;
+            self.try_dual_sector(right)?;
+            Ok(self.fusion_channels(left, right))
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            self.try_dual_sector(left)?;
+            self.try_dual_sector(right)?;
+            self.try_dual_sector(coupled)?;
+            Ok(N)
+        }
+    }
+
+    #[test]
+    fn checked_product_reports_multiplicity_overflow_without_panicking() {
+        // What: product multiplicities that exceed usize return the exact
+        // structured overflow instead of wrapping or entering the hot path.
+        type Rule =
+            ProductFusionRule<CheckedMultiplicityRule<{ usize::MAX }>, CheckedMultiplicityRule<2>>;
+        let rule = Rule::new(CheckedMultiplicityRule, CheckedMultiplicityRule);
+        let sector = rule
+            .try_encode_sector(SectorId::new(0), SectorId::new(0))
+            .unwrap();
+        assert_eq!(
+            rule.try_nsymbol(sector, sector, sector),
+            Err(FusionAlgebraError::MultiplicityOverflow {
+                left: sector,
+                right: sector,
+                coupled: sector,
+            })
+        );
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn checked_products_preserve_child_u1_errors_and_distinguish_codec_errors() {
