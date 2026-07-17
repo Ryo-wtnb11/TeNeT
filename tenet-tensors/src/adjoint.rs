@@ -16,7 +16,10 @@ use tenet_core::{
 
 use crate::cache::registered_operation_cache;
 #[cfg(test)]
-use crate::contract::{encoded_layout_primer, lowered_layout_primer, PreparedLayoutKeys};
+use crate::contract::{
+    encoded_layout_primer, lowered_layout_primer, reset_scratch_publication_observations,
+    scratch_publication_observations, PreparedLayoutKeys,
+};
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder};
 use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
@@ -829,13 +832,13 @@ mod cache_tests {
         .try_bind_rule(&rule)
         .unwrap();
         let source = DynamicFusionMapSpace::from_typed(&typed);
-        let before = tenet_core::fusion_tree_layout_cache_info();
+        reset_scratch_publication_observations();
 
         let error =
             adjoint_space_dyn_with_primer(&rule, &source, lowered_layout_primer::<U1FusionRule>)
                 .unwrap_err();
 
         assert!(matches!(error, OperationError::MissingBlockKey { .. }));
-        assert_eq!(tenet_core::fusion_tree_layout_cache_info(), before);
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
     }
 }

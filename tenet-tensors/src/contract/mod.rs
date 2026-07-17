@@ -42,7 +42,10 @@ pub use context::{
 };
 pub(crate) use dynamic_space::LayoutKeyBuilder;
 #[cfg(test)]
-pub(crate) use dynamic_space::{encoded_layout_primer, lowered_layout_primer, PreparedLayoutKeys};
+pub(crate) use dynamic_space::{
+    encoded_layout_primer, lowered_layout_primer, reset_scratch_publication_observations,
+    scratch_publication_observations, PreparedLayoutKeys,
+};
 pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, ValidatedDynamicFusionLayout,
 };
