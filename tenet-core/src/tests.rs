@@ -5464,6 +5464,120 @@ mod tests {
     }
 
     #[test]
+    fn prepared_lowered_layout_publishes_only_at_commit() {
+        // What: cold preparation enumerates exactly once but does not consume
+        // identity or cache admission until its explicit commit point.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        reset_fusion_tree_layout_probe_side_effect_calls();
+        reset_lowered_layout_build_observations();
+        let hom = singleton_rank_hom(su2(1), 5);
+        let before = fusion_tree_layout_cache_info();
+
+        let prepared = hom
+            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        let cold_work = lowered_layout_build_observations();
+        assert!(cold_work.0 > 0);
+        assert!(cold_work.1 > 0);
+        assert_eq!(fusion_tree_layout_cache_info(), before);
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+
+        let keys = prepared.commit();
+        assert!(!keys.is_empty());
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (1, 1));
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 1);
+    }
+
+    #[test]
+    fn cached_lowered_preparation_is_observationally_read_only() {
+        // What: preparing an already-cached layout performs no enumeration,
+        // ID issue, admission, or cache-accounting mutation when abandoned.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = singleton_rank_hom(su2(1), 5);
+        hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
+        reset_fusion_tree_layout_probe_side_effect_calls();
+        reset_lowered_layout_build_observations();
+        let before = fusion_tree_layout_cache_info();
+
+        let prepared = hom
+            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        assert!(!prepared.keys().is_empty());
+        drop(prepared);
+
+        assert_eq!(lowered_layout_build_observations(), (0, 0));
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+        assert_eq!(fusion_tree_layout_cache_info(), before);
+    }
+
+    #[test]
+    fn cached_lowered_commit_readmits_after_core_reset() {
+        // What: a cached preparation that survives reset republishes its exact
+        // retained keys without consuming a fresh layout identity.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = singleton_rank_hom(su2(1), 5);
+        hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
+        let prepared = hom
+            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        let retained = prepared.keys_arc();
+        reset_core_intern_tables();
+        reset_fusion_tree_layout_probe_side_effect_calls();
+
+        let committed = prepared.commit();
+
+        assert!(Arc::ptr_eq(&retained, &committed));
+        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 1));
+        assert_eq!(fusion_tree_layout_cache_info().entries(), 1);
+    }
+
+    #[test]
+    fn concurrent_lowered_commits_share_one_layout_admission() {
+        // What: two cold preparations racing to commit converge on one Arc
+        // and one cache miss without the losing transaction issuing an ID.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = singleton_rank_hom(su2(1), 5);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let hom = hom.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    reset_fusion_tree_layout_probe_side_effect_calls();
+                    let prepared = hom
+                        .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+                        .unwrap();
+                    barrier.wait();
+                    let keys = prepared.commit();
+                    (keys, fusion_tree_layout_probe_side_effect_calls())
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        let (second, second_calls) = results.pop().unwrap();
+        let (first, first_calls) = results.pop().unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first_calls.0 + second_calls.0, 1);
+        assert_eq!(first_calls.1 + second_calls.1, 1);
+    }
+
+    #[test]
     fn lowered_builder_reports_malformed_ids_and_algebra_closure_without_panicking() {
         // What: packed decode remains a non-algebra lowered error, while U(1),
         // SU(2), and recursive product closure failures retain exact causes.

@@ -147,6 +147,83 @@ struct FusionTreeHomSpaceLayout {
     data: FusionTreeHomSpaceLayoutData,
 }
 
+#[derive(Debug)]
+enum PreparedLoweredFusionTreeLayoutState {
+    Cached {
+        key: FusionTreeHomSpaceCacheKey,
+        layout: Arc<FusionTreeHomSpaceLayout>,
+    },
+    Cold {
+        key: FusionTreeHomSpaceCacheKey,
+        data: FusionTreeHomSpaceLayoutData,
+    },
+}
+
+/// Checked fusion-tree metadata staged without publishing process-local state.
+///
+/// This is an expert transaction boundary for downstream builders that still
+/// have fallible shape or storage work. Call [`Self::commit`] only after that
+/// work succeeds.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct PreparedLoweredFusionTreeLayout {
+    state: PreparedLoweredFusionTreeLayoutState,
+}
+
+impl PreparedLoweredFusionTreeLayout {
+    pub fn keys(&self) -> &[FusionTreeBlockKey] {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
+            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data.keys.as_ref(),
+        }
+    }
+
+    pub fn keys_arc(&self) -> Arc<[FusionTreeBlockKey]> {
+        match &self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
+            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
+        }
+    }
+
+    /// Publishes the prepared layout and returns its shared key storage.
+    ///
+    /// Why no fallible return: checked enumeration and layout-data formation
+    /// completed in `prepare`; the remaining cache race check, monotonic ID,
+    /// and bounded admission are process-local publication only.
+    pub fn commit(self) -> Arc<[FusionTreeBlockKey]> {
+        match self.state {
+            PreparedLoweredFusionTreeLayoutState::Cached { key, layout } => {
+                let cache = fusion_tree_layout_cache();
+                let mut write = cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(existing) = write.lookup(&key) {
+                    return Arc::clone(&existing.keys);
+                }
+                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+                let admitted = write.admit(Arc::new(key), layout, charged_bytes);
+                Arc::clone(&admitted.keys)
+            }
+            PreparedLoweredFusionTreeLayoutState::Cold { key, data } => {
+                let cache = fusion_tree_layout_cache();
+                let mut write = cache
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(existing) = write.lookup(&key) {
+                    return Arc::clone(&existing.keys);
+                }
+                let computed = Arc::new(FusionTreeHomSpaceLayout {
+                    id: next_fusion_tree_layout_id(),
+                    data,
+                });
+                let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
+                let admitted = write.admit(Arc::new(key), computed, charged_bytes);
+                Arc::clone(&admitted.keys)
+            }
+        }
+    }
+}
+
 impl std::ops::Deref for FusionTreeHomSpaceLayout {
     type Target = FusionTreeHomSpaceLayoutData;
 
@@ -1144,9 +1221,39 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        Ok(Arc::clone(
-            &self.try_cached_fusion_tree_layout_lowered(rule)?.keys,
-        ))
+        Ok(self.prepare_fusion_tree_layout_lowered(rule)?.commit())
+    }
+
+    /// Stages checked keys and coupled-sector metadata without issuing a
+    /// layout ID or changing cache admission/accounting.
+    #[doc(hidden)]
+    pub fn prepare_fusion_tree_layout_lowered<R>(
+        &self,
+        rule: &R,
+    ) -> Result<PreparedLoweredFusionTreeLayout, LoweredFusionTreeBuildError>
+    where
+        R: LoweredMultiplicityFreeAlgebra,
+    {
+        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
+        let cache = fusion_tree_layout_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(layout) = read.lookup(&key) {
+            return Ok(PreparedLoweredFusionTreeLayout {
+                state: PreparedLoweredFusionTreeLayoutState::Cached { key, layout },
+            });
+        }
+        drop(read);
+
+        let keys = self.try_fusion_tree_keys_uncached_lowered(rule)?;
+        let data = fusion_tree_layout_data_from_keys(rule, keys);
+        Ok(PreparedLoweredFusionTreeLayout {
+            state: PreparedLoweredFusionTreeLayoutState::Cold {
+                key,
+                data,
+            },
+        })
     }
 
     pub fn try_for_each_fusion_tree_key<R, F, E>(&self, rule: &R, mut f: F) -> Result<(), E>
@@ -1180,6 +1287,7 @@ impl FusionTreeHomSpace {
         .unwrap_or_else(|error| match error {})
     }
 
+    #[cfg(test)]
     fn try_cached_fusion_tree_layout_lowered<R>(
         &self,
         rule: &R,
@@ -1187,9 +1295,15 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        self.try_cached_fusion_tree_layout_with(rule, || {
-            self.try_fusion_tree_keys_uncached_lowered(rule)
-        })
+        self.prepare_fusion_tree_layout_lowered(rule)?.commit();
+        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
+        let cache = fusion_tree_layout_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(read
+            .lookup(&key)
+            .expect("committed lowered layout must be cache-resident"))
     }
 
     fn try_cached_fusion_tree_layout_with<R, E, F>(
