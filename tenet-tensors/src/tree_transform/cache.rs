@@ -25,7 +25,8 @@ use super::operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use super::plan::{
-    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
+    build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
+    build_tree_pair_transform_group_plan,
     TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
 };
 
