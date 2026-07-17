@@ -111,5 +111,12 @@ fn cached_owned_rank_nine_permute_does_not_clone_operation_storage() {
     COUNTING.set(false);
     black_box(output.data());
 
+    // Why-not: llvm-cov instruments this test binary and allocates coverage
+    // bookkeeping during the measured call, so its global allocation count
+    // cannot be compared with the production threshold. The normal test
+    // remains the guard against an operation-storage clone.
+    #[cfg(not(coverage))]
     assert_eq!(ALLOCATIONS.get(), 3);
+    #[cfg(coverage)]
+    assert!(ALLOCATIONS.get() >= 3);
 }
