@@ -692,13 +692,13 @@ impl<'a> HomSpaceDescriptor<'a> {
             .iter()
             .copied()
             .map(|view| view.try_materialize(rule))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
         let domain = self
             .domain()
             .iter()
             .copied()
             .map(|view| view.try_materialize(rule))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
         Ok(FusionTreeHomSpace::new(
             FusionProductSpace::new(codomain),
             FusionProductSpace::new(domain),
@@ -1873,20 +1873,30 @@ fn validate_oriented_composed_leg_checked<R>(
 where
     R: CheckedFusionAlgebra,
 {
-    let mut valid = lhs_domain.is_dual() == rhs_codomain.is_dual()
-        && lhs_domain.source.sectors().len() == rhs_codomain.source.sectors().len();
-    if valid {
-        for (sector, degeneracy) in lhs_domain.source.iter() {
-            let expected = lhs_domain.try_mapped_sector(rule, sector)?;
-            let rhs_source_sector = if rhs_codomain.dualize {
-                rule.try_dual_sector(expected)?
-            } else {
-                expected
-            };
-            if rhs_codomain.source.degeneracy(rhs_source_sector) != Some(degeneracy) {
-                valid = false;
-                break;
-            }
+    if lhs_domain.is_dual() != rhs_codomain.is_dual() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "contracted fusion leg duality flags do not match",
+        }
+        .into());
+    }
+    if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: lhs_domain.source.sectors().len(),
+            actual: rhs_codomain.source.sectors().len(),
+        }
+        .into());
+    }
+    let mut valid = true;
+    for (sector, degeneracy) in lhs_domain.source.iter() {
+        let expected = lhs_domain.try_mapped_sector(rule, sector)?;
+        let rhs_source_sector = if rhs_codomain.dualize {
+            rule.try_dual_sector(expected)?
+        } else {
+            expected
+        };
+        if rhs_codomain.source.degeneracy(rhs_source_sector) != Some(degeneracy) {
+            valid = false;
+            break;
         }
     }
     if valid {

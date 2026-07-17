@@ -272,6 +272,17 @@ fn rank_eight_or_less_same_side_homspace_derivation_is_heap_free() {
             select_allocations, 0,
             "rank-{rank} same-side HomSpace::select must stay heap-free"
         );
+        let (_, checked_select_allocations) = measured_allocations(|| {
+            black_box(
+                homspace
+                    .try_select_checked(&rule, &codomain_axes, &domain_axes)
+                    .unwrap(),
+            )
+        });
+        assert_eq!(
+            checked_select_allocations, 0,
+            "rank-{rank} checked same-side select added transient storage"
+        );
 
         let (_, permute_allocations) = measured_allocations(|| {
             black_box(
@@ -283,6 +294,17 @@ fn rank_eight_or_less_same_side_homspace_derivation_is_heap_free() {
         assert_eq!(
             permute_allocations, 0,
             "rank-{rank} same-side HomSpace::permute must stay heap-free"
+        );
+        let (_, checked_permute_allocations) = measured_allocations(|| {
+            black_box(
+                homspace
+                    .try_permute_checked(&rule, &codomain_axes, &domain_axes)
+                    .unwrap(),
+            )
+        });
+        assert_eq!(
+            checked_permute_allocations, 0,
+            "rank-{rank} checked same-side permute added transient storage"
         );
 
         let (_, compose_allocations) = measured_allocations(|| {
@@ -315,6 +337,20 @@ fn rank_eight_or_less_crossing_derivation_allocates_only_final_dual_legs() {
             "rank-{rank} crossing permute must allocate one final LegData per crossed leg"
         );
 
+        let (_, checked_permute_allocations) = measured_allocations(|| {
+            black_box(
+                homspace
+                    .try_permute_checked(&rule, codomain_axes, domain_axes)
+                    .unwrap(),
+            )
+        });
+        // What: checked orientation keeps its transactional staging inline for
+        // the common rank<=8 case and allocates only the final dual LegData.
+        assert_eq!(
+            checked_permute_allocations, rank,
+            "rank-{rank} checked crossing permute added transient storage"
+        );
+
         let (_, contract_allocations) = measured_allocations(|| {
             black_box(
                 FusionTreeHomSpace::tensorcontract_homspace(
@@ -332,6 +368,25 @@ fn rank_eight_or_less_crossing_derivation_allocates_only_final_dual_legs() {
         assert_eq!(
             contract_allocations, rank,
             "rank-{rank} contraction must allocate only final crossed LegData"
+        );
+
+        let (_, checked_contract_allocations) = measured_allocations(|| {
+            black_box(
+                FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                    &rule,
+                    &homspace,
+                    &homspace,
+                    &lhs_axes,
+                    &rhs_axes,
+                    &output_axes,
+                    nout,
+                )
+                .unwrap(),
+            )
+        });
+        assert_eq!(
+            checked_contract_allocations, rank,
+            "rank-{rank} checked contraction added transient storage"
         );
 
         let (_, repeated_allocations) = measured_allocations(|| {

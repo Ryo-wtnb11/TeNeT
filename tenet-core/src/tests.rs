@@ -4328,7 +4328,7 @@ mod tests {
         )
     }
 
-    fn assert_direct_contract_matches_legacy<R: FusionRule>(
+    fn assert_direct_contract_matches_legacy<R: CheckedFusionAlgebra>(
         rule: &R,
         lhs: &FusionTreeHomSpace,
         rhs: &FusionTreeHomSpace,
@@ -4357,6 +4357,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(actual, expected);
+        let checked = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            nout,
+        )
+        .unwrap();
+        assert_eq!(checked, actual);
     }
 
     #[test]
@@ -4466,22 +4477,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn direct_tensorcontract_matches_old_sequence_for_all_leg_orientations() {
-        let rule = U1FusionRule;
-        let matched = SectorLeg::new([(u1(-2), 1), (u1(1), 2)], false);
-        let open = SectorLeg::new([(u1(0), 1)], false);
+    fn assert_checked_contract_all_orientations<R>(
+        rule: &R,
+        matched: SectorLeg,
+        mismatched: SectorLeg,
+        open: SectorLeg,
+    ) where
+        R: CheckedFusionAlgebra,
+    {
+        let assert_same_result = |lhs: &FusionTreeHomSpace, rhs: &FusionTreeHomSpace| {
+            let infallible =
+                FusionTreeHomSpace::tensorcontract_homspace(rule, lhs, rhs, &[0], &[0], &[], 0);
+            let checked = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                rule,
+                lhs,
+                rhs,
+                &[0],
+                &[0],
+                &[],
+                0,
+            );
+            match (infallible, checked) {
+                (Ok(expected), Ok(actual)) => assert_eq!(actual, expected),
+                (
+                    Err(expected),
+                    Err(CheckedFusionSpaceError::Core(actual)),
+                ) => assert_eq!(*actual, expected),
+                (_, Err(CheckedFusionSpaceError::FusionAlgebra(error))) => {
+                    panic!("closed fixture unexpectedly failed checked algebra: {error}")
+                }
+                (expected, actual) => {
+                    panic!("checked/infallible contraction results differ: {expected:?} vs {actual:?}")
+                }
+            }
+        };
+
         for lhs_axis in 0..2 {
             for rhs_axis in 0..2 {
                 let lhs_stored = if lhs_axis == 0 {
-                    matched.dual(&rule)
+                    matched.dual(rule)
                 } else {
                     matched.clone()
                 };
                 let rhs_stored = if rhs_axis == 0 {
                     matched.clone()
                 } else {
-                    matched.dual(&rule)
+                    matched.dual(rule)
                 };
                 let lhs = if lhs_axis == 0 {
                     FusionTreeHomSpace::new(
@@ -4506,7 +4547,7 @@ mod tests {
                     )
                 };
                 assert_direct_contract_matches_legacy(
-                    &rule,
+                    rule,
                     &lhs,
                     &rhs,
                     &[lhs_axis],
@@ -4514,7 +4555,146 @@ mod tests {
                     &[1, 0],
                     1,
                 );
+
+                let bad_rhs_stored = if rhs_axis == 0 {
+                    mismatched.clone()
+                } else {
+                    mismatched.dual(rule)
+                };
+                let bad_rhs = if rhs_axis == 0 {
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([bad_rhs_stored]),
+                        FusionProductSpace::new([open.clone()]),
+                    )
+                } else {
+                    FusionTreeHomSpace::new(
+                        FusionProductSpace::new([open.clone()]),
+                        FusionProductSpace::new([bad_rhs_stored]),
+                    )
+                };
+                let lhs_contract = if lhs_axis == 0 { 0 } else { 1 };
+                let rhs_contract = if rhs_axis == 0 { 0 } else { 1 };
+                let infallible = FusionTreeHomSpace::tensorcontract_homspace(
+                    rule,
+                    &lhs,
+                    &bad_rhs,
+                    &[lhs_contract],
+                    &[rhs_contract],
+                    &[1, 0],
+                    1,
+                );
+                let checked = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                    rule,
+                    &lhs,
+                    &bad_rhs,
+                    &[lhs_contract],
+                    &[rhs_contract],
+                    &[1, 0],
+                    1,
+                );
+                match (infallible, checked) {
+                    (Err(expected), Err(CheckedFusionSpaceError::Core(actual))) => {
+                        assert_eq!(*actual, expected)
+                    }
+                    (expected, actual) => panic!(
+                        "checked/infallible mismatch error differs: {expected:?} vs {actual:?}"
+                    ),
+                }
             }
+        }
+
+        // Exercise the direct codomain/codomain form in addition to the four
+        // stored-side combinations above.
+        let direct_lhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([matched.clone()]),
+            FusionProductSpace::new([]),
+        );
+        let direct_rhs = FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([matched]),
+        );
+        assert_same_result(&direct_lhs, &direct_rhs);
+    }
+
+    #[test]
+    fn checked_tensorcontract_matches_all_closed_rules_and_leg_orientations() {
+        // What: checked contraction preserves valid HomSpaces and structural
+        // errors across all four stored-side orientations and multi-sector
+        // membership for every built-in multiplicity-free family.
+        let fixture = |sectors: &[(SectorId, usize)], mismatch: &[(SectorId, usize)]| {
+            (
+                SectorLeg::new(sectors.iter().copied(), false),
+                SectorLeg::new(mismatch.iter().copied(), false),
+            )
+        };
+        let (z2, z2_bad) = fixture(
+            &[(z2_even(), 1), (z2_odd(), 2)],
+            &[(z2_even(), 1), (z2_odd(), 3)],
+        );
+        assert_checked_contract_all_orientations(
+            &Z2FusionRule,
+            z2,
+            z2_bad,
+            SectorLeg::new([(z2_even(), 1)], false),
+        );
+        let (fz2, fz2_bad) = fixture(
+            &[(z2_even(), 2), (z2_odd(), 1)],
+            &[(z2_even(), 3), (z2_odd(), 1)],
+        );
+        assert_checked_contract_all_orientations(
+            &FermionParityFusionRule,
+            fz2,
+            fz2_bad,
+            SectorLeg::new([(z2_even(), 1)], false),
+        );
+        let (u1_leg, u1_bad) = fixture(
+            &[(u1(-2), 1), (u1(1), 2)],
+            &[(u1(-2), 1), (u1(1), 3)],
+        );
+        assert_checked_contract_all_orientations(
+            &U1FusionRule,
+            u1_leg,
+            u1_bad,
+            SectorLeg::new([(u1(0), 1)], false),
+        );
+        let spin0 = su2(0);
+        let spin_half = su2(1);
+        let (su2_leg, su2_bad) = fixture(
+            &[(spin0, 1), (spin_half, 2)],
+            &[(spin0, 1), (spin_half, 3)],
+        );
+        assert_checked_contract_all_orientations(
+            &SU2FusionRule,
+            su2_leg,
+            su2_bad,
+            SectorLeg::new([(spin0, 1)], false),
+        );
+        let (fibonacci, fibonacci_bad) = fixture(
+            &[(SectorId::new(0), 1), (SectorId::new(1), 2)],
+            &[(SectorId::new(0), 1), (SectorId::new(1), 3)],
+        );
+        assert_checked_contract_all_orientations(
+            &FibonacciFusionRule,
+            fibonacci,
+            fibonacci_bad,
+            SectorLeg::new([(SectorId::new(0), 1)], false),
+        );
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            type Rule = ProductFusionRule<U1FusionRule, Z2FusionRule, TensorKitProductCodec>;
+            let rule = Rule::new(U1FusionRule, Z2FusionRule);
+            let first = TensorKitProductCodec::encode(u1(-2), z2_even());
+            let second = TensorKitProductCodec::encode(u1(1), z2_odd());
+            let vacuum = TensorKitProductCodec::encode(u1(0), z2_even());
+            let (product, product_bad) =
+                fixture(&[(first, 1), (second, 2)], &[(first, 1), (second, 3)]);
+            assert_checked_contract_all_orientations(
+                &rule,
+                product,
+                product_bad,
+                SectorLeg::new([(vacuum, 1)], false),
+            );
         }
     }
 
@@ -11351,6 +11531,23 @@ mod tests {
             )))
         );
         assert_eq!(rule.dual_calls(), 1);
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            type Rule = ProductFusionRule<U1FusionRule, Z2FusionRule, TensorKitProductCodec>;
+            let product_rule = Rule::new(U1FusionRule, Z2FusionRule);
+            let product_min = TensorKitProductCodec::encode(u1(i32::MIN), z2_odd());
+            let product_hom = FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([(product_min, 1)], false)]),
+                FusionProductSpace::new([]),
+            );
+            assert_eq!(
+                product_hom.try_permute_checked(&product_rule, &[], &[0]),
+                Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                    FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+                )))
+            );
+        }
     }
 
     #[test]
@@ -11410,9 +11607,9 @@ mod tests {
 
     #[test]
     fn checked_tensorcontract_separates_pair_validation_and_output_orientation_failures() {
-        // What: checked contraction reports the exact dual failure both while
-        // validating a contracted pair and while materializing an open output
-        // leg on the domain side.
+        // What: structural pair mismatches retain Core precedence without
+        // touching checked dual arithmetic, while a valid open leg moved to the
+        // output domain reports the exact algebra failure.
         let min_leg = || SectorLeg::new([(u1(i32::MIN), 1)], false);
         let scalar = || {
             FusionTreeHomSpace::new(
@@ -11424,12 +11621,10 @@ mod tests {
             FusionTreeHomSpace::new(FusionProductSpace::new([min_leg()]), FusionProductSpace::new([]));
         let rhs =
             FusionTreeHomSpace::new(FusionProductSpace::new([min_leg()]), FusionProductSpace::new([]));
-        let expected = CheckedFusionSpaceError::FusionAlgebra(Box::new(
-            FusionAlgebraError::U1DualOverflow { charge: i32::MIN },
-        ));
+        let rule = DualCountingRule::new(U1FusionRule);
         assert_eq!(
             FusionTreeHomSpace::try_tensorcontract_homspace_checked(
-                &U1FusionRule,
+                &rule,
                 &lhs,
                 &rhs,
                 &[0],
@@ -11437,11 +11632,43 @@ mod tests {
                 &[],
                 0,
             ),
-            Err(expected.clone())
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::MalformedFusionTree {
+                    message: "contracted fusion leg duality flags do not match",
+                }
+            )))
+        );
+        assert_eq!(rule.dual_calls(), 0);
+
+        let rhs_count_mismatch = FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([SectorLeg::new(
+                [(u1(i32::MIN), 1), (u1(0), 1)],
+                false,
+            )]),
         );
         assert_eq!(
             FusionTreeHomSpace::try_tensorcontract_homspace_checked(
-                &U1FusionRule,
+                &rule,
+                &lhs,
+                &rhs_count_mismatch,
+                &[0],
+                &[0],
+                &[],
+                0,
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::DimensionMismatch {
+                    expected: 1,
+                    actual: 2,
+                }
+            )))
+        );
+        assert_eq!(rule.dual_calls(), 0);
+
+        assert_eq!(
+            FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                &rule,
                 &lhs,
                 &scalar(),
                 &[],
@@ -11449,8 +11676,11 @@ mod tests {
                 &[0],
                 0,
             ),
-            Err(expected)
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+            )))
         );
+        assert_eq!(rule.dual_calls(), 1);
     }
 
     fn assert_checked_contract_matches_infallible<R>(rule: &R, sector: SectorId)
@@ -11515,5 +11745,37 @@ mod tests {
         });
         assert!(std::error::Error::source(&algebra)
             .is_some_and(|source| source.downcast_ref::<FusionAlgebraError>().is_some()));
+    }
+
+    #[test]
+    fn checked_homspace_derivation_keeps_semantic_identity_lazy() {
+        // What: successful checked metadata derivation does not publish or
+        // resolve a process-local HomSpace identity until a caller asks for it.
+        let rule = U1FusionRule;
+        let leg = SectorLeg::new([(u1(-2), 1), (u1(1), 2)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg.clone(), leg]),
+            FusionProductSpace::new([]),
+        );
+        crate::reset_hom_space_intern_calls();
+        let selected = hom.try_select_checked(&rule, &[1, 0], &[]).unwrap();
+        let permuted = hom.try_permute_checked(&rule, &[1, 0], &[]).unwrap();
+        let scalar = FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([]),
+        );
+        let contracted = FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            &rule,
+            &hom,
+            &scalar,
+            &[],
+            &[],
+            &[1, 0],
+            2,
+        )
+        .unwrap();
+        assert_eq!(crate::hom_space_intern_calls(), 0);
+        assert_eq!(selected, permuted);
+        assert_eq!(contracted, permuted);
     }
 }

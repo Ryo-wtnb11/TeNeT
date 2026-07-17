@@ -227,7 +227,7 @@ impl SectorLeg {
                 rule.try_dual_sector(sector)
                     .map(|dual| (dual, degeneracy))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
         // Why not mutate a cloned leg as sectors succeed: a later failure must
         // leave no partially dualized value available to callers.
         Ok(Self::new(sectors, !self.is_dual))
