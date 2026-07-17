@@ -93,7 +93,10 @@ impl From<CoreError> for Error {
 
 impl From<OperationError> for Error {
     fn from(err: OperationError) -> Self {
-        Self::Operation(Box::new(err))
+        match err {
+            OperationError::FusionAlgebra(cause) => Self::FusionAlgebra(cause),
+            other => Self::Operation(Box::new(other)),
+        }
     }
 }
 

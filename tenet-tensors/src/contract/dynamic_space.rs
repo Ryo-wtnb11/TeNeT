@@ -5,8 +5,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, DimVec, FusionRule, FusionTensorMapSpace,
-    FusionTreeBlockKey, FusionTreeHomSpace, HomSpaceId, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, RuleIdentity,
+    FusionTreeBlockKey, FusionTreeHomSpace, HomSpaceId, LoweredFusionTreeBuildError,
+    LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
+    RuleIdentity,
 };
 
 use crate::cache::registered_operation_cache;
@@ -72,6 +73,15 @@ pub(crate) fn encoded_layout_primer<R>(
     Ok(None)
 }
 
+fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
+    match error.into_fusion_algebra() {
+        Ok(cause) => OperationError::FusionAlgebra(Box::new(cause)),
+        Err(error) => OperationError::InvalidArgument {
+            message: error.static_message(),
+        },
+    }
+}
+
 pub(crate) fn lowered_layout_primer<R>(
     rule: &R,
     homspace: &FusionTreeHomSpace,
@@ -82,9 +92,7 @@ where
     homspace
         .try_fusion_tree_keys_lowered(rule)
         .map(Some)
-        .map_err(|error| OperationError::InvalidArgument {
-            message: error.static_message(),
-        })
+        .map_err(lowered_build_operation_error)
 }
 
 /// Identity of a pairwise contraction's output space: the two operand hom
@@ -508,9 +516,7 @@ where
             |rule, homspace| {
                 homspace
                     .try_fusion_tree_keys_lowered(rule)
-                    .map_err(|error| OperationError::InvalidArgument {
-                        message: error.static_message(),
-                    })
+                    .map_err(lowered_build_operation_error)
             },
         )?;
         Self::from_derived_with_capability(provider, space, layout_build)
@@ -1829,9 +1835,10 @@ mod lowered_metadata_tests {
     use crate::test_support::CACHE_TEST_LOCK;
     use std::cell::Cell;
     use tenet_core::{
-        FermionParityFusionRule, FusionProductSpace, Fz2SectorLayout, PackedProductCodec,
-        ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
-        SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+        FermionParityFusionRule, FusionAlgebraError, FusionProductSpace, Fz2SectorLayout,
+        PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout,
+        SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep,
+        U1SectorLayout, Z2Irrep,
     };
 
     type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -2026,13 +2033,45 @@ mod lowered_metadata_tests {
     #[test]
     fn lowered_metadata_error_maps_to_operation_invalid_argument() {
         // What: malformed built-in product IDs cross into the operation layer
-        // as its structured invalid-argument variant and never panic.
+        // as the same structured invalid-argument variant and static message.
         let malformed = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(SectorId::new(usize::MAX), 1)], false)]),
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
         let error = lowered_layout_primer(&rule(), &malformed).unwrap_err();
-        assert!(matches!(error, OperationError::InvalidArgument { .. }));
+        assert_eq!(
+            error,
+            OperationError::InvalidArgument {
+                message: "built-in fusion-tree layout contains an invalid product sector",
+            }
+        );
+    }
+
+    #[test]
+    fn lowered_algebra_error_maps_to_exact_operation_cause() {
+        // What: the operation boundary owns the exact lowered U1 closure
+        // cause and exposes it through the standard error source chain.
+        let overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(U1Irrep::new(i32::MAX), 1)], false),
+                SectorLeg::new([(U1Irrep::new(1), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let expected = FusionAlgebraError::U1FusionOverflow {
+            left: i32::MAX,
+            right: 1,
+        };
+        let error = lowered_layout_primer(&U1FusionRule, &overflow).unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::FusionAlgebra(Box::new(expected.clone()))
+        );
+        assert_eq!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<FusionAlgebraError>()),
+            Some(&expected)
+        );
     }
 }
 

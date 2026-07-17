@@ -339,7 +339,7 @@ mod lowered_multiplicity_free_sealed {
 enum LoweredFusionTreeBuildErrorKind {
     InvalidSector(SectorId),
     Codec(ProductSectorCodecError),
-    AlgebraClosure(&'static str),
+    FusionAlgebra(Box<FusionAlgebraError>),
 }
 
 /// Failure while lowering encoded sectors into the built-in multiplicity-free
@@ -363,9 +363,18 @@ impl LoweredFusionTreeBuildError {
         }
     }
 
-    fn algebra_closure(message: &'static str) -> Self {
+    fn fusion_algebra(error: FusionAlgebraError) -> Self {
         Self {
-            kind: LoweredFusionTreeBuildErrorKind::AlgebraClosure(message),
+            kind: LoweredFusionTreeBuildErrorKind::FusionAlgebra(Box::new(error)),
+        }
+    }
+
+    /// Extracts an exact finite-algebra cause without string classification.
+    #[doc(hidden)]
+    pub fn into_fusion_algebra(self) -> Result<FusionAlgebraError, Self> {
+        match self.kind {
+            LoweredFusionTreeBuildErrorKind::FusionAlgebra(error) => Ok(*error),
+            kind => Err(Self { kind }),
         }
     }
 
@@ -378,7 +387,9 @@ impl LoweredFusionTreeBuildError {
             LoweredFusionTreeBuildErrorKind::Codec(_) => {
                 "built-in fusion-tree layout contains an invalid product sector"
             }
-            LoweredFusionTreeBuildErrorKind::AlgebraClosure(message) => message,
+            LoweredFusionTreeBuildErrorKind::FusionAlgebra(_) => {
+                "built-in fusion-tree layout exceeds the representable algebra"
+            }
         }
     }
 }
@@ -390,14 +401,19 @@ impl fmt::Display for LoweredFusionTreeBuildError {
                 write!(formatter, "invalid built-in sector {sector:?}")
             }
             LoweredFusionTreeBuildErrorKind::Codec(error) => error.fmt(formatter),
-            LoweredFusionTreeBuildErrorKind::AlgebraClosure(message) => {
-                formatter.write_str(message)
-            }
+            LoweredFusionTreeBuildErrorKind::FusionAlgebra(error) => error.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for LoweredFusionTreeBuildError {}
+impl std::error::Error for LoweredFusionTreeBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            LoweredFusionTreeBuildErrorKind::FusionAlgebra(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 /// Typed algebra used only while building built-in multiplicity-free layouts.
 ///
@@ -1592,11 +1608,23 @@ where
             *right.right(),
             *coupled.right(),
         )?;
-        left_n.checked_mul(right_n).ok_or_else(|| {
-            LoweredFusionTreeBuildError::algebra_closure(
-                "product fusion multiplicity exceeds usize",
-            )
-        })
+        match left_n.checked_mul(right_n) {
+            Some(multiplicity) => Ok(multiplicity),
+            None => {
+                // Why not encode every successful call: persistent IDs are
+                // needed only to diagnose the exceptional overflow branch.
+                let left = self.try_encode_lowered(left)?;
+                let right = self.try_encode_lowered(right)?;
+                let coupled = self.try_encode_lowered(coupled)?;
+                Err(LoweredFusionTreeBuildError::fusion_algebra(
+                    FusionAlgebraError::MultiplicityOverflow {
+                        left,
+                        right,
+                        coupled,
+                    },
+                ))
+            }
+        }
     }
 }
 
@@ -2298,11 +2326,7 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
     ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
         checked_u1_dual_charge(sector.charge())
             .map(U1Irrep::new)
-            .map_err(|_| {
-                LoweredFusionTreeBuildError::algebra_closure(
-                    "U(1) dual charge exceeds the representable algebra",
-                )
-            })
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)
     }
 
     fn try_for_each_lowered_channel<F>(
@@ -2314,11 +2338,8 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
     where
         F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
     {
-        let charge = checked_u1_fusion_charge(left.charge(), right.charge()).map_err(|_| {
-                LoweredFusionTreeBuildError::algebra_closure(
-                    "U(1) fusion charge exceeds the representable algebra",
-                )
-            })?;
+        let charge = checked_u1_fusion_charge(left.charge(), right.charge())
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
         emit(U1Irrep::new(charge))
     }
 
@@ -2328,11 +2349,8 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
         right: Self::Sector,
         coupled: Self::Sector,
     ) -> Result<usize, LoweredFusionTreeBuildError> {
-        let charge = checked_u1_fusion_charge(left.charge(), right.charge()).map_err(|_| {
-                LoweredFusionTreeBuildError::algebra_closure(
-                    "U(1) fusion charge exceeds the representable algebra",
-                )
-            })?;
+        let charge = checked_u1_fusion_charge(left.charge(), right.charge())
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
         Ok(usize::from(coupled.charge() == charge))
     }
 }
@@ -2615,19 +2633,9 @@ impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
     where
         F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
     {
-        let left = left.twice_spin();
-        let right = right.twice_spin();
-        let max = left.checked_add(right).ok_or_else(|| {
-            LoweredFusionTreeBuildError::algebra_closure(
-                "SU(2) fusion closure exceeds the supported doubled-spin range",
-            )
-        })?;
-        if max > SU2_MAX_DOUBLED_SPIN {
-            return Err(LoweredFusionTreeBuildError::algebra_closure(
-                "SU(2) fusion closure exceeds the supported doubled-spin range",
-            ));
-        }
-        for twice_spin in (left.abs_diff(right)..=max).step_by(2) {
+        let (min, max) = checked_su2_channels(left.sector_id(), right.sector_id())
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
+        for twice_spin in (min..=max).step_by(2) {
             emit(SU2Irrep::from_twice_spin(twice_spin))?;
         }
         Ok(())
@@ -2639,24 +2647,10 @@ impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
         right: Self::Sector,
         coupled: Self::Sector,
     ) -> Result<usize, LoweredFusionTreeBuildError> {
-        let left = left.twice_spin();
-        let right = right.twice_spin();
-        let max = left.checked_add(right).ok_or_else(|| {
-            LoweredFusionTreeBuildError::algebra_closure(
-                "SU(2) fusion closure exceeds the supported doubled-spin range",
-            )
-        })?;
-        if max > SU2_MAX_DOUBLED_SPIN {
-            return Err(LoweredFusionTreeBuildError::algebra_closure(
-                "SU(2) fusion closure exceeds the supported doubled-spin range",
-            ));
-        }
+        let (min, max) = checked_su2_channels(left.sector_id(), right.sector_id())
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
         let coupled = coupled.twice_spin();
-        Ok(usize::from(
-            coupled >= left.abs_diff(right)
-                && coupled <= max
-                && (coupled - left.abs_diff(right)) % 2 == 0,
-        ))
+        Ok(usize::from(coupled >= min && coupled <= max && (coupled - min) % 2 == 0))
     }
 }
 
