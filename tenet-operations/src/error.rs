@@ -1,6 +1,6 @@
 use core::fmt;
 
-use tenet_core::{BlockKey, BraidingStyleKind, CoreError, FusionStyleKind};
+use tenet_core::{BlockKey, BraidingStyleKind, CoreError, FusionAlgebraError, FusionStyleKind};
 use tenet_dense::DenseError;
 
 use crate::TreeTransformOperation;
@@ -9,6 +9,8 @@ use crate::TreeTransformOperation;
 pub enum OperationError {
     Core(CoreError),
     Dense(DenseError),
+    /// A finite encoded fusion algebra cannot represent a lowered layout.
+    FusionAlgebra(Box<FusionAlgebraError>),
     BlockIndexOutOfBounds {
         tensor: &'static str,
         index: usize,
@@ -111,6 +113,7 @@ impl fmt::Display for OperationError {
         match self {
             Self::Core(err) => err.fmt(f),
             Self::Dense(err) => err.fmt(f),
+            Self::FusionAlgebra(err) => err.fmt(f),
             Self::BlockIndexOutOfBounds {
                 tensor,
                 index,
@@ -227,7 +230,14 @@ impl fmt::Display for OperationError {
     }
 }
 
-impl std::error::Error for OperationError {}
+impl std::error::Error for OperationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FusionAlgebra(err) => Some(err.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<CoreError> for OperationError {
     fn from(value: CoreError) -> Self {

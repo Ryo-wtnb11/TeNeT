@@ -6,7 +6,7 @@ use tenet::core::{
     SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet::operations::{
-    OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
+    OperationError, OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
 };
 use tenet::prelude::*;
 
@@ -48,6 +48,111 @@ fn rand_and_zeros_construction_u1_and_su2() {
         let d = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v]).unwrap();
         assert_ne!(c.data(), d.data());
     }
+}
+
+#[test]
+fn tensor_construction_preserves_lowered_u1_algebra_errors() {
+    // What: public tensor construction returns exact forward-fusion and
+    // reverse-recursion dual failures from the lowered U1 algebra.
+    let rt = Runtime::builder().build().unwrap();
+    let maximum = Space::u1([(i32::MAX, 1)]);
+    let one = Space::u1([(1, 1)]);
+    assert_eq!(
+        Tensor::zeros(&rt, Dtype::F64, [&maximum, &one], [])
+            .err()
+            .expect("MAX + 1 must fail"),
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::U1FusionOverflow {
+            left: i32::MAX,
+            right: 1,
+        }))
+    );
+
+    let zero = Space::u1([(0, 1)]);
+    let minimum = Space::u1([(i32::MIN, 1)]);
+    assert_eq!(
+        Tensor::zeros(&rt, Dtype::F64, [&zero, &zero, &minimum], [])
+            .err()
+            .expect("MIN reverse dual must fail"),
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
+            charge: i32::MIN
+        }))
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn tensor_construction_preserves_lowered_product_child_errors() {
+    // What: both packed multiplicity-free product contexts expose the exact
+    // U1 child failure reached during lowered tensor construction.
+    let rt = Runtime::builder().build().unwrap();
+    let pair_maximum = Space::product([((i32::MAX, 0), 1)]).unwrap();
+    let pair_one = Space::product([((1, 1), 1)]).unwrap();
+    assert_eq!(
+        Tensor::zeros(&rt, Dtype::F64, [&pair_maximum, &pair_one], [])
+            .err()
+            .expect("product U1 child overflow must fail"),
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::U1FusionOverflow {
+            left: i32::MAX,
+            right: 1,
+        }))
+    );
+
+    let triple_maximum = Space::fz2_u1_su2([((0, i32::MAX, 0), 1)]).unwrap();
+    let triple_one = Space::fz2_u1_su2([((1, 1, 1), 1)]).unwrap();
+    assert_eq!(
+        Tensor::zeros(&rt, Dtype::F64, [&triple_maximum, &triple_one], [])
+            .err()
+            .expect("triple-product U1 child overflow must fail"),
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::U1FusionOverflow {
+            left: i32::MAX,
+            right: 1,
+        }))
+    );
+}
+
+#[test]
+fn tensor_construction_preserves_lowered_su2_closure_and_valid_boundary() {
+    // What: an unrepresentable SU2 output is exact, while representable
+    // near-boundary U1 construction retains the ordinary zero-tensor result.
+    let rt = Runtime::builder().build().unwrap();
+    let spin_64 = Space::su2([(128, 1)]);
+    let spin_63_5 = Space::su2([(127, 1)]);
+    assert_eq!(
+        Tensor::zeros(&rt, Dtype::F64, [&spin_64, &spin_63_5], [])
+            .err()
+            .expect("SU2 output beyond 254 must fail"),
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::FusionNotRepresentable {
+            left: SectorId::new(128),
+            right: SectorId::new(127),
+        }))
+    );
+
+    let maximum = Space::u1([(i32::MAX, 2)]);
+    let minimum = Space::u1([(i32::MIN, 3)]);
+    let boundary = Tensor::zeros(&rt, Dtype::F64, [&maximum, &minimum], []).unwrap();
+    let ordinary_left = Space::u1([(1, 2)]);
+    let ordinary_right = Space::u1([(-2, 3)]);
+    let ordinary = Tensor::zeros(&rt, Dtype::F64, [&ordinary_left, &ordinary_right], []).unwrap();
+    assert_eq!(boundary.data(), ordinary.data());
+    assert_eq!(boundary.leg_dims(), ordinary.leg_dims());
+}
+
+#[test]
+fn operation_fusion_algebra_error_flattens_at_the_user_boundary() {
+    // What: only the operation-layer algebra variant becomes the existing
+    // user algebra variant; unrelated operation errors remain boxed.
+    let cause = FusionAlgebraError::U1DualOverflow { charge: i32::MIN };
+    assert_eq!(
+        Error::from(OperationError::FusionAlgebra(Box::new(cause.clone()))),
+        Error::FusionAlgebra(Box::new(cause))
+    );
+    let unrelated = OperationError::InvalidArgument {
+        message: "unrelated operation error",
+    };
+    assert_eq!(
+        Error::from(unrelated.clone()),
+        Error::Operation(Box::new(unrelated))
+    );
 }
 
 #[test]

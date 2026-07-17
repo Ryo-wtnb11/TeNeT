@@ -5258,8 +5258,8 @@ mod tests {
 
     #[test]
     fn lowered_builder_reports_malformed_ids_and_algebra_closure_without_panicking() {
-        // What: packed decode, U(1) overflow, and SU(2) closure failures are
-        // typed lowered-build errors; the expert encoded panic path is untouched.
+        // What: packed decode remains a non-algebra lowered error, while U(1),
+        // SU(2), and recursive product closure failures retain exact causes.
         type Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
         type Rule =
             ProductFusionRule<FermionParityFusionRule, U1FusionRule, Codec>;
@@ -5268,7 +5268,11 @@ mod tests {
         let error = malformed
             .try_fusion_tree_keys_uncached_lowered(&rule)
             .unwrap_err();
-        assert!(error.to_string().contains("packed product sector"));
+        assert_eq!(
+            error.static_message(),
+            "built-in fusion-tree layout contains an invalid product sector"
+        );
+        assert!(error.into_fusion_algebra().is_err());
 
         let u1_overflow = FusionTreeHomSpace::new(
             FusionProductSpace::new([
@@ -5280,7 +5284,13 @@ mod tests {
         let error = u1_overflow
             .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
             .unwrap_err();
-        assert!(error.to_string().contains("U(1) fusion charge"));
+        assert_eq!(
+            error.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        );
 
         let u1_dual_overflow = FusionTreeHomSpace::new(
             FusionProductSpace::new([
@@ -5293,19 +5303,103 @@ mod tests {
         let error = u1_dual_overflow
             .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
             .unwrap_err();
-        assert!(error.to_string().contains("U(1) dual charge"));
+        assert_eq!(
+            error.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+        );
 
         let su2_overflow = FusionTreeHomSpace::new(
             FusionProductSpace::new([
-                SectorLeg::new([(su2(SU2_MAX_DOUBLED_SPIN), 1)], false),
-                SectorLeg::new([(su2(1), 1)], false),
+                SectorLeg::new([(su2(128), 1)], false),
+                SectorLeg::new([(su2(127), 1)], false),
             ]),
             FusionProductSpace::new([]),
         );
         let error = su2_overflow
             .try_fusion_tree_keys_uncached_lowered(&SU2FusionRule)
             .unwrap_err();
-        assert!(error.to_string().contains("SU(2) fusion closure"));
+        assert_eq!(
+            error.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::FusionNotRepresentable {
+                left: su2(128),
+                right: su2(127),
+            }
+        );
+
+        let pair_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(Codec::encode(z2_even(), u1(i32::MAX)), 1)], false),
+                SectorLeg::new([(Codec::encode(z2_odd(), u1(1)), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let error = pair_overflow
+            .try_fusion_tree_keys_uncached_lowered(&rule)
+            .unwrap_err();
+        assert_eq!(
+            error.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        );
+
+        type PairLayout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+        type TripleCodec = PackedProductCodec<PairLayout, Su2SectorLayout>;
+        type TripleRule = ProductFusionRule<Rule, SU2FusionRule, TripleCodec>;
+        let triple_rule = TripleRule::new(rule, SU2FusionRule);
+        let triple = |parity, charge, spin| {
+            TripleCodec::encode(Codec::encode(parity, charge), spin)
+        };
+        let triple_overflow = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new(
+                    [(triple(z2_even(), u1(i32::MAX), su2(0)), 1)],
+                    false,
+                ),
+                SectorLeg::new([(triple(z2_odd(), u1(1), su2(1)), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let error = triple_overflow
+            .try_fusion_tree_keys_uncached_lowered(&triple_rule)
+            .unwrap_err();
+        assert_eq!(
+            error.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn failed_lowered_algebra_build_does_not_publish_a_layout() {
+        // What: a typed closure failure leaves the shared layout cache entry
+        // count unchanged rather than publishing a partial result.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(i32::MAX), 1)], false),
+                SectorLeg::new([(u1(1), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let before = fusion_tree_layout_cache_info().entries();
+        let error = hom
+            .try_fusion_tree_keys_lowered(&U1FusionRule)
+            .unwrap_err();
+        assert_eq!(
+            error.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
+        );
+        assert_eq!(fusion_tree_layout_cache_info().entries(), before);
     }
 
     #[test]
@@ -10889,6 +10983,33 @@ mod tests {
     }
 
     #[test]
+    fn lowered_su2_success_stays_below_the_sector_id_boundary() {
+        // What: validated lowered irreps compute channel bounds and
+        // multiplicity without revalidating or re-encoding SectorIds.
+        reset_su2_id_boundary_observations();
+        let rule = SU2FusionRule;
+        let left = SU2Irrep::from_twice_spin(2);
+        let right = SU2Irrep::from_twice_spin(1);
+        let mut channels = Vec::new();
+        rule.try_for_each_lowered_channel(left, right, &mut |channel| {
+            channels.push(channel.twice_spin());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(channels, vec![1, 3]);
+        assert_eq!(
+            rule.try_lowered_nsymbol(left, right, SU2Irrep::from_twice_spin(1)),
+            Ok(1)
+        );
+        assert_eq!(su2_id_boundary_observations(), (0, 0));
+
+        assert!(rule
+            .try_fusion_channels(left.sector_id(), right.sector_id())
+            .is_ok());
+        assert_eq!(su2_id_boundary_observations(), (2, 0));
+    }
+
+    #[test]
     fn checked_fibonacci_matches_valid_operations_and_rejects_unknown_sectors() {
         // What: Fibonacci's checked companion preserves every valid operation
         // and rejects IDs outside the two-sector algebra with the exact input.
@@ -11110,15 +11231,15 @@ mod tests {
     }
 
     #[test]
-    fn lowered_u1_errors_keep_the_existing_closure_classification() {
-        // What: the lowered hot builder keeps its existing static closure
-        // classification while sharing checked arithmetic internally.
+    fn lowered_u1_errors_preserve_the_checked_algebra_cause() {
+        // What: direct lowered U1 dual and fusion calls own the exact checked
+        // algebra cause instead of retaining only a static classification.
         let dual = U1FusionRule
             .try_lowered_dual(U1Irrep::new(i32::MIN))
             .unwrap_err();
         assert_eq!(
-            dual.static_message(),
-            "U(1) dual charge exceeds the representable algebra"
+            dual.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
         );
         let mut emit = |_sector| Ok(());
         let fusion = U1FusionRule
@@ -11129,8 +11250,11 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(
-            fusion.static_message(),
-            "U(1) fusion charge exceeds the representable algebra"
+            fusion.into_fusion_algebra().unwrap(),
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            }
         );
     }
 
