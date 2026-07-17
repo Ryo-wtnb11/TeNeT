@@ -1778,6 +1778,60 @@ where
     Ok((next_basis, next_columns))
 }
 
+fn compose_fusion_tree_block_terms<R, F, I>(
+    rule: &R,
+    basis: &[FusionTreeKey],
+    columns: &DenseColumns<R::Scalar>,
+    mut transform: F,
+) -> Result<(Vec<FusionTreeKey>, DenseColumns<R::Scalar>), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    F: FnMut(&R, &FusionTreeKey) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (FusionTreeKey, R::Scalar)>,
+{
+    // Why not share the tree-pair composer: #83 keeps that path compact and
+    // block-local, while this fusion-only path has no pair-local frame yet.
+    let num_src = columns.num_src;
+    let mut index = FxHashMap::<FusionTreeKey, usize>::default();
+    let mut next_columns = DenseColumns::with_capacity(num_src, basis.len());
+    for (source_row, source_key) in basis.iter().enumerate() {
+        for (destination_key, step_coefficient) in transform(rule, source_key)? {
+            let row = match index.get(&destination_key) {
+                Some(&row) => row,
+                None => {
+                    let row = next_columns.push_empty_row();
+                    index.insert(destination_key, row);
+                    row
+                }
+            };
+            let source_column = columns.row(source_row);
+            let destination_column = next_columns.row_mut(row);
+            for (src, source_coefficient) in source_column.iter().enumerate() {
+                let Some(source_coefficient) = source_coefficient else {
+                    continue;
+                };
+                let contribution = step_coefficient.clone() * source_coefficient.clone();
+                destination_column[src] = Some(match destination_column[src].take() {
+                    Some(existing) => existing + contribution,
+                    None => contribution,
+                });
+            }
+        }
+    }
+    let mut slots = (0..index.len())
+        .map(|_| None)
+        .collect::<Vec<Option<FusionTreeKey>>>();
+    for (key, row) in index {
+        slots[row] = Some(key);
+    }
+    let basis = slots
+        .into_iter()
+        .map(|key| key.expect("dense rows 0..len are all filled"))
+        .collect();
+    Ok((basis, next_columns))
+}
+
 struct CompactMultiplicityFreeTreePairBasis {
     frame: MultiplicityFreeTreePairFrame,
     locals: Vec<MultiplicityFreeTreePairLocal>,
@@ -2296,6 +2350,127 @@ where
         .into_iter()
         .map(|(local, coefficient)| vec![(frame.materialize(local), coefficient)])
         .collect())
+}
+
+fn validate_fusion_tree_block_group(
+    src_keys: &[FusionTreeKey],
+) -> Result<Option<usize>, CoreError> {
+    let Some(reference) = src_keys.first() else {
+        return Ok(None);
+    };
+    let same_group = |key: &FusionTreeKey| {
+        key.uncoupled() == reference.uncoupled()
+            && key.is_dual() == reference.is_dual()
+            && key.has_multiplicity() == reference.has_multiplicity()
+    };
+    // Why not compare `coupled`: distinct coupled labels are basis states
+    // within one external-sector group, notably for non-Abelian SU(2) blocks.
+    if reference.uncoupled().len() != reference.is_dual().len()
+        || !src_keys.iter().all(same_group)
+    {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion-tree keys must share one group",
+        });
+    }
+    Ok(Some(reference.uncoupled().len()))
+}
+
+/// Apply one braid to every source tree in an all-codomain block.
+///
+/// Sources and result rows retain source order. Floating-point summation can
+/// differ from repeated scalar calls, so coefficients agree numerically rather
+/// than necessarily bit-for-bit. Empty input returns an empty result. Every
+/// nonempty source must share external sectors, duality, and fusion style;
+/// malformed mixed groups fail before symbol evaluation.
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_braid_tree_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeKey],
+    permutation: &[usize],
+    levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let Some(rank) = validate_fusion_tree_block_group(src_keys)? else {
+        return Ok(Vec::new());
+    };
+    if levels.len() != rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: levels.len(),
+        });
+    }
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        });
+    }
+    if permutation.iter().copied().eq(0..rank) {
+        return Ok(src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), rule.scalar_one())])
+            .collect());
+    }
+
+    let swaps = permutation_to_adjacent_swaps(permutation, rank)?;
+    let num_src = src_keys.len();
+    let mut basis = src_keys.to_vec();
+    let mut columns = DenseColumns::with_capacity(num_src, num_src);
+    for source in 0..num_src {
+        let row = columns.push_empty_row();
+        columns.row_mut(row)[source] = Some(rule.scalar_one());
+    }
+    let mut current_levels = levels.to_vec();
+    for swap in swaps {
+        let inverse = current_levels[swap] > current_levels[swap + 1];
+        let (next_basis, next_columns) =
+            compose_fusion_tree_block_terms(rule, &basis, &columns, |rule, key| {
+                multiplicity_free_artin_braid_at_with_inverse(rule, key, swap, inverse)
+            })?;
+        basis = next_basis;
+        columns = next_columns;
+        current_levels.swap(swap, swap + 1);
+    }
+
+    let mut rows_per_source = vec![Vec::new(); num_src];
+    for (destination_row, destination_key) in basis.iter().enumerate() {
+        for (source, coefficient) in columns.row(destination_row).iter().enumerate() {
+            if let Some(coefficient) = coefficient {
+                rows_per_source[source].push((destination_key.clone(), coefficient.clone()));
+            }
+        }
+    }
+    Ok(rows_per_source)
+}
+
+/// Symmetric-braiding convenience wrapper for
+/// [`multiplicity_free_braid_tree_block`], with the same ordering, validation,
+/// and empty-input contract.
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_permute_tree_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeKey],
+    permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rank = validate_fusion_tree_block_group(src_keys)?;
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    let Some(rank) = rank else {
+        return Ok(Vec::new());
+    };
+    let levels = (0..rank).collect::<Vec<_>>();
+    multiplicity_free_braid_tree_block(rule, src_keys, permutation, &levels)
 }
 
 #[derive(Clone, Copy)]

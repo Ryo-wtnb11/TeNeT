@@ -1536,6 +1536,149 @@ mod tests {
         assert_eq!(block, vec![vec![(source, 1.0)]]);
     }
 
+    #[test]
+    fn braid_tree_block_matches_per_source_su2_rows() {
+        use std::collections::BTreeMap;
+
+        let rule = SU2FusionRule;
+        let sources = [
+            FusionTreeKey::from_sector_ids(
+                [1, 1, 1],
+                Some(1),
+                [false, false, false],
+                [0],
+                [1, 1],
+            ),
+            FusionTreeKey::from_sector_ids(
+                [1, 1, 1],
+                Some(1),
+                [false, false, false],
+                [2],
+                [1, 1],
+            ),
+        ];
+
+        let block =
+            multiplicity_free_braid_tree_block(&rule, &sources, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        assert_eq!(block.len(), sources.len());
+        for (source, block_rows) in sources.iter().zip(&block) {
+            let per_source =
+                multiplicity_free_braid_tree(&rule, source, &[0, 2, 1], &[0, 1, 2]).unwrap();
+            let collect = |rows: &[(FusionTreeKey, f64)]| {
+                let mut coefficients = BTreeMap::<FusionTreeKey, f64>::new();
+                for (key, coefficient) in rows {
+                    *coefficients.entry(key.clone()).or_default() += coefficient;
+                }
+                coefficients
+            };
+            let expected = collect(&per_source);
+            let actual = collect(block_rows);
+
+            // What: the whole-block walk preserves every destination tree and
+            // coefficient produced by independent SU(2) source transforms.
+            assert_eq!(
+                expected.keys().collect::<Vec<_>>(),
+                actual.keys().collect::<Vec<_>>()
+            );
+            for (key, expected_coefficient) in expected {
+                let actual_coefficient = actual[&key];
+                assert!(
+                    (expected_coefficient - actual_coefficient).abs()
+                        <= 1.0e-12 * (1.0 + expected_coefficient.abs())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tree_block_rejects_mixed_groups_before_symbol_evaluation() {
+        let base =
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let mixed = [
+            FusionTreeKey::from_sector_ids([1, 4], Some(3), [false, false], [], [1]),
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, true], [], [1]),
+            base.clone().with_has_multiplicity(true),
+        ];
+        let expected = CoreError::MalformedFusionTree {
+            message: "fusion-tree keys must share one group",
+        };
+
+        for other in mixed {
+            let sources = [base.clone(), other];
+            // What: identity and general entry paths reject a mixed block
+            // before the panic-on-symbol fixture can evaluate F or R data.
+            assert_eq!(
+                multiplicity_free_braid_tree_block(
+                    &IdentitySymbolPanicRule,
+                    &sources,
+                    &[0, 1],
+                    &[0, 1],
+                )
+                .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                multiplicity_free_permute_tree_block(
+                    &IdentitySymbolPanicRule,
+                    &sources,
+                    &[1, 0],
+                )
+                .unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn tree_block_empty_and_identity_contracts_preserve_source_order() {
+        let empty: &[FusionTreeKey] = &[];
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &IdentitySymbolPanicRule,
+                empty,
+                &[],
+                &[],
+            )
+            .unwrap(),
+            Vec::<Vec<(FusionTreeKey, f64)>>::new()
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_block(&IdentitySymbolPanicRule, empty, &[]).unwrap(),
+            Vec::<Vec<(FusionTreeKey, f64)>>::new()
+        );
+
+        let sources = [
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]),
+            FusionTreeKey::from_sector_ids([1, 2], Some(7), [false, false], [], [1]),
+        ];
+        let expected = sources
+            .iter()
+            .cloned()
+            .map(|source| vec![(source, 1.0)])
+            .collect::<Vec<_>>();
+        // What: distinct coupled labels remain one external-sector group and
+        // the symbol-free identity path returns exact rows in source order.
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &IdentitySymbolPanicRule,
+                &sources,
+                &[0, 1],
+                &[13, 5],
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_block(
+                &IdentitySymbolPanicRule,
+                &sources,
+                &[0, 1],
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
     fn tree_pair_group_fixture(
         codomain: &[usize],
         domain: &[usize],

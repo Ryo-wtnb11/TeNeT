@@ -246,15 +246,15 @@ pub struct TreeTransformCache<T, RuleKey> {
         FxHashMap<TreeTransformFastStructureKey<RuleKey>, Arc<TreeTransformStructure<T>>>,
     policy: OperationCachePolicy,
     stats: TreeTransformCacheStats,
-    // Shape-independent row front for this context. Miss compiles prefill it
-    // from the process-global row memo, then publish new rows back.
+    // Why not store recoupling rows inside each plan: rows are independent of
+    // degeneracy shape and remain reusable across plan-key misses.
     tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
-    // Same row-granular memo for all-codomain transforms, keyed only by the
-    // codomain tree because the domain is unchanged by this scope.
+    // Why not key all-codomain rows by a full tree pair: this scope leaves the
+    // domain unchanged, so the codomain tree contains every deciding input.
     all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo<T, RuleKey>,
-    // Worker count for plan compilation (missing tree-row computation).
-    // Not a second knob: the execution context propagates the backend's
-    // `recoupling_threads` here, so one setting drives replay and compile.
+    // Why not expose a second compile knob: the execution context propagates
+    // the backend's `recoupling_threads` to whole-group transform + assembly,
+    // keeping one setting for replay and compile.
     recoupling_threads: usize,
 }
 
@@ -1032,8 +1032,8 @@ where
 
     /// Plan-compile worker count; the execution context keeps this in sync
     /// with the backend's `recoupling_threads`, so the one configured knob
-    /// drives both replay and compile parallelism. `threads <= 1` is the
-    /// untouched serial compile path.
+    /// drives both replay and compile parallelism. Serial and parallel
+    /// compilation use the same staged group algorithm.
     pub fn set_recoupling_threads(&mut self, threads: usize) {
         self.recoupling_threads = threads.max(1);
     }
