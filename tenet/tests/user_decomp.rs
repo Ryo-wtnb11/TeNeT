@@ -8,6 +8,7 @@ use tenet::core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     SU2FusionRule, SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
+use tenet::operations::OperationError;
 use tenet::prelude::*;
 
 fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
@@ -24,6 +25,60 @@ fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
 fn relative_distance(lhs: &Tensor, rhs: &Tensor) -> f64 {
     let diff = lhs.add(rhs, 1.0, -1.0).unwrap();
     diff.norm().unwrap() / (1.0 + rhs.norm().unwrap())
+}
+
+fn assert_left_polar_contract(rt: &Runtime, tensor: &Tensor, domain: &Space) {
+    let (isometry, positive) = tensor.left_polar().unwrap();
+    assert!(relative_distance(&isometry.compose(&positive).unwrap(), tensor) < 1e-10);
+    let identity = Tensor::id(rt, tensor.dtype(), [domain]).unwrap();
+    let gram = isometry.adjoint().unwrap().compose(&isometry).unwrap();
+    assert!(relative_distance(&gram, &identity) < 1e-10);
+}
+
+fn assert_right_polar_contract(rt: &Runtime, tensor: &Tensor, codomain: &Space) {
+    let (positive, isometry) = tensor.right_polar().unwrap();
+    assert!(relative_distance(&positive.compose(&isometry).unwrap(), tensor) < 1e-10);
+    let identity = Tensor::id(rt, tensor.dtype(), [codomain]).unwrap();
+    let gram = isometry.compose(&isometry.adjoint().unwrap()).unwrap();
+    assert!(relative_distance(&gram, &identity) < 1e-10);
+}
+
+fn assert_polar_direction_error(result: Result<(Tensor, Tensor), Error>, operation: &'static str) {
+    assert!(matches!(
+        result,
+        Err(Error::Operation(error))
+            if matches!(
+                error.as_ref(),
+                OperationError::InvalidArgument { message }
+                    if message.contains(operation)
+                        && message.contains("coupled-sector")
+            )
+    ));
+}
+
+fn assert_polar_direction_error_without_mutation(tensor: &Tensor, operation: &'static str) {
+    let before_f64 = tensor.try_data().ok().map(<[f64]>::to_vec);
+    let before_c64 = tensor.try_data_c64().ok().map(<[Complex64]>::to_vec);
+    let result = match operation {
+        "left_polar" => tensor.left_polar(),
+        "right_polar" => tensor.right_polar(),
+        _ => unreachable!("test only covers the two public polar directions"),
+    };
+    assert_polar_direction_error(result, operation);
+    assert_eq!(tensor.try_data().ok(), before_f64.as_deref());
+    assert_eq!(tensor.try_data_c64().ok(), before_c64.as_deref());
+}
+
+fn rectangular_polar_spaces() -> Vec<(Space, Space)> {
+    vec![
+        (Space::u1([(0, 2)]), Space::u1([(0, 3)])),
+        (Space::su2([(1, 2)]), Space::su2([(1, 3)])),
+        (Space::fz2([(1, 2)]), Space::fz2([(1, 3)])),
+        (
+            Space::fz2_u1_su2([((1, 1, 1), 2)]).unwrap(),
+            Space::fz2_u1_su2([((1, 1, 1), 3)]).unwrap(),
+        ),
+    ]
 }
 
 fn u1_space() -> Space {
@@ -384,6 +439,28 @@ fn polar_decompositions_reconstruct() {
         assert!(relative_distance(&w.compose(&p).unwrap(), &t) < 1e-10);
         let (p, w) = t.right_polar().unwrap();
         assert!(relative_distance(&p.compose(&w).unwrap(), &t) < 1e-10);
+    }
+}
+
+#[test]
+fn polar_rectangular_direction_contracts_hold_for_f64_and_c64() {
+    // What: U1, SU2, fZ2, and their non-Abelian product enforce each public
+    // polar direction and prove its corresponding one-sided identity.
+    let rt = Runtime::builder().build().unwrap();
+    for dtype in [Dtype::F64, Dtype::C64] {
+        for (small, large) in rectangular_polar_spaces() {
+            let tall = Tensor::rand_with_seed(&rt, dtype, [&large], [&small], 701).unwrap();
+            assert_left_polar_contract(&rt, &tall, &small);
+            assert_polar_direction_error_without_mutation(&tall, "right_polar");
+
+            let wide = Tensor::rand_with_seed(&rt, dtype, [&small], [&large], 702).unwrap();
+            assert_right_polar_contract(&rt, &wide, &small);
+            assert_polar_direction_error_without_mutation(&wide, "left_polar");
+
+            let square = Tensor::rand_with_seed(&rt, dtype, [&small], [&small], 703).unwrap();
+            assert_left_polar_contract(&rt, &square, &small);
+            assert_right_polar_contract(&rt, &square, &small);
+        }
     }
 }
 

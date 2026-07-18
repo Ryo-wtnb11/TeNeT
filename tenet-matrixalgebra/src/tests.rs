@@ -24,6 +24,12 @@ static COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
 struct RejectExecutorCalls;
 
 #[derive(Default)]
+struct SvdCallSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    svd_calls: usize,
+}
+
+#[derive(Default)]
 struct FailAfterObservingSvdInput {
     observed: Vec<Vec<f64>>,
 }
@@ -158,6 +164,31 @@ impl DenseExecutor for RejectExecutorCalls {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("validation must reject the input before dense execution")
+    }
+}
+
+impl DenseExecutor for SvdCallSpy {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.svd_calls += 1;
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
     }
 }
 
@@ -1166,6 +1197,74 @@ fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
             .map(|index| ((index * 11 + 2) % 19) as f64 - 7.0)
             .collect(),
         space,
+    )
+    .unwrap()
+}
+
+fn mixed_rectangular_tensor(
+    even_shape: (usize, usize),
+    odd_shape: (usize, usize),
+) -> TensorMap<f64, 1, 1> {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new(
+            [(even, even_shape.0), (odd, odd_shape.0)],
+            false,
+        )]),
+        FusionProductSpace::new([SectorLeg::new(
+            [(even, even_shape.1), (odd, odd_shape.1)],
+            false,
+        )]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| match key.codomain_tree().coupled() {
+            sector if sector == even => vec![even_shape.0, even_shape.1],
+            sector if sector == odd => vec![odd_shape.0, odd_shape.1],
+            sector => panic!("unexpected Z2 sector {sector:?}"),
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims(
+            [even_shape.0 + odd_shape.0],
+            [even_shape.1 + odd_shape.1],
+        )
+        .unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)
+            .collect(),
+        space,
+    )
+    .unwrap()
+}
+
+fn transposed_rectangular_tensor(
+    tensor: &TensorMap<f64, 1, 1>,
+    rows: usize,
+    cols: usize,
+) -> TensorMap<f64, 1, 1> {
+    let mut data = vec![0.0; rows * cols];
+    for col in 0..cols {
+        for row in 0..rows {
+            data[col + cols * row] = tensor.data()[row + rows * col];
+        }
+    }
+    TensorMap::from_vec_with_fusion_space(
+        data,
+        rectangular_svd_tensor(cols, rows)
+            .fusion_space()
+            .unwrap()
+            .as_ref()
+            .clone(),
     )
     .unwrap()
 }
@@ -4581,6 +4680,154 @@ fn polar_decompositions_reconstruct_with_isometric_factors() {
     .unwrap();
     let reconstructed = crate::compose::compose(&mut context, &rule, &positive, &isometry).unwrap();
     assert_svd_blocks_match(&tensor, &reconstructed);
+}
+
+#[test]
+fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
+    // What: invalid left/right directions are rejected before any sector SVD starts.
+    let rule = Z2FusionRule;
+    for (operation, rows, cols) in [("left_polar", 2, 3), ("right_polar", 3, 2)] {
+        let tensor = rectangular_svd_tensor(rows, cols);
+        let mut dense = RejectExecutorCalls;
+        let mut context = default_context();
+        let result = if operation == "left_polar" {
+            left_polar(
+                &mut dense,
+                &mut context,
+                &bound_tensor_ref!(Arc::new(rule), &tensor),
+            )
+        } else {
+            right_polar(
+                &mut dense,
+                &mut context,
+                &bound_tensor_ref!(Arc::new(rule), &tensor),
+            )
+        };
+
+        assert!(matches!(
+            result,
+            Err(OperationError::InvalidArgument { message })
+                if message.contains(operation)
+                    && message.contains("coupled-sector")
+        ));
+    }
+}
+
+#[test]
+fn polar_validates_every_sector_before_direct_or_fallback_svd_execution() {
+    // What: a later invalid sector prevents SVD of an earlier valid sector on both layouts.
+    let rule = Z2FusionRule;
+    let direct = mixed_rectangular_tensor((4, 2), (1, 3));
+    let direct_bound = bound_tensor(Arc::new(rule), &direct);
+    assert!(
+        crate::factorize::compact_factor_plan_for_test(direct_bound.space())
+            .unwrap()
+            .is_some()
+    );
+    let mut dense = SvdCallSpy::default();
+    let mut context = default_context();
+    let direct_error = left_polar(&mut dense, &mut context, &direct_bound.as_ref()).unwrap_err();
+    assert!(matches!(
+        direct_error,
+        OperationError::InvalidArgument { message }
+            if message.contains("left_polar")
+                && message.contains("coupled-sector")
+    ));
+    assert_eq!(dense.svd_calls, 0);
+
+    let fallback_source = mixed_rectangular_tensor((2, 4), (3, 1));
+    let fallback_bound = bound_tensor(Arc::new(rule), &fallback_source);
+    let fallback_space = fallback_bound.space().adjoint_view().unwrap();
+    assert!(
+        crate::factorize::compact_factor_plan_for_test(&fallback_space)
+            .unwrap()
+            .is_none()
+    );
+    let fallback_input =
+        BoundDynamicTensorRef::try_new(&fallback_space, fallback_bound.data()).unwrap();
+    let mut dense = SvdCallSpy::default();
+    let mut context = default_context();
+    let fallback_error = left_polar_dyn(&mut dense, &mut context, &fallback_input).unwrap_err();
+    assert!(matches!(
+        fallback_error,
+        OperationError::InvalidArgument { message }
+            if message.contains("left_polar")
+                && message.contains("coupled-sector")
+    ));
+    assert_eq!(dense.svd_calls, 0);
+}
+
+#[test]
+fn polar_valid_direct_and_fallback_layouts_agree() {
+    // What: valid fallback matricizations preserve the direct polar factors in both directions.
+    let rule = Z2FusionRule;
+    for (operation, source_rows, source_cols) in [("left_polar", 2, 3), ("right_polar", 3, 2)] {
+        let source = rectangular_svd_tensor(source_rows, source_cols);
+        let transposed = transposed_rectangular_tensor(&source, source_rows, source_cols);
+        let source_bound = bound_tensor(Arc::new(rule), &source);
+        let direct_bound = bound_tensor(Arc::new(rule), &transposed);
+        let fallback_space = source_bound.space().adjoint_view().unwrap();
+        let fallback_input =
+            BoundDynamicTensorRef::try_new(&fallback_space, source_bound.data()).unwrap();
+        assert!(
+            crate::factorize::compact_factor_plan_for_test(direct_bound.space())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            crate::factorize::compact_factor_plan_for_test(&fallback_space)
+                .unwrap()
+                .is_none()
+        );
+        let mut direct_dense = tenet_dense::DefaultDenseExecutor::new();
+        let mut direct_context = default_context();
+        let mut fallback_dense = tenet_dense::DefaultDenseExecutor::new();
+        let mut fallback_context = default_context();
+
+        let (direct_first, direct_second, fallback_first, fallback_second) =
+            if operation == "left_polar" {
+                let (direct_first, direct_second) = left_polar(
+                    &mut direct_dense,
+                    &mut direct_context,
+                    &direct_bound.as_ref(),
+                )
+                .unwrap();
+                let (fallback_first, fallback_second) =
+                    left_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
+                        .unwrap();
+                (
+                    direct_first.data().to_vec(),
+                    direct_second.data().to_vec(),
+                    fallback_first.data().to_vec(),
+                    fallback_second.data().to_vec(),
+                )
+            } else {
+                let (direct_first, direct_second) = right_polar(
+                    &mut direct_dense,
+                    &mut direct_context,
+                    &direct_bound.as_ref(),
+                )
+                .unwrap();
+                let (fallback_first, fallback_second) =
+                    right_polar_dyn(&mut fallback_dense, &mut fallback_context, &fallback_input)
+                        .unwrap();
+                (
+                    direct_first.data().to_vec(),
+                    direct_second.data().to_vec(),
+                    fallback_first.data().to_vec(),
+                    fallback_second.data().to_vec(),
+                )
+            };
+
+        assert_eq!(direct_first.len(), fallback_first.len());
+        assert_eq!(direct_second.len(), fallback_second.len());
+        for (direct, fallback) in direct_first.iter().zip(&fallback_first) {
+            assert!((direct - fallback).abs() < 1e-10);
+        }
+        for (direct, fallback) in direct_second.iter().zip(&fallback_second) {
+            assert!((direct - fallback).abs() < 1e-10);
+        }
+    }
 }
 
 #[test]

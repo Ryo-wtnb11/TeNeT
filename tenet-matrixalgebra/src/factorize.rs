@@ -1337,11 +1337,79 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    svd_compact_factors_dyn_with_direction(dense, input, None)
+}
+
+#[derive(Clone, Copy)]
+enum PolarDirection {
+    Left,
+    Right,
+}
+
+impl PolarDirection {
+    fn accepts(self, rows: usize, cols: usize) -> bool {
+        match self {
+            Self::Left => rows >= cols,
+            Self::Right => cols >= rows,
+        }
+    }
+
+    fn error(self) -> OperationError {
+        OperationError::InvalidArgument {
+            message: match self {
+                Self::Left => "left_polar requires rows >= columns in every coupled-sector matrix",
+                Self::Right => {
+                    "right_polar requires columns >= rows in every coupled-sector matrix"
+                }
+            },
+        }
+    }
+}
+
+fn validate_polar_direction(
+    direction: PolarDirection,
+    sectors: impl IntoIterator<Item = (SectorId, usize, usize)>,
+) -> Result<(), OperationError> {
+    for (_, rows, cols) in sectors {
+        if !direction.accepts(rows, cols) {
+            return Err(direction.error());
+        }
+    }
+    Ok(())
+}
+
+fn svd_compact_factors_dyn_with_direction<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    polar_direction: Option<PolarDirection>,
+) -> Result<SvdFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
     let space = input.space().space();
     if let Some(plan) = compact_factor_plan(input.space())? {
+        if let Some(direction) = polar_direction {
+            validate_polar_direction(
+                direction,
+                plan.routes.iter().map(|route| {
+                    let region = &plan.source.regions[route.source_region];
+                    (route.sector, region.rows(), region.cols())
+                }),
+            )?;
+        }
         return svd_compact_direct_regions(dense, input, &plan);
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    if let Some(direction) = polar_direction {
+        validate_polar_direction(
+            direction,
+            matricizations
+                .iter()
+                .map(|matrix| (matrix.sector, matrix.rows, matrix.cols)),
+        )?;
+    }
     #[cfg(test)]
     record_compact_svd_input_pack(&matricizations);
 
@@ -3987,7 +4055,9 @@ where
 
 /// Left polar decomposition `t = W * P` (MatrixAlgebraKit `left_polar`):
 /// `W` is the isometry `U * Vh` and `P = V * S * Vh` the positive part on
-/// the domain.
+/// the domain. Every coupled-sector matrix must have at least as many rows as
+/// columns; otherwise this returns [`OperationError::InvalidArgument`] before
+/// entering the dense SVD.
 pub fn left_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -4029,7 +4099,8 @@ where
 {
     // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
     // use the S-free factors core.
-    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, input)?;
+    let (u, vh, singular_values) =
+        svd_compact_factors_dyn_with_direction(dense, input, Some(PolarDirection::Left))?;
     let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
     // P = V·S·Vh. Fold S into V as a block-local scaling of V's bond (trailing)
     // axis — TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block
@@ -4044,6 +4115,9 @@ where
 
 /// Right polar decomposition `t = P * W` (MatrixAlgebraKit `right_polar`):
 /// `P = U * S * U^H` is the positive part on the codomain and `W = U * Vh`.
+/// Every coupled-sector matrix must have at least as many columns as rows;
+/// otherwise this returns [`OperationError::InvalidArgument`] before entering
+/// the dense SVD.
 pub fn right_polar<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -4085,7 +4159,8 @@ where
 {
     // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
     // use the S-free factors core.
-    let (u, vh, singular_values) = svd_compact_factors_dyn(dense, input)?;
+    let (u, vh, singular_values) =
+        svd_compact_factors_dyn_with_direction(dense, input, Some(PolarDirection::Right))?;
     let uh = adjoint_bound_factor(&u)?;
     let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
     // P = U·S·Uh. Fold S into U's bond (trailing) axis by block-local scaling —
