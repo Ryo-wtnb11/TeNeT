@@ -59,12 +59,25 @@ for spec in \
     user_decomp) binary=$user_decomp_bin ;;
     *) echo "unknown test binary: $test" >&2; exit 1 ;;
   esac
-  echo "## $op (cold, fresh test-binary process; startup + operation, seconds)"
-  /usr/bin/time -p "$binary" "$filter" --exact --nocapture 2>&1 | tail -n 8
-  echo "## $op (warm, $REPS repeated test-binary processes; startup + operation, seconds)"
-  for ((i=1; i<=REPS; i++)); do
-    /usr/bin/time -p "$binary" "$filter" --exact >/tmp/tenet-op-matrix.out 2>/tmp/tenet-op-matrix.time
-    printf '%s ' "$i"
-    awk '/^real / {print $2}' /tmp/tenet-op-matrix.time
-  done
+  echo "## $op (fresh-process cold/repeat; startup + operation, nanoseconds)"
+  python3 - "$binary" "$filter" "$REPS" <<'PY'
+import statistics
+import subprocess
+import sys
+import time
+
+binary, test_filter, reps = sys.argv[1], sys.argv[2], int(sys.argv[3])
+def run_once():
+    start = time.perf_counter_ns()
+    subprocess.run([binary, test_filter, "--exact"], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return time.perf_counter_ns() - start
+
+cold = run_once()
+repeats = [run_once() for _ in range(reps)]
+print(f"cold_ns={cold}")
+print(f"repeat_ns={repeats}")
+print(f"repeat_median_ns={statistics.median(repeats)}")
+print("note=samples are separate processes; same-process warm timing is unavailable from Rust test binaries")
+PY
 done
