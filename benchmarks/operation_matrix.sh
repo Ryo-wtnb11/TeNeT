@@ -27,6 +27,25 @@ echo "permute,destination,tenet_tensors::permute_into (typed TensorMap destinati
 echo "transpose,destination,tenet_tensors::transpose_into (typed TensorMap destination; see facade API)"
 echo
 
+build_test_binary() {
+  local test_crate=$1
+  # Build once.  All subsequent samples execute the binary directly, so cargo
+  # dependency/build time cannot be mistaken for operation time.
+  cargo test --release -p tenet --test "$test_crate" --no-run >/tmp/tenet-op-matrix-build.out
+  local binary
+  binary=$(find "$CARGO_TARGET_DIR/release/deps" -type f -perm -111 \
+    -name "${test_crate}-*" ! -name '*.d' | head -n 1)
+  test -n "$binary" || { echo "missing test binary for $test_crate" >&2; return 1; }
+  printf '%s\n' "$binary"
+}
+
+declare -A BIN
+for test_crate in user_api user_decomp; do
+  BIN[$test_crate]=$(build_test_binary "$test_crate")
+done
+
+echo "# build complete; timings below exclude compilation (binary startup remains)"
+
 for spec in \
   "permute user_api permute_roundtrip_restores_the_tensor" \
   "transpose user_api transpose_and_adjoint_involutions" \
@@ -34,11 +53,12 @@ for spec in \
   "qr_compact user_decomp qr_and_lq_factorizations" \
   "eigh_full user_decomp eigh_reconstructs_a_hermitized_tensor"; do
   read -r op test filter <<<"$spec"
-  echo "## $op (cold, fresh cargo test process)"
-  /usr/bin/time -p cargo test --release -p tenet --test "$test" "$filter" -- --exact --nocapture 2>&1 | tail -n 8
-  echo "## $op (warm, $REPS repeated test processes; seconds)"
+  binary=${BIN[$test]}
+  echo "## $op (cold, fresh test-binary process; startup + operation, seconds)"
+  /usr/bin/time -p "$binary" "$filter" --exact --nocapture 2>&1 | tail -n 8
+  echo "## $op (warm, $REPS repeated test-binary processes; startup + operation, seconds)"
   for ((i=1; i<=REPS; i++)); do
-    /usr/bin/time -p cargo test --release -p tenet --test "$test" "$filter" -- --exact >/tmp/tenet-op-matrix.out 2>/tmp/tenet-op-matrix.time
+    /usr/bin/time -p "$binary" "$filter" --exact >/tmp/tenet-op-matrix.out 2>/tmp/tenet-op-matrix.time
     printf '%s ' "$i"
     awk '/^real / {print $2}' /tmp/tenet-op-matrix.time
   done
