@@ -295,7 +295,7 @@ pub fn cuda_svd_region(
     let view = src.region_view(rows, cols, rows, offset)?;
     let mut outputs = ctx
         .backend
-        .svd_read(view)
+        .svd_read(TensorRead::from_view(view))
         .map_err(|err| cuda_error("cuda_svd", err))?;
     if outputs.len() != 3 {
         return Err(cuda_error("cuda_svd", "device SVD must return (U, S, Vt)"));
@@ -322,7 +322,7 @@ pub fn cuda_qr_region(
     let view = src.region_view(rows, cols, rows, offset)?;
     let mut outputs = ctx
         .backend
-        .qr_read(view)
+        .qr_read(TensorRead::from_view(view))
         .map_err(|err| cuda_error("cuda_qr", err))?;
     if outputs.len() != 2 {
         return Err(cuda_error("cuda_qr", "device QR must return (Q, R)"));
@@ -362,7 +362,7 @@ pub fn cuda_eigh_region(
     let view = src.region_view(n, n, n, offset)?;
     let mut outputs = ctx
         .backend
-        .eigh_read(view)
+        .eigh_read(TensorRead::from_view(view))
         .map_err(|err| cuda_error("cuda_eigh", err))?;
     if outputs.len() != 2 {
         return Err(cuda_error(

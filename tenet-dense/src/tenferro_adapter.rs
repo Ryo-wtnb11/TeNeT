@@ -484,7 +484,7 @@ impl DenseExecutor for DefaultDenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
         self.backend
-            .svd_read(input)
+            .svd_read(TensorRead::from_view(input))
             .map(wrap_outputs)
             .map_err(|err| tenferro_error("svd_read", err))
     }
@@ -492,7 +492,7 @@ impl DenseExecutor for DefaultDenseExecutor {
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
         self.backend
-            .qr_read(input)
+            .qr_read(TensorRead::from_view(input))
             .map(wrap_outputs)
             .map_err(|err| tenferro_error("qr_read", err))
     }
@@ -500,7 +500,7 @@ impl DenseExecutor for DefaultDenseExecutor {
     fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
         self.backend
-            .eig_read(input)
+            .eig_read(TensorRead::from_view(input))
             .map(wrap_outputs)
             .map_err(|err| tenferro_error("eig_read", err))
     }
@@ -508,7 +508,7 @@ impl DenseExecutor for DefaultDenseExecutor {
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
         self.backend
-            .eigh_read(input)
+            .eigh_read(TensorRead::from_view(input))
             .map(wrap_outputs)
             .map_err(|err| tenferro_error("eigh_read", err))
     }

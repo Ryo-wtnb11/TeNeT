@@ -1132,7 +1132,7 @@ fn default_executor_rejects_integer_linalg_view() {
             backend: DenseBackend::Tenferro,
             op: "qr_read",
             ref message,
-        } if message.contains("unsupported dtype")
+        } if message.contains("does not support dtype I32")
     ));
 }
 
