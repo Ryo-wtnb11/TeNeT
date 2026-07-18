@@ -17,6 +17,7 @@ struct CountingAllocator;
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -24,6 +25,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
         }
         pointer
     }
@@ -36,6 +38,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.realloc(ptr, layout, new_size) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
         }
         pointer
     }
@@ -245,17 +248,77 @@ fn unique_rank_one_u1_plan_allocations_do_not_scale_with_source_blocks() {
         COUNTING.set(false);
         let grouped_allocations = ALLOCATIONS.get();
 
-        // What: grouped lowering adds exactly its preallocated indexed-spec
-        // vector. Key ownership in the structures and the final replay arena
-        // are paid equally by both compilation paths.
+        // What: resolving grouped Single entries owns one descriptor arena but
+        // borrows coefficients and shared source axes from the plan.
         assert_eq!(
             grouped_allocations,
             direct_allocations + 1,
             "source_blocks={count}"
         );
-        assert_eq!(
-            grouped.recoupling_coefficients_dst_src(),
-            direct.recoupling_coefficients_dst_src()
-        );
+        assert_eq!(grouped, direct);
     }
+}
+
+#[test]
+fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
+    const BLOCKS: usize = 64;
+    const COEFFICIENT_BYTES: usize = 64;
+
+    let structure = rank_one_u1_pair_structure(BLOCKS);
+    let keys = (0..BLOCKS)
+        .map(|block| structure.block(block).unwrap().key().clone())
+        .collect::<Vec<_>>();
+    let coefficients = vec![[1_u8; COEFFICIENT_BYTES]; BLOCKS * BLOCKS];
+    let grouped_spec = tenet_tensors::TreeTransformGroupBlockSpec::multi(
+        tenet_core::FusionTreeGroupKey::from_sector_ids([0], [0], [false], [false]),
+        keys.clone(),
+        keys,
+        coefficients.clone(),
+    );
+    let grouped_plan = tenet_tensors::TreeTransformGroupPlan::new(vec![grouped_spec]);
+    let direct_specs = [TreeTransformBlockSpec::multi(
+        (0..BLOCKS).collect(),
+        (0..BLOCKS).collect(),
+        coefficients,
+    )];
+
+    let _ = grouped_plan
+        .compile_structures(&structure, &structure)
+        .unwrap();
+    let _ =
+        TreeTransformStructure::compile_structures(&structure, &structure, &direct_specs).unwrap();
+
+    ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
+    COUNTING.set(true);
+    let direct =
+        TreeTransformStructure::compile_structures(&structure, &structure, &direct_specs).unwrap();
+    COUNTING.set(false);
+    let direct_allocations = ALLOCATIONS.get();
+    let direct_bytes = ALLOCATED_BYTES.get();
+
+    ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
+    COUNTING.set(true);
+    let grouped = grouped_plan
+        .compile_structures(&structure, &structure)
+        .unwrap();
+    COUNTING.set(false);
+    let grouped_allocations = ALLOCATIONS.get();
+    let grouped_bytes = ALLOCATED_BYTES.get();
+
+    // What: grouped key resolution may own index/descriptor scratch, but it
+    // does not allocate the 256 KiB coefficient matrix a second time.
+    assert!(
+        grouped_allocations <= direct_allocations + 16,
+        "grouped_allocations={grouped_allocations}, direct_allocations={direct_allocations}"
+    );
+    assert!(
+        grouped_bytes <= direct_bytes + 32 * 1024,
+        "grouped_bytes={grouped_bytes}, direct_bytes={direct_bytes}"
+    );
+    assert_eq!(
+        grouped.recoupling_coefficients_dst_src(),
+        direct.recoupling_coefficients_dst_src()
+    );
 }

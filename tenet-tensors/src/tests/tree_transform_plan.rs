@@ -4741,6 +4741,269 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     assert_eq!(workspace.destination_len(), 4);
 }
 
+#[test]
+fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
+    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
+    let present = BlockKey::sector_ids([1]);
+    let missing = BlockKey::sector_ids([2]);
+    let dst_structure = packed_fixture_structure(2, [(present.clone(), vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(1, [(present.clone(), vec![1])]).unwrap();
+    let coefficient_mismatch = TreeTransformGroupBlockSpec::multi(
+        group_key.clone(),
+        [present.clone()],
+        [present.clone()],
+        Vec::<f64>::new(),
+    );
+    let missing_later =
+        TreeTransformGroupBlockSpec::single(group_key, missing.clone(), present.clone(), 1.0);
+
+    let err = TreeTransformStructure::compile_grouped_structures(
+        &dst_structure,
+        &src_structure,
+        &[coefficient_mismatch.clone(), missing_later],
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        OperationError::MissingBlockKey {
+            key: Box::new(missing)
+        }
+    );
+
+    let err = TreeTransformStructure::compile_grouped_structures(
+        &dst_structure,
+        &src_structure,
+        &[coefficient_mismatch],
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        OperationError::StructureRankMismatch {
+            expected: 2,
+            actual: 1,
+        }
+    );
+
+    let coefficient_mismatch =
+        TreeTransformKeyBlockSpec::multi([present.clone()], [present.clone()], Vec::<f64>::new());
+    let missing_later = TreeTransformKeyBlockSpec::single(BlockKey::sector_ids([2]), present, 1.0);
+    let err = TreeTransformStructure::compile_keyed_structures(
+        &dst_structure,
+        &src_structure,
+        &[coefficient_mismatch, missing_later],
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        OperationError::MissingBlockKey {
+            key: Box::new(BlockKey::sector_ids([2]))
+        }
+    );
+}
+
+#[test]
+fn grouped_storage_mapping_preserves_callback_error_order() {
+    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
+    let present = BlockKey::sector_ids([1]);
+    let missing = BlockKey::sector_ids([2]);
+    let structure = Arc::new(packed_fixture_structure(1, [(present.clone(), vec![1])]).unwrap());
+    let plan = TreeTransformGroupPlan::new(vec![
+        TreeTransformGroupBlockSpec::single(
+            group_key.clone(),
+            present.clone(),
+            present.clone(),
+            1.0_f64,
+        ),
+        TreeTransformGroupBlockSpec::single(group_key, missing, present, 1.0),
+    ]);
+    let axis_called = std::cell::Cell::new(false);
+
+    let err = plan
+        .compile_shared_structures_with_storage_mapping(
+            Arc::clone(&structure),
+            &structure,
+            Arc::clone(&structure),
+            |_| Err(OperationError::ElementCountOverflow),
+            |_| {
+                axis_called.set(true);
+                Ok(0)
+            },
+            false,
+        )
+        .unwrap_err();
+
+    assert_eq!(err, OperationError::ElementCountOverflow);
+    assert!(!axis_called.get());
+}
+
+#[test]
+fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay() {
+    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
+    let dst0 = BlockKey::sector_ids([10]);
+    let dst1 = BlockKey::sector_ids([20]);
+    let dst2 = BlockKey::sector_ids([25]);
+    let src0 = BlockKey::sector_ids([30]);
+    let src1 = BlockKey::sector_ids([40]);
+    let src2 = BlockKey::sector_ids([50]);
+    let dst_structure = Arc::new(
+        packed_fixture_structure(
+            2,
+            [
+                (dst0.clone(), vec![1, 2]),
+                (dst1.clone(), vec![1, 2]),
+                (dst2.clone(), vec![1, 2]),
+            ],
+        )
+        .unwrap(),
+    );
+    let logical_src_structure = packed_fixture_structure(
+        2,
+        [
+            (src0.clone(), vec![2, 1]),
+            (src1.clone(), vec![2, 1]),
+            (src2.clone(), vec![2, 1]),
+        ],
+    )
+    .unwrap();
+    let storage_src_structure = Arc::new(
+        packed_fixture_structure(
+            2,
+            [
+                (src1.clone(), vec![1, 2]),
+                (src2.clone(), vec![1, 2]),
+                (src0.clone(), vec![1, 2]),
+            ],
+        )
+        .unwrap(),
+    );
+    let coefficients = vec![
+        Complex64::new(0.5, -2.0),
+        Complex64::new(1.0, 1.0),
+        Complex64::new(2.0, -1.0),
+        Complex64::new(-3.0, 0.5),
+        Complex64::new(4.0, 2.0),
+    ];
+    let callback_trace = std::cell::RefCell::new(Vec::new());
+    let grouped = {
+        let plan = TreeTransformGroupPlan::new(vec![
+            TreeTransformGroupBlockSpec::single(group_key.clone(), dst0, src0, coefficients[0])
+                .with_source_axes([1, 0]),
+            TreeTransformGroupBlockSpec::multi(
+                group_key,
+                [dst1, dst2],
+                [src1, src2],
+                coefficients[1..].to_vec(),
+            )
+            .with_source_axes([1, 0]),
+        ]);
+        plan.compile_shared_structures_with_storage_mapping(
+            Arc::clone(&dst_structure),
+            &logical_src_structure,
+            Arc::clone(&storage_src_structure),
+            |block| {
+                callback_trace.borrow_mut().push(("block", block));
+                Ok(match block {
+                    0 => 2,
+                    1 => 0,
+                    2 => 1,
+                    _ => unreachable!("logical source block is resolved from the structure"),
+                })
+            },
+            |axis| {
+                callback_trace.borrow_mut().push(("axis", axis));
+                Ok(1 - axis)
+            },
+            true,
+        )
+        .unwrap()
+    };
+    let direct_specs = [
+        TreeTransformBlockSpec::single(0, 2, coefficients[0]).with_source_axes([0, 1]),
+        TreeTransformBlockSpec::multi(vec![1, 2], vec![0, 1], coefficients[1..].to_vec())
+            .with_source_axes([0, 1]),
+    ];
+    let direct = TreeTransformStructure::compile_structures_with_storage_conjugation(
+        &dst_structure,
+        &storage_src_structure,
+        &direct_specs,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        callback_trace.into_inner(),
+        [
+            ("block", 0),
+            ("axis", 1),
+            ("axis", 0),
+            ("block", 1),
+            ("block", 2),
+            ("axis", 1),
+            ("axis", 0),
+        ]
+    );
+    assert_eq!(grouped, direct);
+    assert_eq!(
+        grouped.recoupling_coefficients_dst_src(),
+        coefficients.as_slice()
+    );
+
+    let src_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let dst_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
+    let src = TensorMap::<Complex64, 2, 0>::from_vec_with_structure(
+        vec![
+            Complex64::new(1.0, 2.0),
+            Complex64::new(3.0, 4.0),
+            Complex64::new(5.0, 6.0),
+            Complex64::new(7.0, 8.0),
+            Complex64::new(9.0, 10.0),
+            Complex64::new(11.0, 12.0),
+        ],
+        src_space,
+        storage_src_structure.as_ref().clone(),
+    )
+    .unwrap();
+    let mut grouped_dst = TensorMap::<Complex64, 2, 0>::from_vec_with_structure(
+        vec![Complex64::new(0.0, 0.0); 6],
+        dst_space.clone(),
+        dst_structure.as_ref().clone(),
+    )
+    .unwrap();
+    let mut direct_dst = TensorMap::<Complex64, 2, 0>::from_vec_with_structure(
+        vec![Complex64::new(0.0, 0.0); 6],
+        dst_space,
+        dst_structure.as_ref().clone(),
+    )
+    .unwrap();
+    let mut grouped_backend = HostTensorOperations;
+    let mut grouped_workspace = TreeTransformWorkspace::default();
+    let mut direct_backend = HostTensorOperations;
+    let mut direct_workspace = TreeTransformWorkspace::default();
+
+    tree_transform_execute_with(
+        &mut grouped_backend,
+        &mut grouped_workspace,
+        &grouped,
+        &mut grouped_dst,
+        &src,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+    tree_transform_execute_with(
+        &mut direct_backend,
+        &mut direct_workspace,
+        &direct,
+        &mut direct_dst,
+        &src,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    assert_eq!(grouped_dst.data(), direct_dst.data());
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ScratchAllocation {
     label: &'static str,
