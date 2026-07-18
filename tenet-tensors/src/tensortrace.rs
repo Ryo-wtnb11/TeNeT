@@ -16,8 +16,10 @@ use crate::strided::offset_to_isize;
 use crate::tree_transform::{transformed_tree_pair_rows_block, TreeTransformOperation};
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
+use tenet_operations::transform_structure::validate_destination_layouts_injective;
 use tenet_operations::OperationError;
 use tenet_operations::TensorTraceAxisSpec;
+use tenet_operations::{axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted};
 use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoefficientAction};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -307,6 +309,10 @@ impl<C> TensorTraceFusionStructure<C> {
             &dst_structure,
             &src_structure,
         )?;
+        validate_destination_layouts_injective(
+            &dst_structure,
+            "tensor trace destination layouts overlap",
+        )?;
 
         Ok(Self {
             dst_rank: dst_structure.rank(),
@@ -507,6 +513,10 @@ impl TensorTraceStructure {
         }];
         let descriptor =
             TensorTraceDescriptor::compile(&axis_plan, &terms, &dst_structure, &src_structure)?;
+        validate_destination_layouts_injective(
+            &dst_structure,
+            "tensor trace destination layouts overlap",
+        )?;
 
         Ok(Self {
             dst_rank: dst_structure.rank(),
@@ -630,6 +640,10 @@ impl TensorTraceStructureTerm {
 pub(crate) struct TensorTraceDescriptor {
     source_conjugate: bool,
     terms: Vec<TensorTraceDescriptorTerm>,
+    destination_layouts: Vec<TensorTraceDestinationLayout>,
+    destination_shape: Vec<usize>,
+    destination_strides: Vec<isize>,
+    destination_zero_strides: Vec<isize>,
     output_shape: Vec<usize>,
     trace_shape: Vec<usize>,
     dst_strides: Vec<isize>,
@@ -646,6 +660,23 @@ impl TensorTraceDescriptor {
     #[inline]
     pub(crate) fn source_conjugate(&self) -> bool {
         self.source_conjugate
+    }
+
+    #[inline]
+    fn destination_layouts(&self) -> &[TensorTraceDestinationLayout] {
+        &self.destination_layouts
+    }
+
+    fn destination_shape(&self, layout: &TensorTraceDestinationLayout) -> &[usize] {
+        &self.destination_shape[layout.layout_start..layout.layout_start + layout.rank]
+    }
+
+    fn destination_strides(&self, layout: &TensorTraceDestinationLayout) -> &[isize] {
+        &self.destination_strides[layout.layout_start..layout.layout_start + layout.rank]
+    }
+
+    fn destination_zero_strides(&self, layout: &TensorTraceDestinationLayout) -> &[isize] {
+        &self.destination_zero_strides[..layout.rank]
     }
 
     pub(crate) fn output_shape(&self, term: &TensorTraceDescriptorTerm) -> &[usize] {
@@ -695,6 +726,12 @@ impl TensorTraceDescriptor {
         descriptor
             .src_trace_strides
             .reserve(terms.len().saturating_mul(axis_plan.trace_lhs_axes.len()));
+        descriptor
+            .destination_layouts
+            .reserve(dst_structure.block_count());
+        descriptor
+            .destination_zero_strides
+            .resize(dst_structure.rank(), 0);
 
         for term in terms {
             let dst_block = dst_structure.block(term.dst_block())?;
@@ -758,8 +795,35 @@ impl TensorTraceDescriptor {
             });
         }
 
+        for dst_block in 0..dst_structure.block_count() {
+            let block = dst_structure.block(dst_block)?;
+            let layout_start = descriptor.destination_shape.len();
+            descriptor
+                .destination_shape
+                .extend_from_slice(block.shape());
+            for &stride in block.strides() {
+                descriptor
+                    .destination_strides
+                    .push(stride_to_isize(stride)?);
+            }
+            descriptor
+                .destination_layouts
+                .push(TensorTraceDestinationLayout {
+                    layout_start,
+                    rank: block.shape().len(),
+                    offset: offset_to_isize(block.offset())?,
+                });
+        }
+
         Ok(descriptor)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TensorTraceDestinationLayout {
+    layout_start: usize,
+    rank: usize,
+    offset: isize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1181,6 +1245,8 @@ where
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
     structure.validate_replay_structures(&dst_structure, &src_structure)?;
+    let dst_len = dst.data_mut().len();
+    validate_trace_data_extents(&dst_structure, dst_len, &src_structure, src.data().len())?;
     let descriptor = structure.descriptor();
     for term in descriptor.terms() {
         tensortrace_raw_strided_kernel(
@@ -1237,8 +1303,10 @@ where
     let dst_structure = Arc::clone(dst.structure());
     let src_structure = Arc::clone(src.structure());
     structure.validate_replay_structures(&dst_structure, &src_structure)?;
-    scale_trace_destination(dst.data_mut(), beta);
+    let dst_len = dst.data_mut().len();
+    validate_trace_data_extents(&dst_structure, dst_len, &src_structure, src.data().len())?;
     let descriptor = structure.descriptor();
+    scale_trace_destination_layouts(descriptor, dst.data_mut(), beta)?;
     for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
         tensortrace_raw_strided_kernel_add_with_coefficient(
             dst.data_mut(),
@@ -1367,8 +1435,14 @@ where
 {
     let structure =
         TensorTraceFusionStructure::compile_fusion_dyn_raw(rule, dst_space, src_space, axes)?;
-    scale_trace_destination(dst_data, beta);
+    validate_trace_data_extents(
+        dst_space.structure(),
+        dst_data.len(),
+        src_space.structure(),
+        src_data.len(),
+    )?;
     let descriptor = structure.descriptor();
+    scale_trace_destination_layouts(descriptor, dst_data, beta)?;
     for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
         tensortrace_raw_strided_kernel_add_with_coefficient(
             dst_data,
@@ -1455,20 +1529,78 @@ where
     )
 }
 
-fn scale_trace_destination<T>(dst: &mut [T], beta: T)
+fn validate_trace_data_extents(
+    dst_structure: &BlockStructure,
+    dst_len: usize,
+    src_structure: &BlockStructure,
+    src_len: usize,
+) -> Result<(), OperationError> {
+    let expected_dst = dst_structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    if dst_len != expected_dst {
+        return Err(OperationError::ElementCountMismatch {
+            expected: expected_dst,
+            actual: dst_len,
+        });
+    }
+    let expected_src = src_structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    if src_len != expected_src {
+        return Err(OperationError::ElementCountMismatch {
+            expected: expected_src,
+            actual: src_len,
+        });
+    }
+    Ok(())
+}
+
+fn scale_trace_destination_layouts<T>(
+    descriptor: &TensorTraceDescriptor,
+    dst: &mut [T],
+    beta: T,
+) -> Result<(), OperationError>
 where
-    T: Copy + Mul<T, Output = T> + PartialEq + Zero + One,
+    T: Copy
+        + Add<T, Output = T>
+        + Mul<T, Output = T>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + strided_kernel::MaybeSendSync,
 {
     if beta.is_one() {
-        return;
+        return Ok(());
     }
     if beta.is_zero() {
-        dst.fill(T::zero());
-    } else {
-        for value in dst {
-            *value = *value * beta;
+        let zero = [T::zero()];
+        for layout in descriptor.destination_layouts() {
+            axpby_raw_strided_kernel_trusted(
+                dst,
+                &zero,
+                descriptor.destination_shape(layout),
+                descriptor.destination_strides(layout),
+                descriptor.destination_zero_strides(layout),
+                layout.offset,
+                0,
+                T::one(),
+                beta,
+            )?;
         }
+        return Ok(());
     }
+    for layout in descriptor.destination_layouts() {
+        scale_raw_strided_kernel_trusted(
+            dst,
+            descriptor.destination_shape(layout),
+            descriptor.destination_strides(layout),
+            layout.offset,
+            beta,
+        )?;
+    }
+    Ok(())
 }
 
 fn mark_axes(
