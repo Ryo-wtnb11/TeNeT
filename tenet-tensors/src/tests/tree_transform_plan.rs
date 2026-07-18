@@ -4548,6 +4548,56 @@ fn unique_production_preserves_interleaved_source_block_order() {
 }
 
 #[test]
+fn unique_production_prepares_each_distinct_source_split() {
+    let rule = Z2FusionRule;
+    let vacuum = rule.vacuum();
+    let odd = SectorId::new(1);
+    let split_one_one = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
+    );
+    let split_two_zero = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [odd, odd],
+            Some(vacuum),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [], None, [], [], []).unwrap(),
+    );
+    let source_order = [
+        BlockKey::from(split_one_one),
+        BlockKey::from(split_two_zero),
+    ];
+    let source_structure =
+        packed_fixture_structure(2, source_order.iter().cloned().map(|key| (key, vec![1, 1])))
+            .unwrap();
+    let operation = TreeTransformOperation::permute([0], [1]);
+
+    let specialized =
+        build_tree_pair_transform_group_plan(&rule, operation.clone(), &source_structure).unwrap();
+    let generic =
+        build_multiplicity_free_tree_pair_transform_group_plan(&rule, operation, &source_structure)
+            .unwrap();
+
+    // What: a rank-homogeneous structure may still contain distinct
+    // codomain/domain splits; each split keeps the generic destination,
+    // coefficient, and raw source order under the prepared Unique path.
+    assert_eq!(specialized, generic);
+    assert_eq!(
+        specialized
+            .specs()
+            .iter()
+            .map(|spec| spec.src_keys()[0].clone())
+            .collect::<Vec<_>>(),
+        source_order
+    );
+}
+
+#[test]
 fn unique_production_preserves_generic_nonfusion_error_precedence() {
     let valid_tree = z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], None);
     let dense_first = packed_fixture_structure(
@@ -4582,8 +4632,20 @@ fn unique_production_preserves_generic_nonfusion_error_precedence() {
         build_tree_pair_transform_group_plan(&Z2FusionRule, malformed.clone(), &tree_first,),
         build_multiplicity_free_tree_pair_transform_group_plan(
             &Z2FusionRule,
-            malformed,
+            malformed.clone(),
             &tree_first,
+        ),
+    );
+    assert_eq!(
+        build_all_codomain_tree_transform_group_plan(
+            &Z2FusionRule,
+            malformed.clone(),
+            &dense_first,
+        ),
+        build_multiplicity_free_all_codomain_tree_transform_group_plan(
+            &Z2FusionRule,
+            malformed,
+            &dense_first,
         ),
     );
 
@@ -4596,6 +4658,18 @@ fn unique_production_preserves_generic_nonfusion_error_precedence() {
             &dense_first,
         ),
         build_multiplicity_free_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &dense_first,
+        ),
+    );
+    assert_eq!(
+        build_all_codomain_tree_transform_group_plan(
+            &Z2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &dense_first,
+        ),
+        build_multiplicity_free_all_codomain_tree_transform_group_plan(
             &Z2FusionRule,
             TreeTransformOperation::permute([0, 1], []),
             &dense_first,

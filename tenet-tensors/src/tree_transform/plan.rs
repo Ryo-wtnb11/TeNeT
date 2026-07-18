@@ -1,7 +1,7 @@
 use core::ops::{Add, Mul};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::{collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
 use tenet_core::{
@@ -11,11 +11,10 @@ use tenet_core::{
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_block,
     multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
     multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block,
-    unique_braid_tree, unique_permute_tree, unique_rigid_braid_tree_pair,
-    unique_rigid_permute_tree_pair, unique_rigid_transpose_tree_pair, BlockKey, BlockStructure,
-    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey,
-    GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols,
+    unique_braid_tree, unique_permute_tree, BlockKey, BlockStructure, FusionRule, FusionStyleKind,
+    FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey, GenericBraidScalar,
+    GenericRigidSymbols, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    PreparedTreePairOperation,
 };
 
 use crate::OperationError;
@@ -107,33 +106,51 @@ where
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_unique_tree_transform_group_plan<T, R, F>(
     rule: &R,
     operation: TreeTransformOperation,
     src_structure: &BlockStructure,
-    mut transform: F,
+    transform: F,
 ) -> Result<TreeTransformGroupPlan<T>, OperationError>
 where
     R: FusionRule,
     F: FnMut(&FusionTreeBlockKey) -> Result<(FusionTreeBlockKey, T), OperationError>,
 {
+    let source_axes = validate_unique_tree_transform_operation(rule, &operation)?;
+    assemble_unique_tree_transform_group_plan(src_structure, &source_axes, transform)
+}
+
+fn validate_unique_tree_transform_operation<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+) -> Result<Arc<[usize]>, OperationError>
+where
+    R: FusionRule,
+{
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
-            operation: Box::new(operation),
+            operation: Box::new(operation.clone()),
             style: rule.fusion_style(),
         });
     }
     operation.validate_braiding_support(rule)?;
-    let source_axes = operation_source_axes(&operation);
+    Ok(operation_source_axes(operation))
+}
 
+fn assemble_unique_tree_transform_group_plan<T, F>(
+    src_structure: &BlockStructure,
+    source_axes: &Arc<[usize]>,
+    mut transform: F,
+) -> Result<TreeTransformGroupPlan<T>, OperationError>
+where
+    F: FnMut(&FusionTreeBlockKey) -> Result<(FusionTreeBlockKey, T), OperationError>,
+{
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
         let block = src_structure.block(index)?;
         let BlockKey::FusionTree(src_key) = block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "src",
-                index,
-            });
+            continue;
         };
         let (dst_key, coefficient) = transform(src_key)?;
         specs.push(
@@ -143,7 +160,7 @@ where
                 src_key.clone(),
                 coefficient,
             )
-            .with_shared_source_axes(Arc::clone(&source_axes)),
+            .with_shared_source_axes(Arc::clone(source_axes)),
         );
     }
 
@@ -173,10 +190,7 @@ where
     for index in 0..src_structure.block_count() {
         let block = src_structure.block(index)?;
         let BlockKey::FusionTree(src_key) = block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "src",
-                index,
-            });
+            continue;
         };
         validate_all_codomain_fusion_tree_block(rule, index, src_key)?;
 
@@ -1553,42 +1567,86 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let transform_operation = operation.clone();
-    build_unique_tree_transform_group_plan(rule, operation, src_structure, move |src_key| {
-        match &transform_operation {
-            TreeTransformOperation::Permute {
-                codomain_permutation,
-                domain_permutation,
-            } => Ok(unique_rigid_permute_tree_pair(
-                rule,
-                src_key,
-                codomain_permutation,
-                domain_permutation,
-            )?),
-            TreeTransformOperation::Braid {
-                codomain_permutation,
-                domain_permutation,
-                codomain_levels,
-                domain_levels,
-            } => Ok(unique_rigid_braid_tree_pair(
-                rule,
-                src_key,
-                codomain_permutation,
-                domain_permutation,
-                codomain_levels,
-                domain_levels,
-            )?),
-            TreeTransformOperation::Transpose {
-                codomain_permutation,
-                domain_permutation,
-            } => Ok(unique_rigid_transpose_tree_pair(
-                rule,
-                src_key,
-                codomain_permutation,
-                domain_permutation,
-            )?),
+    let source_axes = validate_unique_tree_transform_operation(rule, &operation)?;
+    let mut primary_prepared = None;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
+    assemble_unique_tree_transform_group_plan(src_structure, &source_axes, |src_key| {
+        let source_split = (
+            src_key.codomain_tree().uncoupled().len(),
+            src_key.domain_tree().uncoupled().len(),
+        );
+        if primary_prepared.is_none() {
+            primary_prepared = Some((
+                source_split,
+                prepare_unique_tree_pair_operation(rule, &operation, source_split)?,
+            ));
         }
+        if let Some((primary_split, prepared)) = primary_prepared.as_ref() {
+            if *primary_split == source_split {
+                return prepared
+                    .execute_unique_rigid(rule, src_key)
+                    .map_err(OperationError::from_core_preserving_context);
+            }
+        }
+        let prepared_by_split = additional_prepared.get_or_insert_with(FxHashMap::default);
+        let prepared = match prepared_by_split.entry(source_split) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(prepare_unique_tree_pair_operation(
+                rule,
+                &operation,
+                source_split,
+            )?),
+        };
+        prepared
+            .execute_unique_rigid(rule, src_key)
+            .map_err(OperationError::from_core_preserving_context)
     })
+}
+
+fn prepare_unique_tree_pair_operation<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    (source_codomain_rank, source_domain_rank): (usize, usize),
+) -> Result<PreparedTreePairOperation, OperationError>
+where
+    R: FusionRule,
+{
+    match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            domain_permutation,
+        } => PreparedTreePairOperation::prepare_permute(
+            rule,
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        ),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        } => PreparedTreePairOperation::prepare_braid(
+            rule,
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        TreeTransformOperation::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => PreparedTreePairOperation::prepare_transpose(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        ),
+    }
+    .map_err(OperationError::from_core_preserving_context)
 }
 
 fn validate_all_codomain_operation_scope(
