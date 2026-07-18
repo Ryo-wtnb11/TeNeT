@@ -39,10 +39,11 @@ build_test_binary() {
   printf '%s\n' "$binary"
 }
 
-declare -A BIN
-for test_crate in user_api user_decomp; do
-  BIN[$test_crate]=$(build_test_binary "$test_crate")
-done
+# Keep plain variables: the macOS system bash is 3.2 and has no associative
+# arrays.  This is a diagnostic script, so portability is more useful than a
+# dynamic map here.
+user_api_bin=$(build_test_binary user_api)
+user_decomp_bin=$(build_test_binary user_decomp)
 
 echo "# build complete; timings below exclude compilation (binary startup remains)"
 
@@ -53,7 +54,11 @@ for spec in \
   "qr_compact user_decomp qr_and_lq_factorizations" \
   "eigh_full user_decomp eigh_reconstructs_a_hermitized_tensor"; do
   read -r op test filter <<<"$spec"
-  binary=${BIN[$test]}
+  case "$test" in
+    user_api) binary=$user_api_bin ;;
+    user_decomp) binary=$user_decomp_bin ;;
+    *) echo "unknown test binary: $test" >&2; exit 1 ;;
+  esac
   echo "## $op (cold, fresh test-binary process; startup + operation, seconds)"
   /usr/bin/time -p "$binary" "$filter" --exact --nocapture 2>&1 | tail -n 8
   echo "## $op (warm, $REPS repeated test-binary processes; startup + operation, seconds)"
