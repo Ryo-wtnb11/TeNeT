@@ -755,6 +755,157 @@ mod tests {
         }
     }
 
+    impl MultiplicityFreeRigidSymbols for AsymmetricAnyonicRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct UncertifiedCustomSymbolsRule;
+
+    impl FusionRule for UncertifiedCustomSymbolsRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new(left.id() ^ right.id())]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for UncertifiedCustomSymbolsRule {}
+
+    impl MultiplicityFreeFusionSymbols for UncertifiedCustomSymbolsRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            2.0
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            coupled: SectorId,
+        ) -> Self::Scalar {
+            if coupled.id() == 0 { 3.0 } else { 5.0 }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct ComplexAsymmetricUniqueRule;
+
+    impl FusionRule for ComplexAsymmetricUniqueRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Anyonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            smallvec![SectorId::new((left.id() + right.id()) % 4)]
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for ComplexAsymmetricUniqueRule {}
+
+    impl MultiplicityFreeFusionSymbols for ComplexAsymmetricUniqueRule {
+        type Scalar = Complex64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value.conj()
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            Complex64::new(1.0, 0.0)
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            let angle = match (left.id(), right.id()) {
+                (1, 2) => std::f64::consts::FRAC_PI_3,
+                (2, 1) => std::f64::consts::FRAC_PI_6,
+                _ => 0.0,
+            };
+            Complex64::from_polar(1.0, angle)
+        }
+    }
+
     fn fusion_tree_pair_order(keys: &[FusionTreeBlockKey]) -> Vec<(Vec<usize>, Vec<usize>, usize)> {
         keys.iter()
             .map(|key| {
@@ -1042,6 +1193,145 @@ mod tests {
         assert_eq!(forward_tree, inverse_tree);
         assert_eq!(forward_coeff, 5.0);
         assert_eq!(inverse_coeff, 7.0);
+    }
+
+    #[test]
+    fn symmetric_unique_direct_braid_matches_artin_replay_exactly() {
+        // What: every rank-4 fZ2 permutation has the exact tree and sign of
+        // TensorKit's adjacent-Artin semantics, including multiplication order.
+        let tree = FusionTreeKey::from_sector_ids(
+            [1, 1, 0, 1],
+            Some(1),
+            [false, true, false, true],
+            [0, 0],
+            [1, 1, 1],
+        );
+        let levels = [0, 1, 2, 3];
+        let mut permutation = [0usize, 1, 2, 3];
+        loop {
+            let direct =
+                unique_braid_tree(&FermionParityFusionRule, &tree, &permutation, &levels)
+                    .unwrap();
+
+            let mut replay_tree = tree.clone();
+            let mut replay_coefficient = 1.0;
+            let mut replay_levels = levels;
+            for swap in permutation_to_adjacent_swaps(&permutation, 4).unwrap() {
+                let inverse = replay_levels[swap] > replay_levels[swap + 1];
+                let (next, coefficient) = unique_artin_braid_at_with_inverse(
+                    &FermionParityFusionRule,
+                    &replay_tree,
+                    swap,
+                    inverse,
+                )
+                .unwrap();
+                replay_tree = next;
+                replay_coefficient *= coefficient;
+                replay_levels.swap(swap, swap + 1);
+            }
+            assert_eq!(direct, (replay_tree, replay_coefficient));
+
+            let Some(pivot) =
+                (0..permutation.len() - 1).rfind(|&index| permutation[index] < permutation[index + 1])
+            else {
+                break;
+            };
+            let successor = (pivot + 1..permutation.len())
+                .rfind(|&index| permutation[index] > permutation[pivot])
+                .unwrap();
+            permutation.swap(pivot, successor);
+            permutation[pivot + 1..].reverse();
+        }
+    }
+
+    #[test]
+    fn symmetric_unique_direct_braid_preserves_noncanonical_public_keys() {
+        // What: a Unique key accepted by the public constructor but carrying
+        // a noncanonical innerline retains the exact legacy Artin result
+        // instead of being silently normalized by the direct rebuild.
+        let tree = FusionTreeKey::try_new_for_rule(
+            &FermionParityFusionRule,
+            [SectorId::new(1), SectorId::new(1), SectorId::new(1)],
+            Some(SectorId::new(1)),
+            [false, false, false],
+            [SectorId::new(1)],
+            [SectorId::new(1), SectorId::new(1)],
+        )
+        .unwrap();
+        assert!(!is_unique_direct_braid_source(
+            &FermionParityFusionRule,
+            &tree
+        ));
+
+        let actual =
+            unique_braid_tree(&FermionParityFusionRule, &tree, &[1, 0, 2], &[0, 1, 2]).unwrap();
+        let oracle =
+            unique_artin_braid_at_with_inverse(&FermionParityFusionRule, &tree, 0, false).unwrap();
+
+        assert_eq!(actual, oracle);
+        assert_eq!(actual.0.innerlines(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn unique_direct_braid_eligibility_excludes_rank_zero() {
+        // What: the canonical empty-tree convention keeps `coupled = None`,
+        // but no rank-zero operation is eligible for a direct braid rebuild.
+        let empty = FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            [],
+            None,
+            [],
+            [],
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(empty.coupled(), None);
+        assert!(!is_unique_direct_braid_source(&Z2FusionRule, &empty));
+    }
+
+    #[test]
+    fn uncertified_custom_symbols_stay_on_general_artin_path() {
+        // What: the public provider trait does not runtime-check coherence, so
+        // arbitrary custom F/R data must remain on the default-false Artin
+        // boundary instead of claiming TensorKit's certified F=1 shortcut.
+        let rule = UncertifiedCustomSymbolsRule;
+        assert!(!rule.has_trivial_associator_gauge());
+        let tree =
+            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
+
+        let (destination, coefficient) =
+            unique_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        let expected = unique_artin_braid_at_with_inverse(&rule, &tree, 1, false).unwrap();
+
+        assert_eq!((destination, coefficient), expected);
+        assert_eq!(coefficient, 30.0);
+    }
+
+    #[test]
+    fn complex_unique_prepared_steps_keep_asymmetric_inverse_orientation() {
+        // What: prepared Artin steps retain Complex64 conjugation and reverse
+        // R-symbol argument order for an inverse anyonic crossing.
+        let rule = ComplexAsymmetricUniqueRule;
+        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, true], [], [1]);
+
+        let forward = unique_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
+        let inverse = unique_braid_tree(&rule, &tree, &[1, 0], &[1, 0]).unwrap();
+        let expected_forward =
+            Complex64::from_polar(1.0, std::f64::consts::FRAC_PI_3);
+        let expected_inverse =
+            Complex64::from_polar(1.0, -std::f64::consts::FRAC_PI_6);
+
+        assert_eq!(forward.0, inverse.0);
+        assert!((forward.1 - expected_forward).norm() < 1.0e-12);
+        assert!((inverse.1 - expected_inverse).norm() < 1.0e-12);
+    }
+
+    #[test]
+    fn prepared_tree_pair_operation_size_excludes_a_second_step_arena() {
+        // What: the expert plan stores one inline Artin lowering, not parallel
+        // Artin and inversion arrays for mutually exclusive execution paths.
+        assert!(std::mem::size_of::<PreparedTreePairOperation>() <= 600);
     }
 
     #[test]
@@ -2422,6 +2712,248 @@ mod tests {
     }
 
     #[test]
+    fn prepared_fermionic_domain_crossing_is_exactly_negative_one() {
+        // What: an actual odd fZ2 domain leg crossing an odd codomain leg
+        // retains the exact TensorKit fermionic phase through prepared replay.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [true],
+            [],
+            [],
+            [],
+            [],
+        );
+        let prepared = PreparedTreePairOperation::prepare_permute(
+            &FermionParityFusionRule,
+            1,
+            1,
+            &[1],
+            &[0],
+        )
+        .unwrap();
+
+        let (destination, coefficient) = prepared
+            .execute_unique_rigid(&FermionParityFusionRule, &source)
+            .unwrap();
+
+        assert_eq!(coefficient, -1.0);
+        assert_eq!(destination.codomain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(destination.domain_uncoupled(), &[SectorId::new(1)]);
+        assert_eq!(destination.codomain_is_dual(), &[false]);
+        assert_eq!(destination.domain_is_dual(), &[true]);
+    }
+
+    #[test]
+    fn prepared_permute_reverses_domain_levels_before_artin_lowering() {
+        // What: TensorKit linearizes incoming legs in reverse order, so a
+        // domain-only swap is prepared as the inverse Artin generator.
+        let prepared =
+            PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 2, &[0], &[2, 1])
+                .unwrap();
+        let PreparedTreePairPlan::Braid(braid) = prepared.plan else {
+            panic!("domain-only swap must prepare a braid");
+        };
+
+        assert_eq!(
+            braid.artin_steps.as_slice(),
+            &[PreparedArtinStep {
+                index: 1,
+                inverse: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn prepared_permute_revalidates_symmetric_capability_for_reused_rule() {
+        // What: a prepared permutation cannot become an identity, repartition,
+        // or general braid when executed with a non-symmetric provider.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        );
+        let plans = [
+            PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 1, &[0], &[1]).unwrap(),
+            PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 1, &[0, 1], &[]).unwrap(),
+            PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 1, &[1], &[0]).unwrap(),
+        ];
+        assert!(matches!(plans[0].plan, PreparedTreePairPlan::Identity));
+        assert!(matches!(
+            plans[1].plan,
+            PreparedTreePairPlan::Repartition
+        ));
+        assert!(matches!(plans[2].plan, PreparedTreePairPlan::Braid(_)));
+
+        for prepared in plans {
+            assert_eq!(
+                prepared.execute_unique_rigid(&AsymmetricAnyonicRule, &source),
+                Err(CoreError::UnsupportedBraidingStyle {
+                    expected: "symmetric braiding",
+                    actual: BraidingStyleKind::Anyonic,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_transpose_fixes_both_cycle_directions_once() {
+        // What: clockwise and anticlockwise TensorKit cyclic permutations are
+        // lowered to one fixed direction/count before any source execution.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1, 0],
+            [1, 0],
+            Some(1),
+            [false, false],
+            [false, false],
+            [],
+            [],
+            [1],
+            [1],
+        );
+        let cases = [
+            (
+                &[1, 3][..],
+                &[0, 2][..],
+                PreparedCycleDirection::Clockwise,
+            ),
+            (
+                &[2, 0][..],
+                &[3, 1][..],
+                PreparedCycleDirection::Anticlockwise,
+            ),
+        ];
+        for (codomain, domain, expected_direction) in cases {
+            let prepared =
+                PreparedTreePairOperation::prepare_transpose(2, 2, codomain, domain).unwrap();
+            assert_eq!(
+                prepared.plan,
+                PreparedTreePairPlan::Transpose {
+                    direction: expected_direction,
+                    count: 1,
+                }
+            );
+            let actual = prepared.execute_unique_rigid(&Z2FusionRule, &source).unwrap();
+            let repartitioned =
+                unique_rigid_repartition_tree_pair(&Z2FusionRule, &source, codomain.len()).unwrap();
+            let (oracle_tree, cycle_coefficient) = match expected_direction {
+                PreparedCycleDirection::Clockwise => {
+                    unique_rigid_cycle_clockwise_tree_pair(&Z2FusionRule, &repartitioned.0).unwrap()
+                }
+                PreparedCycleDirection::Anticlockwise => {
+                    unique_rigid_cycle_anticlockwise_tree_pair(&Z2FusionRule, &repartitioned.0)
+                        .unwrap()
+                }
+            };
+            let oracle = (oracle_tree, repartitioned.1 * cycle_coefficient);
+            assert_eq!(actual, oracle);
+        }
+    }
+
+    #[test]
+    fn unique_prepared_executor_rejects_simple_for_every_plan_variant() {
+        // What: a general multiplicity-free plan never becomes a Unique plan
+        // merely because its operation variant is an identity or repartition.
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        );
+        let plans = [
+            PreparedTreePairOperation::prepare_braid(
+                &SU2FusionRule,
+                1,
+                1,
+                &[0],
+                &[1],
+                &[0],
+                &[1],
+            )
+            .unwrap(),
+            PreparedTreePairOperation::prepare_braid(
+                &SU2FusionRule,
+                1,
+                1,
+                &[0, 1],
+                &[],
+                &[0],
+                &[1],
+            )
+            .unwrap(),
+            PreparedTreePairOperation::prepare_braid(
+                &SU2FusionRule,
+                1,
+                1,
+                &[1],
+                &[0],
+                &[0],
+                &[1],
+            )
+            .unwrap(),
+            PreparedTreePairOperation::prepare_transpose(1, 1, &[1], &[0]).unwrap(),
+        ];
+        assert!(matches!(plans[0].plan, PreparedTreePairPlan::Identity));
+        assert!(matches!(plans[1].plan, PreparedTreePairPlan::Repartition));
+        assert!(matches!(plans[2].plan, PreparedTreePairPlan::Braid(_)));
+        assert!(matches!(
+            plans[3].plan,
+            PreparedTreePairPlan::Transpose { .. }
+        ));
+
+        for prepared in plans {
+            assert_eq!(
+                prepared.execute_unique_rigid(&SU2FusionRule, &source),
+                Err(CoreError::UnsupportedFusionStyle {
+                    expected: FusionStyleKind::Unique,
+                    actual: FusionStyleKind::Simple,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_operation_preserves_validation_error_precedence() {
+        // What: level dimensions still fail before identity short-circuiting,
+        // while transpose still reports the original unlinearized permutation.
+        assert_eq!(
+            PreparedTreePairOperation::prepare_braid(
+                &SU2FusionRule,
+                1,
+                1,
+                &[0],
+                &[1],
+                &[],
+                &[1],
+            ),
+            Err(CoreError::DimensionMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(
+            PreparedTreePairOperation::prepare_transpose(2, 1, &[0, 2], &[2]),
+            Err(CoreError::InvalidPermutation {
+                permutation: vec![0, 2, 2],
+                rank: 3,
+            })
+        );
+    }
+
+    #[test]
     fn unique_transpose_tree_pair_is_cyclic_and_reversible() {
         let source = FusionTreeBlockKey::pair_from_sector_ids(
             [1],
@@ -3431,6 +3963,63 @@ mod tests {
             Some(SectorId::new(1))
         );
         assert!((permuted[0].1 - 1.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn prepared_simple_pair_matches_explicit_generic_composition() {
+        // What: a prepared Simple-fusion pair operation equals the explicit
+        // repartition -> all-codomain Artin -> repartition composition.
+        let rule = SU2FusionRule;
+        let source = FusionTreeBlockKey::pair_from_sector_ids(
+            [1],
+            [1],
+            Some(1),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        );
+        let prepared =
+            PreparedTreePairOperation::prepare_permute(&rule, 1, 1, &[1], &[0]).unwrap();
+        let actual = prepared
+            .execute_multiplicity_free(&rule, &source)
+            .unwrap();
+
+        let all_codomain = multiplicity_free_repartition_tree_pair(&rule, &source, 2).unwrap();
+        let braided = compose_tree_pair_terms(&rule, all_codomain, |rule, key| {
+            multiplicity_free_braid_tree(
+                rule,
+                key.codomain_tree(),
+                &[1, 0],
+                &[0, 1],
+            )
+            .map(|terms| {
+                terms
+                    .into_iter()
+                    .map(|(tree, coefficient)| {
+                        (
+                            FusionTreeBlockKey::pair(
+                                tree,
+                                key.domain_tree().clone(),
+                            ),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap();
+        let expected = multiplicity_free_repartition_terms(&rule, braided, 1).unwrap();
+
+        assert_eq!(
+            actual.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            expected.iter().map(|(key, _)| key).collect::<Vec<_>>()
+        );
+        for ((_, actual), (_, expected)) in actual.iter().zip(expected) {
+            assert!((*actual - expected).abs() < 1.0e-12);
+        }
     }
 
     fn u1_nonselfdual_tree_pair_fixture() -> FusionTreeBlockKey {

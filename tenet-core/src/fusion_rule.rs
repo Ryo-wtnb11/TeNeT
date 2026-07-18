@@ -469,6 +469,17 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
 
     fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar;
 
+    /// Whether every allowed associator coefficient in this provider's
+    /// current gauge is exactly the scalar unit.
+    ///
+    /// TensorKit's direct Unique + SymmetricBraiding permutation lowering
+    /// relies on this stronger property, not symmetric braiding alone.
+    /// Defaulting to false keeps custom providers on the gauge-general Artin
+    /// path unless they explicitly certify the invariant.
+    fn has_trivial_associator_gauge(&self) -> bool {
+        false
+    }
+
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -1637,6 +1648,11 @@ where
 {
     type Scalar = f64;
 
+    fn has_trivial_associator_gauge(&self) -> bool {
+        self.left.has_trivial_associator_gauge()
+            && self.right.has_trivial_associator_gauge()
+    }
+
     fn scalar_one(&self) -> Self::Scalar {
         1.0
     }
@@ -1903,6 +1919,10 @@ impl LoweredMultiplicityFreeAlgebra for Z2FusionRule {
 impl MultiplicityFreeFusionSymbols for Z2FusionRule {
     type Scalar = f64;
 
+    fn has_trivial_associator_gauge(&self) -> bool {
+        true
+    }
+
     fn scalar_one(&self) -> Self::Scalar {
         1.0
     }
@@ -2084,6 +2104,10 @@ impl LoweredMultiplicityFreeAlgebra for FermionParityFusionRule {
 
 impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
     type Scalar = f64;
+
+    fn has_trivial_associator_gauge(&self) -> bool {
+        true
+    }
 
     fn scalar_one(&self) -> Self::Scalar {
         1.0
@@ -2357,6 +2381,10 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
 
 impl MultiplicityFreeFusionSymbols for U1FusionRule {
     type Scalar = f64;
+
+    fn has_trivial_associator_gauge(&self) -> bool {
+        true
+    }
 
     fn scalar_one(&self) -> Self::Scalar {
         1.0
