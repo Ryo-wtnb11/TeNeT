@@ -3881,6 +3881,307 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TensorKitZ4Element2Rule;
+
+impl TensorKitZ4Element2Rule {
+    fn label(sector: SectorId) -> usize {
+        assert!(sector.id() < 4, "Z4 fixture sector must be in 0..4");
+        sector.id()
+    }
+
+    fn cispi(exponent: f64) -> Complex64 {
+        Complex64::from_polar(1.0, std::f64::consts::PI * exponent)
+    }
+
+    fn cocycle(left: SectorId, middle: SectorId, right: SectorId) -> Complex64 {
+        let left = Self::label(left);
+        let middle = Self::label(middle);
+        let right = Self::label(right);
+        let wrapped_sum = (middle + right) % 4;
+        let carry = middle + right - wrapped_sum;
+        Self::cispi((4 * left * carry) as f64 / 16.0)
+    }
+}
+
+impl FusionRule for TensorKitZ4Element2Rule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        SectorId::new((4 - Self::label(sector)) % 4)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        vec![SectorId::new((Self::label(left) + Self::label(right)) % 4)].into()
+    }
+}
+
+impl MultiplicityFreeFusionRule for TensorKitZ4Element2Rule {}
+
+impl MultiplicityFreeFusionSymbols for TensorKitZ4Element2Rule {
+    type Scalar = Complex64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value.conj()
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        let expected_left = SectorId::new((Self::label(left) + Self::label(middle)) % 4);
+        let expected_right = SectorId::new((Self::label(middle) + Self::label(right)) % 4);
+        let expected_coupled = SectorId::new((Self::label(expected_left) + Self::label(right)) % 4);
+        if left_coupled == expected_left
+            && right_coupled == expected_right
+            && coupled == expected_coupled
+        {
+            Self::cocycle(left, middle, right)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        let expected = SectorId::new((Self::label(left) + Self::label(right)) % 4);
+        if coupled == expected {
+            Self::cispi((Self::label(left) * Self::label(right)) as f64 / 4.0)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for TensorKitZ4Element2Rule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        Complex64::new(1.0, 0.0)
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        let label = Self::label(sector);
+        Self::cispi((label * label) as f64 / 4.0)
+    }
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        Self::cocycle(sector, self.dual(sector), sector)
+    }
+}
+
+fn tensor_kit_z4_rank_three_pair() -> FusionTreeBlockKey {
+    let rule = TensorKitZ4Element2Rule;
+    FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(1), SectorId::new(2), SectorId::new(3)],
+            Some(SectorId::new(2)),
+            [false, false, false],
+            [SectorId::new(3)],
+            [SectorId::new(1), SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(2)],
+            Some(SectorId::new(2)),
+            [false],
+            [],
+            [],
+        )
+        .unwrap(),
+    )
+}
+
+fn assert_complex_oracle(actual: Complex64, expected: Complex64) {
+    assert!(
+        (actual - expected).norm() < 1.0e-14,
+        "actual={actual:?}, expected={expected:?}"
+    );
+}
+
+#[test]
+fn unique_production_domain_fermion_crossing_matches_tensorkit_oracle() {
+    let rule = FermionParityFusionRule;
+    let odd = SectorId::new(1);
+    let source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [true], [], []).unwrap(),
+    );
+    let source_structure =
+        packed_fixture_structure(2, [(BlockKey::from(source.clone()), vec![1, 1])]).unwrap();
+
+    let plan = build_unique_tree_pair_transform_group_plan(
+        &rule,
+        TreeTransformOperation::braid([1], [0], [0], [1]),
+        &source_structure,
+    )
+    .unwrap();
+
+    // What: moving one odd domain leg across one odd codomain leg carries the
+    // exact TensorKit fermionic sign, rather than a self-consistency result.
+    assert_eq!(plan.specs().len(), 1);
+    assert_eq!(plan.specs()[0].dst_keys(), &[BlockKey::from(source)]);
+    assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-1.0]);
+}
+
+#[test]
+fn unique_production_complex_artin_and_inverse_match_tensorkit_oracle() {
+    let rule = TensorKitZ4Element2Rule;
+    let source = tensor_kit_z4_rank_three_pair();
+    let source_structure =
+        packed_fixture_structure(4, [(BlockKey::from(source.clone()), vec![1; 4])]).unwrap();
+    let expected = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(1), SectorId::new(3), SectorId::new(2)],
+            Some(SectorId::new(2)),
+            [false, false, false],
+            [SectorId::new(0)],
+            [SectorId::new(1), SectorId::new(1)],
+        )
+        .unwrap(),
+        source.domain_tree().clone(),
+    );
+
+    for (codomain_levels, expected_coefficient) in [
+        ([0, 1, 2], Complex64::new(0.0, -1.0)),
+        ([0, 2, 1], Complex64::new(0.0, 1.0)),
+    ] {
+        let plan = build_unique_tree_pair_transform_group_plan(
+            &rule,
+            TreeTransformOperation::braid([0, 2, 1], [3], codomain_levels, [3]),
+            &source_structure,
+        )
+        .unwrap();
+
+        // What: Z4Element{2}'s later Artin crossing preserves the recoupled
+        // innerline and conjugates the complex phase when the levels reverse.
+        assert_eq!(plan.specs().len(), 1);
+        assert_eq!(
+            plan.specs()[0].dst_keys(),
+            &[BlockKey::from(expected.clone())]
+        );
+        assert_complex_oracle(
+            plan.specs()[0].recoupling_coefficients_dst_src()[0],
+            expected_coefficient,
+        );
+    }
+}
+
+#[test]
+fn unique_production_pivotal_transpose_matches_tensorkit_oracle() {
+    let rule = TensorKitZ4Element2Rule;
+    let source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(1), SectorId::new(2)],
+            Some(SectorId::new(3)),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(3)],
+            Some(SectorId::new(3)),
+            [true],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
+    let expected = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(2), SectorId::new(1)],
+            Some(SectorId::new(3)),
+            [true, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(3)],
+            Some(SectorId::new(3)),
+            [true],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
+    let source_structure =
+        packed_fixture_structure(3, [(BlockKey::from(source), vec![1; 3])]).unwrap();
+
+    let plan = build_unique_tree_pair_transform_group_plan(
+        &rule,
+        TreeTransformOperation::transpose([1, 2], [0]),
+        &source_structure,
+    )
+    .unwrap();
+
+    // What: the nontrivial Z4 Frobenius-Schur/A-symbol phase survives the
+    // cyclic transpose with TensorKit's exact destination dual flags.
+    assert_eq!(plan.specs().len(), 1);
+    assert_eq!(plan.specs()[0].dst_keys(), &[BlockKey::from(expected)]);
+    assert_complex_oracle(
+        plan.specs()[0].recoupling_coefficients_dst_src()[0],
+        Complex64::new(-1.0, 0.0),
+    );
+}
+
+#[test]
+fn tensorkit_unique_oracle_provenance_is_pinned() {
+    const RAW: &str = include_str!("fixtures/issue306_tensorkit_unique_oracle.txt");
+
+    // What: independent expected values retain the exact reference revision
+    // and raw outputs needed to regenerate or audit this fixture.
+    assert!(RAW.contains("TensorKit_commit=cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91"));
+    assert!(RAW.contains("pair3.coeff=-2.2204460492503131e-16-1im"));
+    assert!(RAW.contains("pair3.coeff=-2.2204460492503131e-16+1im"));
+    assert!(RAW.contains("transpose.coeff=-1+0im"));
+    assert!(RAW.contains("fz2.domain_crossing.coeff=-1+0im"));
+}
+
 fn unique_rank_three_tree_pair<R>(rule: &R, left: SectorId, right: SectorId) -> FusionTreeBlockKey
 where
     R: FusionRule,
@@ -4184,6 +4485,121 @@ fn unique_production_lowering_preserves_generic_error_precedence() {
         &UniquePlanarRule,
         &planar_structure,
         TreeTransformOperation::permute([1, 0], [2]),
+    );
+}
+
+fn z2_two_leg_pair_with_empty_domain(
+    uncoupled: [SectorId; 2],
+    empty_coupled: Option<SectorId>,
+) -> FusionTreeBlockKey {
+    let rule = Z2FusionRule;
+    let coupled = rule.fusion_channels(uncoupled[0], uncoupled[1])[0];
+    FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &rule,
+            uncoupled,
+            Some(coupled),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [], empty_coupled, [], [], []).unwrap(),
+    )
+}
+
+#[test]
+fn unique_production_preserves_interleaved_source_block_order() {
+    let vacuum = Z2FusionRule.vacuum();
+    let group_a_first =
+        z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], None);
+    let group_b = z2_two_leg_pair_with_empty_domain([SectorId::new(0), SectorId::new(0)], None);
+    let group_a_second =
+        z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], Some(vacuum));
+    let source_order = [
+        BlockKey::from(group_a_first),
+        BlockKey::from(group_b),
+        BlockKey::from(group_a_second),
+    ];
+    let source_structure =
+        packed_fixture_structure(2, source_order.iter().cloned().map(|key| (key, vec![1, 1])))
+            .unwrap();
+    assert_eq!(
+        source_structure.fusion_tree_groups()[0].block_indices(),
+        &[0, 2]
+    );
+
+    let plan = build_tree_pair_transform_group_plan(
+        &Z2FusionRule,
+        TreeTransformOperation::permute([0, 1], []),
+        &source_structure,
+    )
+    .unwrap();
+
+    // What: the Unique/Abelian transformer emits one spec per stored source
+    // block in raw source order, including when one group is interleaved.
+    assert_eq!(
+        plan.specs()
+            .iter()
+            .map(|spec| spec.src_keys()[0].clone())
+            .collect::<Vec<_>>(),
+        source_order
+    );
+}
+
+#[test]
+fn unique_production_preserves_generic_nonfusion_error_precedence() {
+    let valid_tree = z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], None);
+    let dense_first = packed_fixture_structure(
+        2,
+        [
+            (BlockKey::Dense, vec![1, 1]),
+            (BlockKey::from(valid_tree.clone()), vec![1, 1]),
+        ],
+    )
+    .unwrap();
+    let tree_first = packed_fixture_structure(
+        2,
+        [
+            (BlockKey::from(valid_tree), vec![1, 1]),
+            (BlockKey::Dense, vec![1, 1]),
+        ],
+    )
+    .unwrap();
+    let malformed = TreeTransformOperation::permute([0, 0], []);
+
+    // What: non-fusion blocks stay outside the fusion-group census, so a
+    // malformed fusion-tree operation wins independently of dense block order.
+    assert_eq!(
+        build_tree_pair_transform_group_plan(&Z2FusionRule, malformed.clone(), &dense_first,),
+        build_multiplicity_free_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            malformed.clone(),
+            &dense_first,
+        ),
+    );
+    assert_eq!(
+        build_tree_pair_transform_group_plan(&Z2FusionRule, malformed.clone(), &tree_first,),
+        build_multiplicity_free_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            malformed,
+            &tree_first,
+        ),
+    );
+
+    // What: a valid operation also preserves the generic path's treatment of
+    // non-fusion blocks instead of introducing a new direct-path rejection.
+    assert_eq!(
+        build_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &dense_first,
+        ),
+        build_multiplicity_free_tree_pair_transform_group_plan(
+            &Z2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &dense_first,
+        ),
     );
 }
 

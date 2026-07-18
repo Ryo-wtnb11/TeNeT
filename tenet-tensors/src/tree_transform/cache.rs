@@ -882,6 +882,70 @@ impl<'a> CacheBytes<'a> {
 mod persistence_tests {
     use super::*;
 
+    fn decode_hex_fixture(hex: &str) -> Vec<u8> {
+        fn nibble(byte: u8) -> u8 {
+            match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                b'A'..=b'F' => byte - b'A' + 10,
+                _ => panic!("persistent fixture contains a non-hex byte"),
+            }
+        }
+
+        assert_eq!(hex.len() % 2, 0);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
+            .collect()
+    }
+
+    #[test]
+    fn origin_main_v2_fixture_decodes_to_canonical_shared_storage() {
+        // What: bytes produced by origin/main 35de652's encoder with two one-by-one
+        // `multi` specs sharing source axes [0, 1]. Keeping literal bytes
+        // catches representation migrations that a current-encoder roundtrip
+        // cannot see.
+        const ORIGIN_MAIN_35DE652_V2: &str = concat!(
+            "54454e45545f545245455f504c414e5f43414348450200000000000000010000",
+            "0000000000030101020200000000000000000000000000000001000000000000",
+            "0000000000000000000200000000000000030000000000000005000000000000",
+            "0000000000000000000100000000000000020000000000000001000000000000",
+            "0001000000000000000000000000000000020000000000000000000000000000",
+            "0000000100000000000000000200000000000000020000000000000001000000",
+            "0000000001000000000000000000000000000000020000000000000000000000",
+            "0000000000000100000000000000000100000000000000000100000000000000",
+            "000000000000f43f010200000000000000000000000000000001000000000000",
+            "0002000000000000000100000000000000010000000000000000000000000000",
+            "0002000000000000000000000000000000000001000000000000000001000000",
+            "0000000000010000000000000000000000000004c00102000000000000000000",
+            "0000000000000100000000000000",
+        );
+        let bytes = decode_hex_fixture(ORIGIN_MAIN_35DE652_V2);
+        let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
+
+        // What: the committed v2 wire format remains readable and its legacy
+        // one-by-one multi entries canonicalize to the compact single form.
+        assert_eq!(decoded.len(), 1);
+        let specs = decoded[0].1.specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].recoupling_coefficients_dst_src(), &[1.25]);
+        assert_eq!(specs[1].recoupling_coefficients_dst_src(), &[-2.5]);
+        assert!(format!("{:?}", specs[0]).contains("Single"));
+        assert!(format!("{:?}", specs[1]).contains("Single"));
+
+        // What: equal decoded axis maps retain one allocation rather than one
+        // Arc payload per spec. Slice identity observes the shared allocation
+        // without adding a production-only representation accessor.
+        assert!(std::ptr::eq(
+            specs[0].source_axes().unwrap(),
+            specs[1].source_axes().unwrap(),
+        ));
+
+        let mut reencoded = FxHashMap::default();
+        reencoded.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
+        assert_eq!(encode_builtin_tree_plan_cache(&reencoded), bytes);
+    }
+
     #[test]
     fn persistent_builtin_tree_plan_cache_round_trips_with_version_guard() {
         let group_key = FusionTreeGroupKey::from_sector_ids([1, 1], [], [false, false], []);
