@@ -546,6 +546,7 @@ fn decode_tree_transform_group_plan_f64(
 ) -> Result<TreeTransformGroupPlan<f64>, ()> {
     let spec_count = input.read_usize()?;
     let mut specs = Vec::with_capacity(spec_count);
+    let mut shared_axes = FxHashMap::<Arc<[usize]>, Arc<[usize]>>::default();
     for _ in 0..spec_count {
         let group_key = decode_fusion_tree_group_key(input)?;
         let dst_count = input.read_usize()?;
@@ -563,15 +564,28 @@ fn decode_tree_transform_group_plan_f64(
         for _ in 0..coeff_count {
             coefficients.push(f64::from_bits(input.read_u64()?));
         }
-        let mut spec =
-            TreeTransformGroupBlockSpec::multi(group_key, dst_keys, src_keys, coefficients);
+        let mut spec = if dst_count == 1 && src_count == 1 && coeff_count == 1 {
+            TreeTransformGroupBlockSpec::single(
+                group_key,
+                dst_keys.pop().ok_or(())?,
+                src_keys.pop().ok_or(())?,
+                coefficients.pop().ok_or(())?,
+            )
+        } else {
+            TreeTransformGroupBlockSpec::multi(group_key, dst_keys, src_keys, coefficients)
+        };
         if input.read_u8()? != 0 {
             let axis_count = input.read_usize()?;
             let mut axes = Vec::with_capacity(axis_count);
             for _ in 0..axis_count {
                 axes.push(input.read_usize()?);
             }
-            spec = spec.with_source_axes(axes);
+            let axes: Arc<[usize]> = axes.into();
+            let axes = shared_axes.get(axes.as_ref()).cloned().unwrap_or_else(|| {
+                shared_axes.insert(Arc::clone(&axes), Arc::clone(&axes));
+                axes
+            });
+            spec = spec.with_shared_source_axes(axes);
         }
         specs.push(spec);
     }
@@ -882,14 +896,28 @@ mod persistence_tests {
                 src_keys: vec![BlockKey::Dense],
             }],
         };
+        let legacy_single = TreeTransformGroupBlockSpec::multi(
+            group_key.clone(),
+            [BlockKey::Dense],
+            [BlockKey::Dense],
+            vec![1.25],
+        )
+        .with_source_axes([0, 1]);
+        let mixed_multi = TreeTransformGroupBlockSpec::multi(
+            group_key.clone(),
+            [BlockKey::sector_ids([10]), BlockKey::sector_ids([20])],
+            [BlockKey::sector_ids([30]), BlockKey::sector_ids([40])],
+            vec![1.0, 2.0, 3.0, 4.0],
+        )
+        .with_source_axes([0, 1]);
         let plan = Arc::new(TreeTransformGroupPlan::new(vec![
-            TreeTransformGroupBlockSpec::multi(
-                group_key,
-                [BlockKey::Dense],
-                [BlockKey::Dense],
-                vec![1.25],
-            )
-            .with_source_axes([0, 1]),
+            legacy_single,
+            mixed_multi.clone(),
+        ]));
+        let current_plan = Arc::new(TreeTransformGroupPlan::new(vec![
+            TreeTransformGroupBlockSpec::single(group_key, BlockKey::Dense, BlockKey::Dense, 1.25)
+                .with_source_axes([0, 1]),
+            mixed_multi,
         ]));
         let mut plans = FxHashMap::default();
         plans.insert(key.clone(), Arc::clone(&plan));
@@ -897,6 +925,12 @@ mod persistence_tests {
         let mut bytes = encode_builtin_tree_plan_cache(&plans);
         let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
         assert_eq!(decoded, vec![(key, (*plan).clone())]);
+        let mut current_plans = FxHashMap::default();
+        current_plans.insert(decoded[0].0.clone(), current_plan);
+        assert_eq!(encode_builtin_tree_plan_cache(&current_plans), bytes);
+        let mut decoded_plans = FxHashMap::default();
+        decoded_plans.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
+        assert_eq!(encode_builtin_tree_plan_cache(&decoded_plans), bytes);
 
         let version_offset = TREE_PLAN_CACHE_MAGIC.len();
         bytes[version_offset..version_offset + 8].copy_from_slice(&1_u64.to_le_bytes());

@@ -10,15 +10,12 @@ use tenet_core::{
     multiplicity_free_braid_tree_pair, multiplicity_free_braid_tree_pair_block,
     multiplicity_free_permute_tree, multiplicity_free_permute_tree_block,
     multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
-    multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block, BlockKey,
-    BlockStructure, FusionRule, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey,
+    multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block,
+    unique_braid_tree, unique_permute_tree, unique_rigid_braid_tree_pair,
+    unique_rigid_permute_tree_pair, unique_rigid_transpose_tree_pair, BlockKey, BlockStructure,
+    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey,
     GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols,
-};
-#[cfg(test)]
-use tenet_core::{
-    unique_braid_tree, unique_braid_tree_pair, unique_permute_tree, unique_permute_tree_pair,
-    unique_transpose_tree_pair, FusionStyleKind, MultiplicityFreePivotalSymbols,
 };
 
 use crate::OperationError;
@@ -81,7 +78,15 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
-    build_multiplicity_free_all_codomain_tree_transform_group_plan(rule, operation, src_structure)
+    if rule.fusion_style() == FusionStyleKind::Unique {
+        build_unique_all_codomain_tree_transform_group_plan(rule, operation, src_structure)
+    } else {
+        build_multiplicity_free_all_codomain_tree_transform_group_plan(
+            rule,
+            operation,
+            src_structure,
+        )
+    }
 }
 
 /// Standard full tree-pair transform builder for Unique and Simple
@@ -95,10 +100,13 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
-    build_multiplicity_free_tree_pair_transform_group_plan(rule, operation, src_structure)
+    if rule.fusion_style() == FusionStyleKind::Unique {
+        build_unique_tree_pair_transform_group_plan(rule, operation, src_structure)
+    } else {
+        build_multiplicity_free_tree_pair_transform_group_plan(rule, operation, src_structure)
+    }
 }
 
-#[cfg(test)]
 pub(crate) fn build_unique_tree_transform_group_plan<T, R, F>(
     rule: &R,
     operation: TreeTransformOperation,
@@ -135,14 +143,13 @@ where
                 src_key.clone(),
                 coefficient,
             )
-            .with_source_axes(source_axes.clone()),
+            .with_shared_source_axes(Arc::clone(&source_axes)),
         );
     }
 
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-#[cfg(test)]
 pub(crate) fn build_unique_all_codomain_tree_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
@@ -200,7 +207,7 @@ where
                 src_key.clone(),
                 coefficient,
             )
-            .with_source_axes(source_axes.clone()),
+            .with_shared_source_axes(Arc::clone(&source_axes)),
         );
     }
 
@@ -740,7 +747,7 @@ fn assemble_identity_all_codomain_group_specs<R, T, F>(
     rule: &R,
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
-    source_axes: &[usize],
+    source_axes: &Arc<[usize]>,
     rows_for: &mut F,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
@@ -771,7 +778,7 @@ where
                 src_key.clone(),
                 coefficient.clone(),
             )
-            .with_source_axes(source_axes.to_vec()),
+            .with_shared_source_axes(Arc::clone(source_axes)),
         );
     }
     Ok(specs)
@@ -814,7 +821,7 @@ fn assemble_all_codomain_group_specs<R, T, F>(
     rule: &R,
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
-    source_axes: &[usize],
+    source_axes: &Arc<[usize]>,
     rows_for: &mut F,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
@@ -897,7 +904,7 @@ where
         src_keys,
         rows.into_coefficients(),
     )
-    .with_source_axes(source_axes.to_vec())])
+    .with_shared_source_axes(Arc::clone(source_axes))])
 }
 
 /// Shape-independent recoupling rows for one source tree under one
@@ -1385,7 +1392,7 @@ where
 fn assemble_identity_tree_pair_group_specs<T, F>(
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
-    source_axes: &[usize],
+    source_axes: &Arc<[usize]>,
     rows_for: &mut F,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
@@ -1415,7 +1422,7 @@ where
                 src_key.clone(),
                 coefficient.clone(),
             )
-            .with_source_axes(source_axes.to_vec()),
+            .with_shared_source_axes(Arc::clone(source_axes)),
         );
     }
     Ok(specs)
@@ -1428,7 +1435,7 @@ where
 fn assemble_tree_pair_group_specs<T, F>(
     src_structure: &BlockStructure,
     group: &FusionTreeBlockGroup,
-    source_axes: &[usize],
+    source_axes: &Arc<[usize]>,
     rows_for: &mut F,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
 where
@@ -1504,12 +1511,12 @@ where
         src_keys,
         rows.into_coefficients(),
     )
-    .with_source_axes(source_axes.to_vec())])
+    .with_shared_source_axes(Arc::clone(source_axes))])
 }
 
 fn lower_injective_singleton_rows<T>(
     group: &FusionTreeBlockGroup,
-    source_axes: &[usize],
+    source_axes: &Arc<[usize]>,
     direct_rows: Vec<(BlockKey, BlockKey, T)>,
     src_count: usize,
     is_injective_singleton: bool,
@@ -1531,78 +1538,57 @@ fn lower_injective_singleton_rows<T>(
                     src_key,
                     coefficient,
                 )
-                .with_source_axes(source_axes.to_vec())
+                .with_shared_source_axes(Arc::clone(source_axes))
             })
             .collect(),
     )
 }
 
-#[cfg(test)]
 pub(crate) fn build_unique_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
     src_structure: &BlockStructure,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
-    R: MultiplicityFreePivotalSymbols,
-    R::Scalar: Mul<Output = R::Scalar>,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    if rule.fusion_style() != FusionStyleKind::Unique {
-        return Err(OperationError::UnsupportedFusionStyle {
-            operation: Box::new(operation),
-            style: rule.fusion_style(),
-        });
-    }
-    operation.validate_braiding_support(rule)?;
-    let source_axes = operation_source_axes(&operation);
-
-    let mut specs = Vec::with_capacity(src_structure.block_count());
-    for index in 0..src_structure.block_count() {
-        let block = src_structure.block(index)?;
-        let BlockKey::FusionTree(src_key) = block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "src",
-                index,
-            });
-        };
-
-        let (dst_key, coefficient) = match &operation {
+    let transform_operation = operation.clone();
+    build_unique_tree_transform_group_plan(rule, operation, src_structure, move |src_key| {
+        match &transform_operation {
             TreeTransformOperation::Permute {
                 codomain_permutation,
                 domain_permutation,
-            } => unique_permute_tree_pair(rule, src_key, codomain_permutation, domain_permutation)?,
+            } => Ok(unique_rigid_permute_tree_pair(
+                rule,
+                src_key,
+                codomain_permutation,
+                domain_permutation,
+            )?),
             TreeTransformOperation::Braid {
                 codomain_permutation,
                 domain_permutation,
                 codomain_levels,
                 domain_levels,
-            } => unique_braid_tree_pair(
+            } => Ok(unique_rigid_braid_tree_pair(
                 rule,
                 src_key,
                 codomain_permutation,
                 domain_permutation,
                 codomain_levels,
                 domain_levels,
-            )?,
+            )?),
             TreeTransformOperation::Transpose {
                 codomain_permutation,
                 domain_permutation,
-            } => {
-                unique_transpose_tree_pair(rule, src_key, codomain_permutation, domain_permutation)?
-            }
-        };
-        specs.push(
-            TreeTransformGroupBlockSpec::single(
-                src_key.group_key(),
-                dst_key,
-                src_key.clone(),
-                coefficient,
-            )
-            .with_source_axes(source_axes.clone()),
-        );
-    }
-
-    Ok(TreeTransformGroupPlan::new(specs))
+            } => Ok(unique_rigid_transpose_tree_pair(
+                rule,
+                src_key,
+                codomain_permutation,
+                domain_permutation,
+            )?),
+        }
+    })
 }
 
 fn validate_all_codomain_operation_scope(
@@ -1633,7 +1619,7 @@ fn validate_all_codomain_operation_scope(
     }
 }
 
-fn operation_source_axes(operation: &TreeTransformOperation) -> Vec<usize> {
+fn operation_source_axes(operation: &TreeTransformOperation) -> Arc<[usize]> {
     match operation {
         TreeTransformOperation::Permute {
             codomain_permutation,

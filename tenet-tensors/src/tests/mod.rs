@@ -398,22 +398,28 @@ impl MultiplicityFreeFusionSymbols for UniqueZ2Rule {
     }
 }
 
-impl MultiplicityFreePivotalSymbols for UniqueZ2Rule {
-    fn bendright_scalar(
-        &self,
-        _left_coupled: SectorId,
-        _bent_sector: SectorId,
-        _coupled: SectorId,
-        _bent_leg_is_dual: bool,
-    ) -> Self::Scalar {
+impl MultiplicityFreeRigidSymbols for UniqueZ2Rule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 
-    fn foldright_scalar(
-        &self,
-        _source: &FusionTreeBlockKey,
-        _destination: &FusionTreeBlockKey,
-    ) -> Self::Scalar {
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
 }
@@ -497,6 +503,101 @@ impl MultiplicityFreePivotalSymbols for UniqueAnyonicRule {
 }
 
 impl MultiplicityFreeRigidSymbols for UniqueAnyonicRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AsymmetricAnyonicPointedRule;
+
+impl FusionRule for AsymmetricAnyonicPointedRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        match (left.id(), right.id()) {
+            (0, sector) | (sector, 0) => vec![SectorId::new(sector)].into(),
+            (1, 2) | (2, 1) => vec![SectorId::new(3)].into(),
+            (3, 1) | (1, 3) => vec![SectorId::new(2)].into(),
+            (3, 2) | (2, 3) => vec![SectorId::new(1)].into(),
+            _ => vec![SectorId::new((left.id() + right.id()) % 4)].into(),
+        }
+    }
+}
+
+impl MultiplicityFreeFusionRule for AsymmetricAnyonicPointedRule {}
+
+impl MultiplicityFreeFusionSymbols for AsymmetricAnyonicPointedRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        11.0
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, _coupled: SectorId) -> Self::Scalar {
+        match (left.id(), right.id()) {
+            (1, 2) => 5.0,
+            (2, 1) => 7.0,
+            (3, 2) => 13.0,
+            (2, 3) => 17.0,
+            (1, 3) => 19.0,
+            (3, 1) => 23.0,
+            _ => 1.0,
+        }
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for AsymmetricAnyonicPointedRule {
     fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
     }
@@ -655,6 +756,65 @@ impl FusionRule for UniquePlanarRule {
 }
 
 impl MultiplicityFreeFusionRule for UniquePlanarRule {}
+
+impl MultiplicityFreeFusionSymbols for UniquePlanarRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for UniquePlanarRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct SimpleSu2Rule;

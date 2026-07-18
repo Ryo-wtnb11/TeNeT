@@ -3881,6 +3881,312 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
+fn unique_rank_three_tree_pair<R>(rule: &R, left: SectorId, right: SectorId) -> FusionTreeBlockKey
+where
+    R: FusionRule,
+{
+    let coupled = rule.fusion_channels(left, right)[0];
+    FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            rule,
+            [left, right],
+            Some(coupled),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(rule, [coupled], Some(coupled), [true], [], []).unwrap(),
+    )
+}
+
+fn assert_unique_and_generic_plan_are_identical<R>(
+    rule: &R,
+    source: FusionTreeBlockKey,
+    operation: TreeTransformOperation,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let rank = source.codomain_tree().uncoupled().len() + source.domain_tree().uncoupled().len();
+    let source_structure =
+        packed_fixture_structure(rank, [(BlockKey::from(source), vec![1; rank])]).unwrap();
+    let specialized =
+        build_unique_tree_pair_transform_group_plan(rule, operation.clone(), &source_structure)
+            .unwrap();
+    let generic = build_multiplicity_free_tree_pair_transform_group_plan(
+        rule,
+        operation.clone(),
+        &source_structure,
+    )
+    .unwrap();
+    let standard =
+        build_tree_pair_transform_group_plan(rule, operation, &source_structure).unwrap();
+
+    // What: the production Unique lowering is the exact one-term form of the
+    // explicit multiplicity-free algorithm, including key and coefficient
+    // ordering, and is the branch selected by the standard builder.
+    assert_eq!(specialized, generic);
+    assert_eq!(standard, specialized);
+    assert_eq!(specialized.specs().len(), 1);
+    assert_eq!(specialized.specs()[0].src_keys().len(), 1);
+    assert_eq!(specialized.specs()[0].dst_keys().len(), 1);
+
+    let destination_structure = packed_fixture_structure(
+        rank,
+        [(specialized.specs()[0].dst_keys()[0].clone(), vec![1; rank])],
+    )
+    .unwrap();
+    let specialized_replay = specialized
+        .compile_structures(&destination_structure, &source_structure)
+        .unwrap();
+    let generic_replay = generic
+        .compile_structures(&destination_structure, &source_structure)
+        .unwrap();
+
+    // What: specialized and explicit generic plans compile to identical raw
+    // replay blocks, layouts, coefficients, schedules, and structure guards.
+    assert_eq!(specialized_replay, generic_replay);
+}
+
+#[test]
+fn unique_production_lowering_matches_generic_across_pointed_rules_and_operations() {
+    let u1_source = unique_rank_three_tree_pair(
+        &U1FusionRule,
+        U1Irrep::new(1).sector_id(),
+        U1Irrep::new(-2).sector_id(),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &U1FusionRule,
+        u1_source,
+        TreeTransformOperation::permute([1, 0], [2]),
+    );
+
+    let z2_source = unique_rank_three_tree_pair(&Z2FusionRule, SectorId::new(1), SectorId::new(0));
+    assert_unique_and_generic_plan_are_identical(
+        &Z2FusionRule,
+        z2_source,
+        TreeTransformOperation::braid([2, 0], [1], [0, 2], [1]),
+    );
+
+    let fz2_source =
+        unique_rank_three_tree_pair(&FermionParityFusionRule, SectorId::new(1), SectorId::new(1));
+    assert_unique_and_generic_plan_are_identical(
+        &FermionParityFusionRule,
+        fz2_source,
+        TreeTransformOperation::transpose([2, 0], [1]),
+    );
+
+    let product = FpU1Rule::default();
+    let odd_charge = product.encode_sector(SectorId::new(1), U1Irrep::new(2).sector_id());
+    let even_charge = product.encode_sector(SectorId::new(0), U1Irrep::new(-1).sector_id());
+    let coupled = product.fusion_channels(odd_charge, even_charge)[0];
+    let product_source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &product,
+            [odd_charge, even_charge],
+            Some(coupled),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &product,
+            [product.vacuum(), coupled],
+            Some(coupled),
+            [true, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &product,
+        product_source,
+        TreeTransformOperation::braid([0, 1, 3], [2], [0, 1], [2, 3]),
+    );
+
+    let anyonic_source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &UniqueAnyonicRule,
+            [SectorId::new(1)],
+            Some(SectorId::new(1)),
+            [false],
+            [],
+            [],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &UniqueAnyonicRule,
+            [SectorId::new(1)],
+            Some(SectorId::new(1)),
+            [true],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &UniqueAnyonicRule,
+        anyonic_source,
+        TreeTransformOperation::braid([1], [0], [0], [1]),
+    );
+
+    let asymmetric_source = unique_rank_three_tree_pair(
+        &AsymmetricAnyonicPointedRule,
+        SectorId::new(1),
+        SectorId::new(2),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &AsymmetricAnyonicPointedRule,
+        asymmetric_source.clone(),
+        TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &AsymmetricAnyonicPointedRule,
+        asymmetric_source,
+        TreeTransformOperation::transpose([2, 0], [1]),
+    );
+}
+
+#[test]
+fn unique_production_lowering_matches_generic_at_rank_zero_and_one() {
+    let scalar = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(U1FusionRule.vacuum()), [], [], [])
+            .unwrap(),
+        FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(U1FusionRule.vacuum()), [], [], [])
+            .unwrap(),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &U1FusionRule,
+        scalar,
+        TreeTransformOperation::permute([], []),
+    );
+
+    let rank_one = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            [Z2FusionRule.vacuum()],
+            Some(Z2FusionRule.vacuum()),
+            [true],
+            [],
+            [],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], Some(Z2FusionRule.vacuum()), [], [], [])
+            .unwrap(),
+    );
+    assert_unique_and_generic_plan_are_identical(
+        &Z2FusionRule,
+        rank_one,
+        TreeTransformOperation::transpose([0], []),
+    );
+}
+
+#[test]
+fn unique_all_codomain_production_lowering_matches_generic_replay_exactly() {
+    let source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            Some(Z2FusionRule.vacuum()),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], Some(Z2FusionRule.vacuum()), [], [], [])
+            .unwrap(),
+    );
+    let source_structure =
+        packed_fixture_structure(2, [(BlockKey::from(source), vec![1; 2])]).unwrap();
+    let operation = TreeTransformOperation::permute([1, 0], []);
+    let specialized = build_unique_all_codomain_tree_transform_group_plan(
+        &Z2FusionRule,
+        operation.clone(),
+        &source_structure,
+    )
+    .unwrap();
+    let generic = build_multiplicity_free_all_codomain_tree_transform_group_plan(
+        &Z2FusionRule,
+        operation.clone(),
+        &source_structure,
+    )
+    .unwrap();
+    let standard =
+        build_all_codomain_tree_transform_group_plan(&Z2FusionRule, operation, &source_structure)
+            .unwrap();
+
+    // What: all-codomain dispatch lowers the same key, phase, and raw replay
+    // descriptor as the explicit multiplicity-free algorithm.
+    assert_eq!(specialized, generic);
+    assert_eq!(standard, specialized);
+    let destination_structure = packed_fixture_structure(
+        2,
+        [(specialized.specs()[0].dst_keys()[0].clone(), vec![1; 2])],
+    )
+    .unwrap();
+    assert_eq!(
+        specialized
+            .compile_structures(&destination_structure, &source_structure)
+            .unwrap(),
+        generic
+            .compile_structures(&destination_structure, &source_structure)
+            .unwrap()
+    );
+}
+
+fn assert_unique_and_generic_error_are_identical<R>(
+    rule: &R,
+    source_structure: &BlockStructure,
+    operation: TreeTransformOperation,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let specialized =
+        build_unique_tree_pair_transform_group_plan(rule, operation.clone(), source_structure)
+            .unwrap_err();
+    let generic =
+        build_multiplicity_free_tree_pair_transform_group_plan(rule, operation, source_structure)
+            .unwrap_err();
+    assert_eq!(specialized, generic);
+}
+
+#[test]
+fn unique_production_lowering_preserves_generic_error_precedence() {
+    let source = unique_rank_three_tree_pair(&Z2FusionRule, SectorId::new(1), SectorId::new(0));
+    let source_structure =
+        packed_fixture_structure(3, [(BlockKey::from(source), vec![1; 3])]).unwrap();
+
+    // What: malformed permutations, braid levels, and noncyclic transposes
+    // fail with the same error and precedence as the explicit generic path.
+    assert_unique_and_generic_error_are_identical(
+        &Z2FusionRule,
+        &source_structure,
+        TreeTransformOperation::permute([0, 0], [2]),
+    );
+    assert_unique_and_generic_error_are_identical(
+        &Z2FusionRule,
+        &source_structure,
+        TreeTransformOperation::braid([1, 0], [2], [0], [2]),
+    );
+    assert_unique_and_generic_error_are_identical(
+        &Z2FusionRule,
+        &source_structure,
+        TreeTransformOperation::transpose([1, 0], [2]),
+    );
+
+    let planar_source =
+        unique_rank_three_tree_pair(&UniquePlanarRule, SectorId::new(1), SectorId::new(0));
+    let planar_structure =
+        packed_fixture_structure(3, [(BlockKey::from(planar_source), vec![1; 3])]).unwrap();
+    assert_unique_and_generic_error_are_identical(
+        &UniquePlanarRule,
+        &planar_structure,
+        TreeTransformOperation::permute([1, 0], [2]),
+    );
+}
+
 #[test]
 fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);

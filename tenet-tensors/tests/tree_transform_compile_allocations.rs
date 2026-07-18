@@ -4,12 +4,12 @@ use std::cell::Cell;
 use tenet_core::{
     BlockKey, BlockStructure, DegeneracyStructure, FusionProductSpace, FusionTreeBlockKey,
     FusionTreeHomSpace, FusionTreeKey, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorStructure, TensorMap, TensorMapSpace,
+    SectorStructure, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    reset_global_operation_caches, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
-    TreeTransformOperation,
+    reset_global_operation_caches, TreeTransformBlockSpec, TreeTransformBuiltinRuleCacheKey,
+    TreeTransformCache, TreeTransformOperation, TreeTransformStructure,
 };
 
 struct CountingAllocator;
@@ -167,9 +167,7 @@ fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 
 
 #[test]
 fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
-    for (missing, expected_allocations) in
-        [(1, 72), (2, 84), (4, 110), (5, 128), (8, 160), (9, 180)]
-    {
+    for (missing, expected_allocations) in [(1, 64), (2, 68), (4, 78), (5, 87), (8, 95), (9, 106)] {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(missing);
         let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
@@ -191,5 +189,73 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
         // reallocation formerly paid by its missing-position Vec.
         assert_eq!(ALLOCATIONS.get(), expected_allocations, "missing={missing}");
         std::hint::black_box(plan);
+    }
+}
+
+fn rank_one_u1_pair_structure(count: usize) -> BlockStructure {
+    let keys = (0..count).map(|charge| {
+        let sector = U1Irrep::new(charge as i32).sector_id();
+        BlockKey::from(FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], Some(sector), [false], [], [])
+                .unwrap(),
+            FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], Some(sector), [false], [], [])
+                .unwrap(),
+        ))
+    });
+    BlockStructure::from_parts(
+        SectorStructure::from_keys(2, keys).unwrap(),
+        DegeneracyStructure::packed_column_major(2, (0..count).map(|_| vec![1, 1])).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn unique_rank_one_u1_plan_allocations_do_not_scale_with_source_blocks() {
+    for count in [1, 2, 4, 8, 16] {
+        let structure = rank_one_u1_pair_structure(count);
+        let operation = TreeTransformOperation::permute([0], [1]);
+
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let plan =
+            build_tree_pair_transform_group_plan(&U1FusionRule, operation, &structure).unwrap();
+        COUNTING.set(false);
+
+        // What: every Unique source block is an inline Single and shares the
+        // operation axis map, so plan construction owns only the outer specs
+        // allocation and the shared axis allocation at every cardinality.
+        assert_eq!(ALLOCATIONS.get(), 2, "source_blocks={count}");
+        assert_eq!(plan.specs().len(), count);
+
+        let indexed_specs = (0..count)
+            .map(|index| TreeTransformBlockSpec::single(index, index, 1.0).with_source_axes([0, 1]))
+            .collect::<Vec<_>>();
+
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let direct =
+            TreeTransformStructure::compile_structures(&structure, &structure, &indexed_specs)
+                .unwrap();
+        COUNTING.set(false);
+        let direct_allocations = ALLOCATIONS.get();
+
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let grouped = plan.compile_structures(&structure, &structure).unwrap();
+        COUNTING.set(false);
+        let grouped_allocations = ALLOCATIONS.get();
+
+        // What: grouped lowering adds exactly its preallocated indexed-spec
+        // vector. Key ownership in the structures and the final replay arena
+        // are paid equally by both compilation paths.
+        assert_eq!(
+            grouped_allocations,
+            direct_allocations + 1,
+            "source_blocks={count}"
+        );
+        assert_eq!(
+            grouped.recoupling_coefficients_dst_src(),
+            direct.recoupling_coefficients_dst_src()
+        );
     }
 }
