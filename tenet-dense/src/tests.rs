@@ -1126,14 +1126,74 @@ fn default_executor_rejects_integer_linalg_view() {
     let mut executor = DefaultDenseExecutor::new();
     let err = executor.qr(DenseRead::I32(view)).unwrap_err();
 
-    assert!(matches!(
+    assert_eq!(
         err,
         DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "qr_read",
-            ref message,
-        } if message.contains("unsupported dtype")
-    ));
+            message: "unsupported dtype I32 for qr".to_string(),
+        }
+    );
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn tenferro_non_dtype_errors_keep_generic_backend_translation() {
+    let upstream_errors = [
+        tenferro_tensor::Error::extension(
+            "custom_op",
+            "custom_family",
+            tenferro_tensor::ErrorKind::BackendFailure,
+            std::io::Error::other("provider rejected the request"),
+        ),
+        tenferro_tensor::Error::extension(
+            "svd",
+            tenferro_linalg::LINALG_EXTENSION_FAMILY_ID,
+            tenferro_tensor::ErrorKind::NumericalFailure,
+            tenferro_linalg::Error::NonConvergence { op: "svd" },
+        ),
+        tenferro_tensor::Error::backend_failure("matmul", "provider rejected the request"),
+    ];
+
+    for upstream in upstream_errors {
+        let expected_message = upstream.to_string();
+        let err = crate::tenferro_adapter::tenferro_error("dense_surface", upstream);
+
+        assert_eq!(
+            err,
+            DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "dense_surface",
+                message: expected_message,
+            }
+        );
+    }
+}
+
+#[cfg(feature = "tenferro")]
+#[test]
+fn tenferro_wrong_family_keeps_typed_linalg_error_on_the_generic_path() {
+    let upstream = tenferro_tensor::Error::extension(
+        "custom_op",
+        "custom_family",
+        tenferro_tensor::ErrorKind::Unsupported,
+        tenferro_linalg::Error::UnsupportedDType {
+            op: "qr",
+            dtype: tenferro_tensor::DType::I32,
+        },
+    );
+    let expected_message = upstream.to_string();
+
+    let err = crate::tenferro_adapter::tenferro_error("dense_surface", upstream);
+
+    assert_eq!(
+        err,
+        DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "dense_surface",
+            message: expected_message,
+        }
+    );
 }
 
 #[cfg(all(feature = "cpu-faer", not(feature = "cpu-blas")))]

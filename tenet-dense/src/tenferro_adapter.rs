@@ -1,5 +1,6 @@
 use num_complex::{Complex32, Complex64};
 
+use crate::dtype::dense_dtype_from_tenferro;
 use crate::executor::batch_offset;
 use crate::layout::strides_to_isize;
 use crate::{
@@ -846,10 +847,33 @@ fn tenferro_dot_config(config: &DenseDotConfig) -> DotGeneralConfig {
     }
 }
 
-pub(crate) fn tenferro_error(op: &'static str, err: tenferro_tensor::Error) -> DenseError {
+pub(crate) fn tenferro_error(surface_op: &'static str, err: tenferro_tensor::Error) -> DenseError {
+    let unsupported_dtype = if let tenferro_tensor::Error::Extension { family, source, .. } = &err {
+        if *family == tenferro_linalg::LINALG_EXTENSION_FAMILY_ID {
+            match source.downcast_ref::<tenferro_linalg::Error>() {
+                Some(tenferro_linalg::Error::UnsupportedDType { op, dtype }) => Some((*op, *dtype)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some((source_op, dtype)) = unsupported_dtype {
+        return DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: surface_op,
+            message: format!(
+                "unsupported dtype {:?} for {source_op}",
+                dense_dtype_from_tenferro(dtype)
+            ),
+        };
+    }
+
     DenseError::Backend {
         backend: DenseBackend::Tenferro,
-        op,
+        op: surface_op,
         message: err.to_string(),
     }
 }
