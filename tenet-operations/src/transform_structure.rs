@@ -319,10 +319,10 @@ impl<T: Copy> TreeTransformStructure<T> {
         specs: &[TreeTransformGroupBlockSpec<T>],
         storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
-        let indexed_specs = specs
-            .iter()
-            .map(|spec| spec.to_indexed_spec(&dst_structure, &src_structure))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut indexed_specs = Vec::with_capacity(specs.len());
+        for spec in specs {
+            indexed_specs.push(spec.to_indexed_spec(&dst_structure, &src_structure)?);
+        }
         Self::compile_shared_structures(
             dst_structure,
             src_structure,
@@ -337,10 +337,10 @@ impl<T: Copy> TreeTransformStructure<T> {
         specs: &[TreeTransformKeyBlockSpec<T>],
         storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
-        let indexed_specs = specs
-            .iter()
-            .map(|spec| spec.to_indexed_spec(&dst_structure, &src_structure))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut indexed_specs = Vec::with_capacity(specs.len());
+        for spec in specs {
+            indexed_specs.push(spec.to_indexed_spec(&dst_structure, &src_structure)?);
+        }
         Self::compile_shared_structures(
             dst_structure,
             src_structure,
@@ -370,22 +370,25 @@ impl<T: Copy> TreeTransformStructure<T> {
         let mut touched_dst_blocks = vec![false; dst_structure.block_count()];
 
         for spec in specs {
-            if spec.dst_blocks.is_empty() || spec.src_blocks.is_empty() {
+            let dst_blocks = spec.dst_blocks();
+            let src_blocks = spec.src_blocks();
+            let coefficients = spec.recoupling_coefficients_dst_src();
+            if dst_blocks.is_empty() || src_blocks.is_empty() {
                 return Err(OperationError::EmptyTransformBlock);
             }
-            let src_count = spec.src_blocks.len();
-            let dst_count = spec.dst_blocks.len();
+            let src_count = src_blocks.len();
+            let dst_count = dst_blocks.len();
             let expected_coefficients = src_count
                 .checked_mul(dst_count)
                 .ok_or(OperationError::ElementCountOverflow)?;
-            if spec.recoupling_coefficients_dst_src.len() != expected_coefficients {
+            if coefficients.len() != expected_coefficients {
                 return Err(OperationError::CoefficientCountMismatch {
                     expected: expected_coefficients,
-                    actual: spec.recoupling_coefficients_dst_src.len(),
+                    actual: coefficients.len(),
                 });
             }
 
-            for &dst_block in &spec.dst_blocks {
+            for &dst_block in dst_blocks {
                 let touched = touched_dst_blocks.get_mut(dst_block).ok_or(
                     OperationError::BlockIndexOutOfBounds {
                         tensor: "dst",
@@ -401,7 +404,7 @@ impl<T: Copy> TreeTransformStructure<T> {
 
             let dst_layout_start = layouts.entry_count();
             let mut element_count = None;
-            for &dst_block in &spec.dst_blocks {
+            for &dst_block in dst_blocks {
                 let block = dst_structure.block(dst_block)?;
                 let layout_element_count =
                     layouts.push_block(rank, block.shape(), block.strides(), block.offset())?;
@@ -418,7 +421,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             }
 
             let src_layout_start = layouts.entry_count();
-            for &src_block in &spec.src_blocks {
+            for &src_block in src_blocks {
                 let block = src_structure.block(src_block)?;
                 let layout_element_count = layouts.push_block_with_axes(
                     rank,
@@ -440,8 +443,7 @@ impl<T: Copy> TreeTransformStructure<T> {
             }
             let element_count = element_count.expect("validated non-empty block");
             let coefficient_start = recoupling_coefficients_dst_src.len();
-            recoupling_coefficients_dst_src
-                .extend_from_slice(&spec.recoupling_coefficients_dst_src);
+            recoupling_coefficients_dst_src.extend_from_slice(coefficients);
 
             if src_count == 1 && dst_count == 1 {
                 let dst_layout = layouts.entry(dst_layout_start);

@@ -4,8 +4,9 @@ use std::hint::black_box;
 
 use tenet_core::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
-    unique_permute_tree, FusionProductSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    unique_permute_tree, FermionParityFusionRule, FusionProductSpace, FusionTreeBlockKey,
+    FusionTreeHomSpace, FusionTreeKey, PreparedTreePairOperation, SU2FusionRule, SU2Irrep,
+    SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -13,6 +14,7 @@ struct CountingAllocator;
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -20,6 +22,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + layout.size());
         }
         pointer
     }
@@ -32,6 +35,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.realloc(ptr, layout, new_size) };
         if !pointer.is_null() && COUNTING.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
+            ALLOCATED_BYTES.set(ALLOCATED_BYTES.get() + new_size);
         }
         pointer
     }
@@ -245,11 +249,114 @@ fn u1_homspace(rank: usize) -> FusionTreeHomSpace {
 }
 
 fn measured_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    let (output, allocations, _) = measured_allocation_stats(operation);
+    (output, allocations)
+}
+
+fn measured_allocation_stats<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
     ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
     COUNTING.set(true);
     let output = operation();
     COUNTING.set(false);
-    (output, ALLOCATIONS.get())
+    (output, ALLOCATIONS.get(), ALLOCATED_BYTES.get())
+}
+
+#[test]
+fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_allocations() {
+    let odd = Z2Irrep::ODD.sector_id();
+    let even = Z2Irrep::EVEN.sector_id();
+    let tree = || {
+        FusionTreeKey::try_new_for_rule(
+            &FermionParityFusionRule,
+            [odd, odd],
+            Some(even),
+            [false, true],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap()
+    };
+    let source = FusionTreeBlockKey::pair(tree(), tree());
+    let single = [source.clone()];
+    let cohort = std::iter::repeat_n(source, 16).collect::<Vec<_>>();
+    let permute = PreparedTreePairOperation::prepare_permute(
+        &FermionParityFusionRule,
+        2,
+        2,
+        &[3, 0],
+        &[1, 2],
+    )
+    .unwrap();
+    let braid = PreparedTreePairOperation::prepare_braid(
+        &FermionParityFusionRule,
+        2,
+        2,
+        &[3, 0],
+        &[1, 2],
+        &[7, 2],
+        &[11, 5],
+    )
+    .unwrap();
+    let transpose = PreparedTreePairOperation::prepare_transpose(2, 2, &[1, 3], &[0, 2]).unwrap();
+
+    let preparations: [fn() -> PreparedTreePairOperation; 3] = [
+        || {
+            PreparedTreePairOperation::prepare_permute(
+                &FermionParityFusionRule,
+                2,
+                2,
+                &[3, 0],
+                &[1, 2],
+            )
+            .unwrap()
+        },
+        || {
+            PreparedTreePairOperation::prepare_braid(
+                &FermionParityFusionRule,
+                2,
+                2,
+                &[3, 0],
+                &[1, 2],
+                &[7, 2],
+                &[11, 5],
+            )
+            .unwrap()
+        },
+        || PreparedTreePairOperation::prepare_transpose(2, 2, &[1, 3], &[0, 2]).unwrap(),
+    ];
+    for prepare in preparations {
+        let (_, calls, bytes) = measured_allocation_stats(prepare);
+        // What: valid rank<=8 operation validation and lowering fit entirely
+        // in the prepared representation's inline storage.
+        assert_eq!((calls, bytes), (0, 0));
+    }
+
+    for prepared in [&permute, &braid, &transpose] {
+        let run = |sources: &[FusionTreeBlockKey]| {
+            for source in sources {
+                black_box(
+                    prepared
+                        .execute_unique_rigid(&FermionParityFusionRule, source)
+                        .unwrap(),
+                );
+            }
+        };
+        run(&single);
+        run(&cohort);
+        let (_, single_calls, single_bytes) = measured_allocation_stats(|| run(&single));
+        let (_, repeated_calls, repeated_bytes) = measured_allocation_stats(|| run(&single));
+        let (_, cohort_calls, cohort_bytes) = measured_allocation_stats(|| run(&cohort));
+
+        // What: repeated nonidentity replay has a stable allocation contract,
+        // and a source cohort pays exactly the measured per-source cost.
+        assert_eq!(
+            (repeated_calls, repeated_bytes),
+            (single_calls, single_bytes)
+        );
+        assert_eq!(cohort_calls, single_calls * cohort.len());
+        assert_eq!(cohort_bytes, single_bytes * cohort.len());
+    }
 }
 
 #[test]

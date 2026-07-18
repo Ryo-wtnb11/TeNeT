@@ -546,6 +546,7 @@ fn decode_tree_transform_group_plan_f64(
 ) -> Result<TreeTransformGroupPlan<f64>, ()> {
     let spec_count = input.read_usize()?;
     let mut specs = Vec::with_capacity(spec_count);
+    let mut shared_axes = FxHashMap::<Arc<[usize]>, Arc<[usize]>>::default();
     for _ in 0..spec_count {
         let group_key = decode_fusion_tree_group_key(input)?;
         let dst_count = input.read_usize()?;
@@ -563,15 +564,28 @@ fn decode_tree_transform_group_plan_f64(
         for _ in 0..coeff_count {
             coefficients.push(f64::from_bits(input.read_u64()?));
         }
-        let mut spec =
-            TreeTransformGroupBlockSpec::multi(group_key, dst_keys, src_keys, coefficients);
+        let mut spec = if dst_count == 1 && src_count == 1 && coeff_count == 1 {
+            TreeTransformGroupBlockSpec::single(
+                group_key,
+                dst_keys.pop().ok_or(())?,
+                src_keys.pop().ok_or(())?,
+                coefficients.pop().ok_or(())?,
+            )
+        } else {
+            TreeTransformGroupBlockSpec::multi(group_key, dst_keys, src_keys, coefficients)
+        };
         if input.read_u8()? != 0 {
             let axis_count = input.read_usize()?;
             let mut axes = Vec::with_capacity(axis_count);
             for _ in 0..axis_count {
                 axes.push(input.read_usize()?);
             }
-            spec = spec.with_source_axes(axes);
+            let axes: Arc<[usize]> = axes.into();
+            let axes = shared_axes.get(axes.as_ref()).cloned().unwrap_or_else(|| {
+                shared_axes.insert(Arc::clone(&axes), Arc::clone(&axes));
+                axes
+            });
+            spec = spec.with_shared_source_axes(axes);
         }
         specs.push(spec);
     }
@@ -868,6 +882,70 @@ impl<'a> CacheBytes<'a> {
 mod persistence_tests {
     use super::*;
 
+    fn decode_hex_fixture(hex: &str) -> Vec<u8> {
+        fn nibble(byte: u8) -> u8 {
+            match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                b'A'..=b'F' => byte - b'A' + 10,
+                _ => panic!("persistent fixture contains a non-hex byte"),
+            }
+        }
+
+        assert_eq!(hex.len() % 2, 0);
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
+            .collect()
+    }
+
+    #[test]
+    fn origin_main_v2_fixture_decodes_to_canonical_shared_storage() {
+        // What: bytes produced by origin/main 35de652's encoder with two one-by-one
+        // `multi` specs sharing source axes [0, 1]. Keeping literal bytes
+        // catches representation migrations that a current-encoder roundtrip
+        // cannot see.
+        const ORIGIN_MAIN_35DE652_V2: &str = concat!(
+            "54454e45545f545245455f504c414e5f43414348450200000000000000010000",
+            "0000000000030101020200000000000000000000000000000001000000000000",
+            "0000000000000000000200000000000000030000000000000005000000000000",
+            "0000000000000000000100000000000000020000000000000001000000000000",
+            "0001000000000000000000000000000000020000000000000000000000000000",
+            "0000000100000000000000000200000000000000020000000000000001000000",
+            "0000000001000000000000000000000000000000020000000000000000000000",
+            "0000000000000100000000000000000100000000000000000100000000000000",
+            "000000000000f43f010200000000000000000000000000000001000000000000",
+            "0002000000000000000100000000000000010000000000000000000000000000",
+            "0002000000000000000000000000000000000001000000000000000001000000",
+            "0000000000010000000000000000000000000004c00102000000000000000000",
+            "0000000000000100000000000000",
+        );
+        let bytes = decode_hex_fixture(ORIGIN_MAIN_35DE652_V2);
+        let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
+
+        // What: the committed v2 wire format remains readable and its legacy
+        // one-by-one multi entries canonicalize to the compact single form.
+        assert_eq!(decoded.len(), 1);
+        let specs = decoded[0].1.specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].recoupling_coefficients_dst_src(), &[1.25]);
+        assert_eq!(specs[1].recoupling_coefficients_dst_src(), &[-2.5]);
+        assert!(format!("{:?}", specs[0]).contains("Single"));
+        assert!(format!("{:?}", specs[1]).contains("Single"));
+
+        // What: equal decoded axis maps retain one allocation rather than one
+        // Arc payload per spec. Slice identity observes the shared allocation
+        // without adding a production-only representation accessor.
+        assert!(std::ptr::eq(
+            specs[0].source_axes().unwrap(),
+            specs[1].source_axes().unwrap(),
+        ));
+
+        let mut reencoded = FxHashMap::default();
+        reencoded.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
+        assert_eq!(encode_builtin_tree_plan_cache(&reencoded), bytes);
+    }
+
     #[test]
     fn persistent_builtin_tree_plan_cache_round_trips_with_version_guard() {
         let group_key = FusionTreeGroupKey::from_sector_ids([1, 1], [], [false, false], []);
@@ -882,14 +960,28 @@ mod persistence_tests {
                 src_keys: vec![BlockKey::Dense],
             }],
         };
+        let legacy_single = TreeTransformGroupBlockSpec::multi(
+            group_key.clone(),
+            [BlockKey::Dense],
+            [BlockKey::Dense],
+            vec![1.25],
+        )
+        .with_source_axes([0, 1]);
+        let mixed_multi = TreeTransformGroupBlockSpec::multi(
+            group_key.clone(),
+            [BlockKey::sector_ids([10]), BlockKey::sector_ids([20])],
+            [BlockKey::sector_ids([30]), BlockKey::sector_ids([40])],
+            vec![1.0, 2.0, 3.0, 4.0],
+        )
+        .with_source_axes([0, 1]);
         let plan = Arc::new(TreeTransformGroupPlan::new(vec![
-            TreeTransformGroupBlockSpec::multi(
-                group_key,
-                [BlockKey::Dense],
-                [BlockKey::Dense],
-                vec![1.25],
-            )
-            .with_source_axes([0, 1]),
+            legacy_single,
+            mixed_multi.clone(),
+        ]));
+        let current_plan = Arc::new(TreeTransformGroupPlan::new(vec![
+            TreeTransformGroupBlockSpec::single(group_key, BlockKey::Dense, BlockKey::Dense, 1.25)
+                .with_source_axes([0, 1]),
+            mixed_multi,
         ]));
         let mut plans = FxHashMap::default();
         plans.insert(key.clone(), Arc::clone(&plan));
@@ -897,6 +989,12 @@ mod persistence_tests {
         let mut bytes = encode_builtin_tree_plan_cache(&plans);
         let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
         assert_eq!(decoded, vec![(key, (*plan).clone())]);
+        let mut current_plans = FxHashMap::default();
+        current_plans.insert(decoded[0].0.clone(), current_plan);
+        assert_eq!(encode_builtin_tree_plan_cache(&current_plans), bytes);
+        let mut decoded_plans = FxHashMap::default();
+        decoded_plans.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
+        assert_eq!(encode_builtin_tree_plan_cache(&decoded_plans), bytes);
 
         let version_offset = TREE_PLAN_CACHE_MAGIC.len();
         bytes[version_offset..version_offset + 8].copy_from_slice(&1_u64.to_le_bytes());
