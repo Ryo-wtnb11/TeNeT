@@ -4,8 +4,9 @@ mod plan;
 pub(crate) use plan::contracted_axis_order_candidates;
 #[cfg(test)]
 pub(crate) use plan::{
-    candidate_score_calls, prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order,
-    reset_candidate_score_calls,
+    candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+    prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order, reset_candidate_score_calls,
+    FusionContractCandidateFacts, FusionContractOrientation,
 };
 
 #[cfg(test)]
