@@ -9,9 +9,53 @@ use crate::kernel_adapter::{fuse_pair_layout, BakedFusedLayout};
 use crate::strided::offset_to_isize;
 use crate::structure_identity::validate_structure_identity;
 use crate::transform_plan::{
-    TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformKeyBlockSpec,
+    ResolvedTreeTransformBlockSpec, TreeTransformBlockSpec, TreeTransformGroupBlockSpec,
+    TreeTransformKeyBlockSpec,
 };
 use crate::OperationError;
+
+trait TreeTransformCompileSpec<T> {
+    fn dst_blocks(&self) -> &[usize];
+    fn src_blocks(&self) -> &[usize];
+    fn coefficients(&self) -> &[T];
+    fn source_axes(&self) -> Option<&[usize]>;
+}
+
+impl<T> TreeTransformCompileSpec<T> for TreeTransformBlockSpec<T> {
+    fn dst_blocks(&self) -> &[usize] {
+        self.dst_blocks()
+    }
+
+    fn src_blocks(&self) -> &[usize] {
+        self.src_blocks()
+    }
+
+    fn coefficients(&self) -> &[T] {
+        self.recoupling_coefficients_dst_src()
+    }
+
+    fn source_axes(&self) -> Option<&[usize]> {
+        self.source_axes()
+    }
+}
+
+impl<T> TreeTransformCompileSpec<T> for ResolvedTreeTransformBlockSpec<'_, T> {
+    fn dst_blocks(&self) -> &[usize] {
+        self.dst_blocks()
+    }
+
+    fn src_blocks(&self) -> &[usize] {
+        self.src_blocks()
+    }
+
+    fn coefficients(&self) -> &[T] {
+        self.coefficients()
+    }
+
+    fn source_axes(&self) -> Option<&[usize]> {
+        self.source_axes()
+    }
+}
 
 /// Replay-ready tree-transform descriptor.
 ///
@@ -194,10 +238,10 @@ impl<T: Copy> TreeTransformStructure<T> {
         )
     }
 
-    pub(crate) fn compile_indexed_shared_structures_with_storage_conjugation(
+    pub(crate) fn compile_resolved_shared_structures(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
-        specs: &[TreeTransformBlockSpec<T>],
+        specs: &[ResolvedTreeTransformBlockSpec<'_, T>],
         storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
         Self::compile_shared_structures(dst_structure, src_structure, specs, storage_conjugate)
@@ -319,14 +363,16 @@ impl<T: Copy> TreeTransformStructure<T> {
         specs: &[TreeTransformGroupBlockSpec<T>],
         storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
-        let mut indexed_specs = Vec::with_capacity(specs.len());
+        let mut resolved_specs = Vec::with_capacity(specs.len());
+        // Why not compile spec-by-spec: grouped and keyed entry points must
+        // resolve every key before rank/count/layout validation.
         for spec in specs {
-            indexed_specs.push(spec.to_indexed_spec(&dst_structure, &src_structure)?);
+            resolved_specs.push(spec.resolve(&dst_structure, &src_structure)?);
         }
         Self::compile_shared_structures(
             dst_structure,
             src_structure,
-            &indexed_specs,
+            &resolved_specs,
             storage_conjugate,
         )
     }
@@ -337,24 +383,29 @@ impl<T: Copy> TreeTransformStructure<T> {
         specs: &[TreeTransformKeyBlockSpec<T>],
         storage_conjugate: bool,
     ) -> Result<Self, OperationError> {
-        let mut indexed_specs = Vec::with_capacity(specs.len());
+        let mut resolved_specs = Vec::with_capacity(specs.len());
+        // Why not compile spec-by-spec: grouped and keyed entry points must
+        // resolve every key before rank/count/layout validation.
         for spec in specs {
-            indexed_specs.push(spec.to_indexed_spec(&dst_structure, &src_structure)?);
+            resolved_specs.push(spec.resolve(&dst_structure, &src_structure)?);
         }
         Self::compile_shared_structures(
             dst_structure,
             src_structure,
-            &indexed_specs,
+            &resolved_specs,
             storage_conjugate,
         )
     }
 
-    fn compile_shared_structures(
+    fn compile_shared_structures<S>(
         dst_structure: Arc<BlockStructure>,
         src_structure: Arc<BlockStructure>,
-        specs: &[TreeTransformBlockSpec<T>],
+        specs: &[S],
         storage_conjugate: bool,
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        S: TreeTransformCompileSpec<T>,
+    {
         let rank = dst_structure.rank();
         if src_structure.rank() != rank {
             return Err(OperationError::StructureRankMismatch {
@@ -372,7 +423,7 @@ impl<T: Copy> TreeTransformStructure<T> {
         for spec in specs {
             let dst_blocks = spec.dst_blocks();
             let src_blocks = spec.src_blocks();
-            let coefficients = spec.recoupling_coefficients_dst_src();
+            let coefficients = spec.coefficients();
             if dst_blocks.is_empty() || src_blocks.is_empty() {
                 return Err(OperationError::EmptyTransformBlock);
             }

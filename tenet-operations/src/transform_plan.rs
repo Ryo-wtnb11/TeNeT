@@ -3,6 +3,7 @@
 //! the symmetric compile layer in `tenet-tensors` builds these from fusion
 //! rules; replay consumes them without any symmetry knowledge.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use tenet_core::{
@@ -53,6 +54,154 @@ impl<K, T> SpecEntries<K, T> {
     }
 }
 
+#[derive(Debug)]
+enum ResolvedSpecEntries<'a, T> {
+    Single {
+        dst: usize,
+        src: usize,
+        coefficient: &'a T,
+    },
+    Multi {
+        dst: Vec<usize>,
+        src: Vec<usize>,
+        coefficients: &'a [T],
+    },
+}
+
+impl<T> ResolvedSpecEntries<'_, T> {
+    #[inline]
+    fn dst(&self) -> &[usize] {
+        match self {
+            Self::Single { dst, .. } => std::slice::from_ref(dst),
+            Self::Multi { dst, .. } => dst,
+        }
+    }
+
+    #[inline]
+    fn src(&self) -> &[usize] {
+        match self {
+            Self::Single { src, .. } => std::slice::from_ref(src),
+            Self::Multi { src, .. } => src,
+        }
+    }
+
+    #[inline]
+    fn coefficients(&self) -> &[T] {
+        match self {
+            Self::Single { coefficient, .. } => std::slice::from_ref(coefficient),
+            Self::Multi { coefficients, .. } => coefficients,
+        }
+    }
+
+    fn map_source_blocks<F>(&mut self, logical_to_storage_block: &F) -> Result<(), OperationError>
+    where
+        F: Fn(usize) -> Result<usize, OperationError>,
+    {
+        match self {
+            Self::Single { src, .. } => *src = logical_to_storage_block(*src)?,
+            Self::Multi { src, .. } => {
+                for block in src {
+                    *block = logical_to_storage_block(*block)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolvedTreeTransformBlockSpec<'a, T> {
+    entries: ResolvedSpecEntries<'a, T>,
+    source_axes: Option<Cow<'a, [usize]>>,
+}
+
+impl<'a, T> ResolvedTreeTransformBlockSpec<'a, T> {
+    fn from_entries(
+        entries: &'a SpecEntries<BlockKey, T>,
+        source_axes: Option<&'a [usize]>,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<Self, OperationError> {
+        let entries = match entries {
+            SpecEntries::Single {
+                dst,
+                src,
+                coefficient,
+            } => {
+                let dst = dst_structure.find_block_index_by_key(dst).ok_or_else(|| {
+                    OperationError::MissingBlockKey {
+                        key: Box::new(dst.clone()),
+                    }
+                })?;
+                let src = src_structure.find_block_index_by_key(src).ok_or_else(|| {
+                    OperationError::MissingBlockKey {
+                        key: Box::new(src.clone()),
+                    }
+                })?;
+                ResolvedSpecEntries::Single {
+                    dst,
+                    src,
+                    coefficient,
+                }
+            }
+            SpecEntries::Multi {
+                dst,
+                src,
+                coefficients,
+            } => ResolvedSpecEntries::Multi {
+                dst: block_indices_for_keys(dst_structure, dst)?,
+                src: block_indices_for_keys(src_structure, src)?,
+                coefficients,
+            },
+        };
+        Ok(Self {
+            entries,
+            source_axes: source_axes.map(Cow::Borrowed),
+        })
+    }
+
+    pub(crate) fn dst_blocks(&self) -> &[usize] {
+        self.entries.dst()
+    }
+
+    pub(crate) fn src_blocks(&self) -> &[usize] {
+        self.entries.src()
+    }
+
+    pub(crate) fn coefficients(&self) -> &[T] {
+        self.entries.coefficients()
+    }
+
+    pub(crate) fn source_axes(&self) -> Option<&[usize]> {
+        self.source_axes.as_deref()
+    }
+
+    fn map_storage<FBlock, FAxis>(
+        mut self,
+        logical_rank: usize,
+        logical_to_storage_block: &FBlock,
+        logical_to_storage_axis: &FAxis,
+    ) -> Result<Self, OperationError>
+    where
+        FBlock: Fn(usize) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        self.entries.map_source_blocks(logical_to_storage_block)?;
+        let storage_axes = match self.source_axes.as_deref() {
+            Some(logical_axes) => logical_axes
+                .iter()
+                .copied()
+                .map(logical_to_storage_axis)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => (0..logical_rank)
+                .map(logical_to_storage_axis)
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        self.source_axes = Some(Cow::Owned(storage_axes));
+        Ok(self)
+    }
+}
+
 impl<K: PartialEq, T: PartialEq> PartialEq for SpecEntries<K, T> {
     fn eq(&self, other: &Self) -> bool {
         self.dst() == other.dst()
@@ -99,11 +248,6 @@ impl<T> TreeTransformBlockSpec<T> {
         I: IntoIterator<Item = usize>,
     {
         self.source_axes = Some(axes.into_iter().collect());
-        self
-    }
-
-    fn with_optional_source_axes(mut self, axes: Option<Arc<[usize]>>) -> Self {
-        self.source_axes = axes;
         self
     }
 
@@ -204,41 +348,18 @@ impl<T> TreeTransformKeyBlockSpec<T> {
     }
 }
 
-impl<T: Copy> TreeTransformKeyBlockSpec<T> {
-    pub(crate) fn to_indexed_spec(
+impl<T> TreeTransformKeyBlockSpec<T> {
+    pub(crate) fn resolve(
         &self,
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
-    ) -> Result<TreeTransformBlockSpec<T>, OperationError> {
-        let spec = match &self.entries {
-            SpecEntries::Single {
-                dst,
-                src,
-                coefficient,
-            } => {
-                let dst_block = dst_structure.find_block_index_by_key(dst).ok_or_else(|| {
-                    OperationError::MissingBlockKey {
-                        key: Box::new(dst.clone()),
-                    }
-                })?;
-                let src_block = src_structure.find_block_index_by_key(src).ok_or_else(|| {
-                    OperationError::MissingBlockKey {
-                        key: Box::new(src.clone()),
-                    }
-                })?;
-                TreeTransformBlockSpec::single(dst_block, src_block, *coefficient)
-            }
-            SpecEntries::Multi {
-                dst,
-                src,
-                coefficients,
-            } => TreeTransformBlockSpec::multi(
-                block_indices_for_keys(dst_structure, dst)?,
-                block_indices_for_keys(src_structure, src)?,
-                coefficients.clone(),
-            ),
-        };
-        Ok(spec.with_optional_source_axes(self.source_axes.clone()))
+    ) -> Result<ResolvedTreeTransformBlockSpec<'_, T>, OperationError> {
+        ResolvedTreeTransformBlockSpec::from_entries(
+            &self.entries,
+            self.source_axes(),
+            dst_structure,
+            src_structure,
+        )
     }
 }
 
@@ -364,41 +485,18 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     }
 }
 
-impl<T: Copy> TreeTransformGroupBlockSpec<T> {
-    pub(crate) fn to_indexed_spec(
+impl<T> TreeTransformGroupBlockSpec<T> {
+    pub(crate) fn resolve(
         &self,
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
-    ) -> Result<TreeTransformBlockSpec<T>, OperationError> {
-        let spec = match &self.entries {
-            SpecEntries::Single {
-                dst,
-                src,
-                coefficient,
-            } => {
-                let dst_block = dst_structure.find_block_index_by_key(dst).ok_or_else(|| {
-                    OperationError::MissingBlockKey {
-                        key: Box::new(dst.clone()),
-                    }
-                })?;
-                let src_block = src_structure.find_block_index_by_key(src).ok_or_else(|| {
-                    OperationError::MissingBlockKey {
-                        key: Box::new(src.clone()),
-                    }
-                })?;
-                TreeTransformBlockSpec::single(dst_block, src_block, *coefficient)
-            }
-            SpecEntries::Multi {
-                dst,
-                src,
-                coefficients,
-            } => TreeTransformBlockSpec::multi(
-                block_indices_for_keys(dst_structure, dst)?,
-                block_indices_for_keys(src_structure, src)?,
-                coefficients.clone(),
-            ),
-        };
-        Ok(spec.with_optional_source_axes(self.source_axes.clone()))
+    ) -> Result<ResolvedTreeTransformBlockSpec<'_, T>, OperationError> {
+        ResolvedTreeTransformBlockSpec::from_entries(
+            &self.entries,
+            self.source_axes(),
+            dst_structure,
+            src_structure,
+        )
     }
 }
 
@@ -503,40 +601,19 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
         let mut specs = Vec::with_capacity(self.specs.len());
+        // Why not resolve every key first: fallible block/axis mapping completes
+        // per spec before the next key lookup, preserving callback error order.
         for spec in &self.specs {
-            let indexed = spec.to_indexed_spec(&dst_structure, logical_src_structure)?;
-            let entries = match indexed.entries {
-                SpecEntries::Single {
-                    dst,
-                    src,
-                    coefficient,
-                } => {
-                    TreeTransformBlockSpec::single(dst, logical_to_storage_block(src)?, coefficient)
-                }
-                SpecEntries::Multi {
-                    dst,
-                    src,
-                    coefficients,
-                } => TreeTransformBlockSpec::multi(
-                    dst,
-                    src.into_iter()
-                        .map(&logical_to_storage_block)
-                        .collect::<Result<Vec<_>, _>>()?,
-                    coefficients,
-                ),
-            };
-            let logical_axes = indexed
-                .source_axes
-                .as_deref()
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| (0..logical_src_structure.rank()).collect());
-            let storage_axes = logical_axes
-                .into_iter()
-                .map(&logical_to_storage_axis)
-                .collect::<Result<Vec<_>, _>>()?;
-            specs.push(entries.with_source_axes(storage_axes));
+            specs.push(
+                spec.resolve(&dst_structure, logical_src_structure)?
+                    .map_storage(
+                        logical_src_structure.rank(),
+                        &logical_to_storage_block,
+                        &logical_to_storage_axis,
+                    )?,
+            );
         }
-        TreeTransformStructure::compile_indexed_shared_structures_with_storage_conjugation(
+        TreeTransformStructure::compile_resolved_shared_structures(
             dst_structure,
             storage_src_structure,
             &specs,
