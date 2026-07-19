@@ -152,11 +152,45 @@ fn build_adjoint_space_dyn_with_primer<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    let homspace = space.homspace();
+    let adjoint_hom =
+        FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+    let prepared = dispatch_prepare(primer, rule, &adjoint_hom)?;
+    validate_adjoint_lazy_source_keys(rule, homspace, space.structure())?;
+    validate_adjoint_source_structure(rule, homspace, space.structure())?;
+
+    DynamicFusionMapSpace::from_final_homspace_with_prepared(rule, adjoint_hom, prepared)
+}
+
+fn build_adjoint_target_space_with_primer<R>(
+    rule: &R,
+    source_homspace: &FusionTreeHomSpace,
+    primer: LayoutKeyBuilder<R>,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let adjoint_hom = FusionTreeHomSpace::new(
+        source_homspace.domain().clone(),
+        source_homspace.codomain().clone(),
+    );
+    let prepared = dispatch_prepare(primer, rule, &adjoint_hom)?;
+    DynamicFusionMapSpace::from_final_homspace_with_prepared(rule, adjoint_hom, prepared)
+}
+
+#[cfg(test)]
+fn build_adjoint_space_dyn_legacy_oracle<R>(
+    rule: &R,
+    space: &DynamicFusionMapSpace,
+    primer: LayoutKeyBuilder<R>,
+) -> Result<DynamicFusionMapSpace, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     let nout = space.nout();
     let homspace = space.homspace();
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
-
     let structure = Arc::clone(space.structure());
     let prepared = dispatch_prepare(primer, rule, &adjoint_hom)?;
     let keys = prepared.keys(rule, &adjoint_hom);
@@ -167,11 +201,6 @@ where
                 key.domain_tree().clone(),
                 key.codomain_tree().clone(),
             ));
-            // Why-not eager `ok_or`: this closure runs once per block on the
-            // warm adjoint-fold loop (#231) -- an eager `ok_or` builds the
-            // 96 B `OperationError` payload on every success, not just on the
-            // (cold) missing-key path; `ok_or_else` defers construction to
-            // the actual error case.
             let index = structure
                 .find_block_index_by_key(&source_key)
                 .ok_or_else(|| OperationError::MissingBlockKey {
@@ -262,6 +291,35 @@ where
     Ok(())
 }
 
+fn validate_adjoint_lazy_source_keys<R>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+    source: &BlockStructure,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    // Why not let target construction discover missing source keys: the final
+    // HomSpace is now the sole target-layout authority, so it deliberately
+    // does not inspect source storage. The cold lazy path retains its public
+    // MissingBlockKey failure before running the stricter canonical preflight.
+    let expected = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    for index in 0..expected.block_count() {
+        let key = expected
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?
+            .key();
+        if source.find_block_index_by_key(key).is_none() {
+            return Err(OperationError::MissingBlockKey {
+                key: Box::new(key.clone()),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
 /// domain swapped) together with freshly allocated coupled-layout data whose
 /// blocks are the conjugate transposes of the source blocks.
@@ -297,7 +355,7 @@ where
     // Uncached build: the eager adjoint (SVD/eigh consumers) is a separate,
     // out-of-scope path from the cached lazy `adjoint_space_dyn` (#118 PR-1),
     // and routing it here keeps the replay-cache-key bound off matrix algebra.
-    let adjoint_space = build_adjoint_space_dyn_with_primer(rule, space, primer)?;
+    let adjoint_space = build_adjoint_target_space_with_primer(rule, space.homspace(), primer)?;
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
@@ -612,48 +670,23 @@ where
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
 
     let structure = Arc::clone(tensor.structure());
-    let source_shape_of = |key: &FusionTreePairKey| -> Result<Vec<usize>, OperationError> {
-        // The adjoint block for (dom_tree, cod_tree) reads the source block
-        // keyed by the swapped pair.
-        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
-            key.domain_tree().clone(),
-            key.codomain_tree().clone(),
-        ));
-        let index = structure
-            .find_block_index_by_key(&source_key)
-            .ok_or_else(|| OperationError::MissingBlockKey {
-                key: Box::new(source_key.clone()),
-            })?;
-        Ok(structure
-            .block(index)
-            .map_err(OperationError::from_core_preserving_context)?
-            .shape()
-            .to_vec())
-    };
-
-    let keys = adjoint_hom.fusion_tree_keys(rule);
-    let shapes = keys
-        .iter()
-        .map(|key| {
-            let source_shape = source_shape_of(key)?;
-            let mut shape = source_shape[NOUT..].to_vec();
-            shape.extend_from_slice(&source_shape[..NOUT]);
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-
     let dims = tensor.space().dims();
     let mut domain_dims = [0usize; NIN];
     domain_dims.copy_from_slice(&dims[NOUT..]);
     let mut codomain_dims = [0usize; NOUT];
     codomain_dims.copy_from_slice(&dims[..NOUT]);
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
-        TensorMapSpace::<NIN, NOUT>::from_dims(domain_dims, codomain_dims)
-            .map_err(OperationError::from_core_preserving_context)?,
+    let dense_space = TensorMapSpace::<NIN, NOUT>::from_dims(domain_dims, codomain_dims)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let subblock_structure = adjoint_hom
+        .coupled_subblock_structure_from_leg_degeneracies(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let space = FusionTensorMapSpace::from_shared_subblock_structure(
+        dense_space,
         adjoint_hom,
-        rule,
-        shapes,
+        subblock_structure,
     )
+    .map_err(OperationError::from_core_preserving_context)?
+    .try_inherit_rule_identity(fusion_space)
     .map_err(OperationError::from_core_preserving_context)?;
     let len = space
         .required_len()
@@ -729,6 +762,7 @@ where
 mod cache_tests {
     use super::*;
     use crate::tree_transform::TreeTransformBuiltinRuleCacheKey;
+    use num_complex::Complex64;
     use std::cell::Cell;
     use std::ops::Add;
     use tenet_core::{
@@ -949,6 +983,235 @@ mod cache_tests {
         .unwrap();
         let len = space.required_len().unwrap();
         TensorMap::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
+    }
+
+    fn canonical_dynamic_source<R>(rule: &R, homspace: FusionTreeHomSpace) -> DynamicFusionMapSpace
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let structure = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(rule)
+            .unwrap();
+        let shapes = homspace
+            .fusion_tree_keys(rule)
+            .iter()
+            .map(|key| {
+                let index = structure.find_block_index_by_fusion_tree_pair(key).unwrap();
+                structure.block(index).unwrap().shape().to_vec()
+            })
+            .collect::<Vec<_>>();
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, shapes).unwrap()
+    }
+
+    fn assert_complete_structure_eq(actual: &BlockStructure, expected: &BlockStructure) {
+        assert_eq!(actual, expected);
+        assert_eq!(actual.rank(), expected.rank());
+        assert_eq!(actual.block_count(), expected.block_count());
+        assert_eq!(
+            actual.required_len().unwrap(),
+            expected.required_len().unwrap()
+        );
+        for index in 0..expected.block_count() {
+            let actual = actual.block(index).unwrap();
+            let expected = expected.block(index).unwrap();
+            assert_eq!(actual.key(), expected.key());
+            assert_eq!(actual.shape(), expected.shape());
+            assert_eq!(actual.strides(), expected.strides());
+            assert_eq!(actual.offset(), expected.offset());
+        }
+    }
+
+    fn adjoint_data_oracle(
+        source: &DynamicFusionMapSpace,
+        target: &DynamicFusionMapSpace,
+        data: &[Complex64],
+    ) -> Vec<Complex64> {
+        let nout = source.nout();
+        let nin = source.nin();
+        let mut result = vec![Complex64::new(0.0, 0.0); target.required_len().unwrap()];
+        for index in 0..target.structure().block_count() {
+            let target_block = target.structure().block(index).unwrap();
+            let BlockKey::FusionTree(target_key) = target_block.key() else {
+                panic!("adjoint oracle requires fusion-tree blocks");
+            };
+            let source_key = FusionTreePairKey::pair(
+                target_key.domain_tree().clone(),
+                target_key.codomain_tree().clone(),
+            );
+            let source_index = source
+                .structure()
+                .find_block_index_by_fusion_tree_pair(&source_key)
+                .unwrap();
+            let source_block = source.structure().block(source_index).unwrap();
+            let mut indices = vec![0usize; target_block.shape().len()];
+            let count = target_block.shape().iter().product::<usize>();
+            for _ in 0..count {
+                let target_position = target_block.offset()
+                    + indices
+                        .iter()
+                        .zip(target_block.strides())
+                        .map(|(&axis, &stride)| axis * stride)
+                        .sum::<usize>();
+                let source_position = source_block.offset()
+                    + indices[nin..]
+                        .iter()
+                        .zip(&source_block.strides()[..nout])
+                        .map(|(&axis, &stride)| axis * stride)
+                        .sum::<usize>()
+                    + indices[..nin]
+                        .iter()
+                        .zip(&source_block.strides()[nout..])
+                        .map(|(&axis, &stride)| axis * stride)
+                        .sum::<usize>();
+                result[target_position] = data[source_position].conj();
+                for (axis, index) in indices.iter_mut().enumerate() {
+                    *index += 1;
+                    if *index < target_block.shape()[axis] {
+                        break;
+                    }
+                    *index = 0;
+                }
+            }
+        }
+        result
+    }
+
+    fn assert_rank_one_final_layout<R>(
+        rule: &R,
+        sector: SectorId,
+        codomain_degeneracy: usize,
+        domain_degeneracy: usize,
+        codomain_dual: bool,
+        domain_dual: bool,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new(
+                [(sector, codomain_degeneracy)],
+                codomain_dual,
+            )]),
+            FusionProductSpace::new([SectorLeg::new([(sector, domain_degeneracy)], domain_dual)]),
+        );
+        let source = canonical_dynamic_source(rule, homspace.clone());
+        let data = (0..source.required_len().unwrap())
+            .map(|index| Complex64::new(index as f64 + 1.0, index as f64 + 0.25))
+            .collect::<Vec<_>>();
+        let legacy =
+            build_adjoint_space_dyn_legacy_oracle(rule, &source, encoded_layout_primer::<R>)
+                .unwrap();
+        let expected_data = adjoint_data_oracle(&source, &legacy, &data);
+
+        let (dynamic, dynamic_data) = adjoint_dyn(rule, &source, &data).unwrap();
+        assert_complete_structure_eq(dynamic.structure(), legacy.structure());
+        assert_eq!(dynamic.nout(), 1);
+        assert_eq!(dynamic.nin(), 1);
+        assert_eq!(dynamic.homspace(), legacy.homspace());
+        assert_eq!(dynamic_data, expected_data);
+
+        let dense_space =
+            TensorMapSpace::<1, 1>::from_dims([codomain_degeneracy], [domain_degeneracy]).unwrap();
+        let typed_space = FusionTensorMapSpace::from_shared_subblock_structure(
+            dense_space,
+            homspace,
+            Arc::clone(source.structure()),
+        )
+        .unwrap()
+        .try_bind_rule(rule)
+        .unwrap();
+        let tensor = TensorMap::from_vec_with_fusion_space(data, typed_space).unwrap();
+        let typed = adjoint(rule, &tensor).unwrap();
+        assert_complete_structure_eq(typed.structure(), legacy.structure());
+        assert_eq!(
+            typed.space().dims(),
+            &[domain_degeneracy, codomain_degeneracy]
+        );
+        assert_eq!(typed.data(), expected_data);
+    }
+
+    #[test]
+    fn final_homspace_is_the_adjoint_layout_authority_for_rank_one_rules() {
+        // What: asymmetric U(1), half-integer SU(2), and odd fZ2 typed and
+        // dynamic daggers preserve the legacy complete layout and conjugate
+        // transpose numbers without a pivotal or fermionic phase.
+        assert_rank_one_final_layout(
+            &U1FusionRule,
+            U1Irrep::new(1).sector_id(),
+            2,
+            3,
+            false,
+            false,
+        );
+        assert_rank_one_final_layout(
+            &SU2FusionRule,
+            SU2Irrep::from_twice_spin(1).sector_id(),
+            3,
+            2,
+            false,
+            true,
+        );
+        assert_rank_one_final_layout(
+            &FermionParityFusionRule,
+            Z2Irrep::ODD.sector_id(),
+            2,
+            3,
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn final_homspace_is_the_adjoint_layout_authority_for_product_rule() {
+        // What: a mixed-duality fZ2 x U(1) x SU(2) tensor keeps every ordered
+        // block key, shape, stride, offset, and number from the independent
+        // source-shape oracle, with no extra categorical phase.
+        let rule = triple_rule();
+        let vacuum = triple_sector(0, 0, 0);
+        let charged = triple_sector(1, 1, 1);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(vacuum, 1), (charged, 2)], false),
+                SectorLeg::new([(vacuum, 2), (charged, 1)], true),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(vacuum, 1), (charged, 3)], true),
+                SectorLeg::new([(vacuum, 2), (charged, 2)], false),
+            ]),
+        );
+        let source = canonical_dynamic_source(&rule, homspace.clone());
+        assert!(source.structure().block_count() > 1);
+        let data = (0..source.required_len().unwrap())
+            .map(|index| Complex64::new(index as f64 + 0.5, index as f64 + 0.125))
+            .collect::<Vec<_>>();
+        let legacy = build_adjoint_space_dyn_legacy_oracle(
+            &rule,
+            &source,
+            encoded_layout_primer::<TripleRule>,
+        )
+        .unwrap();
+        let expected_data = adjoint_data_oracle(&source, &legacy, &data);
+
+        let (dynamic, dynamic_data) = adjoint_dyn(&rule, &source, &data).unwrap();
+        assert_complete_structure_eq(dynamic.structure(), legacy.structure());
+        assert_eq!(dynamic.nout(), 2);
+        assert_eq!(dynamic.nin(), 2);
+        assert_eq!(dynamic.homspace(), legacy.homspace());
+        assert_eq!(dynamic_data, expected_data);
+
+        let dense_space = TensorMapSpace::<2, 2>::from_dims([3, 3], [4, 4]).unwrap();
+        let typed_space = FusionTensorMapSpace::from_shared_subblock_structure(
+            dense_space,
+            homspace,
+            Arc::clone(source.structure()),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let tensor = TensorMap::from_vec_with_fusion_space(data, typed_space).unwrap();
+        let typed = adjoint(&rule, &tensor).unwrap();
+        assert_complete_structure_eq(typed.structure(), legacy.structure());
+        assert_eq!(typed.space().dims(), &[4, 4, 3, 3]);
+        assert_eq!(typed.data(), expected_data);
     }
 
     #[test]
@@ -1191,6 +1454,84 @@ mod cache_tests {
             assert_eq!(error, OperationError::StructureMismatch { tensor: "src" });
             assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
         }
+    }
+
+    #[test]
+    fn lazy_adjoint_rejects_extra_and_noncanonical_sources_before_cache_admission() {
+        // What: metadata-only dagger construction cannot use the final
+        // HomSpace authority to conceal extra blocks or noncanonical source
+        // ordering, and failed sources publish no adjoint-space cache entry.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let zero = U1Irrep::new(0).sector_id();
+        let one = U1Irrep::new(1).sector_id();
+
+        let single_leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]);
+        let single_homspace = FusionTreeHomSpace::new(single_leg(), single_leg());
+        let extra_structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![1, 1], 0)
+                    .unwrap(),
+                BlockSpec::column_major_with_key(u1_rank_one_pair(1).into(), vec![1, 1], 1)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let extra_tensor = typed_u1_expert_tensor(1, 1, single_homspace, extra_structure);
+        let extra = DynamicFusionMapSpace::from_typed(extra_tensor.fusion_space().unwrap());
+
+        let sectors = [(zero, 1), (one, 1)];
+        let double_leg = || FusionProductSpace::new([SectorLeg::new(sectors, false)]);
+        let double_homspace = FusionTreeHomSpace::new(double_leg(), double_leg());
+        let canonical = double_homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        let reordered = BlockStructure::from_blocks_with_rank(
+            2,
+            [1, 0]
+                .into_iter()
+                .map(|index| {
+                    let block = canonical.block(index).unwrap();
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let reordered_tensor = typed_u1_expert_tensor(2, 2, double_homspace, reordered);
+        let reordered = DynamicFusionMapSpace::from_typed(reordered_tensor.fusion_space().unwrap());
+
+        let extra_error = adjoint_space_dyn(&U1FusionRule, &extra).unwrap_err();
+        assert_eq!(
+            extra_error,
+            OperationError::Core(CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        let reordered_error = adjoint_space_dyn(&U1FusionRule, &reordered).unwrap_err();
+        assert_eq!(
+            reordered_error,
+            OperationError::StructureMismatch { tensor: "src" }
+        );
+        let cache = adjoint_space_cache::<<U1FusionRule as TreeTransformRuleCacheKey>::Key>();
+        assert_eq!(
+            cache
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries
+                .len(),
+            0
+        );
     }
 
     #[test]

@@ -1404,7 +1404,7 @@ impl DynamicFusionMapSpace {
         Self::from_final_homspace_with_prepared(rule, homspace, prepared)
     }
 
-    fn from_final_homspace_with_prepared<R>(
+    pub(crate) fn from_final_homspace_with_prepared<R>(
         rule: &R,
         homspace: FusionTreeHomSpace,
         prepared: PreparedLayoutKeys,
