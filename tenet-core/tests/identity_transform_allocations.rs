@@ -70,6 +70,48 @@ fn unique_identity_permute_does_not_allocate() {
 }
 
 #[test]
+fn large_tree_pair_syntax_validation_does_not_allocate() {
+    let codomain_rank = 10;
+    let domain_rank = 9;
+    let codomain = (0..codomain_rank).collect::<Vec<_>>();
+    let domain = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    let run = || {
+        PreparedTreePairOperation::validate_permute_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+        )
+        .unwrap();
+        PreparedTreePairOperation::validate_braid_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+            &codomain_levels,
+            &domain_levels,
+        )
+        .unwrap();
+        PreparedTreePairOperation::validate_transpose_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+        )
+        .unwrap();
+    };
+    run();
+
+    let (_, allocations) = measured_allocations(|| black_box(run()));
+
+    // What: successful cache admission above the inline rank validates all
+    // operation kinds without materializing permutations or Artin plans.
+    assert_eq!(allocations, 0);
+}
+
+#[test]
 fn block_identity_permute_allocates_only_owned_output() {
     let source = FusionTreeBlockKey::pair_from_sector_ids(
         [1, 1],
