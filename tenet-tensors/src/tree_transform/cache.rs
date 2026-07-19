@@ -351,17 +351,18 @@ mod tests {
 
     #[test]
     fn source_group_key_rejects_repeated_public_group_indices() {
-        let key = FusionTreePairKey::pair_from_sector_ids(
+        let key = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 1],
             [],
-            Some(0),
+            0,
             [false, false],
             [],
             [],
             [],
             [1],
             [],
-        );
+        )
+        .unwrap();
         let structure =
             crate::tests::packed_fixture_structure(2, [(key.clone(), vec![1, 1])]).unwrap();
         let repeated = FusionTreeBlockGroup::new(key.group_key(), vec![0, 0]);

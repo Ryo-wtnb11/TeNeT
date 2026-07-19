@@ -1,3 +1,5 @@
+use core::num::NonZeroUsize;
+
 /// Opaque identifier used by one fusion-rule implementation.
 ///
 /// The numeric value is an internal representation, not a stable wire format
@@ -28,6 +30,52 @@ impl SectorId {
 impl From<usize> for SectorId {
     fn from(value: usize) -> Self {
         Self::new(value)
+    }
+}
+
+/// One-based outer-multiplicity label at a fusion vertex.
+///
+/// Unlike [`SectorId`], this value selects a basis vector within a fixed
+/// fusion channel. Zero is not a categorical basis label.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct MultiplicityIndex(NonZeroUsize);
+
+impl MultiplicityIndex {
+    /// The unique vertex label of a multiplicity-free fusion channel.
+    pub const ONE: Self = Self(NonZeroUsize::MIN);
+
+    /// Constructs a one-based fusion-vertex basis label.
+    ///
+    /// Returns `None` for zero. Numeric import boundaries that need a typed
+    /// error can use [`TryFrom<usize>`], which reports
+    /// [`CoreError::InvalidMultiplicityIndex`].
+    #[inline]
+    pub const fn new(value: usize) -> Option<Self> {
+        match NonZeroUsize::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the one-based fusion-vertex basis label.
+    #[inline]
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl TryFrom<usize> for MultiplicityIndex {
+    type Error = CoreError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or(CoreError::InvalidMultiplicityIndex { value })
+    }
+}
+
+impl From<MultiplicityIndex> for usize {
+    fn from(value: MultiplicityIndex) -> Self {
+        value.get()
     }
 }
 

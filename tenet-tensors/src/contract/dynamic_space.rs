@@ -5,9 +5,10 @@ use std::sync::{Arc, RwLock};
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, DimVec,
-    FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, HomSpaceId,
-    LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule,
-    MultiplicityFreeRigidSymbols, PreparedLoweredFusionTreeLayout, RuleIdentity, SectorLeg,
+    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey,
+    HomSpaceId, LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra,
+    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, PreparedLoweredFusionTreeLayout,
+    RuleIdentity, SectorLeg,
 };
 
 use crate::cache::registered_operation_cache;
@@ -769,14 +770,29 @@ fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), 
     Ok(())
 }
 
+fn validate_generic_provider_style<R>(rule: &R) -> Result<(), OperationError>
+where
+    R: FusionRule,
+{
+    if rule.fusion_style().has_multiplicity() {
+        Ok(())
+    } else {
+        Err(OperationError::from_core_preserving_context(
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: rule.fusion_style(),
+            },
+        ))
+    }
+}
+
 /// A complete dynamic fusion space bound to the provider that defines it.
 ///
 /// Construct this with [`Self::bind_multiplicity_free`] for a
 /// [`MultiplicityFreeFusionRule`] and [`Self::bind_generic`] for a generic
-/// fusion rule. Both constructors compare the space against the exact tree set
-/// produced by the selected enumeration mode, so choosing the wrong mode can
-/// only succeed when the two modes are semantically identical for that space.
-/// A missing rule identity is rejected rather than inferred.
+/// fusion rule. Generic roots first require the provider-owned
+/// [`FusionStyleKind::Generic`] capability; tree keys do not carry a duplicate
+/// binding-mode flag. A missing rule identity is rejected rather than inferred.
 pub struct BoundDynamicFusionMapSpace<R> {
     space: DynamicFusionMapSpace,
     provider: Arc<R>,
@@ -928,6 +944,7 @@ where
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
+        validate_generic_provider_style(provider.as_ref())?;
         let space = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
             provider.as_ref(),
             homspace,
@@ -1136,6 +1153,7 @@ where
         lhs_axes: &[usize],
         rhs_axes: &[usize],
     ) -> Result<Self, OperationError> {
+        validate_generic_provider_style(lhs.provider.as_ref())?;
         if lhs.provider.rule_identity() != rhs.provider.rule_identity() {
             return Err(OperationError::from_core_preserving_context(
                 CoreError::FusionRuleMismatch {
@@ -1159,6 +1177,7 @@ where
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError> {
+        validate_generic_provider_style(provider.as_ref())?;
         let space =
             DynamicFusionMapSpace::from_final_homspace_generic(provider.as_ref(), homspace)?;
         Self::from_derived(provider, space)
@@ -1196,6 +1215,7 @@ where
         &self,
         operation: &TreeTransformOperation,
     ) -> Result<Self, OperationError> {
+        validate_generic_provider_style(self.provider.as_ref())?;
         let space = self
             .space
             .transformed_generic(self.provider.as_ref(), operation)?;
@@ -1214,6 +1234,7 @@ where
         space: DynamicFusionMapSpace,
         provider: Arc<R>,
     ) -> Result<Self, OperationError> {
+        validate_generic_provider_style(provider.as_ref())?;
         let keys = space
             .homspace()
             .fusion_tree_keys_generic(provider.as_ref())
@@ -1798,6 +1819,10 @@ impl DynamicFusionMapSpace {
     /// Generic-fusion (SU(3)) sibling of [`Self::from_degeneracy_shapes`] for
     /// caller-supplied per-tree shapes. Derived transform/contraction results
     /// instead use the final HomSpace's stored leg degeneracies directly.
+    ///
+    /// This is a Generic execution capability boundary, not an alternate
+    /// spelling for multiplicity-free construction. The provider must report
+    /// [`FusionStyleKind::Generic`].
     pub fn from_degeneracy_shapes_generic<R, Shapes>(
         rule: &R,
         homspace: FusionTreeHomSpace,
@@ -1808,6 +1833,7 @@ impl DynamicFusionMapSpace {
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
+        validate_generic_provider_style(rule)?;
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
         let keys = homspace
@@ -2266,7 +2292,7 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
 #[cfg(test)]
 mod bound_invariant_tests {
     use super::*;
-    use tenet_core::{BlockSpec, Z2FusionRule};
+    use tenet_core::{BlockSpec, Su3FusionRule, Z2FusionRule};
 
     fn matrix_space() -> DynamicFusionMapSpace {
         let rule = Z2FusionRule;
@@ -2327,17 +2353,30 @@ mod bound_invariant_tests {
             [vec![1, 1]],
         )
         .unwrap();
+        let generic_provider = Arc::new(Su3FusionRule::default());
+        let octet = generic_provider
+            .sector_of(1, 1)
+            .expect("the production SU(3) table contains the octet");
+        let generic_homspace = FusionTreeHomSpace::from_sector_ids(
+            [(octet.id(), 1), (octet.id(), 1)],
+            [(octet.id(), 1)],
+        );
+        let generic_key_count = generic_homspace
+            .fusion_tree_keys_generic(generic_provider.as_ref())
+            .expect("8 x 8 -> 8 is covered by the production SU(3) table")
+            .len();
+        assert_eq!(generic_key_count, 2, "8 x 8 -> 8 has multiplicity two");
         let generic = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
-            provider,
-            homspace,
-            [vec![1, 1]],
+            generic_provider,
+            generic_homspace,
+            vec![vec![1, 1, 1]; generic_key_count],
         )
         .unwrap();
 
         assert_eq!(multiplicity_free.space().nout(), 1);
         assert_eq!(generic.space().nin(), 1);
         assert_eq!(multiplicity_free.space().structure().rank(), 2);
-        assert_eq!(generic.space().structure().rank(), 2);
+        assert_eq!(generic.space().structure().rank(), 3);
     }
 }
 
@@ -3737,8 +3776,8 @@ mod scratch_cache_tests {
             .iter()
             .map(|key| {
                 vec![
-                    usize::from(key.codomain_tree().coupled() == Some(even)),
-                    usize::from(key.domain_tree().coupled() == Some(even)),
+                    usize::from(key.codomain_tree().coupled() == even),
+                    usize::from(key.domain_tree().coupled() == even),
                 ]
             })
             .collect::<Vec<_>>();
@@ -3867,7 +3906,7 @@ mod scratch_cache_tests {
     }
 
     #[test]
-    fn binding_mode_mismatch_is_rejected_by_exact_tree_validation() {
+    fn binding_mode_mismatch_is_rejected_by_provider_style() {
         let space = z2_matrix_space();
         let multiplicity_free = BoundDynamicFusionMapSpace::bind_multiplicity_free(
             space.clone(),
@@ -3879,9 +3918,67 @@ mod scratch_cache_tests {
 
         assert!(matches!(
             generic_error,
-            OperationError::MissingBlockKey { .. }
+            OperationError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
         ));
         assert_eq!(multiplicity_free.clone().space(), multiplicity_free.space());
+    }
+
+    #[test]
+    fn every_generic_root_rejects_multiplicity_free_provider_before_input_validation() {
+        // What: provider style is the single Generic capability authority for
+        // raw binding, shape/final-HomSpace roots, and derived operations.
+        let raw = z2_matrix_space();
+        let homspace = raw.homspace().clone();
+        let bound =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(raw.clone(), Arc::new(Z2FusionRule))
+                .unwrap();
+        let expected = |error| {
+            assert!(matches!(
+                error,
+                OperationError::Core(CoreError::UnsupportedFusionStyle {
+                    expected: FusionStyleKind::Generic,
+                    actual: FusionStyleKind::Unique,
+                })
+            ));
+        };
+
+        expected(
+            BoundDynamicFusionMapSpace::bind_generic(raw, Arc::new(Z2FusionRule)).unwrap_err(),
+        );
+        expected(
+            DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+                &Z2FusionRule,
+                homspace.clone(),
+                Vec::<Vec<usize>>::new(),
+            )
+            .unwrap_err(),
+        );
+        expected(
+            BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
+                Arc::new(Z2FusionRule),
+                homspace.clone(),
+                Vec::<Vec<usize>>::new(),
+            )
+            .unwrap_err(),
+        );
+        expected(
+            BoundDynamicFusionMapSpace::from_final_homspace_generic(
+                Arc::new(Z2FusionRule),
+                homspace,
+            )
+            .unwrap_err(),
+        );
+        expected(
+            bound
+                .transformed_generic(&TreeTransformOperation::permute([0], [1]))
+                .unwrap_err(),
+        );
+        expected(
+            BoundDynamicFusionMapSpace::contracted_generic(&bound, &bound, &[99], &[]).unwrap_err(),
+        );
     }
 
     #[test]

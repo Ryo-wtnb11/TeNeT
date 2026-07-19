@@ -1055,7 +1055,7 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     let keys = homspace.fusion_tree_keys(&rule);
     let key_for_sector = |sector| {
         keys.iter()
-            .find(|key| key.codomain_tree().coupled() == Some(sector))
+            .find(|key| key.codomain_tree().coupled() == sector)
             .cloned()
             .expect("Z2 one-leg homspace contains requested sector")
     };
@@ -1153,7 +1153,7 @@ fn assert_fusion_block_scatter_beta_dtype<T>(
     let keys = homspace.fusion_tree_keys(&rule);
     let key_for_sector = |sector| {
         keys.iter()
-            .find(|key| key.codomain_tree().coupled() == Some(sector))
+            .find(|key| key.codomain_tree().coupled() == sector)
             .cloned()
             .expect("Z2 one-leg homspace contains requested sector")
     };
@@ -2361,7 +2361,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
     let src_key = all_codomain_fusion_tree_test_key_for_rule(
         &rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -2370,7 +2370,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
     let dst_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -2848,19 +2848,19 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
     let lhs_domain = FusionTreeKey::try_new_for_rule(
         &rule,
         [plus_two],
-        Some(plus_two),
+        plus_two,
         [false],
         Vec::<SectorId>::new(),
-        Vec::<SectorId>::new(),
+        Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
     let rhs_codomain = FusionTreeKey::try_new_for_rule(
         &rule,
         [minus_two],
-        Some(minus_two),
+        minus_two,
         [false],
         Vec::<SectorId>::new(),
-        Vec::<SectorId>::new(),
+        Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
     assert!(contracted_fusion_tree_basis_matches(
@@ -2872,10 +2872,10 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
     let raw_rhs_codomain = FusionTreeKey::try_new_for_rule(
         &rule,
         [plus_two],
-        Some(plus_two),
+        plus_two,
         [false],
         Vec::<SectorId>::new(),
-        Vec::<SectorId>::new(),
+        Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
     assert!(!contracted_fusion_tree_basis_matches(
@@ -2887,10 +2887,10 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
     let dual_flag_rhs_codomain = FusionTreeKey::try_new_for_rule(
         &rule,
         [minus_two],
-        Some(minus_two),
+        minus_two,
         [true],
         Vec::<SectorId>::new(),
-        Vec::<SectorId>::new(),
+        Vec::<MultiplicityIndex>::new(),
     )
     .unwrap();
     assert!(!contracted_fusion_tree_basis_matches(
@@ -2902,6 +2902,10 @@ fn contracted_fusion_tree_basis_matches_dual_u1_labels_and_flags() {
 
 #[test]
 fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence() {
+    // What: exact cache counters describe one uninterrupted cache generation.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
@@ -3429,6 +3433,10 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
 
 #[test]
 fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
+    // What: per-layout cache counters describe one uninterrupted cache generation.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);

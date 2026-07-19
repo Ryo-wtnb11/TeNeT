@@ -1117,9 +1117,9 @@ where
         });
     }
 
-    let lhs_layout = FusionBlockMatrixLayout::compile_generic(rule, lhs_space)?;
-    let rhs_layout = FusionBlockMatrixLayout::compile_generic(rule, rhs_space)?;
-    let dst_layout = FusionBlockMatrixLayout::compile_generic(rule, dst_space)?;
+    let lhs_layout = FusionBlockMatrixLayout::compile_generic(lhs_space)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile_generic(rhs_space)?;
+    let dst_layout = FusionBlockMatrixLayout::compile_generic(dst_space)?;
 
     let mut groups = Vec::new();
     let mut active_dst_blocks = HashSet::<usize>::new();
@@ -1222,8 +1222,8 @@ impl FusionBlockMatrixLayout {
                     index: block_index,
                 });
             };
-            let coupled = coupled_sector(rule, key.codomain_tree());
-            if coupled != coupled_sector(rule, key.domain_tree()) {
+            let coupled = coupled_sector(key.codomain_tree());
+            if coupled != coupled_sector(key.domain_tree()) {
                 return Err(OperationError::FusionTreeGroupMismatch {
                     tensor: "fusion",
                     index: block_index,
@@ -1259,10 +1259,7 @@ impl FusionBlockMatrixLayout {
     /// blocks by coupled sector — no F/R symbols). Outer-multiplicity vertex
     /// labels ride in the fusion-tree keys, so multiplicity blocks land in the
     /// right coupled group automatically.
-    fn compile_generic<R>(rule: &R, space: &DynamicFusionMapSpace) -> Result<Self, OperationError>
-    where
-        R: FusionRule,
-    {
+    fn compile_generic(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
         let mut group_indices = FxHashMap::<SectorId, usize>::default();
         for block_index in 0..space.structure().block_count() {
@@ -1273,8 +1270,8 @@ impl FusionBlockMatrixLayout {
                     index: block_index,
                 });
             };
-            let coupled = coupled_sector_generic(rule, key.codomain_tree());
-            if coupled != coupled_sector_generic(rule, key.domain_tree()) {
+            let coupled = coupled_sector_generic(key.codomain_tree());
+            if coupled != coupled_sector_generic(key.domain_tree()) {
                 return Err(OperationError::FusionTreeGroupMismatch {
                     tensor: "fusion",
                     index: block_index,
@@ -1569,19 +1566,13 @@ struct TreeMatrixOffset {
     dim: usize,
 }
 
-fn coupled_sector<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    tree.coupled().unwrap_or_else(|| rule.vacuum())
+fn coupled_sector(tree: &FusionTreeKey) -> SectorId {
+    tree.coupled()
 }
 
-/// Generic-fusion sibling of [`coupled_sector`], relaxed to any [`FusionRule`].
-fn coupled_sector_generic<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
-where
-    R: FusionRule,
-{
-    tree.coupled().unwrap_or_else(|| rule.vacuum())
+/// Generic-fusion sibling retained as a named algorithm boundary.
+fn coupled_sector_generic(tree: &FusionTreeKey) -> SectorId {
+    tree.coupled()
 }
 
 #[cfg(test)]

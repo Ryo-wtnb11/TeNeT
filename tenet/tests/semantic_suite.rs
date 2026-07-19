@@ -599,7 +599,7 @@ fn oracle_tensor(rt: &Runtime, v: &Space, c0: i64, label_of: impl Fn(SectorId) -
         };
         let cod = key.codomain_uncoupled();
         let dom = key.domain_uncoupled();
-        let coupled = key.coupled().expect("coupled sector");
+        let coupled = key.coupled();
         let labels = [
             label_of(cod[0]),
             label_of(cod[1]),

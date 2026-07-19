@@ -1031,7 +1031,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
-    let coupled = trace_tree.coupled().unwrap_or_else(|| rule.vacuum());
+    let coupled = trace_tree.coupled();
     let first = trace_tree.uncoupled().first().copied().ok_or(
         tenet_core::CoreError::MalformedFusionTree {
             message: "trace channel requires at least one uncoupled sector",

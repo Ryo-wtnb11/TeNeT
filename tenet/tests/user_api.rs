@@ -1162,7 +1162,7 @@ fn fz2_u1_su2_braid_fermion_sign_vs_tensorkit() {
     ] {
         assert_eq!(rule.dim_scalar(sector), qdim);
         let proj = Tensor::from_block_fn(&rt, [&odd, &odd], [&w], |key, _| match key {
-            BlockKey::FusionTree(key) if key.coupled() == Some(sector) => 1.0,
+            BlockKey::FusionTree(key) if key.coupled() == sector => 1.0,
             _ => 0.0,
         })
         .unwrap();

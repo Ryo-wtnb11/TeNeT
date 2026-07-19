@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockStructure, FermionParityFusionRule, FusionProductSpace,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
-    U1FusionRule, U1Irrep,
+    FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    MultiplicityIndex, ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+    TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
     tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
@@ -528,7 +528,7 @@ fn all_codomain_fusion_tree_key(innerlines: [usize; 2]) -> BlockKey {
         FusionTreeKey::try_from_sector_ids_for_rule(
             &SU2FusionRule,
             [1, 1, 1, 1],
-            Some(0),
+            0,
             [false, false, false, false],
             innerlines,
             [1, 1, 1],
@@ -537,10 +537,10 @@ fn all_codomain_fusion_tree_key(innerlines: [usize; 2]) -> BlockKey {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             Vec::<SectorId>::new(),
-            None,
+            SU2FusionRule.vacuum(),
             Vec::<bool>::new(),
             Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
         )
         .unwrap(),
     ))

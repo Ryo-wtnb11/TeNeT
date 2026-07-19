@@ -182,10 +182,7 @@ fn visit_entries<V: Copy>(
         let BlockKey::FusionTree(tree) = block.key() else {
             continue;
         };
-        let sector = tree
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        let sector = tree.codomain_tree().coupled();
         // Why not build a per-call HashMap: compact spectra are canonicalized
         // once at construction, so binary search keeps replay allocation-free.
         let Ok(spectrum_index) = spectrum.binary_search_by_key(&sector, |entry| entry.sector)

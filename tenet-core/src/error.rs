@@ -42,6 +42,9 @@ pub enum CoreError {
     InvalidSector {
         sector: SectorId,
     },
+    InvalidMultiplicityIndex {
+        value: usize,
+    },
     SectorMismatch {
         expected: SectorId,
         actual: SectorId,
@@ -163,6 +166,9 @@ impl fmt::Display for CoreError {
                 )
             }
             Self::InvalidSector { sector } => write!(f, "invalid sector {sector:?}"),
+            Self::InvalidMultiplicityIndex { value } => {
+                write!(f, "invalid multiplicity index {value}; labels are one-based")
+            }
             Self::SectorMismatch { expected, actual } => {
                 write!(f, "sector mismatch: expected {expected:?}, got {actual:?}")
             }

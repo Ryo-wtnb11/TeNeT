@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CoreError,
     FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeKey, FusionTreePairKey, MultiplicityFreeFusionRule, RuleIdentity, SectorId,
-    SectorLeg, SectorVec, TabulatedFusionRule, TensorMapSpace, Z2FusionRule,
+    FusionTreeKey, FusionTreePairKey, MultiplicityFreeFusionRule, MultiplicityIndex, RuleIdentity,
+    SectorId, SectorLeg, SectorVec, TabulatedFusionRule, TensorMapSpace, Z2FusionRule,
 };
 
 #[derive(Clone, Debug)]
@@ -119,7 +119,8 @@ fn content_identity_hash_cost_does_not_scale_with_table_bytes() {
 }
 
 fn raw_scalar_space() -> FusionTensorMapSpace<0, 0> {
-    let key = FusionTreePairKey::pair_from_sector_ids([], [], None, [], [], [], [], [], []);
+    let key =
+        FusionTreePairKey::try_pair_from_sector_ids([], [], 0, [], [], [], [], [], []).unwrap();
     FusionTensorMapSpace::new_unbound(
         TensorMapSpace::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
@@ -147,7 +148,7 @@ fn raw_scalar_space_with_key(key: BlockKey) -> FusionTensorMapSpace<0, 0> {
 }
 
 fn raw_scalar_space_for_rule<R: FusionRule>(rule: &R) -> FusionTensorMapSpace<0, 0> {
-    let empty_tree = FusionTreeKey::try_new_for_rule(rule, [], None, [], [], []).unwrap();
+    let empty_tree = FusionTreeKey::try_new_for_rule(rule, [], rule.vacuum(), [], [], []).unwrap();
     let key = FusionTreePairKey::pair(empty_tree.clone(), empty_tree);
     raw_scalar_space_with_key(key.into())
 }
@@ -203,7 +204,8 @@ fn inherited_malformed_tree_is_revalidated_by_same_rule_binding() {
         .try_bind_rule(&Z2FusionRule)
         .unwrap();
     let malformed =
-        FusionTreePairKey::pair_from_sector_ids([1], [], Some(1), [false], [], [], [], [], []);
+        FusionTreePairKey::try_pair_from_sector_ids([1], [], 1, [false], [], [], [], [], [])
+            .unwrap();
     let inherited = raw_scalar_space_with_key(malformed.into())
         .try_inherit_rule_identity(&source)
         .unwrap();
@@ -285,23 +287,23 @@ fn product_rule_identity_includes_stateful_child_identity() {
 fn multiplicity_free_tree_rejects_out_of_range_vertices() {
     // What: rule-aware construction reports the precise lower and upper
     // 1-based multiplicity bounds for a multiplicity-free vertex.
-    for (label, message) in [
-        (0, "fusion tree vertex labels are 1-based"),
-        (
-            2,
-            "fusion tree vertex label exceeds its fusion multiplicity",
-        ),
-    ] {
-        let error = FusionTreeKey::try_new_for_rule(
-            &Z2FusionRule,
-            [SectorId::new(1), SectorId::new(1)],
-            Some(SectorId::new(0)),
-            [false, false],
-            [],
-            [SectorId::new(label)],
-        )
-        .unwrap_err();
-
-        assert_eq!(error, CoreError::MalformedFusionTree { message });
-    }
+    assert_eq!(
+        MultiplicityIndex::try_from(0).unwrap_err(),
+        CoreError::InvalidMultiplicityIndex { value: 0 }
+    );
+    let error = FusionTreeKey::try_new_for_rule(
+        &Z2FusionRule,
+        [SectorId::new(1), SectorId::new(1)],
+        SectorId::new(0),
+        [false, false],
+        [],
+        [MultiplicityIndex::new(2).unwrap()],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        CoreError::MalformedFusionTree {
+            message: "fusion tree vertex label exceeds its fusion multiplicity",
+        }
+    );
 }

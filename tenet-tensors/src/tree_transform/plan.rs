@@ -198,11 +198,7 @@ where
             let BlockKey::FusionTree(key) = block.key() else {
                 continue;
             };
-            let normalized_coupled = |tree: &FusionTreeKey| {
-                tree.coupled()
-                    .or_else(|| tree.uncoupled().is_empty().then(|| rule.vacuum()))
-            };
-            if normalized_coupled(key.codomain_tree()) != normalized_coupled(key.domain_tree()) {
+            if key.codomain_tree().coupled() != key.domain_tree().coupled() {
                 first_pair_mismatch.get_or_insert(OperationError::Core(
                     CoreError::MalformedFusionTree {
                         message: "fusion tree pair requires matching coupled sectors",
@@ -604,8 +600,8 @@ where
 }
 
 /// Shape-independent all-codomain rows. One plan compile records one hit or
-/// miss per distinct memo key, even when both accepted empty-domain encodings
-/// (`None` and `Some(vacuum)`) reference the same codomain tree.
+/// miss per distinct memo key. Empty domains use the single canonical
+/// rank-zero tree whose coupled sector is the provider vacuum.
 type TransformRows<K, T> = Vec<(K, T)>;
 type SharedTransformRows<K, T> = Arc<TransformRows<K, T>>;
 type TransformBlockRows<K, T> = Vec<TransformRows<K, T>>;
@@ -752,8 +748,8 @@ mod staged_row_resolution_tests {
 mod generic_preflight_tests {
     use super::{validate_generic_tree_pair_preflight, TreeTransformOperation};
     use tenet_core::{
-        BlockKey, BlockSpec, BlockStructure, CoreError, FusionTreeKey, FusionTreePairKey, SectorId,
-        Su3FusionRule,
+        BlockKey, BlockSpec, BlockStructure, CoreError, FusionTreeKey, FusionTreePairKey,
+        MultiplicityIndex, SectorId, Su3FusionRule,
     };
     use tenet_operations::OperationError;
 
@@ -766,13 +762,13 @@ mod generic_preflight_tests {
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [eight, eight],
-                Some(vacuum),
+                vacuum,
                 [false, false],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
-            FusionTreeKey::try_new_for_rule(&rule, [], Some(vacuum), [], [], []).unwrap(),
+            FusionTreeKey::try_new_for_rule(&rule, [], vacuum, [], [], []).unwrap(),
         );
         let valid_structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
             BlockKey::from(valid),
@@ -791,17 +787,34 @@ mod generic_preflight_tests {
             validate_generic_tree_pair_preflight(&rule, &operation, &valid_structure).unwrap();
         }
 
-        let malformed = FusionTreePairKey::pair_from_sector_ids(
+        assert_eq!(
+            FusionTreePairKey::try_pair_from_sector_ids(
+                [eight.id(), eight.id()],
+                [],
+                vacuum.id(),
+                [false, false],
+                [],
+                [],
+                [],
+                [0],
+                [],
+            )
+            .unwrap_err(),
+            CoreError::InvalidMultiplicityIndex { value: 0 }
+        );
+
+        let malformed = FusionTreePairKey::try_pair_from_sector_ids(
             [eight.id(), eight.id()],
             [],
-            Some(vacuum.id()),
+            vacuum.id(),
             [false, false],
             [],
             [],
             [],
-            [0],
+            [2],
             [],
-        );
+        )
+        .unwrap();
         let malformed_structure =
             BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
                 BlockKey::from(malformed),
@@ -1502,11 +1515,9 @@ where
 /// Why not call this a byte-for-byte or blanket zero-cost guarantee: changes to
 /// the shared assembler are expected to affect both paths; the guarantee is
 /// that multiplicity-free rules never execute generic F/R-symbol logic. The
-/// runtime `has_multiplicity` gate below defends against a
-/// `GenericRigidSymbols` rule that reports a multiplicity-free style. A
-/// `has_multiplicity()` dispatch over a dyn-style entry is a Stage B3 concern
-/// (the SU(3) provider / generic-capable facade), where a caller can hold a rule
-/// of unknown style.
+/// provider-owned [`FusionStyleKind`] gate below defends against a
+/// `GenericRigidSymbols` implementation that reports a multiplicity-free
+/// style. Fusion style is not duplicated in individual tree keys.
 ///
 /// # Provider-domain precondition
 ///
@@ -2270,9 +2281,7 @@ where
     R: FusionRule,
 {
     let domain = key.domain_tree();
-    let empty_domain_coupled_is_valid = domain
-        .coupled()
-        .map_or(true, |coupled| coupled == rule.vacuum());
+    let empty_domain_coupled_is_valid = domain.coupled() == rule.vacuum();
     if domain.uncoupled().is_empty()
         && empty_domain_coupled_is_valid
         && domain.is_dual().is_empty()

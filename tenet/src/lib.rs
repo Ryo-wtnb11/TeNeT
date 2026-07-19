@@ -69,7 +69,7 @@ pub mod prelude {
     pub use num_complex::Complex64;
     #[allow(deprecated)]
     pub use tenet_core::FusionTreeBlockKey;
-    pub use tenet_core::{BlockKey, FusionTreePairKey, SectorId};
+    pub use tenet_core::{BlockKey, FusionTreePairKey, MultiplicityIndex, SectorId};
     pub use tenet_matrixalgebra::{SectorSpectrum, Truncation};
 }
 

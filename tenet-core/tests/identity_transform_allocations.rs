@@ -5,8 +5,8 @@ use std::hint::black_box;
 use tenet_core::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
     unique_permute_tree, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreeKey, FusionTreePairKey, PreparedTreePairOperation, SU2FusionRule, SU2Irrep, SectorId,
-    SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    FusionTreeKey, FusionTreePairKey, MultiplicityIndex, PreparedTreePairOperation, SU2FusionRule,
+    SU2Irrep, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -51,7 +51,7 @@ fn unique_identity_permute_does_not_allocate() {
     let tree = FusionTreeKey::try_new_for_rule(
         &Z2FusionRule,
         [Z2Irrep::ODD.sector_id()],
-        Some(Z2Irrep::ODD.sector_id()),
+        Z2Irrep::ODD.sector_id(),
         [false],
         [],
         [],
@@ -113,17 +113,18 @@ fn large_tree_pair_syntax_validation_does_not_allocate() {
 
 #[test]
 fn block_identity_permute_allocates_only_owned_output() {
-    let source = FusionTreePairKey::pair_from_sector_ids(
+    let source = FusionTreePairKey::try_pair_from_sector_ids(
         [1, 1],
         [0],
-        Some(0),
+        0,
         [false, false],
         [false],
         [],
         [],
         [1],
         [],
-    );
+    )
+    .unwrap();
     let sources = [source.clone()];
     let _ =
         multiplicity_free_permute_tree_pair_block(&Z2FusionRule, &sources, &[0, 1], &[2]).unwrap();
@@ -186,15 +187,15 @@ fn compact_block_warm_allocations_do_not_restore_per_source_scratch() {
 
 #[test]
 fn shared_frame_decode_does_not_allocate_per_source_above_inline_rank() {
-    for (rank, expected_per_extra_source) in [(9usize, 5usize), (16, 11)] {
+    for (rank, expected_per_extra_source) in [(9usize, 4usize), (16, 8)] {
         let even = Z2Irrep::EVEN.sector_id();
         let source = FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             std::iter::repeat_n(even, rank),
-            Some(even),
+            even,
             std::iter::repeat_n(false, rank),
             std::iter::repeat_n(even, rank.saturating_sub(2)),
-            std::iter::repeat_n(SectorId::new(1), rank.saturating_sub(1)),
+            std::iter::repeat_n(MultiplicityIndex::ONE, rank.saturating_sub(1)),
         )
         .unwrap();
         let single = [source.clone()];
@@ -212,10 +213,11 @@ fn shared_frame_decode_does_not_allocate_per_source_above_inline_rank() {
         let (_, single_allocations) = measured_allocations(|| black_box(run(&single)));
         let (_, cohort_allocations) = measured_allocations(|| black_box(run(&cohort)));
 
-        // What: duplicate rank-9/16 sources reuse one owned external frame.
-        // The exact slope includes the intentional owned output and local
-        // scratch costs. A reconstructed compact codomain frame would add two
-        // allocations per source at either rank, so this equality detects it.
+        // What: duplicate rank-9/16 sources reuse one owned external frame and
+        // do not retain or clone multiplicity vertices in Artin intermediates
+        // after validation. The exact slope includes the intentional owned
+        // output and remaining local scratch. A reconstructed compact codomain
+        // frame would add two allocations per source, so equality detects it.
         assert_eq!(
             cohort_allocations - single_allocations,
             expected_per_extra_source * (cohort.len() - single.len()),
@@ -226,21 +228,21 @@ fn shared_frame_decode_does_not_allocate_per_source_above_inline_rank() {
 
 #[test]
 fn tree_pair_shared_frames_do_not_allocate_per_source_above_inline_rank() {
-    for (rank, expected_per_extra_source) in [(9usize, 5usize), (16, 11)] {
+    for (rank, expected_per_extra_source) in [(9usize, 4usize), (16, 8)] {
         let even = Z2Irrep::EVEN.sector_id();
         let codomain = FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             std::iter::repeat_n(even, rank),
-            Some(even),
+            even,
             std::iter::repeat_n(false, rank),
             std::iter::repeat_n(even, rank.saturating_sub(2)),
-            std::iter::repeat_n(SectorId::new(1), rank.saturating_sub(1)),
+            std::iter::repeat_n(MultiplicityIndex::ONE, rank.saturating_sub(1)),
         )
         .unwrap();
         let domain = FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             std::iter::empty(),
-            Some(even),
+            even,
             std::iter::empty(),
             std::iter::empty(),
             std::iter::empty(),
@@ -262,8 +264,9 @@ fn tree_pair_shared_frames_do_not_allocate_per_source_above_inline_rank() {
         let (_, cohort_allocations) = measured_allocations(|| black_box(run(&cohort)));
 
         // What: both codomain and domain frames are borrowed-matched for every
-        // tree-pair source after the first; the exact slope excludes rebuilding
-        // either frame while retaining the public owned-output costs.
+        // tree-pair source after the first, without cloning vertex vectors
+        // through Artin intermediates; the exact slope retains only public
+        // owned-output and remaining local scratch costs.
         assert_eq!(
             cohort_allocations - single_allocations,
             expected_per_extra_source * (cohort.len() - single.len()),
@@ -312,10 +315,10 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
         FusionTreeKey::try_new_for_rule(
             &FermionParityFusionRule,
             [odd, odd],
-            Some(even),
+            even,
             [false, true],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap()
     };

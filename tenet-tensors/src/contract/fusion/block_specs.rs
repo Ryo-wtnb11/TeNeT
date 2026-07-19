@@ -27,7 +27,7 @@ where
 {
     let tree_self_dual = |tree: &FusionTreeKey| {
         tree.uncoupled().iter().all(|&s| rule.dual(s) == s)
-            && tree.coupled().is_none_or(|c| rule.dual(c) == c)
+            && rule.dual(tree.coupled()) == tree.coupled()
     };
     space
         .homspace()
@@ -654,8 +654,7 @@ where
             .copied()
             .map(|sector| rule.dual(sector))
             .eq(rhs_codomain.innerlines().iter().copied())
-        && rule.dual(lhs_domain.coupled().unwrap_or_else(|| rule.vacuum()))
-            == rhs_codomain.coupled().unwrap_or_else(|| rule.vacuum())
+        && rule.dual(lhs_domain.coupled()) == rhs_codomain.coupled()
 }
 
 fn contracted_output_external_sectors(

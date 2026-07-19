@@ -33,9 +33,10 @@ use tenet_core::{
     FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
     FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, Placement, ProductFusionRule,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, SimilarStorage,
-    TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
+    MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement,
+    ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
+    SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep,
+    Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
 
@@ -155,10 +156,10 @@ fn fusion_tree_test_key<
     codomain_is_dual: [bool; COD_DUAL],
     domain_is_dual: [bool; DOM_DUAL],
 ) -> FusionTreePairKey {
-    FusionTreePairKey::pair_from_sector_ids(
+    FusionTreePairKey::try_pair_from_sector_ids(
         codomain,
         domain,
-        Some(coupled),
+        coupled,
         codomain_is_dual,
         domain_is_dual,
         [coupled + 100],
@@ -166,6 +167,7 @@ fn fusion_tree_test_key<
         [coupled + 300],
         [coupled + 400],
     )
+    .unwrap()
 }
 
 trait TestFusionTreePair {
@@ -201,17 +203,17 @@ fn block_offset_for_tree_pair(structure: &BlockStructure, key: &FusionTreePairKe
 }
 
 fn empty_fusion_tree() -> FusionTreeKey {
-    empty_fusion_tree_with_coupled(None)
+    empty_fusion_tree_with_coupled(0)
 }
 
-fn empty_fusion_tree_with_coupled(coupled: Option<usize>) -> FusionTreeKey {
+fn empty_fusion_tree_with_coupled(coupled: usize) -> FusionTreeKey {
     FusionTreeKey::try_new_for_rule(
         &Z2FusionRule,
         Vec::<SectorId>::new(),
-        coupled.map(SectorId::new),
+        SectorId::new(coupled),
         Vec::<bool>::new(),
         Vec::<SectorId>::new(),
-        Vec::<SectorId>::new(),
+        Vec::<MultiplicityIndex>::new(),
     )
     .unwrap()
 }
@@ -223,7 +225,7 @@ fn all_codomain_fusion_tree_test_key<
     const COD_VERTICES: usize,
 >(
     codomain: [usize; COD],
-    coupled: Option<usize>,
+    coupled: usize,
     codomain_is_dual: [bool; COD_DUAL],
     codomain_innerlines: [usize; COD_INNER],
     codomain_vertices: [usize; COD_VERTICES],
@@ -247,7 +249,7 @@ fn all_codomain_fusion_tree_test_key_for_rule<
 >(
     rule: &R,
     codomain: [usize; COD],
-    coupled: Option<usize>,
+    coupled: usize,
     codomain_is_dual: [bool; COD_DUAL],
     codomain_innerlines: [usize; COD_INNER],
     codomain_vertices: [usize; COD_VERTICES],
@@ -268,10 +270,10 @@ where
         FusionTreeKey::try_new_for_rule(
             rule,
             Vec::<SectorId>::new(),
-            None,
+            rule.vacuum(),
             Vec::<bool>::new(),
             Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
         )
         .unwrap(),
     );
@@ -359,7 +361,7 @@ fn single_transform_coefficient_for_coupled(
         assert_eq!(spec.src_keys().len(), 1);
         assert_eq!(spec.dst_keys().len(), 1);
         assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
-        let dst_coupled = expect_tree_key(&spec.dst_keys()[0]).coupled().unwrap();
+        let dst_coupled = expect_tree_key(&spec.dst_keys()[0]).coupled();
         if dst_coupled == coupled {
             assert!(found.is_none(), "duplicate coefficient for {coupled:?}");
             found = Some(spec.recoupling_coefficients_dst_src()[0]);

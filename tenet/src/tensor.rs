@@ -1005,9 +1005,7 @@ where
         }
         return Ok(total.widen_complex());
     }
-    coupled_region_inner(structure, nout, a, b, |coupled| {
-        rule.dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()))
-    })
+    coupled_region_inner(structure, nout, a, b, |coupled| rule.dim_scalar(coupled))
 }
 
 /// Generic-fusion (Stage B3c-1) sibling of [`weighted_inner`] for an
@@ -1030,7 +1028,7 @@ where
     D: UserScalar,
 {
     coupled_region_inner(structure, nout, a, b, |coupled| {
-        let sqrt = rule.sqrt_dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()));
+        let sqrt = rule.sqrt_dim_scalar(coupled);
         sqrt * sqrt
     })
 }
@@ -1065,10 +1063,7 @@ where
         if key.codomain_tree() != key.domain_tree() {
             continue;
         }
-        let coupled = key
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| rule.vacuum());
+        let coupled = key.codomain_tree().coupled();
         let sqrt = rule.sqrt_dim_scalar(coupled);
         let weight = sqrt * sqrt;
         let shape = block.shape();
@@ -1126,10 +1121,7 @@ where
         if key.codomain_tree() != key.domain_tree() {
             continue;
         }
-        let coupled = key
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| rule.vacuum());
+        let coupled = key.codomain_tree().coupled();
         let weight = rule.dim_scalar(coupled);
         let shape = block.shape();
         let strides = block.strides();
@@ -6879,7 +6871,7 @@ fn coupled_region_inner<D, W>(
 ) -> Result<Complex64, Error>
 where
     D: UserScalar,
-    W: FnMut(Option<SectorId>) -> f64,
+    W: FnMut(SectorId) -> f64,
 {
     let regions = sector_regions(structure, nout)?;
     let required_len = structure.required_len()?;
@@ -6916,15 +6908,17 @@ fn odometer_inner_oracle<D, W>(
 ) -> Result<Complex64, Error>
 where
     D: UserScalar,
-    W: FnMut(Option<SectorId>) -> f64,
+    W: FnMut(SectorId) -> f64,
 {
     let mut total = Complex64::new(0.0, 0.0);
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
-        let coupled = match block.key() {
-            BlockKey::FusionTree(key) => key.codomain_tree().coupled(),
-            _ => None,
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(internal_layout_error(
+                "inner-product oracle requires fusion-tree blocks",
+            ));
         };
+        let coupled = key.codomain_tree().coupled();
         let shape = block.shape();
         let strides = block.strides();
         let count: usize = shape.iter().product();
@@ -6974,16 +6968,12 @@ mod coupled_region_inner_tests {
             let expected = match (lhs.coupled_data().unwrap(), rhs.coupled_data().unwrap()) {
                 (Data::F64(a), Data::F64(b)) => {
                     with_user_rule!(lhs.ordinary_body().space, rule, {
-                        odometer_inner_oracle(structure, a, b, |coupled| {
-                            rule.dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()))
-                        })
+                        odometer_inner_oracle(structure, a, b, |coupled| rule.dim_scalar(coupled))
                     })
                 }
                 (Data::C64(a), Data::C64(b)) => {
                     with_user_rule!(lhs.ordinary_body().space, rule, {
-                        odometer_inner_oracle(structure, a, b, |coupled| {
-                            rule.dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()))
-                        })
+                        odometer_inner_oracle(structure, a, b, |coupled| rule.dim_scalar(coupled))
                     })
                 }
                 _ => unreachable!(),
@@ -7032,7 +7022,7 @@ mod coupled_region_inner_tests {
             data,
             data,
             |coupled| {
-                let sqrt = rule.sqrt_dim_scalar(coupled.unwrap_or_else(|| rule.vacuum()));
+                let sqrt = rule.sqrt_dim_scalar(coupled);
                 sqrt * sqrt
             },
         )
@@ -7112,11 +7102,8 @@ fn require_cuda(cuda: Option<&mut CudaDenseContext>) -> Result<&mut CudaDenseCon
 }
 
 #[cfg(feature = "cuda")]
-fn coupled_sector_of<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
-    region: &SectorRegion,
-    rule: &R,
-) -> SectorId {
-    region.coupled().unwrap_or_else(|| rule.vacuum())
+fn coupled_sector_of(region: &SectorRegion) -> SectorId {
+    region.coupled()
 }
 
 #[cfg(feature = "cuda")]
@@ -7298,10 +7285,7 @@ fn fill_diagonal_values(
         let BlockKey::FusionTree(tree) = block.key() else {
             continue;
         };
-        let sector = tree
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        let sector = tree.codomain_tree().coupled();
         let Some(entry) = spectra.iter().find(|entry| entry.sector == sector) else {
             continue;
         };
@@ -7360,7 +7344,7 @@ impl Tensor {
             regions
                 .iter()
                 .zip(&values)
-                .map(|(region, &value)| value * rule.dim_scalar(coupled_sector_of(region, rule)))
+                .map(|(region, &value)| value * rule.dim_scalar(coupled_sector_of(region)))
                 .sum::<f64>()
         });
         Ok(Complex64::new(total, 0.0))
@@ -7422,7 +7406,7 @@ impl Tensor {
             let mut factors: Vec<Option<(CudaDenseStorage, CudaDenseStorage)>> =
                 Vec::with_capacity(regions.len());
             for region in regions.iter() {
-                let sector = coupled_sector_of(region, rule);
+                let sector = coupled_sector_of(region);
                 if region.rows() == 0 || region.cols() == 0 {
                     spectra.push(SectorSpectrum {
                         sector,
@@ -7549,7 +7533,7 @@ impl Tensor {
                 Vec::with_capacity(regions.len());
             let mut bond_pairs: Vec<(SectorId, usize)> = Vec::with_capacity(regions.len());
             for region in regions.iter() {
-                let sector = coupled_sector_of(region, rule);
+                let sector = coupled_sector_of(region);
                 if region.rows() == 0 || region.cols() == 0 {
                     bond_pairs.push((sector, 0));
                     factors.push(None);
@@ -7684,7 +7668,7 @@ impl Tensor {
             let mut factors: Vec<Option<(CudaDenseStorage, Vec<usize>)>> =
                 Vec::with_capacity(regions.len());
             for region in regions.iter() {
-                let sector = coupled_sector_of(region, rule);
+                let sector = coupled_sector_of(region);
                 let n = region.rows();
                 if n == 0 {
                     spectra.push(SectorSpectrum {
@@ -8573,7 +8557,7 @@ mod tk_user_api_tests {
         domain_inner: Vec<NestedLabel>,
         codomain_is_dual: Vec<bool>,
         domain_is_dual: Vec<bool>,
-        coupled: Option<NestedLabel>,
+        coupled: NestedLabel,
         indices: Vec<usize>,
     }
 
@@ -8592,7 +8576,7 @@ mod tk_user_api_tests {
             domain_inner: domain_inner.to_vec(),
             codomain_is_dual: vec![false; codomain.len()],
             domain_is_dual: vec![false; domain.len()],
-            coupled: Some(coupled),
+            coupled,
             indices: indices.to_vec(),
         }
     }
@@ -8625,7 +8609,7 @@ mod tk_user_api_tests {
             domain_inner: labels(key.domain_innerlines()),
             codomain_is_dual: key.codomain_is_dual().to_vec(),
             domain_is_dual: key.domain_is_dual().to_vec(),
-            coupled: key.coupled().map(nested_label),
+            coupled: nested_label(key.coupled()),
             indices: indices.to_vec(),
         }
     }
