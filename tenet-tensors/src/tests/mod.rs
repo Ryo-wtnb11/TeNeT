@@ -31,7 +31,7 @@ use tenet_core::{
     multiplicity_free_repartition_tree_pair, unique_permute_tree_pair, BlockKey, BlockSpec,
     BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError, DegeneracyStructure,
     FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeBlockKey, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, HostReadableStorage,
+    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, Placement, ProductFusionRule,
     SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, SimilarStorage,
@@ -155,7 +155,7 @@ fn fusion_tree_test_key<
     codomain_is_dual: [bool; COD_DUAL],
     domain_is_dual: [bool; DOM_DUAL],
 ) -> BlockKey {
-    BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         codomain,
         domain,
         Some(coupled),
@@ -168,10 +168,10 @@ fn fusion_tree_test_key<
     ))
 }
 
-fn expect_tree_key(key: &BlockKey) -> FusionTreeBlockKey {
+fn expect_tree_key(key: &BlockKey) -> FusionTreePairKey {
     match key {
         BlockKey::FusionTree(tree) => tree.clone(),
-        BlockKey::Dense => panic!("test expected a fusion-tree key"),
+        _ => panic!("test expected a fusion-tree key"),
     }
 }
 
@@ -230,7 +230,7 @@ fn all_codomain_fusion_tree_test_key_for_rule<
 where
     R: FusionRule,
 {
-    let tree_pair = FusionTreeBlockKey::pair(
+    let tree_pair = FusionTreePairKey::pair(
         FusionTreeKey::try_from_sector_ids_for_rule(
             rule,
             codomain,
@@ -532,8 +532,8 @@ impl MultiplicityFreePivotalSymbols for UniqueAnyonicRule {
 
     fn foldright_scalar(
         &self,
-        _source: &FusionTreeBlockKey,
-        _destination: &FusionTreeBlockKey,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
     ) -> Self::Scalar {
         1.0
     }
@@ -735,8 +735,8 @@ impl MultiplicityFreePivotalSymbols for UnitaryPhaseAnyonicRule {
 
     fn foldright_scalar(
         &self,
-        _source: &FusionTreeBlockKey,
-        _destination: &FusionTreeBlockKey,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
     ) -> Self::Scalar {
         Complex64::new(1.0, 0.0)
     }
@@ -1336,11 +1336,11 @@ fn assert_tree_multi_keyed_dtype<T>(
         + strided_kernel::MaybeSendSync
         + RecouplingCoefficientAction<T>,
 {
-    let key10 = BlockKey::sector_ids([10]);
-    let key20 = BlockKey::sector_ids([20]);
-    let key100 = BlockKey::sector_ids([100]);
-    let key200 = BlockKey::sector_ids([200]);
-    let key300 = BlockKey::sector_ids([300]);
+    let key10 = BlockKey::opaque([10]);
+    let key20 = BlockKey::opaque([20]);
+    let key100 = BlockKey::opaque([100]);
+    let key200 = BlockKey::opaque([200]);
+    let key300 = BlockKey::opaque([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(

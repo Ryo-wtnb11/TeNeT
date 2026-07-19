@@ -2,7 +2,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
 
-use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreeBlockKey};
+use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreePairKey};
 use tenet_dense::DefaultDenseExecutor;
 use tenet_operations::{
     try_tree_transform_structure_overwrite_owned_raw, TransposeBackend, TreeTransformBlockSpec,
@@ -42,7 +42,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn canonical_structure() -> Arc<BlockStructure> {
-    let key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),

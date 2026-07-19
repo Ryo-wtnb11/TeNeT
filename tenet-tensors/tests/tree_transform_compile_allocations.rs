@@ -1,10 +1,16 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use tenet_core::{
-    BlockKey, BlockStructure, DegeneracyStructure, FusionProductSpace, FusionTreeBlockKey,
-    FusionTreeHomSpace, FusionTreeKey, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorStructure, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
+    BlockKey, BlockStructure, BraidingStyleKind, DegeneracyStructure, FusionProductSpace,
+    FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, TensorMap,
+    TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
@@ -47,9 +53,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// Why not rely on thread-local allocation counters alone: categorical plan
+// compilation and reset still mutate shared process-global cache state.
+static GLOBAL_CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
+
 fn su2_f_move_structure() -> BlockStructure {
     let keys = [[0, 1], [2, 1]].map(|inner| {
-        BlockKey::from(FusionTreeBlockKey::pair(
+        BlockKey::from(FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
                 [SectorId::new(1); 4],
@@ -68,6 +78,172 @@ fn su2_f_move_structure() -> BlockStructure {
         DegeneracyStructure::packed_column_major(4, [vec![1; 4], vec![1; 4]]).unwrap(),
     )
     .unwrap()
+}
+
+#[derive(Clone)]
+struct AdmissionCountingSu2Rule {
+    nsymbol_calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct AdmissionCountingSu2CacheKey;
+
+impl FusionRule for AdmissionCountingSu2Rule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        SU2FusionRule.rule_identity()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        SU2FusionRule.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        SU2FusionRule.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SU2FusionRule.vacuum()
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        SU2FusionRule.dual(sector)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        SU2FusionRule.fusion_channels(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_calls.fetch_add(1, Ordering::Relaxed);
+        SU2FusionRule.nsymbol(left, right, coupled)
+    }
+}
+
+impl MultiplicityFreeFusionRule for AdmissionCountingSu2Rule {}
+
+impl MultiplicityFreeFusionSymbols for AdmissionCountingSu2Rule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        SU2FusionRule.scalar_one()
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        SU2FusionRule.scalar_conj(value)
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        SU2FusionRule.f_symbol_scalar(left, middle, right, coupled, left_coupled, right_coupled)
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        SU2FusionRule.r_symbol_scalar(left, right, coupled)
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for AdmissionCountingSu2Rule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.dim_scalar(sector)
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.inv_dim_scalar(sector)
+    }
+
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.sqrt_dim_scalar(sector)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.inv_sqrt_dim_scalar(sector)
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.twist_scalar(sector)
+    }
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.frobenius_schur_phase_scalar(sector)
+    }
+}
+
+impl tenet_tensors::TreeTransformRuleCacheKey for AdmissionCountingSu2Rule {
+    type Key = AdmissionCountingSu2CacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        AdmissionCountingSu2CacheKey
+    }
+}
+
+fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
+    const RANK: usize = 129;
+
+    let vacuum = SectorId::new(0);
+    let key = FusionTreePairKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            vec![vacuum; RANK],
+            Some(vacuum),
+            vec![false; RANK],
+            vec![vacuum; RANK - 2],
+            vec![SectorId::new(1); RANK - 1],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], Some(vacuum), [], [], []).unwrap(),
+    );
+    Arc::new(
+        BlockStructure::from_parts(
+            SectorStructure::from_keys(RANK, [BlockKey::from(key)]).unwrap(),
+            DegeneracyStructure::packed_column_major(RANK, [vec![1; RANK]]).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn rank_129_second_exact_warm_structure_hit_is_allocation_and_provider_free() {
+    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_global_operation_caches();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rule = AdmissionCountingSu2Rule {
+        nsymbol_calls: Arc::clone(&calls),
+    };
+    let structure = rank_129_su2_vacuum_structure();
+    let operation = TreeTransformOperation::permute(0..129, []);
+    let mut cache = TreeTransformCache::<f64, AdmissionCountingSu2CacheKey>::default();
+    let cold = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, false,
+        )
+        .unwrap();
+    assert!(calls.load(Ordering::Relaxed) > 0);
+
+    calls.store(0, Ordering::Relaxed);
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let warm = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, false,
+        )
+        .unwrap();
+    COUNTING.set(false);
+
+    // What: a dynamic-rank categorical replay reuses the exact structural
+    // admission and compiled plan without rank-dependent scratch or providers.
+    assert!(Arc::ptr_eq(&cold, &warm));
+    assert_eq!(ALLOCATIONS.get(), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -170,7 +346,25 @@ fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 
 
 #[test]
 fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
-    for (missing, expected_allocations) in [(1, 64), (2, 68), (4, 78), (5, 87), (8, 95), (9, 106)] {
+    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // What: exact counts cover missing-position plan compilation after registry
+    // capacity exists, independently of unrelated typed-cache test order.
+    reset_global_operation_caches();
+    let (dst, src) = rank_eight_su2_subset(1);
+    TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new()
+        .get_or_compile_tree_pair(
+            &SU2FusionRule,
+            TreeTransformOperation::permute(0..8, []),
+            &dst,
+            &src,
+        )
+        .unwrap();
+    reset_global_operation_caches();
+
+    for (missing, expected_allocations) in [(1, 63), (2, 68), (4, 78), (5, 87), (8, 95), (9, 106)] {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(missing);
         let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
@@ -198,7 +392,7 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
 fn rank_one_u1_pair_structure(count: usize) -> BlockStructure {
     let keys = (0..count).map(|charge| {
         let sector = U1Irrep::new(charge as i32).sector_id();
-        BlockKey::from(FusionTreeBlockKey::pair(
+        BlockKey::from(FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], Some(sector), [false], [], [])
                 .unwrap(),
             FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], Some(sector), [false], [], [])

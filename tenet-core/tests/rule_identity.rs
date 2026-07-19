@@ -1,10 +1,10 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tenet_core::{
-    product_fusion_rule, BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace,
-    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
-    MultiplicityFreeFusionRule, RuleIdentity, SectorId, SectorLeg, SectorVec, TabulatedFusionRule,
-    TensorMapSpace, Z2FusionRule,
+    product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CoreError,
+    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreeKey, FusionTreePairKey, MultiplicityFreeFusionRule, RuleIdentity, SectorId,
+    SectorLeg, SectorVec, TabulatedFusionRule, TensorMapSpace, Z2FusionRule,
 };
 
 #[derive(Clone, Debug)]
@@ -119,12 +119,119 @@ fn content_identity_hash_cost_does_not_scale_with_table_bytes() {
 }
 
 fn raw_scalar_space() -> FusionTensorMapSpace<0, 0> {
+    let key = FusionTreePairKey::pair_from_sector_ids([], [], None, [], [], [], [], [], []);
     FusionTensorMapSpace::new_unbound(
         TensorMapSpace::from_dims([], []).unwrap(),
         FusionTreeHomSpace::from_sector_ids([], []),
-        BlockStructure::packed_column_major(0, [vec![]]).unwrap(),
+        BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+            key.into(),
+            vec![],
+            0,
+        )
+        .unwrap()])
+        .unwrap(),
     )
     .unwrap()
+}
+
+fn raw_scalar_space_with_key(key: BlockKey) -> FusionTensorMapSpace<0, 0> {
+    FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::from_dims([], []).unwrap(),
+        FusionTreeHomSpace::from_sector_ids([], []),
+        BlockStructure::from_blocks(vec![
+            BlockSpec::column_major_with_key(key, vec![], 0).unwrap()
+        ])
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn raw_scalar_space_for_rule<R: FusionRule>(rule: &R) -> FusionTensorMapSpace<0, 0> {
+    let empty_tree = FusionTreeKey::try_new_for_rule(rule, [], None, [], [], []).unwrap();
+    let key = FusionTreePairKey::pair(empty_tree.clone(), empty_tree);
+    raw_scalar_space_with_key(key.into())
+}
+
+#[test]
+fn binding_a_rule_rejects_non_categorical_block_namespaces() {
+    // What: neither the anonymous dense key nor application routing metadata
+    // can acquire a categorical rule identity.
+    for key in [BlockKey::Dense, BlockKey::opaque([0])] {
+        let error = raw_scalar_space_with_key(key)
+            .try_bind_rule(&Z2FusionRule)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ExpectedFusionTreePairKey { .. }));
+    }
+}
+
+#[test]
+fn identity_inheritance_rejects_non_categorical_destinations() {
+    let source = raw_scalar_space_for_rule(&Z2FusionRule)
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+
+    for key in [BlockKey::Dense, BlockKey::opaque([0])] {
+        let error = raw_scalar_space_with_key(key.clone())
+            .try_inherit_rule_identity(&source)
+            .unwrap_err();
+
+        // What: a valid source tag cannot turn anonymous or application-owned
+        // block routing into a categorical contract space.
+        assert_eq!(
+            error,
+            CoreError::ExpectedFusionTreePairKey { actual: key.kind() }
+        );
+    }
+}
+
+#[test]
+fn missing_source_identity_precedes_destination_namespace_rejection() {
+    let source = raw_scalar_space();
+    let destination = raw_scalar_space_with_key(BlockKey::opaque([0]));
+
+    // What: the established source-capability error remains observable before
+    // the new constant-time destination namespace gate.
+    assert_eq!(
+        destination.try_inherit_rule_identity(&source),
+        Err(CoreError::MissingFusionRuleIdentity)
+    );
+}
+
+#[test]
+fn inherited_malformed_tree_is_revalidated_by_same_rule_binding() {
+    let source = raw_scalar_space_for_rule(&Z2FusionRule)
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+    let malformed =
+        FusionTreePairKey::pair_from_sector_ids([1], [], Some(1), [false], [], [], [], [], []);
+    let inherited = raw_scalar_space_with_key(malformed.into())
+        .try_inherit_rule_identity(&source)
+        .unwrap();
+
+    // What: an inherited identity remains a migration tag; rebinding the same
+    // rule performs LOCAL validation and rejects the rank-incoherent tree.
+    assert_eq!(
+        inherited.try_bind_rule(&Z2FusionRule),
+        Err(CoreError::StructureRankMismatch {
+            expected: 0,
+            actual: 1,
+        })
+    );
+}
+
+#[test]
+fn noncategorical_contract_route_cannot_acquire_an_inherited_tag() {
+    let source = raw_scalar_space_for_rule(&Z2FusionRule)
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+    let contract_layout = raw_scalar_space_with_key(BlockKey::opaque([17, 23]));
+
+    // What: the former silent contract-layout route stops at namespace
+    // admission instead of returning a rule-tagged application-key space.
+    assert!(matches!(
+        contract_layout.try_inherit_rule_identity(&source),
+        Err(CoreError::ExpectedFusionTreePairKey { .. })
+    ));
 }
 
 #[test]
@@ -158,7 +265,7 @@ fn generic_space_rejects_a_different_tabulated_rule() {
     const SU4: &[u8] = include_bytes!("../src/testdata/su4_table.bin");
     let su3 = TabulatedFusionRule::try_from_bytes(SU3, "su3-table.bin").unwrap();
     let su4 = TabulatedFusionRule::try_from_bytes(SU4, "su4-table.bin").unwrap();
-    let space = raw_scalar_space().try_bind_rule(&su3).unwrap();
+    let space = raw_scalar_space_for_rule(&su3).try_bind_rule(&su3).unwrap();
 
     assert!(matches!(
         space.validate_rule(&su4),

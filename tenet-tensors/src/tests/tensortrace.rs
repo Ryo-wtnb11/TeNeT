@@ -409,7 +409,7 @@ fn tensortrace_rejects_invalid_axis_sets_at_compile_time() {
 #[test]
 fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() {
     let cod_sector = SectorId::new(1);
-    let dom_sector = SectorId::new(2);
+    let dom_sector = SectorId::new(1);
     let hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(cod_sector, 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(dom_sector, 3)], false)]),
@@ -417,7 +417,26 @@ fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() 
     let structure = BlockStructure::from_blocks_with_rank(
         2,
         vec![BlockSpec::with_key(
-            fusion_tree_test_key([1], [2], 3, [false], [false]),
+            BlockKey::from(FusionTreePairKey::pair(
+                FusionTreeKey::try_new_for_rule(
+                    &Z2FusionRule,
+                    [cod_sector],
+                    Some(cod_sector),
+                    [false],
+                    [],
+                    [],
+                )
+                .unwrap(),
+                FusionTreeKey::try_new_for_rule(
+                    &Z2FusionRule,
+                    [dom_sector],
+                    Some(dom_sector),
+                    [false],
+                    [],
+                    [],
+                )
+                .unwrap(),
+            )),
             vec![2, 3],
             vec![1, 2],
             5,
@@ -970,7 +989,7 @@ fn scalar_trace_term_oracle<R>(
     trace_lhs_axes: &[usize],
     trace_rhs_axes: &[usize],
     dst_codomain_rank: usize,
-) -> Vec<(FusionTreeBlockKey, FusionTreeBlockKey, usize, usize, f64)>
+) -> Vec<(FusionTreePairKey, FusionTreePairKey, usize, usize, f64)>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -1022,9 +1041,9 @@ where
                     trace_factor *= rule.twist_scalar(sector);
                 }
             }
-            let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, dst_domain_tree);
+            let dst_key = FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree);
             let dst_block = dst_structure
-                .find_block_index_by_fusion_tree_key(&dst_key)
+                .find_block_index_by_fusion_tree_pair(&dst_key)
                 .unwrap();
             terms.push((
                 dst_key,
@@ -1487,7 +1506,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
                     let codomain = key.codomain_tree();
                     // What: the later member is deliberately malformed so the
                     // public trace boundary proves source-major group admission.
-                    let raw = FusionTreeBlockKey::pair_from_sector_ids(
+                    let raw = FusionTreePairKey::pair_from_sector_ids(
                         codomain.uncoupled().iter().map(|sector| sector.id()),
                         Vec::<usize>::new(),
                         None,
@@ -1498,7 +1517,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
                         codomain.vertices().iter().map(|sector| sector.id()),
                         Vec::<usize>::new(),
                     );
-                    FusionTreeBlockKey::pair(raw.codomain_tree().clone(), key.domain_tree().clone())
+                    FusionTreePairKey::pair(raw.codomain_tree().clone(), key.domain_tree().clone())
                         .into()
                 } else {
                     block.key().clone()
@@ -1520,7 +1539,7 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
         malformed_structure,
     )
     .unwrap()
-    .try_bind_rule(&rule)
+    .try_inherit_rule_identity(src.fusion_space().unwrap())
     .unwrap();
     let malformed_src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
         vec![0.0; malformed_src_space.required_len().unwrap()],

@@ -372,13 +372,7 @@ mod inactive_destination_tests {
     }
 
     fn block(sector: usize, shape: usize, stride: usize, offset: usize) -> BlockSpec {
-        BlockSpec::with_key(
-            BlockKey::sector_ids([sector]),
-            vec![shape],
-            vec![stride],
-            offset,
-        )
-        .unwrap()
+        BlockSpec::with_key(BlockKey::ordinal(sector), vec![shape], vec![stride], offset).unwrap()
     }
 
     fn identity_multi_fixture() -> (
@@ -538,9 +532,7 @@ mod inactive_destination_tests {
         let src_structure = BlockStructure::packed_column_major(2, [vec![2, 2]]).unwrap();
         let dst_structure = BlockStructure::from_blocks_with_rank(
             2,
-            vec![
-                BlockSpec::with_key(BlockKey::sector_ids([0]), vec![2, 2], vec![1, 1], 0).unwrap(),
-            ],
+            vec![BlockSpec::with_key(BlockKey::opaque([0]), vec![2, 2], vec![1, 1], 0).unwrap()],
         )
         .unwrap();
         assert_eq!(
@@ -2236,12 +2228,12 @@ mod owned_overwrite_tests {
     use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
     use num_complex::Complex64;
     use tenet_core::{
-        BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, FusionTreeBlockKey,
-        FusionTreeHomSpace, SectorLeg, TensorMapSpace, Z2FusionRule, Z2Irrep,
+        BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
+        FusionTreePairKey, SectorLeg, TensorMapSpace, Z2FusionRule, Z2Irrep,
     };
 
     fn canonical_structure(offset: usize) -> Arc<BlockStructure> {
-        let key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        let key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
             [1],
             [1],
             Some(1),

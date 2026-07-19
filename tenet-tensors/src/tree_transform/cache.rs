@@ -9,8 +9,8 @@ use std::sync::{Arc, RwLock};
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
-    FusionTreeKey, GenericBraidScalar, GenericRigidSymbols,
+    BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreeKey,
+    FusionTreePairKey, GenericBraidScalar, GenericRigidSymbols,
     LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
@@ -28,13 +28,14 @@ use super::operation::{
 use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated,
     build_generic_tree_pair_transform_group_plan_validated,
-    build_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
+    build_tree_pair_transform_group_plan_validated, validate_all_codomain_namespace_before_cache,
+    validate_generic_tree_pair_preflight,
     validate_multiplicity_free_all_codomain_preflight_after_capability,
     validate_multiplicity_free_tree_pair_preflight,
     validate_multiplicity_free_tree_pair_preflight_after_capability,
     validate_multiplicity_free_tree_transform_capability,
-    LocallyValidatedAllCodomainFusionTreeBlockStructure, TreeTransformGroupBlockSpec,
-    TreeTransformGroupPlan,
+    validate_tree_pair_namespace_before_cache, LocallyValidatedAllCodomainFusionTreeBlockStructure,
+    TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -411,6 +412,9 @@ fn load_persistent_builtin_tree_plans_if_needed() {
         .write()
         .expect("global tree-transform plan cache poisoned");
     for (key, plan) in entries {
+        if !builtin_tree_plan_is_multiplicity_free(&key, &plan) {
+            continue;
+        }
         plans.entry(key).or_insert_with(|| Arc::new(plan));
     }
     *loaded = true;
@@ -445,7 +449,9 @@ fn persist_builtin_tree_plans_if_enabled() {
     if count < last + core::cmp::max(64, last / 8) {
         return;
     }
-    let bytes = encode_builtin_tree_plan_cache(&plans);
+    let Ok(bytes) = encode_builtin_tree_plan_cache(&plans) else {
+        return;
+    };
     last_persisted_plan_count().store(count, Ordering::Relaxed);
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_err() {
@@ -463,7 +469,7 @@ fn encode_builtin_tree_plan_cache(
         TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>,
         Arc<TreeTransformGroupPlan<f64>>,
     >,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, ()> {
     let mut out = Vec::new();
     out.extend_from_slice(TREE_PLAN_CACHE_MAGIC);
     write_u64(&mut out, TREE_PLAN_CACHE_VERSION);
@@ -476,10 +482,10 @@ fn encode_builtin_tree_plan_cache(
         .filter(|(key, plan)| builtin_tree_plan_is_multiplicity_free(key, plan));
     write_usize(&mut out, persistent_plans.clone().count());
     for (key, plan) in persistent_plans {
-        encode_builtin_tree_plan_key(&mut out, key);
-        encode_tree_transform_group_plan_f64(&mut out, plan);
+        encode_builtin_tree_plan_key(&mut out, key)?;
+        encode_tree_transform_group_plan_f64(&mut out, plan)?;
     }
-    out
+    Ok(out)
 }
 
 fn builtin_tree_plan_is_multiplicity_free(
@@ -499,10 +505,10 @@ fn builtin_tree_plan_is_multiplicity_free(
 
 fn block_key_is_multiplicity_free(key: &BlockKey) -> bool {
     match key {
-        BlockKey::Dense => true,
         BlockKey::FusionTree(tree) => {
             !tree.codomain_tree().has_multiplicity() && !tree.domain_tree().has_multiplicity()
         }
+        _ => false,
     }
 }
 
@@ -534,7 +540,7 @@ fn decode_builtin_tree_plan_cache(
 fn encode_builtin_tree_plan_key(
     out: &mut Vec<u8>,
     key: &TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>,
-) {
+) -> Result<(), ()> {
     encode_builtin_rule_key(out, *key.rule());
     encode_plan_scope(out, key.scope());
     encode_tree_transform_operation(out, key.operation());
@@ -543,9 +549,10 @@ fn encode_builtin_tree_plan_key(
         encode_fusion_tree_group_key(out, group.group_key());
         write_usize(out, group.src_keys().len());
         for key in group.src_keys() {
-            encode_block_key(out, key);
+            encode_block_key(out, key)?;
         }
     }
+    Ok(())
 }
 
 fn decode_builtin_tree_plan_key(
@@ -576,17 +583,20 @@ fn decode_builtin_tree_plan_key(
     })
 }
 
-fn encode_tree_transform_group_plan_f64(out: &mut Vec<u8>, plan: &TreeTransformGroupPlan<f64>) {
+fn encode_tree_transform_group_plan_f64(
+    out: &mut Vec<u8>,
+    plan: &TreeTransformGroupPlan<f64>,
+) -> Result<(), ()> {
     write_usize(out, plan.specs().len());
     for spec in plan.specs() {
         encode_fusion_tree_group_key(out, spec.group_key());
         write_usize(out, spec.dst_keys().len());
         for key in spec.dst_keys() {
-            encode_block_key(out, key);
+            encode_block_key(out, key)?;
         }
         write_usize(out, spec.src_keys().len());
         for key in spec.src_keys() {
-            encode_block_key(out, key);
+            encode_block_key(out, key)?;
         }
         write_usize(out, spec.recoupling_coefficients_dst_src().len());
         for &coefficient in spec.recoupling_coefficients_dst_src() {
@@ -603,6 +613,7 @@ fn encode_tree_transform_group_plan_f64(out: &mut Vec<u8>, plan: &TreeTransformG
             None => out.push(0),
         }
     }
+    Ok(())
 }
 
 fn decode_tree_transform_group_plan_f64(
@@ -772,36 +783,35 @@ fn decode_fusion_tree_group_key(input: &mut CacheBytes<'_>) -> Result<FusionTree
     ))
 }
 
-fn encode_block_key(out: &mut Vec<u8>, key: &BlockKey) {
-    match key {
-        BlockKey::Dense => out.push(0),
-        BlockKey::FusionTree(tree) => {
-            out.push(1);
-            encode_fusion_tree_block_key(out, tree);
-        }
-    }
+fn encode_block_key(out: &mut Vec<u8>, key: &BlockKey) -> Result<(), ()> {
+    let Some(tree) = key.as_fusion_tree_pair() else {
+        return Err(());
+    };
+    out.push(1);
+    encode_fusion_tree_pair_key(out, tree);
+    Ok(())
 }
 
 fn decode_block_key(input: &mut CacheBytes<'_>) -> Result<BlockKey, ()> {
     match input.read_u8()? {
         0 => Ok(BlockKey::Dense),
-        1 => Ok(BlockKey::FusionTree(decode_fusion_tree_block_key(input)?)),
+        1 => Ok(BlockKey::FusionTree(decode_fusion_tree_pair_key(input)?)),
         _ => Err(()),
     }
 }
 
-fn encode_fusion_tree_block_key(out: &mut Vec<u8>, key: &FusionTreeBlockKey) {
+fn encode_fusion_tree_pair_key(out: &mut Vec<u8>, key: &FusionTreePairKey) {
     encode_fusion_tree_key(out, key.codomain_tree());
     encode_fusion_tree_key(out, key.domain_tree());
 }
 
-fn decode_fusion_tree_block_key(input: &mut CacheBytes<'_>) -> Result<FusionTreeBlockKey, ()> {
+fn decode_fusion_tree_pair_key(input: &mut CacheBytes<'_>) -> Result<FusionTreePairKey, ()> {
     let codomain = decode_fusion_tree_key_parts(input)?;
     let domain = decode_fusion_tree_key_parts(input)?;
     if codomain.coupled != domain.coupled {
         return Err(());
     }
-    Ok(FusionTreeBlockKey::pair_from_sector_ids(
+    Ok(FusionTreePairKey::pair_from_sector_ids(
         codomain.uncoupled.into_iter().map(SectorId::id),
         domain.uncoupled.into_iter().map(SectorId::id),
         codomain.coupled.map(SectorId::id),
@@ -996,6 +1006,20 @@ mod persistence_tests {
         }
     }
 
+    fn multiplicity_free_key() -> BlockKey {
+        BlockKey::FusionTree(FusionTreePairKey::pair_from_sector_ids(
+            [1, 1],
+            [],
+            Some(0),
+            [false, false],
+            [],
+            [],
+            [],
+            [1],
+            [],
+        ))
+    }
+
     fn decode_hex_fixture(hex: &str) -> Vec<u8> {
         fn nibble(byte: u8) -> u8 {
             match byte {
@@ -1054,10 +1078,17 @@ mod persistence_tests {
             specs[0].source_axes().unwrap(),
             specs[1].source_axes().unwrap(),
         ));
+        assert!(!builtin_tree_plan_is_multiplicity_free(
+            &decoded[0].0,
+            &decoded[0].1
+        ));
 
+        // What: legacy dense entries remain readable, but the current v2
+        // writer and loader never admit a non-categorical block namespace.
         let mut reencoded = FxHashMap::default();
         reencoded.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
-        assert_eq!(encode_builtin_tree_plan_cache(&reencoded), bytes);
+        let current = encode_builtin_tree_plan_cache(&reencoded).unwrap();
+        assert!(decode_builtin_tree_plan_cache(&current).unwrap().is_empty());
     }
 
     #[test]
@@ -1071,50 +1102,51 @@ mod persistence_tests {
             operation: TreeTransformOperation::braid([0, 1], [], [3, 5], []),
             source_groups: vec![TreeTransformSourceGroupKey {
                 group_key: group_key.clone(),
-                src_keys: vec![BlockKey::Dense],
+                src_keys: vec![multiplicity_free_key()],
             }],
         };
+        let categorical_key = multiplicity_free_key();
         let legacy_single = TreeTransformGroupBlockSpec::multi(
             group_key.clone(),
-            [BlockKey::Dense],
-            [BlockKey::Dense],
+            [categorical_key.clone()],
+            [categorical_key.clone()],
             vec![1.25],
         )
         .with_source_axes([0, 1]);
-        let mixed_multi = TreeTransformGroupBlockSpec::multi(
-            group_key.clone(),
-            [BlockKey::sector_ids([10]), BlockKey::sector_ids([20])],
-            [BlockKey::sector_ids([30]), BlockKey::sector_ids([40])],
-            vec![1.0, 2.0, 3.0, 4.0],
-        )
-        .with_source_axes([0, 1]);
-        let plan = Arc::new(TreeTransformGroupPlan::new(vec![
-            legacy_single,
-            mixed_multi.clone(),
-        ]));
+        let plan = Arc::new(TreeTransformGroupPlan::new(vec![legacy_single]));
         let current_plan = Arc::new(TreeTransformGroupPlan::new(vec![
-            TreeTransformGroupBlockSpec::single(group_key, BlockKey::Dense, BlockKey::Dense, 1.25)
-                .with_source_axes([0, 1]),
-            mixed_multi,
+            TreeTransformGroupBlockSpec::single(
+                group_key,
+                categorical_key.clone(),
+                categorical_key,
+                1.25,
+            )
+            .with_source_axes([0, 1]),
         ]));
         let mut plans = FxHashMap::default();
         plans.insert(key.clone(), Arc::clone(&plan));
 
-        let mut bytes = encode_builtin_tree_plan_cache(&plans);
+        let mut bytes = encode_builtin_tree_plan_cache(&plans).unwrap();
         let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
         assert_eq!(decoded, vec![(key, (*plan).clone())]);
         let mut current_plans = FxHashMap::default();
         current_plans.insert(decoded[0].0.clone(), current_plan);
-        assert_eq!(encode_builtin_tree_plan_cache(&current_plans), bytes);
+        assert_eq!(
+            encode_builtin_tree_plan_cache(&current_plans).unwrap(),
+            bytes
+        );
         let mut decoded_plans = FxHashMap::default();
         decoded_plans.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
-        assert_eq!(encode_builtin_tree_plan_cache(&decoded_plans), bytes);
+        assert_eq!(
+            encode_builtin_tree_plan_cache(&decoded_plans).unwrap(),
+            bytes
+        );
 
         let version_offset = TREE_PLAN_CACHE_MAGIC.len();
         bytes[version_offset..version_offset + 8].copy_from_slice(&1_u64.to_le_bytes());
         assert!(decode_builtin_tree_plan_cache(&bytes).is_err());
 
-        let mut bytes = encode_builtin_tree_plan_cache(&plans);
+        let mut bytes = encode_builtin_tree_plan_cache(&plans).unwrap();
         let authority_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8 + 1;
         bytes[authority_offset] = tenet_core::SU2_EXACT_AUTHORITY_VERSION + 1;
         assert!(decode_builtin_tree_plan_cache(&bytes).is_err());
@@ -1134,7 +1166,7 @@ mod persistence_tests {
         .unwrap();
         let generic_domain = FusionTreeKey::try_new_for_rule(&rule, [], None, [], [], []).unwrap();
         let generic_key =
-            BlockKey::FusionTree(FusionTreeBlockKey::pair(generic_codomain, generic_domain));
+            BlockKey::FusionTree(FusionTreePairKey::pair(generic_codomain, generic_domain));
         let group_key = FusionTreeGroupKey::from_sector_ids([0], [], [false], []);
         let operation = TreeTransformOperation::braid([0], [], [0], []);
         let generic_plan_key = TreeTransformSectorPlanKey {
@@ -1164,17 +1196,24 @@ mod persistence_tests {
             operation,
             source_groups: vec![TreeTransformSourceGroupKey {
                 group_key: group_key.clone(),
-                src_keys: vec![BlockKey::Dense],
+                src_keys: vec![multiplicity_free_key()],
             }],
         };
+        let multiplicity_free_key = multiplicity_free_key();
         let multiplicity_free_plan = Arc::new(TreeTransformGroupPlan::new(vec![
-            TreeTransformGroupBlockSpec::single(group_key, BlockKey::Dense, BlockKey::Dense, 1.0),
+            TreeTransformGroupBlockSpec::single(
+                group_key,
+                multiplicity_free_key.clone(),
+                multiplicity_free_key,
+                1.0,
+            ),
         ]));
         let mut plans = FxHashMap::default();
         plans.insert(generic_plan_key.clone(), generic_plan);
         plans.insert(multiplicity_free_plan_key.clone(), multiplicity_free_plan);
 
-        let decoded = decode_builtin_tree_plan_cache(&encode_builtin_tree_plan_cache(&plans))
+        let encoded = encode_builtin_tree_plan_cache(&plans).unwrap();
+        let decoded = decode_builtin_tree_plan_cache(&encoded)
             .expect("multiplicity-free persistent entry decodes");
 
         // What: v2 cannot encode the outer-multiplicity identity bit, so only
@@ -1183,6 +1222,88 @@ mod persistence_tests {
         assert_eq!(decoded[0].0, multiplicity_free_plan_key);
         assert_eq!(plans.len(), 2);
         assert!(plans.contains_key(&generic_plan_key));
+    }
+
+    #[test]
+    fn persistent_v2_never_writes_dense_or_opaque_block_keys() {
+        let group_key = FusionTreeGroupKey::from_sector_ids([1, 1], [], [false, false], []);
+        let operation = TreeTransformOperation::braid([0, 1], [], [0, 1], []);
+        let make_entry = |block_key: BlockKey| {
+            let key = TreeTransformSectorPlanKey {
+                rule: TreeTransformBuiltinRuleCacheKey::Z2,
+                scope: TreeTransformPlanScope::TreePair,
+                operation: operation.clone(),
+                source_groups: vec![TreeTransformSourceGroupKey {
+                    group_key: group_key.clone(),
+                    src_keys: vec![block_key.clone()],
+                }],
+            };
+            let plan = Arc::new(TreeTransformGroupPlan::new(vec![
+                TreeTransformGroupBlockSpec::single(
+                    group_key.clone(),
+                    block_key.clone(),
+                    block_key,
+                    1.0,
+                ),
+            ]));
+            (key, plan)
+        };
+        let mut plans = FxHashMap::default();
+        let (dense_key, dense_plan) = make_entry(BlockKey::Dense);
+        let (opaque_key, opaque_plan) = make_entry(BlockKey::opaque([7, 11]));
+        let (categorical_key, categorical_plan) = make_entry(multiplicity_free_key());
+        plans.insert(dense_key, dense_plan);
+        plans.insert(opaque_key, opaque_plan);
+        plans.insert(categorical_key.clone(), categorical_plan);
+
+        let encoded = encode_builtin_tree_plan_cache(&plans).unwrap();
+        let decoded = decode_builtin_tree_plan_cache(&encoded).unwrap();
+
+        // What: v2 persistence skips whole non-categorical plans rather than
+        // emitting an ambiguous tag or a partially encoded entry.
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, categorical_key);
+    }
+
+    #[test]
+    fn legacy_v2_pre_split_sector_key_bytes_remain_categorical_without_opaque_aliasing() {
+        // What: literal v2 bytes emitted for the old
+        // `BlockKey::sector_ids([1, 1])` representation. Before namespace
+        // separation that application label was serialized as a malformed
+        // categorical pair: two codomain sectors, no coupled sector, no
+        // vertices, and an empty domain tree.
+        const PRE_SPLIT_FAKE_CATEGORICAL_KEY: &str = concat!(
+            "01",
+            "0200000000000000",
+            "0100000000000000",
+            "0100000000000000",
+            "00",
+            "0200000000000000",
+            "0000",
+            "0000000000000000",
+            "0000000000000000",
+            "0000000000000000",
+            "00",
+            "0000000000000000",
+            "0000000000000000",
+            "0000000000000000",
+        );
+        let bytes = decode_hex_fixture(PRE_SPLIT_FAKE_CATEGORICAL_KEY);
+        let mut input = CacheBytes::new(&bytes);
+        let decoded = decode_block_key(&mut input).unwrap();
+        input.finish().unwrap();
+
+        let tree = decoded
+            .as_fusion_tree_pair()
+            .expect("legacy tag 1 remains categorical");
+        assert_eq!(
+            tree.codomain_uncoupled(),
+            &[SectorId::new(1), SectorId::new(1)]
+        );
+        assert_eq!(tree.coupled(), None);
+        assert!(tree.codomain_vertices().is_empty());
+        assert!(tree.validate_for_rule(&tenet_core::Z2FusionRule).is_err());
+        assert_ne!(decoded, BlockKey::opaque([1, 1]));
     }
 }
 
@@ -1649,6 +1770,7 @@ where
         DSrc: TensorStorage<TSrc>,
     {
         validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
+        validate_tree_pair_namespace_before_cache(&operation, src.structure())?;
         if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
             let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
                 rule,
@@ -1762,6 +1884,7 @@ where
         RuleKey: 'static + Send + Sync,
     {
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
+        validate_tree_pair_namespace_before_cache(operation, src_structure)?;
         if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
             let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
                 rule,
@@ -2065,6 +2188,7 @@ where
         DSrc: TensorStorage<TSrc>,
     {
         validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
+        validate_all_codomain_namespace_before_cache(&operation, src.structure())?;
         if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
             let source_proof = validate_multiplicity_free_all_codomain_preflight_after_capability(
                 rule,

@@ -2375,7 +2375,7 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
         [2, 1],
         [1, 1, 1],
     );
-    let scalar_key = BlockKey::from(FusionTreeBlockKey::pair(
+    let scalar_key = BlockKey::from(FusionTreePairKey::pair(
         empty_fusion_tree(),
         empty_fusion_tree(),
     ));
@@ -2791,11 +2791,11 @@ fn tensorcontract_fusion_su2_keeps_contracted_tree_basis_with_degeneracy() {
     for spec in &specs {
         let lhs_key = match lhs.structure().block(spec.lhs_block()).unwrap().key() {
             BlockKey::FusionTree(key) => key,
-            BlockKey::Dense => panic!("expected lhs fusion-tree block"),
+            _ => panic!("expected lhs fusion-tree block"),
         };
         let rhs_key = match rhs.structure().block(spec.rhs_block()).unwrap().key() {
             BlockKey::FusionTree(key) => key,
-            BlockKey::Dense => panic!("expected rhs fusion-tree block"),
+            _ => panic!("expected rhs fusion-tree block"),
         };
         assert_eq!(
             lhs_key.domain_tree().innerlines()[0],

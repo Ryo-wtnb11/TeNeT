@@ -59,7 +59,7 @@ fn eight() -> Space {
 /// (the SU(3) table labels the two vertices `1` and `2`, giving values `3, 5`).
 /// `dom` selects the domain tree (for `A`, codomain `[8]`) or the codomain tree
 /// (for `B`, codomain `[8,8]`) — whichever carries the two-leg `(8,8)` fusion.
-fn vertex_fill(key: &FusionTreeBlockKey, dom: bool) -> f64 {
+fn vertex_fill(key: &FusionTreePairKey, dom: bool) -> f64 {
     let tree = if dom {
         key.domain_tree()
     } else {

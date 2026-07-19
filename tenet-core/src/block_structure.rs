@@ -1,28 +1,11 @@
+/// Categorical identity of one codomain/domain fusion-tree basis pair.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct FusionTreeBlockKey {
+pub struct FusionTreePairKey {
     codomain_tree: FusionTreeKey,
     domain_tree: FusionTreeKey,
 }
 
-impl FusionTreeBlockKey {
-    pub fn new(
-        uncoupled: Vec<SectorId>,
-        coupled: Option<SectorId>,
-        vertices: Vec<SectorId>,
-    ) -> Self {
-        let is_dual = vec![false; uncoupled.len()];
-        Self::pair(
-            FusionTreeKey::new(uncoupled, coupled, is_dual, Vec::new(), vertices),
-            FusionTreeKey::new(
-                Vec::<SectorId>::new(),
-                None,
-                Vec::<bool>::new(),
-                Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
-            ),
-        )
-    }
-
+impl FusionTreePairKey {
     pub fn pair(codomain_tree: FusionTreeKey, domain_tree: FusionTreeKey) -> Self {
         Self {
             codomain_tree,
@@ -83,22 +66,6 @@ impl FusionTreeBlockKey {
                 domain_is_dual,
                 domain_innerlines,
                 domain_vertices,
-            ),
-        )
-    }
-
-    pub fn from_uncoupled<I>(uncoupled: I) -> Self
-    where
-        I: IntoIterator<Item = SectorId>,
-    {
-        Self::pair(
-            FusionTreeKey::from_uncoupled(uncoupled),
-            FusionTreeKey::new(
-                Vec::<SectorId>::new(),
-                None,
-                Vec::<bool>::new(),
-                Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
             ),
         )
     }
@@ -220,72 +187,222 @@ impl FusionTreeBlockKey {
         )
     }
 
+}
+
+/// Deprecated name for [`FusionTreePairKey`].
+#[deprecated(
+    since = "0.1.0",
+    note = "renamed to FusionTreePairKey to distinguish categorical tree pairs from opaque block labels"
+)]
+pub type FusionTreeBlockKey = FusionTreePairKey;
+
+/// Application-defined block identity with no categorical interpretation.
+///
+/// The number of words is independent of tensor rank. The inline capacity is
+/// a storage detail and never selects an execution path.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct OpaqueBlockKey {
+    words: SmallVec<[u64; 2]>,
+}
+
+impl OpaqueBlockKey {
+    /// Construct an opaque key from owned words.
+    pub fn new(words: Vec<u64>) -> Self {
+        Self {
+            words: words.into_iter().collect(),
+        }
+    }
+
+    /// Construct an opaque key from any sequence of words.
+    pub fn from_words<I>(words: I) -> Self
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        Self {
+            words: words.into_iter().collect(),
+        }
+    }
+
+    /// Construct the conventional one-word key for an ordinal block index.
+    pub fn ordinal(index: u64) -> Self {
+        Self::from_words([index])
+    }
+
+    /// Return the uninterpreted words that identify this block.
+    #[inline]
+    pub fn words(&self) -> &[u64] {
+        &self.words
+    }
+
     fn compact_id(&self) -> Option<usize> {
-        if self.domain_tree.uncoupled().is_empty()
-            && self.domain_tree.coupled().is_none()
-            && self.domain_tree.innerlines().is_empty()
-            && self.domain_tree.vertices().is_empty()
-        {
-            self.codomain_tree.compact_id()?.checked_add(1)
-        } else {
-            None
+        let [word] = self.words.as_slice() else {
+            return None;
+        };
+        usize::try_from(*word).ok()
+    }
+}
+
+/// Structural namespace occupied by every key in one [`SectorStructure`].
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BlockKeyKind {
+    Dense,
+    Opaque,
+    FusionTree,
+}
+
+impl fmt::Display for BlockKeyKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dense => formatter.write_str("dense"),
+            Self::Opaque => formatter.write_str("opaque"),
+            Self::FusionTree => formatter.write_str("fusion-tree"),
         }
     }
 }
 
+/// Identity of a stored tensor block.
+///
+/// A [`SectorStructure`] contains either the anonymous dense key, only opaque
+/// keys, or only categorical fusion-tree pairs.
+// Why-not box the categorical variant: every owned block key would pay a heap
+// allocation and indirection on the production lookup path. Its size is
+// intentional because the complete categorical identity is stored inline.
+#[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum BlockKey {
     Dense,
-    FusionTree(FusionTreeBlockKey),
+    Opaque(OpaqueBlockKey),
+    FusionTree(FusionTreePairKey),
 }
 
 impl BlockKey {
+    /// Return the anonymous key used by a single dense block.
     pub fn trivial() -> Self {
         Self::Dense
     }
 
+    /// Construct an application-defined opaque key.
+    pub fn opaque<I>(words: I) -> Self
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        Self::Opaque(OpaqueBlockKey::from_words(words))
+    }
+
+    /// Construct an opaque key from the numeric identities of sector values.
+    ///
+    /// This compatibility helper does not preserve categorical meaning.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use BlockKey::opaque with numeric routing words"
+    )]
     pub fn sectors<I>(sectors: I) -> Self
     where
         I: IntoIterator<Item = SectorId>,
     {
-        Self::FusionTree(FusionTreeBlockKey::from_uncoupled(sectors))
+        Self::opaque(
+            sectors
+                .into_iter()
+                .map(|sector| supported_usize_to_u64(sector.id())),
+        )
     }
 
+    /// Construct an opaque key from numeric values formerly interpreted as
+    /// sector identifiers.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use BlockKey::opaque with numeric routing words"
+    )]
     pub fn sector_ids<I>(sector_ids: I) -> Self
     where
         I: IntoIterator<Item = usize>,
     {
-        Self::sectors(sector_ids.into_iter().map(SectorId::new))
+        Self::opaque(sector_ids.into_iter().map(supported_usize_to_u64))
     }
 
+    /// Construct the conventional one-word opaque key for a block ordinal.
     pub fn ordinal(index: usize) -> Self {
-        Self::sector_ids([index])
+        Self::Opaque(OpaqueBlockKey::ordinal(supported_usize_to_u64(index)))
+    }
+
+    /// Return whether this is the anonymous dense key.
+    #[inline]
+    pub fn is_dense(&self) -> bool {
+        matches!(self, Self::Dense)
+    }
+
+    /// Borrow the opaque identity, if this key is application-defined.
+    #[inline]
+    pub fn as_opaque(&self) -> Option<&OpaqueBlockKey> {
+        match self {
+            Self::Opaque(key) => Some(key),
+            _ => None,
+        }
+    }
+
+    /// Borrow the categorical tree pair, if this key names fusion-tree data.
+    #[inline]
+    pub fn as_fusion_tree_pair(&self) -> Option<&FusionTreePairKey> {
+        match self {
+            Self::FusionTree(key) => Some(key),
+            _ => None,
+        }
+    }
+
+    /// Return this key's structural namespace.
+    #[inline]
+    pub fn kind(&self) -> BlockKeyKind {
+        match self {
+            Self::Dense => BlockKeyKind::Dense,
+            Self::Opaque(_) => BlockKeyKind::Opaque,
+            Self::FusionTree(_) => BlockKeyKind::FusionTree,
+        }
     }
 
     fn compact_id(&self) -> Option<usize> {
         match self {
             Self::Dense => Some(0),
-            Self::FusionTree(tree) => tree.compact_id(),
+            Self::Opaque(key) => key.compact_id(),
+            Self::FusionTree(_) => None,
         }
     }
 
     pub fn fusion_tree_group_key(&self) -> Option<FusionTreeGroupKey> {
         match self {
             Self::Dense => None,
+            Self::Opaque(_) => None,
             Self::FusionTree(tree) => Some(tree.group_key()),
         }
     }
 }
 
-impl From<FusionTreeBlockKey> for BlockKey {
-    fn from(value: FusionTreeBlockKey) -> Self {
-        Self::FusionTree(value)
+#[cfg(any(
+    target_pointer_width = "16",
+    target_pointer_width = "32",
+    target_pointer_width = "64"
+))]
+const fn supported_usize_to_u64(value: usize) -> u64 {
+    value as u64
+}
+
+#[cfg(not(any(
+    target_pointer_width = "16",
+    target_pointer_width = "32",
+    target_pointer_width = "64"
+)))]
+compile_error!("OpaqueBlockKey requires a target whose usize fits in u64");
+
+impl From<OpaqueBlockKey> for BlockKey {
+    fn from(value: OpaqueBlockKey) -> Self {
+        Self::Opaque(value)
     }
 }
 
-impl<const N: usize> From<[SectorId; N]> for BlockKey {
-    fn from(value: [SectorId; N]) -> Self {
-        Self::sectors(value)
+impl From<FusionTreePairKey> for BlockKey {
+    fn from(value: FusionTreePairKey) -> Self {
+        Self::FusionTree(value)
     }
 }
 
@@ -381,6 +498,12 @@ impl SectorBlock {
     }
 }
 
+/// Indices of fusion-tree pairs sharing one external-sector group.
+///
+/// Unlike TensorKit's `FusionTreeBlock`, this value does not own a vector of
+/// tree pairs; its indices refer back to the parent [`BlockStructure`].
+/// `Group` is intentional because TeNeT keeps one canonical Rust block-storage
+/// owner and uses this value only as a grouped execution view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionTreeBlockGroup {
     group_key: FusionTreeGroupKey,
@@ -409,6 +532,7 @@ impl FusionTreeBlockGroup {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SectorStructure {
     rank: usize,
+    key_kind: Option<BlockKeyKind>,
     blocks: Vec<SectorBlock>,
     sorted_indices: DimVec,
     compact_lookup: Option<CompactBlockLookup>,
@@ -422,6 +546,7 @@ impl SectorStructure {
     pub fn empty(rank: usize) -> Self {
         Self {
             rank,
+            key_kind: None,
             blocks: Vec::new(),
             sorted_indices: DimVec::new(),
             compact_lookup: None,
@@ -434,8 +559,20 @@ impl SectorStructure {
         K: Into<BlockKey>,
     {
         let mut blocks = Vec::new();
+        let mut expected_kind = None;
         for key in keys {
             let key = key.into();
+            let actual_kind = key.kind();
+            if let Some(expected) = expected_kind {
+                if expected != actual_kind {
+                    return Err(CoreError::MixedBlockKeyKinds {
+                        expected,
+                        actual: actual_kind,
+                    });
+                }
+            } else {
+                expected_kind = Some(actual_kind);
+            }
             blocks.push(SectorBlock::new(key));
         }
         let mut sorted_indices = (0..blocks.len()).collect::<DimVec>();
@@ -453,6 +590,7 @@ impl SectorStructure {
         let compact_lookup = CompactBlockLookup::from_blocks(&blocks);
         Ok(Self {
             rank,
+            key_kind: expected_kind,
             blocks,
             sorted_indices,
             compact_lookup,
@@ -467,6 +605,12 @@ impl SectorStructure {
     #[inline]
     pub fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Return the homogeneous block-key namespace, or `None` when empty.
+    #[inline]
+    pub fn key_kind(&self) -> Option<BlockKeyKind> {
+        self.key_kind
     }
 
     #[inline]
@@ -505,6 +649,9 @@ impl SectorStructure {
     }
 
     pub fn find_index(&self, key: &BlockKey) -> Option<usize> {
+        if self.key_kind != Some(key.kind()) {
+            return None;
+        }
         if let (Some(lookup), Some(id)) = (&self.compact_lookup, key.compact_id()) {
             if let Some(index) = lookup.get(id) {
                 return Some(index);
@@ -516,19 +663,26 @@ impl SectorStructure {
             .map(|position| self.sorted_indices[position])
     }
 
-    pub fn find_fusion_tree_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {
-        if let (Some(lookup), Some(id)) = (&self.compact_lookup, key.compact_id()) {
-            if let Some(index) = lookup.get(id) {
-                return Some(index);
-            }
+    pub fn find_fusion_tree_pair_index(&self, key: &FusionTreePairKey) -> Option<usize> {
+        if self.key_kind != Some(BlockKeyKind::FusionTree) {
+            return None;
         }
         self.sorted_indices
             .binary_search_by(|&index| match self.blocks[index].key() {
                 BlockKey::Dense => std::cmp::Ordering::Less,
+                BlockKey::Opaque(_) => std::cmp::Ordering::Less,
                 BlockKey::FusionTree(tree) => tree.cmp(key),
             })
             .ok()
             .map(|position| self.sorted_indices[position])
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "renamed to find_fusion_tree_pair_index to match FusionTreePairKey"
+    )]
+    pub fn find_fusion_tree_index(&self, key: &FusionTreePairKey) -> Option<usize> {
+        self.find_fusion_tree_pair_index(key)
     }
 
     #[inline]
@@ -547,6 +701,12 @@ impl SectorStructure {
                 expected: self.block_count(),
                 actual: src.block_count(),
             });
+        }
+        if self.key_kind != src.key_kind {
+            let (Some(expected), Some(actual)) = (self.key_kind, src.key_kind) else {
+                unreachable!("equal nonzero block counts cannot mix empty and nonempty structures");
+            };
+            return Err(CoreError::MixedBlockKeyKinds { expected, actual });
         }
         if let Some(src_lookup) = &src.compact_lookup {
             if self
@@ -623,6 +783,9 @@ impl CompactBlockLookup {
     const MISSING: usize = usize::MAX;
 
     fn from_blocks(blocks: &[SectorBlock]) -> Option<Self> {
+        if blocks.is_empty() {
+            return None;
+        }
         let mut max_id = 0usize;
         let mut ids = Vec::with_capacity(blocks.len());
         for block in blocks {
@@ -1186,17 +1349,20 @@ where
     ) -> Result<Self, CoreError> {
         for index in 0..structure.block_count() {
             let block = structure.block(index)?;
-            if let BlockKey::FusionTree(key) = block.key() {
-                let key_rank = key.codomain_tree().uncoupled().len()
-                    + key.domain_tree().uncoupled().len();
-                if key_rank != structure.rank() {
-                    return Err(CoreError::StructureRankMismatch {
-                        expected: structure.rank(),
-                        actual: key_rank,
-                    });
-                }
-                key.validate_for_rule(rule)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                });
+            };
+            let key_rank = key.codomain_tree().uncoupled().len()
+                + key.domain_tree().uncoupled().len();
+            if key_rank != structure.rank() {
+                return Err(CoreError::StructureRankMismatch {
+                    expected: structure.rank(),
+                    actual: key_rank,
+                });
             }
+            key.validate_for_rule(rule)?;
         }
         Ok(Self { rule, structure })
     }
@@ -1211,14 +1377,29 @@ where
         self.structure
     }
 
+    #[doc(hidden)]
+    pub fn fusion_tree_pair_key(
+        &self,
+        index: usize,
+    ) -> Result<Option<&'structure FusionTreePairKey>, CoreError> {
+        Ok(match self.structure.block(index)?.key() {
+            BlockKey::FusionTree(key) => Some(key),
+            key => {
+                return Err(CoreError::ExpectedFusionTreePairKey { actual: key.kind() });
+            }
+        })
+    }
+
+    #[doc(hidden)]
+    #[deprecated(
+        since = "0.1.0",
+        note = "renamed to fusion_tree_pair_key to match FusionTreePairKey"
+    )]
     pub fn fusion_tree_block_key(
         &self,
         index: usize,
-    ) -> Result<Option<&'structure FusionTreeBlockKey>, CoreError> {
-        Ok(match self.structure.block(index)?.key() {
-            BlockKey::Dense => None,
-            BlockKey::FusionTree(key) => Some(key),
-        })
+    ) -> Result<Option<&'structure FusionTreePairKey>, CoreError> {
+        self.fusion_tree_pair_key(index)
     }
 }
 
@@ -1232,14 +1413,14 @@ where
         &self,
         index: usize,
         operation: &PreparedTreePairOperation,
-    ) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError> {
+    ) -> Result<(FusionTreePairKey, R::Scalar), CoreError> {
         if self.rule.fusion_style() != FusionStyleKind::Unique {
             return Err(CoreError::UnsupportedFusionStyle {
                 expected: FusionStyleKind::Unique,
                 actual: self.rule.fusion_style(),
             });
         }
-        let key = self.required_fusion_tree_block_key(index)?;
+        let key = self.required_fusion_tree_pair_key(index)?;
         operation.execute_unique_rigid_proven(ValidatedFusionTreePair {
             rule: self.rule,
             key,
@@ -1250,14 +1431,14 @@ where
         &self,
         index: usize,
         operation: &PreparedTreePairOperation,
-    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
+    ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError> {
         if !self.rule.fusion_style().is_multiplicity_free() {
             return Err(CoreError::UnsupportedFusionStyle {
                 expected: FusionStyleKind::Simple,
                 actual: self.rule.fusion_style(),
             });
         }
-        let key = self.required_fusion_tree_block_key(index)?;
+        let key = self.required_fusion_tree_pair_key(index)?;
         operation.execute_multiplicity_free_proven(ValidatedFusionTreePair {
             rule: self.rule,
             key,
@@ -1268,7 +1449,7 @@ where
         &self,
         indices: I,
         operation: PreparedTreePairOperation,
-    ) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+    ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
     where
         I: IntoIterator<Item = usize>,
     {
@@ -1278,15 +1459,15 @@ where
             let (lower, upper) = indices.size_hint();
             let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
             for index in indices {
-                let source = self.required_fusion_tree_block_key(index)?;
+                let source = self.required_fusion_tree_pair_key(index)?;
                 rows.push(vec![(source.clone(), self.rule.scalar_one())]);
             }
             return Ok(rows);
         }
         let sources = indices
             .into_iter()
-            .map(|index| self.required_fusion_tree_block_key(index).cloned())
-            .collect::<Result<SmallVec<[FusionTreeBlockKey; 8]>, _>>()?;
+            .map(|index| self.required_fusion_tree_pair_key(index).cloned())
+            .collect::<Result<SmallVec<[FusionTreePairKey; 8]>, _>>()?;
         multiplicity_free_braid_tree_pair_block_proven(self.rule, &sources, operation)
     }
 
@@ -1294,7 +1475,7 @@ where
         &self,
         indices: I,
         operation: PreparedTreePairOperation,
-    ) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+    ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
     where
         I: IntoIterator<Item = usize>,
     {
@@ -1304,15 +1485,15 @@ where
             let (lower, upper) = indices.size_hint();
             let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
             for index in indices {
-                let source = self.required_fusion_tree_block_key(index)?;
+                let source = self.required_fusion_tree_pair_key(index)?;
                 rows.push(vec![(source.clone(), self.rule.scalar_one())]);
             }
             return Ok(rows);
         }
         let sources = indices
             .into_iter()
-            .map(|index| self.required_fusion_tree_block_key(index).cloned())
-            .collect::<Result<SmallVec<[FusionTreeBlockKey; 8]>, _>>()?;
+            .map(|index| self.required_fusion_tree_pair_key(index).cloned())
+            .collect::<Result<SmallVec<[FusionTreePairKey; 8]>, _>>()?;
         multiplicity_free_transpose_tree_pair_block_proven(self.rule, &sources, operation)
     }
 }
@@ -1335,7 +1516,7 @@ where
                 actual: self.rule.fusion_style(),
             });
         }
-        let source = self.required_fusion_tree_block_key(block_index)?;
+        let source = self.required_fusion_tree_pair_key(block_index)?;
         let tree = source.codomain_tree();
         let rank = tree.uncoupled().len();
         if levels.len() != rank {
@@ -1371,7 +1552,7 @@ where
                 actual: self.rule.fusion_style(),
             });
         }
-        let source = self.required_fusion_tree_block_key(block_index)?;
+        let source = self.required_fusion_tree_pair_key(block_index)?;
         let tree = source.codomain_tree();
         let rank = tree.uncoupled().len();
         let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
@@ -1398,7 +1579,7 @@ where
         let sources = indices
             .into_iter()
             .map(|index| {
-                self.required_fusion_tree_block_key(index)
+                self.required_fusion_tree_pair_key(index)
                     .map(|key| key.codomain_tree().clone())
             })
             .collect::<Result<SmallVec<[FusionTreeKey; 8]>, _>>()?;
@@ -1423,7 +1604,7 @@ where
         let rank = indices
             .first()
             .map(|&index| {
-                self.required_fusion_tree_block_key(index)
+                self.required_fusion_tree_pair_key(index)
                     .map(|key| key.codomain_tree().uncoupled().len())
             })
             .transpose()?
@@ -1444,8 +1625,8 @@ where
         block_index: usize,
         codomain_permutation: &[usize],
         domain_permutation: &[usize],
-    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
-        let source = self.required_generic_fusion_tree_block_key(block_index)?;
+    ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError> {
+        let source = self.required_generic_fusion_tree_pair_key(block_index)?;
         generic_permute_tree_pair_proven(
             ValidatedFusionTreePair {
                 rule: self.rule,
@@ -1463,8 +1644,8 @@ where
         domain_permutation: &[usize],
         codomain_levels: &[usize],
         domain_levels: &[usize],
-    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
-        let source = self.required_generic_fusion_tree_block_key(block_index)?;
+    ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError> {
+        let source = self.required_generic_fusion_tree_pair_key(block_index)?;
         generic_braid_tree_pair_proven(
             ValidatedFusionTreePair {
                 rule: self.rule,
@@ -1482,8 +1663,8 @@ where
         block_index: usize,
         codomain_permutation: &[usize],
         domain_permutation: &[usize],
-    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
-        let source = self.required_generic_fusion_tree_block_key(block_index)?;
+    ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError> {
+        let source = self.required_generic_fusion_tree_pair_key(block_index)?;
         generic_transpose_tree_pair_proven(
             ValidatedFusionTreePair {
                 rule: self.rule,
@@ -1494,17 +1675,17 @@ where
         )
     }
 
-    fn required_generic_fusion_tree_block_key(
+    fn required_generic_fusion_tree_pair_key(
         &self,
         block_index: usize,
-    ) -> Result<&FusionTreeBlockKey, CoreError> {
+    ) -> Result<&FusionTreePairKey, CoreError> {
         if self.rule.fusion_style() != FusionStyleKind::Generic {
             return Err(CoreError::UnsupportedFusionStyle {
                 expected: FusionStyleKind::Generic,
                 actual: self.rule.fusion_style(),
             });
         }
-        self.required_fusion_tree_block_key(block_index)
+        self.required_fusion_tree_pair_key(block_index)
     }
 }
 
@@ -1512,11 +1693,11 @@ impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'stru
 where
     R: FusionRule,
 {
-    fn required_fusion_tree_block_key(
+    fn required_fusion_tree_pair_key(
         &self,
         index: usize,
-    ) -> Result<&'structure FusionTreeBlockKey, CoreError> {
-        self.fusion_tree_block_key(index)?
+    ) -> Result<&'structure FusionTreePairKey, CoreError> {
+        self.fusion_tree_pair_key(index)?
             .ok_or(CoreError::MalformedFusionTree {
                 message: "validated fusion-tree group contains a dense block",
             })
@@ -1626,7 +1807,7 @@ impl BlockStructure {
         rule: &R,
         nout: usize,
         rank: usize,
-        blocks: Vec<(FusionTreeBlockKey, Vec<usize>)>,
+        blocks: Vec<(FusionTreePairKey, Vec<usize>)>,
     ) -> Result<Self, CoreError>
     where
         R: FusionRule,
@@ -1676,8 +1857,16 @@ impl BlockStructure {
         self.sector.find_index(key)
     }
 
-    pub fn find_block_index_by_fusion_tree_key(&self, key: &FusionTreeBlockKey) -> Option<usize> {
-        self.sector.find_fusion_tree_index(key)
+    pub fn find_block_index_by_fusion_tree_pair(&self, key: &FusionTreePairKey) -> Option<usize> {
+        self.sector.find_fusion_tree_pair_index(key)
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "renamed to find_block_index_by_fusion_tree_pair to match FusionTreePairKey"
+    )]
+    pub fn find_block_index_by_fusion_tree_key(&self, key: &FusionTreePairKey) -> Option<usize> {
+        self.find_block_index_by_fusion_tree_pair(key)
     }
 
     pub fn pair_block_indices_from(&self, src: &BlockStructure) -> Result<Vec<usize>, CoreError> {
@@ -1711,13 +1900,24 @@ impl BlockStructure {
         self.block(index)
     }
 
-    pub fn fusion_tree_block(&self, key: &FusionTreeBlockKey) -> Result<BlockRef<'_>, CoreError> {
+    pub fn fusion_tree_pair_block(
+        &self,
+        key: &FusionTreePairKey,
+    ) -> Result<BlockRef<'_>, CoreError> {
         let index = self
-            .find_block_index_by_fusion_tree_key(key)
+            .find_block_index_by_fusion_tree_pair(key)
             .ok_or_else(|| CoreError::MissingBlockKey {
                 key: Box::new(BlockKey::FusionTree(key.clone())),
             })?;
         self.block(index)
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "renamed to fusion_tree_pair_block to match FusionTreePairKey"
+    )]
+    pub fn fusion_tree_block(&self, key: &FusionTreePairKey) -> Result<BlockRef<'_>, CoreError> {
+        self.fusion_tree_pair_block(key)
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {

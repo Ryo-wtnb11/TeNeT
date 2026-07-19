@@ -9,7 +9,7 @@ use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
 use tenet_core::{
-    BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace,
+    BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey,
     HomSpaceId, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, TensorMap,
     TensorMapSpace,
 };
@@ -163,7 +163,7 @@ where
     let shapes = keys
         .iter()
         .map(|key| {
-            let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+            let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
                 key.domain_tree().clone(),
                 key.codomain_tree().clone(),
             ));
@@ -242,7 +242,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
@@ -408,7 +408,7 @@ where
     let shapes = keys
         .iter()
         .map(|key| {
-            let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+            let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
                 key.domain_tree().clone(),
                 key.codomain_tree().clone(),
             ));
@@ -467,7 +467,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
@@ -540,10 +540,10 @@ where
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
 
     let structure = Arc::clone(tensor.structure());
-    let source_shape_of = |key: &FusionTreeBlockKey| -> Result<Vec<usize>, OperationError> {
+    let source_shape_of = |key: &FusionTreePairKey| -> Result<Vec<usize>, OperationError> {
         // The adjoint block for (dom_tree, cod_tree) reads the source block
         // keyed by the swapped pair.
-        let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));
@@ -599,7 +599,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let source_key = BlockKey::FusionTree(FusionTreeBlockKey::pair(
+        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
             key.domain_tree().clone(),
             key.codomain_tree().clone(),
         ));

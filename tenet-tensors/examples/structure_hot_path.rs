@@ -213,14 +213,8 @@ fn run_tree_multi_keyed_case(group_count: usize, key_order: KeyOrder) {
         .map(|group| {
             let first = group * 2;
             TreeTransformKeyBlockSpec::multi(
-                [
-                    BlockKey::sector_ids([first]),
-                    BlockKey::sector_ids([first + 1]),
-                ],
-                [
-                    BlockKey::sector_ids([first]),
-                    BlockKey::sector_ids([first + 1]),
-                ],
+                [BlockKey::ordinal(first), BlockKey::ordinal(first + 1)],
+                [BlockKey::ordinal(first), BlockKey::ordinal(first + 1)],
                 vec![1.0_f64, 2.0, 3.0, 4.0],
             )
         })
@@ -295,7 +289,7 @@ fn keys(block_count: usize, key_order: KeyOrder) -> Vec<BlockKey> {
         KeyOrder::Ordered => Box::new(0..block_count),
         KeyOrder::Reversed => Box::new((0..block_count).rev()),
     };
-    ids.map(|key| BlockKey::sector_ids([key])).collect()
+    ids.map(BlockKey::ordinal).collect()
 }
 
 fn pair_sorted_merge(dst: &[BlockKey], src: &[BlockKey]) -> usize {

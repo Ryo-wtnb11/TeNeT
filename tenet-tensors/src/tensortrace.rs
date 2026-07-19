@@ -5,7 +5,7 @@ use num_traits::{One, Zero};
 use tenet_core::{
     multiplicity_free_permute_tree_pair, split_fusion_tree, BlockKey, BlockStructure,
     CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, SectorLeg, TensorMap,
     TensorStorage,
 };
@@ -407,8 +407,8 @@ impl<C> TensorTraceFusionStructure<C> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorTraceFusionStructureTerm<C> {
-    dst_key: FusionTreeBlockKey,
-    src_key: FusionTreeBlockKey,
+    dst_key: FusionTreePairKey,
+    src_key: FusionTreePairKey,
     dst_block: usize,
     src_block: usize,
     coefficient: C,
@@ -416,12 +416,12 @@ pub struct TensorTraceFusionStructureTerm<C> {
 
 impl<C> TensorTraceFusionStructureTerm<C> {
     #[inline]
-    pub fn dst_key(&self) -> &FusionTreeBlockKey {
+    pub fn dst_key(&self) -> &FusionTreePairKey {
         &self.dst_key
     }
 
     #[inline]
-    pub fn src_key(&self) -> &FusionTreeBlockKey {
+    pub fn src_key(&self) -> &FusionTreePairKey {
         &self.src_key
     }
 
@@ -869,7 +869,7 @@ where
         TreeTransformOperation::permute(codomain_permutation.clone(), domain_permutation.clone());
     let mut rows_by_source = (0..source_keys.len())
         .map(|_| None)
-        .collect::<Vec<Option<Vec<(FusionTreeBlockKey, R::Scalar)>>>>();
+        .collect::<Vec<Option<Vec<(FusionTreePairKey, R::Scalar)>>>>();
     let is_unique = rule.fusion_style() == FusionStyleKind::Unique;
     let groups = if is_unique {
         Vec::new()
@@ -981,8 +981,8 @@ fn lower_fusion_trace_source_rows<R>(
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
     src_block_index: usize,
-    src_key: &FusionTreeBlockKey,
-    rows: Vec<(FusionTreeBlockKey, R::Scalar)>,
+    src_key: &FusionTreePairKey,
+    rows: Vec<(FusionTreePairKey, R::Scalar)>,
     terms: &mut Vec<TensorTraceFusionStructureTerm<R::Scalar>>,
 ) -> Result<(), OperationError>
 where
@@ -1006,9 +1006,9 @@ where
         let trace_factor = trace_channel_factor(rule, &trace_codomain_tree)
             .map_err(OperationError::from_core_preserving_context)?;
         let coefficient = permutation_coefficient * trace_factor;
-        let dst_key = FusionTreeBlockKey::pair(dst_codomain_tree, dst_domain_tree);
+        let dst_key = FusionTreePairKey::pair(dst_codomain_tree, dst_domain_tree);
         let dst_block = dst_structure
-            .find_block_index_by_fusion_tree_key(&dst_key)
+            .find_block_index_by_fusion_tree_pair(&dst_key)
             .ok_or_else(|| OperationError::MissingBlockKey {
                 key: Box::new(BlockKey::from(dst_key.clone())),
             })?;

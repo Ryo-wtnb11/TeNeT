@@ -78,6 +78,13 @@ pub enum CoreError {
     DuplicateBlockKey {
         key: Box<BlockKey>,
     },
+    MixedBlockKeyKinds {
+        expected: BlockKeyKind,
+        actual: BlockKeyKind,
+    },
+    ExpectedFusionTreePairKey {
+        actual: BlockKeyKind,
+    },
     MissingBlockKey {
         key: Box<BlockKey>,
     },
@@ -190,6 +197,15 @@ impl fmt::Display for CoreError {
             }
             Self::DuplicateBlockKey { key } => {
                 write!(f, "duplicate block key {key:?}")
+            }
+            Self::MixedBlockKeyKinds { expected, actual } => {
+                write!(
+                    f,
+                    "mixed block key kinds: expected {expected}, got {actual}"
+                )
+            }
+            Self::ExpectedFusionTreePairKey { actual } => {
+                write!(f, "expected a fusion-tree pair key, got {actual}")
             }
             Self::MissingBlockKey { key } => {
                 write!(f, "missing matching block for key {key:?}")

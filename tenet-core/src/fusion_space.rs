@@ -147,7 +147,7 @@ struct FusionTreeCoupledSectorLayout {
 
 #[derive(Clone, Debug)]
 struct FusionTreeHomSpaceLayoutData {
-    keys: Arc<[FusionTreeBlockKey]>,
+    keys: Arc<[FusionTreePairKey]>,
     sectors: Vec<FusionTreeCoupledSectorLayout>,
 }
 
@@ -195,14 +195,14 @@ impl PreparedLoweredFusionTreeLayout {
         }
     }
 
-    pub fn keys(&self) -> &[FusionTreeBlockKey] {
+    pub fn keys(&self) -> &[FusionTreePairKey] {
         match &self.state {
             PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
             PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data.keys.as_ref(),
         }
     }
 
-    pub fn keys_arc(&self) -> Arc<[FusionTreeBlockKey]> {
+    pub fn keys_arc(&self) -> Arc<[FusionTreePairKey]> {
         match &self.state {
             PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
             PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
@@ -242,7 +242,7 @@ impl PreparedLoweredFusionTreeLayout {
     /// Why no fallible return: checked enumeration and layout-data formation
     /// completed in `prepare`; the remaining cache race check, monotonic ID,
     /// and bounded admission are process-local publication only.
-    pub fn commit(self) -> Arc<[FusionTreeBlockKey]> {
+    pub fn commit(self) -> Arc<[FusionTreePairKey]> {
         match self.state {
             PreparedLoweredFusionTreeLayoutState::Cached { key, layout } => {
                 let cache = fusion_tree_layout_cache();
@@ -903,7 +903,7 @@ fn reset_hom_space_intern_table() {
 fn fusion_tree_layout_from_keys<R>(
     rule: &R,
     id: FusionTreeLayoutId,
-    keys: Vec<FusionTreeBlockKey>,
+    keys: Vec<FusionTreePairKey>,
 ) -> FusionTreeHomSpaceLayout
 where
     R: FusionRule,
@@ -916,9 +916,9 @@ where
 
 fn fusion_tree_layout_data_from_keys(
     vacuum: SectorId,
-    keys: Vec<FusionTreeBlockKey>,
+    keys: Vec<FusionTreePairKey>,
 ) -> FusionTreeHomSpaceLayoutData {
-    let keys = Arc::<[FusionTreeBlockKey]>::from(keys);
+    let keys = Arc::<[FusionTreePairKey]>::from(keys);
     let mut sectors = Vec::new();
     let mut run_start = 0usize;
     while run_start < keys.len() {
@@ -1251,11 +1251,11 @@ impl FusionTreeHomSpace {
     /// The cached fusion-tree block keys, shared in O(1) (`Arc::clone`): the
     /// layout already holds them as `Arc<[_]>`, so there is no need to deep-clone
     /// each key (two `FusionTreeKey`s, four `SectorVec`s each) into a fresh `Vec`
-    /// on every call. Returns `Arc<[_]>`, which derefs to `[FusionTreeBlockKey]`,
+    /// on every call. Returns `Arc<[_]>`, which derefs to `[FusionTreePairKey]`,
     /// so iterate / index / `len` callers are unchanged; by-value consumers can
     /// `.to_vec()`. TensorKit's `fusiontrees(W)` likewise returns the cached
     /// index set by reference. See #53.
-    pub fn fusion_tree_keys<R>(&self, rule: &R) -> Arc<[FusionTreeBlockKey]>
+    pub fn fusion_tree_keys<R>(&self, rule: &R) -> Arc<[FusionTreePairKey]>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1266,7 +1266,7 @@ impl FusionTreeHomSpace {
     pub fn try_fusion_tree_keys_lowered<R>(
         &self,
         rule: &R,
-    ) -> Result<Arc<[FusionTreeBlockKey]>, LoweredFusionTreeBuildError>
+    ) -> Result<Arc<[FusionTreePairKey]>, LoweredFusionTreeBuildError>
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
@@ -1311,7 +1311,7 @@ impl FusionTreeHomSpace {
     pub fn try_for_each_fusion_tree_key<R, F, E>(&self, rule: &R, mut f: F) -> Result<(), E>
     where
         R: MultiplicityFreeFusionRule,
-        F: FnMut(&FusionTreeBlockKey) -> Result<(), E>,
+        F: FnMut(&FusionTreePairKey) -> Result<(), E>,
     {
         let layout = self.cached_fusion_tree_layout(rule);
         for key in layout.keys.iter() {
@@ -1323,7 +1323,7 @@ impl FusionTreeHomSpace {
     pub fn try_with_fusion_tree_keys<R, F, T, E>(&self, rule: &R, f: F) -> Result<T, E>
     where
         R: MultiplicityFreeFusionRule,
-        F: FnOnce(&[FusionTreeBlockKey]) -> Result<T, E>,
+        F: FnOnce(&[FusionTreePairKey]) -> Result<T, E>,
     {
         let layout = self.cached_fusion_tree_layout(rule);
         f(layout.keys.as_ref())
@@ -1365,7 +1365,7 @@ impl FusionTreeHomSpace {
     ) -> Result<Arc<FusionTreeHomSpaceLayout>, E>
     where
         R: MultiplicityFreeFusionRule,
-        F: FnOnce() -> Result<Vec<FusionTreeBlockKey>, E>,
+        F: FnOnce() -> Result<Vec<FusionTreePairKey>, E>,
     {
         let key = FusionTreeHomSpaceCacheKey::new(rule, self);
         let cache = fusion_tree_layout_cache();
@@ -1523,7 +1523,7 @@ impl FusionTreeHomSpace {
 
     fn degeneracy_shape_for_key(
         &self,
-        key: &FusionTreeBlockKey,
+        key: &FusionTreePairKey,
     ) -> Result<DimVec, CoreError> {
         let rank = self.rank();
         if key.codomain_uncoupled().len() != self.codomain.len()
@@ -1556,7 +1556,7 @@ impl FusionTreeHomSpace {
         Ok(shape)
     }
 
-    fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreeBlockKey>
+    fn fusion_tree_keys_uncached<R>(&self, rule: &R) -> Vec<FusionTreePairKey>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1575,7 +1575,7 @@ impl FusionTreeHomSpace {
                 std::cmp::Ordering::Equal => {
                     for domain_tree in &domain[domain_index].trees {
                         for codomain_tree in &codomain[codomain_index].trees {
-                            keys.push(FusionTreeBlockKey::pair(
+                            keys.push(FusionTreePairKey::pair(
                                 codomain_tree.clone(),
                                 domain_tree.clone(),
                             ));
@@ -1592,7 +1592,7 @@ impl FusionTreeHomSpace {
     fn try_fusion_tree_keys_uncached_lowered<R>(
         &self,
         rule: &R,
-    ) -> Result<Vec<FusionTreeBlockKey>, LoweredFusionTreeBuildError>
+    ) -> Result<Vec<FusionTreePairKey>, LoweredFusionTreeBuildError>
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
@@ -1618,7 +1618,7 @@ impl FusionTreeHomSpace {
     pub fn fusion_tree_keys_generic<R>(
         &self,
         rule: &R,
-    ) -> Result<Vec<FusionTreeBlockKey>, CoreError>
+    ) -> Result<Vec<FusionTreePairKey>, CoreError>
     where
         R: FusionRule,
     {
@@ -1645,7 +1645,7 @@ impl FusionTreeHomSpace {
         &self,
         rule: &R,
         coupled: SectorId,
-    ) -> Result<Vec<FusionTreeBlockKey>, CoreError>
+    ) -> Result<Vec<FusionTreePairKey>, CoreError>
     where
         R: FusionRule,
     {
@@ -1674,7 +1674,7 @@ impl FusionTreeHomSpace {
         let mut keys = Vec::with_capacity(codomain_trees.len() * domain_trees.len());
         for domain_tree in &domain_trees {
             for codomain_tree in &codomain_trees {
-                keys.push(FusionTreeBlockKey::pair(
+                keys.push(FusionTreePairKey::pair(
                     codomain_tree.clone(),
                     domain_tree.clone(),
                 ));
@@ -1697,7 +1697,7 @@ impl FusionTreeHomSpace {
         &self,
         rule: &R,
         sectors: &[SectorId],
-    ) -> Result<FusionTreeBlockKey, CoreError>
+    ) -> Result<FusionTreePairKey, CoreError>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1718,7 +1718,7 @@ impl FusionTreeHomSpace {
         &self,
         rule: &R,
         sectors: &[SectorId],
-    ) -> Result<Vec<FusionTreeBlockKey>, CoreError>
+    ) -> Result<Vec<FusionTreePairKey>, CoreError>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -1754,7 +1754,7 @@ impl FusionTreeHomSpace {
                 std::cmp::Ordering::Equal => {
                     for domain_tree in &domain[domain_index].trees {
                         for codomain_tree in &codomain[codomain_index].trees {
-                            keys.push(FusionTreeBlockKey::pair(
+                            keys.push(FusionTreePairKey::pair(
                                 codomain_tree.clone(),
                                 domain_tree.clone(),
                             ));
@@ -1775,7 +1775,7 @@ impl FusionTreeHomSpace {
     /// tree's uncoupled sector on that axis.
     pub fn validate_degeneracy_shapes<S>(
         &self,
-        keys: &[FusionTreeBlockKey],
+        keys: &[FusionTreePairKey],
         shapes: &[S],
     ) -> Result<(), CoreError>
     where
@@ -2095,7 +2095,7 @@ fn coupled_subblock_structure_from_layout<F>(
     shape_for_key: F,
 ) -> Result<Arc<BlockStructure>, CoreError>
 where
-    F: FnMut(&FusionTreeBlockKey) -> Result<DimVec, CoreError>,
+    F: FnMut(&FusionTreePairKey) -> Result<DimVec, CoreError>,
 {
     let (sector, degeneracy) =
         coupled_subblock_parts_from_layout(homspace, nout, layout, shape_for_key)?;
@@ -2109,7 +2109,7 @@ fn coupled_subblock_parts_from_layout<F>(
     mut shape_for_key: F,
 ) -> Result<(SectorStructure, DegeneracyStructure), CoreError>
 where
-    F: FnMut(&FusionTreeBlockKey) -> Result<DimVec, CoreError>,
+    F: FnMut(&FusionTreePairKey) -> Result<DimVec, CoreError>,
 {
     let rank = homspace.rank();
     if nout > rank {
@@ -2246,7 +2246,7 @@ fn coupled_sector_matrix_block_specs<R, S>(
     rule: &R,
     nout: usize,
     rank: usize,
-    keys: &[FusionTreeBlockKey],
+    keys: &[FusionTreePairKey],
     shapes: &[S],
 ) -> Result<Vec<BlockSpec>, CoreError>
 where
@@ -2750,17 +2750,20 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
 
     pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
         let actual = rule.rule_identity();
-        match self.rule_identity.as_ref() {
-            Some(expected) if expected != &actual => Err(CoreError::FusionRuleMismatch {
-                expected: expected.clone(),
-                actual,
-            }),
-            Some(_) => Ok(self),
-            None => {
-                self.rule_identity = Some(actual);
-                Ok(self)
+        if let Some(expected) = self.rule_identity.as_ref() {
+            if expected != &actual {
+                return Err(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
             }
         }
+        // Why not treat an equal identity tag as LOCAL proof: inheritance can
+        // copy the tag without a provider. Binding therefore revalidates the
+        // exact categorical structure before retaining or returning the tag.
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, self.subblock_structure())?;
+        self.rule_identity = Some(actual);
+        Ok(self)
     }
 
     pub fn try_inherit_rule_identity<const OTHER_NOUT: usize, const OTHER_NIN: usize>(
@@ -2769,28 +2772,36 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     ) -> Result<Self, CoreError> {
         match (self.rule_identity.as_ref(), source.rule_identity.as_ref()) {
             (Some(expected), Some(actual)) if expected != actual => {
-                Err(CoreError::FusionRuleMismatch {
+                return Err(CoreError::FusionRuleMismatch {
                     expected: expected.clone(),
                     actual: actual.clone(),
-                })
+                });
             }
-            (None, Some(identity)) => {
-                self.rule_identity = Some(identity.clone());
-                Ok(self)
-            }
-            (Some(_), Some(_)) => Ok(self),
-            (_, None) => Err(CoreError::MissingFusionRuleIdentity),
+            (_, None) => return Err(CoreError::MissingFusionRuleIdentity),
+            _ => {}
         }
+        match self.subblock_structure.sector_structure().key_kind() {
+            None | Some(BlockKeyKind::FusionTree) => {}
+            Some(actual) => {
+                return Err(CoreError::ExpectedFusionTreePairKey { actual });
+            }
+        }
+        if self.rule_identity.is_none() {
+            self.rule_identity = source.rule_identity.clone();
+        }
+        Ok(self)
     }
 
+    // Why not expose a general tag setter: this path is reserved for structures
+    // enumerated directly from the same HomSpace and rule above.
     fn with_rule_identity(mut self, identity: RuleIdentity) -> Self {
         self.rule_identity = Some(identity);
         self
     }
 
-    pub fn find_subblock_index(&self, key: &FusionTreeBlockKey) -> Option<usize> {
+    pub fn find_subblock_index(&self, key: &FusionTreePairKey) -> Option<usize> {
         self.subblock_structure
-            .find_block_index_by_fusion_tree_key(key)
+            .find_block_index_by_fusion_tree_pair(key)
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {

@@ -9,10 +9,18 @@ use std::hash::{Hash, Hasher};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rustc_hash::FxHasher;
-use tenet_core::{FusionTreeKey, SectorId};
+use tenet_core::{FusionTreeKey, SectorId, Z2FusionRule};
 
 fn mult_free_key() -> FusionTreeKey {
-    FusionTreeKey::from_uncoupled((0..4).map(SectorId::new))
+    FusionTreeKey::try_new_for_rule(
+        &Z2FusionRule,
+        [SectorId::new(0); 4],
+        Some(SectorId::new(0)),
+        [false; 4],
+        [SectorId::new(0); 2],
+        [SectorId::new(1); 3],
+    )
+    .expect("the benchmark fixture is a valid Z2 fusion tree")
 }
 
 fn bench_hash_eq(c: &mut Criterion) {

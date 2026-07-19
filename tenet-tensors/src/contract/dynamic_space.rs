@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, DimVec,
-    FusionRule, FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, HomSpaceId,
+    FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, HomSpaceId,
     LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule,
     MultiplicityFreeRigidSymbols, PreparedLoweredFusionTreeLayout, RuleIdentity, SectorLeg,
 };
@@ -25,7 +25,7 @@ impl PreparedLayoutKeys {
         &self,
         rule: &R,
         homspace: &FusionTreeHomSpace,
-    ) -> Arc<[FusionTreeBlockKey]>
+    ) -> Arc<[FusionTreePairKey]>
     where
         R: MultiplicityFreeFusionRule,
     {
@@ -645,7 +645,7 @@ where
     for (index, (key, shape)) in blocks.iter().enumerate() {
         match key {
             BlockKey::FusionTree(tree) => tree_blocks.push((tree.clone(), shape.clone())),
-            BlockKey::Dense => {
+            _ => {
                 return Err(OperationError::ExpectedFusionTreeBlock {
                     tensor: "scratch",
                     index,
@@ -938,7 +938,7 @@ where
     fn bind_with_keys(
         space: DynamicFusionMapSpace,
         provider: Arc<R>,
-        keys: Vec<FusionTreeBlockKey>,
+        keys: Vec<FusionTreePairKey>,
     ) -> Result<Self, OperationError> {
         validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
@@ -1266,7 +1266,7 @@ where
     ) -> Result<Self, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-        BuildShapes: FnOnce(&[FusionTreeBlockKey]) -> Result<Shapes, OperationError>,
+        BuildShapes: FnOnce(&[FusionTreePairKey]) -> Result<Shapes, OperationError>,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
@@ -1365,7 +1365,7 @@ where
 impl DynamicFusionMapSpace {
     fn degeneracy_shapes_for_keys(
         homspace: &FusionTreeHomSpace,
-        keys: &[FusionTreeBlockKey],
+        keys: &[FusionTreePairKey],
     ) -> Result<Vec<Vec<usize>>, OperationError> {
         #[cfg(test)]
         PER_TREE_SHAPE_BATCH_BUILDS.with(|builds| builds.set(builds.get() + 1));
@@ -1494,7 +1494,7 @@ impl DynamicFusionMapSpace {
 
     fn validate_complete_tree_grid(
         &self,
-        keys: &[FusionTreeBlockKey],
+        keys: &[FusionTreePairKey],
     ) -> Result<(), OperationError> {
         let structure = self.structure();
         if structure.block_count() != keys.len() {

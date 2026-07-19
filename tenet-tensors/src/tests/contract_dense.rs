@@ -1361,21 +1361,21 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
     let lhs_structure = packed_fixture_structure(
         2,
         [
-            (BlockKey::sector_ids([10]), vec![1, 2]),
-            (BlockKey::sector_ids([20]), vec![1, 2]),
+            (BlockKey::opaque([10]), vec![1, 2]),
+            (BlockKey::opaque([20]), vec![1, 2]),
         ],
     )
     .unwrap();
     let rhs_structure = packed_fixture_structure(
         2,
         [
-            (BlockKey::sector_ids([30]), vec![2, 1]),
-            (BlockKey::sector_ids([40]), vec![2, 1]),
+            (BlockKey::opaque([30]), vec![2, 1]),
+            (BlockKey::opaque([40]), vec![2, 1]),
         ],
     )
     .unwrap();
     let dst_structure =
-        packed_fixture_structure(2, [(BlockKey::sector_ids([99]), vec![1, 1])]).unwrap();
+        packed_fixture_structure(2, [(BlockKey::opaque([99]), vec![1, 1])]).unwrap();
     let lhs = TensorMap::<f64, 2, 0>::from_vec_with_structure(
         vec![1.0, 2.0, 3.0, 4.0],
         lhs_space,

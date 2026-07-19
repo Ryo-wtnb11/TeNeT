@@ -2695,10 +2695,7 @@ mod tests {
         Arc::new(
             BlockStructure::from_blocks_with_rank(
                 1,
-                vec![
-                    BlockSpec::column_major_with_key(BlockKey::sector_ids([0]), vec![2], 0)
-                        .unwrap(),
-                ],
+                vec![BlockSpec::column_major_with_key(BlockKey::opaque([0]), vec![2], 0).unwrap()],
             )
             .unwrap(),
         )

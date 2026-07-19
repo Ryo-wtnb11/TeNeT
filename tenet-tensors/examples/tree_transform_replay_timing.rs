@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use tenet_core::{
     product_fusion_rule, BlockKey, BlockStructure, FermionParityFusionRule, FusionProductSpace,
-    FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, TensorMap, TensorMapSpace,
     U1FusionRule, U1Irrep,
 };
@@ -524,7 +524,7 @@ fn su2_recoupling_fixture() -> (BlockStructure, TensorMapSpace<4, 0>, TensorMapS
 }
 
 fn all_codomain_fusion_tree_key(innerlines: [usize; 2]) -> BlockKey {
-    BlockKey::from(FusionTreeBlockKey::pair(
+    BlockKey::from(FusionTreePairKey::pair(
         FusionTreeKey::try_from_sector_ids_for_rule(
             &SU2FusionRule,
             [1, 1, 1, 1],

@@ -34,7 +34,7 @@ fn build_structure() -> Arc<BlockStructure> {
     let blocks = (0..CHARGES)
         .map(|charge| {
             BlockSpec::with_key(
-                BlockKey::sector_ids([charge]),
+                BlockKey::ordinal(charge),
                 BLOCK_DIMS.to_vec(),
                 strides.to_vec(),
                 charge * BLOCK_LEN,

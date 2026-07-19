@@ -504,8 +504,8 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
 
     fn foldright_scalar(
         &self,
-        source: &FusionTreeBlockKey,
-        destination: &FusionTreeBlockKey,
+        source: &FusionTreePairKey,
+        destination: &FusionTreePairKey,
     ) -> Self::Scalar;
 }
 
@@ -1966,8 +1966,8 @@ impl MultiplicityFreePivotalSymbols for Z2FusionRule {
 
     fn foldright_scalar(
         &self,
-        _source: &FusionTreeBlockKey,
-        _destination: &FusionTreeBlockKey,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
     ) -> Self::Scalar {
         1.0
     }
@@ -2151,8 +2151,8 @@ impl MultiplicityFreePivotalSymbols for FermionParityFusionRule {
 
     fn foldright_scalar(
         &self,
-        _source: &FusionTreeBlockKey,
-        _destination: &FusionTreeBlockKey,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
     ) -> Self::Scalar {
         1.0
     }
@@ -3005,8 +3005,8 @@ impl MultiplicityFreePivotalSymbols for FibonacciFusionRule {
 
     fn foldright_scalar(
         &self,
-        _source: &FusionTreeBlockKey,
-        _destination: &FusionTreeBlockKey,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
     ) -> Self::Scalar {
         self.scalar_one()
     }
