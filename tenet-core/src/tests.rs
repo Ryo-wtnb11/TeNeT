@@ -2858,6 +2858,562 @@ mod tests {
         );
     }
 
+    struct FibonacciFAdmissibilityProbe {
+        calls: std::sync::Mutex<Vec<[SectorId; 6]>>,
+    }
+
+    impl FibonacciFAdmissibilityProbe {
+        const SENTINEL: Complex64 = Complex64::new(97.0, -31.0);
+
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn take_calls(&self) -> Vec<[SectorId; 6]> {
+            std::mem::take(
+                &mut *self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+    }
+
+    impl FusionRule for FibonacciFAdmissibilityProbe {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FibonacciFusionRule.fusion_style()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            FibonacciFusionRule.braiding_style()
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FibonacciFusionRule.vacuum()
+        }
+
+        fn supports_unitary_braid_dagger(&self) -> bool {
+            FibonacciFusionRule.supports_unitary_braid_dagger()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            FibonacciFusionRule.dual(sector)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            FibonacciFusionRule.fusion_channels(left, right)
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            FibonacciFusionRule.nsymbol(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for FibonacciFAdmissibilityProbe {}
+
+    impl MultiplicityFreeFusionSymbols for FibonacciFAdmissibilityProbe {
+        type Scalar = Complex64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            FibonacciFusionRule.scalar_one()
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            FibonacciFusionRule.scalar_conj(value)
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            left: SectorId,
+            middle: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+            left_coupled: SectorId,
+            right_coupled: SectorId,
+        ) -> Self::Scalar {
+            let call = [
+                left,
+                middle,
+                right,
+                coupled,
+                left_coupled,
+                right_coupled,
+            ];
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(call);
+            let admissible = FibonacciFusionRule.nsymbol(left, middle, left_coupled) != 0
+                && FibonacciFusionRule.nsymbol(left_coupled, right, coupled) != 0
+                && FibonacciFusionRule.nsymbol(middle, right, right_coupled) != 0
+                && FibonacciFusionRule.nsymbol(left, right_coupled, coupled) != 0;
+            if admissible {
+                FibonacciFusionRule.f_symbol_scalar(
+                    left,
+                    middle,
+                    right,
+                    coupled,
+                    left_coupled,
+                    right_coupled,
+                )
+            } else {
+                Self::SENTINEL
+            }
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Self::Scalar {
+            FibonacciFusionRule.r_symbol_scalar(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for FibonacciFAdmissibilityProbe {
+        fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.dim_scalar(sector)
+        }
+
+        fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.inv_dim_scalar(sector)
+        }
+
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.sqrt_dim_scalar(sector)
+        }
+
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.inv_sqrt_dim_scalar(sector)
+        }
+
+        fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.twist_scalar(sector)
+        }
+
+        fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+            FibonacciFusionRule.frobenius_schur_phase_scalar(sector)
+        }
+    }
+
+    fn fibonacci_multi_associator_counterexample() -> (FusionTreeKey, FusionTreeKey) {
+        let long =
+            FusionTreeKey::try_from_sector_ids([1; 4], 1, [false; 4], [1, 0], [1, 1, 1])
+                .unwrap();
+        let short =
+            FusionTreeKey::try_from_sector_ids([1; 3], 1, [false; 3], [0], [1, 1]).unwrap();
+        let tau = SectorId::new(1);
+        assert!(
+            collect_fusion_trees_for_coupled(
+                &FibonacciFusionRule,
+                &[tau; 4],
+                &[false; 4],
+                &[tau; 4],
+                tau,
+            )
+            .contains(&long)
+        );
+        assert!(
+            collect_fusion_trees_for_coupled(
+                &FibonacciFusionRule,
+                &[tau; 3],
+                &[false; 3],
+                &[tau; 3],
+                tau,
+            )
+            .contains(&short)
+        );
+        (long, short)
+    }
+
+    fn assert_fibonacci_f_calls_are_admissible(calls: &[[SectorId; 6]]) {
+        for &[left, middle, right, coupled, left_coupled, right_coupled] in calls {
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(left, middle, left_coupled),
+                0
+            );
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(left_coupled, right, coupled),
+                0
+            );
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(middle, right, right_coupled),
+                0
+            );
+            assert_ne!(
+                FibonacciFusionRule.nsymbol(left, right_coupled, coupled),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn fibonacci_multi_associator_filters_cross_inadmissible_candidates() {
+        let rule = FibonacciFAdmissibilityProbe::new();
+        let (long, short) = fibonacci_multi_associator_counterexample();
+        let first = long.uncoupled()[0];
+        let right = long.uncoupled()[2];
+        let (middle_left, middle_right) = fusion_tree_vertex_neighbors(&long, 2).unwrap();
+        let (short_left, short_right) = fusion_tree_vertex_neighbors(&short, 1).unwrap();
+
+        // What: both stored trees are valid, but their staged cross vertex is
+        // absent and therefore does not name an F-symbol coefficient.
+        assert_ne!(
+            rule.nsymbol(middle_left, right, middle_right),
+            0
+        );
+        assert_ne!(rule.nsymbol(short_left, right, short_right), 0);
+        assert_ne!(rule.nsymbol(first, short_left, middle_left), 0);
+        assert_eq!(rule.nsymbol(first, short_right, middle_right), 0);
+        assert_eq!(
+            rule.f_symbol_scalar(
+                first,
+                short_left,
+                right,
+                middle_right,
+                middle_left,
+                short_right,
+            ),
+            FibonacciFAdmissibilityProbe::SENTINEL
+        );
+        assert_eq!(rule.take_calls().len(), 1);
+
+        assert_eq!(
+            multiplicity_free_multi_associator_scalar(&rule, &long, &short).unwrap(),
+            None
+        );
+        assert!(rule.take_calls().is_empty());
+    }
+
+    #[test]
+    fn fibonacci_multi_fmove_forward_and_inverse_call_only_admissible_f() {
+        let rule = FibonacciFAdmissibilityProbe::new();
+        let (long, short) = fibonacci_multi_associator_counterexample();
+        let actual_forward = multiplicity_free_multi_fmove_tree(&rule, &long).unwrap();
+        let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        // What: TensorKit's Stage-1 candidate intersection retains these two
+        // tails in this order; Stage 2 gives the listed Fibonacci F products.
+        assert_eq!(
+            actual_forward
+                .iter()
+                .map(|(tree, _)| (tree.coupled(), tree.innerlines().to_vec()))
+                .collect::<Vec<_>>(),
+            vec![
+                (SectorId::new(0), vec![SectorId::new(1)]),
+                (SectorId::new(1), vec![SectorId::new(1)]),
+            ]
+        );
+        assert!(
+            (actual_forward[0].1 - Complex64::new(1.0 / phi, 0.0)).norm() < 1.0e-12
+        );
+        assert!(
+            (actual_forward[1].1 - Complex64::new(1.0 / phi.sqrt(), 0.0)).norm()
+                < 1.0e-12
+        );
+        let calls = rule.take_calls();
+        assert!(!calls.is_empty());
+        assert_fibonacci_f_calls_are_admissible(&calls);
+
+        let actual_inverse = multiplicity_free_multi_fmove_inv_tree(
+            &rule,
+            SectorId::new(1),
+            SectorId::new(1),
+            &short,
+            false,
+        )
+        .unwrap();
+        // What: TensorKit's right-to-left inverse construction retains these
+        // two rank-4 trees in canonical order and conjugates the same real
+        // Fibonacci coefficients.
+        assert_eq!(
+            actual_inverse
+                .iter()
+                .map(|(tree, _)| (tree.coupled(), tree.innerlines().to_vec()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    SectorId::new(1),
+                    vec![SectorId::new(0), SectorId::new(1)]
+                ),
+                (
+                    SectorId::new(1),
+                    vec![SectorId::new(1), SectorId::new(1)]
+                ),
+            ]
+        );
+        assert!(
+            (actual_inverse[0].1 - Complex64::new(1.0 / phi, 0.0)).norm() < 1.0e-12
+        );
+        assert!(
+            (actual_inverse[1].1 - Complex64::new(1.0 / phi.sqrt(), 0.0)).norm()
+                < 1.0e-12
+        );
+        let calls = rule.take_calls();
+        assert!(!calls.is_empty());
+        assert_fibonacci_f_calls_are_admissible(&calls);
+    }
+
+    #[test]
+    fn fibonacci_multi_fmove_low_ranks_keep_their_existing_contracts() {
+        let rule = FibonacciFAdmissibilityProbe::new();
+        let vacuum = SectorId::new(0);
+        let tau = SectorId::new(1);
+        let empty = FusionTreeKey::new([], vacuum, [], [], []);
+        let rank_one = FusionTreeKey::new([tau], tau, [false], [], []);
+        let rank_two =
+            FusionTreeKey::new([tau, tau], vacuum, [false, false], [], [MultiplicityIndex::ONE]);
+
+        // What: forward rank 0/1/2 and inverse rank 0/1 retain their prior
+        // results and do not enter an F-symbol provider.
+        assert_eq!(
+            multiplicity_free_multi_fmove_tree(&rule, &empty),
+            multiplicity_free_multi_fmove_tree(&FibonacciFusionRule, &empty)
+        );
+        assert_eq!(
+            multiplicity_free_multi_fmove_tree(&rule, &rank_one),
+            multiplicity_free_multi_fmove_tree(&FibonacciFusionRule, &rank_one)
+        );
+        assert_eq!(
+            multiplicity_free_multi_fmove_tree(&rule, &rank_two),
+            multiplicity_free_multi_fmove_tree(&FibonacciFusionRule, &rank_two)
+        );
+        assert_eq!(
+            multiplicity_free_multi_fmove_inv_tree(&rule, tau, tau, &empty, false),
+            multiplicity_free_multi_fmove_inv_tree(
+                &FibonacciFusionRule,
+                tau,
+                tau,
+                &empty,
+                false,
+            )
+        );
+        assert_eq!(
+            multiplicity_free_multi_fmove_inv_tree(&rule, tau, vacuum, &rank_one, false),
+            multiplicity_free_multi_fmove_inv_tree(
+                &FibonacciFusionRule,
+                tau,
+                vacuum,
+                &rank_one,
+                false,
+            )
+        );
+        assert!(rule.take_calls().is_empty());
+
+        // What: inverse rank 2 still performs its one associator step, with
+        // unchanged data and an admissible provider call.
+        assert_eq!(
+            multiplicity_free_multi_fmove_inv_tree(&rule, tau, tau, &rank_two, false),
+            multiplicity_free_multi_fmove_inv_tree(
+                &FibonacciFusionRule,
+                tau,
+                tau,
+                &rank_two,
+                false,
+            )
+        );
+        let calls = rule.take_calls();
+        assert!(!calls.is_empty());
+        assert_fibonacci_f_calls_are_admissible(&calls);
+    }
+
+    struct UniqueFAdmissibilityProbe {
+        calls: std::sync::Mutex<Vec<[SectorId; 6]>>,
+    }
+
+    impl UniqueFAdmissibilityProbe {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn take_calls(&self) -> Vec<[SectorId; 6]> {
+            std::mem::take(
+                &mut *self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        }
+    }
+
+    impl FusionRule for UniqueFAdmissibilityProbe {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            Z2FusionRule.fusion_style()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            Z2FusionRule.braiding_style()
+        }
+
+        fn vacuum(&self) -> SectorId {
+            Z2FusionRule.vacuum()
+        }
+
+        fn supports_unitary_braid_dagger(&self) -> bool {
+            Z2FusionRule.supports_unitary_braid_dagger()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            Z2FusionRule.dual(sector)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            Z2FusionRule.fusion_channels(left, right)
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            Z2FusionRule.nsymbol(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for UniqueFAdmissibilityProbe {}
+
+    impl MultiplicityFreeFusionSymbols for UniqueFAdmissibilityProbe {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            Z2FusionRule.scalar_one()
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            Z2FusionRule.scalar_conj(value)
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            left: SectorId,
+            middle: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+            left_coupled: SectorId,
+            right_coupled: SectorId,
+        ) -> Self::Scalar {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push([
+                    left,
+                    middle,
+                    right,
+                    coupled,
+                    left_coupled,
+                    right_coupled,
+                ]);
+            let admissible = Z2FusionRule.nsymbol(left, middle, left_coupled) != 0
+                && Z2FusionRule.nsymbol(left_coupled, right, coupled) != 0
+                && Z2FusionRule.nsymbol(middle, right, right_coupled) != 0
+                && Z2FusionRule.nsymbol(left, right_coupled, coupled) != 0;
+            if admissible {
+                Z2FusionRule.f_symbol_scalar(
+                    left,
+                    middle,
+                    right,
+                    coupled,
+                    left_coupled,
+                    right_coupled,
+                )
+            } else {
+                997.0
+            }
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Self::Scalar {
+            Z2FusionRule.r_symbol_scalar(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for UniqueFAdmissibilityProbe {
+        fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            Z2FusionRule.dim_scalar(sector)
+        }
+
+        fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            Z2FusionRule.inv_dim_scalar(sector)
+        }
+
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            Z2FusionRule.sqrt_dim_scalar(sector)
+        }
+
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            Z2FusionRule.inv_sqrt_dim_scalar(sector)
+        }
+
+        fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+            Z2FusionRule.twist_scalar(sector)
+        }
+
+        fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+            Z2FusionRule.frobenius_schur_phase_scalar(sector)
+        }
+    }
+
+    #[test]
+    fn unique_multi_fmove_callers_preserve_admissible_z2_results() {
+        let rule = UniqueFAdmissibilityProbe::new();
+        let odd = z2_odd();
+        let even = z2_even();
+        let long = FusionTreeKey::new(
+            [odd; 4],
+            even,
+            [false; 4],
+            [even, odd],
+            [MultiplicityIndex::ONE; 3],
+        );
+        let short = FusionTreeKey::new(
+            [odd; 3],
+            odd,
+            [false; 3],
+            [even],
+            [MultiplicityIndex::ONE; 2],
+        );
+
+        // What: the Unique-fusion wrappers that share the associator boundary
+        // retain exact output trees, coefficients, and conjugation direction.
+        assert_eq!(
+            unique_rigid_multi_fmove_tree(&rule, &long),
+            unique_rigid_multi_fmove_tree(&Z2FusionRule, &long)
+        );
+        let calls = rule.take_calls();
+        assert!(!calls.is_empty());
+        for &[left, middle, right, coupled, left_coupled, right_coupled] in &calls {
+            assert_ne!(Z2FusionRule.nsymbol(left, middle, left_coupled), 0);
+            assert_ne!(Z2FusionRule.nsymbol(left_coupled, right, coupled), 0);
+            assert_ne!(Z2FusionRule.nsymbol(middle, right, right_coupled), 0);
+            assert_ne!(Z2FusionRule.nsymbol(left, right_coupled, coupled), 0);
+        }
+
+        assert_eq!(
+            unique_rigid_multi_fmove_inv_tree(&rule, odd, even, &short, false),
+            unique_rigid_multi_fmove_inv_tree(&Z2FusionRule, odd, even, &short, false)
+        );
+        let calls = rule.take_calls();
+        assert!(!calls.is_empty());
+        for &[left, middle, right, coupled, left_coupled, right_coupled] in &calls {
+            assert_ne!(Z2FusionRule.nsymbol(left, middle, left_coupled), 0);
+            assert_ne!(Z2FusionRule.nsymbol(left_coupled, right, coupled), 0);
+            assert_ne!(Z2FusionRule.nsymbol(middle, right, right_coupled), 0);
+            assert_ne!(Z2FusionRule.nsymbol(left, right_coupled, coupled), 0);
+        }
+    }
+
     #[test]
     fn fibonacci_braid_then_inverse_braid_is_identity() {
         // Self-consistency (a): braiding a crossing and then undoing it
@@ -9903,7 +10459,7 @@ mod tests {
         ) -> GenericFArray<Self::Scalar> {
             self.f_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            panic!("cross-incompatible candidate reached the F provider")
+            GenericFArray::new(vec![997.0], (1, 1, 1, 1))
         }
 
         fn r_symbol_generic(
@@ -9921,7 +10477,8 @@ mod tests {
     #[test]
     fn generic_multi_fmove_filters_cross_incompatible_trees_before_f() {
         // What: forward and inverse multi-F moves discard individually valid
-        // long/short trees whose cross-tree F vertex does not exist.
+        // long/short trees whose cross-tree F vertex does not exist, even when
+        // the provider returns a nonzero sentinel outside its valid domain.
         let rule = CrossIncompatibleGenericRule::default();
         let sector = SectorId::new;
         let long = FusionTreeKey::new(
