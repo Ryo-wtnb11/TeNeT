@@ -221,26 +221,14 @@ impl PartialEq for Space {
 }
 
 impl Space {
-    /// Normalizes to the TensorKit `GradedSpace.dims` map invariant:
-    /// zero-degeneracy sectors are dropped (TensorKit does the same) and a
-    /// duplicate sector label panics immediately with a clear message —
-    /// mirroring TensorKit's `ArgumentError` at `GradedSpace` construction
-    /// (gradedspace.jl:49-56) — instead of surfacing later as an
-    /// inconsistent `dim()` or a tensor-construction panic.
+    /// Normalizes through [`tenet_core::SectorLeg`], the single authority for
+    /// the TensorKit `GradedSpace.dims` map invariant: zero-degeneracy sectors
+    /// are absent and every duplicate sector declaration is rejected.
     fn new(context: Arc<UserRuleContext>, sectors: Vec<(SectorId, usize)>) -> Self {
-        let mut sectors = sectors;
-        sectors.retain(|&(_, degeneracy)| degeneracy > 0);
-        sectors.sort_by_key(|(sector, _)| *sector);
-        for pair in sectors.windows(2) {
-            assert!(
-                pair[0].0 != pair[1].0,
-                "sector {:?} appears multiple times in the space constructor                  (TensorKit rejects duplicate sectors at construction)",
-                pair[0].0
-            );
-        }
+        let leg = SectorLeg::new(sectors, false);
         Self {
             context,
-            sectors,
+            sectors: leg.iter().collect(),
             dual: false,
         }
     }
@@ -260,8 +248,10 @@ impl Space {
     /// # Panics
     ///
     /// Panics on a duplicate sector label — a programming bug in the
-    /// constructor call, mirroring TensorKit's `ArgumentError` at
-    /// `GradedSpace` construction (`gradedspace.jl:49-56`). The
+    /// constructor call. This follows TensorKit's strict tuple-constructor
+    /// invariant without reproducing its order-dependent `SectorDict`
+    /// zero-entry corner. [`tenet_core::SectorLeg`] defines the normalization
+    /// contract. The
     /// [`Self::product`] / [`Self::fz2_u1_su2`] constructors return
     /// `Result` instead only because their product-sector *encoding* can
     /// fail on data-dependent capacity, not for duplicates.

@@ -2087,6 +2087,43 @@ fn space_drops_zero_degeneracy_sectors() {
 }
 
 #[test]
+fn space_zero_degeneracy_matches_omission_across_supported_constructors() {
+    // What: every multiplicity-free user constructor inherits the same
+    // zero-is-absent contract from the core leg representation.
+    for (explicit_zero, omitted) in [
+        (Space::u1([(-1, 0), (0, 2)]), Space::u1([(0, 2)])),
+        (Space::su2([(2, 0), (0, 2)]), Space::su2([(0, 2)])),
+        (Space::fz2([(1, 0), (0, 2)]), Space::fz2([(0, 2)])),
+    ] {
+        assert_eq!(explicit_zero, omitted);
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn product_space_zero_degeneracy_matches_omission() {
+    // What: packed pair and triple product constructors share the core
+    // zero-is-absent contract without product-specific normalization.
+    assert_eq!(
+        Space::product([((1, 1), 0), ((0, 0), 2)]).unwrap(),
+        Space::product([((0, 0), 2)]).unwrap()
+    );
+    assert_eq!(
+        Space::fz2_u1_su2([((1, 1, 1), 0), ((0, 0, 0), 2)]).unwrap(),
+        Space::fz2_u1_su2([((0, 0, 0), 2)]).unwrap()
+    );
+}
+
+#[test]
+fn space_rejects_zero_and_positive_duplicate_sectors_in_both_orders() {
+    // What: duplicate rejection is independent of whether a zero-degeneracy
+    // declaration appears before or after the positive declaration.
+    for sectors in [[(0, 0), (0, 2)], [(0, 2), (0, 0)]] {
+        assert!(std::panic::catch_unwind(|| Space::u1(sectors)).is_err());
+    }
+}
+
+#[test]
 #[should_panic(expected = "appears multiple times")]
 fn space_rejects_duplicate_sectors_same_degeneracy() {
     let _ = Space::u1([(0, 2), (0, 2)]);

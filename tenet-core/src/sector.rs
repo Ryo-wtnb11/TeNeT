@@ -155,6 +155,24 @@ struct SectorLegData {
     degeneracies: DimVec,
 }
 
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SectorLegConstructionError {
+    DuplicateSector { sector: SectorId },
+}
+
+impl fmt::Display for SectorLegConstructionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateSector { sector } => {
+                write!(formatter, "sector {sector:?} appears multiple times")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SectorLegConstructionError {}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct SectorLeg {
     data: Arc<SectorLegData>,
@@ -164,16 +182,20 @@ pub struct SectorLeg {
 impl SectorLeg {
     /// Builds one external leg from `(sector, degeneracy)` pairs.
     ///
-    /// Pairs are stored sorted by sector id; identical duplicate pairs are
-    /// removed. Panics when the same sector appears with two different
-    /// degeneracies.
+    /// Zero-degeneracy sectors are absent from the resulting leg. Remaining
+    /// pairs are stored sorted by sector id.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a sector appears more than once. Use [`Self::try_new`] to
+    /// handle this error.
     ///
     /// # Examples
     ///
     /// ```
     /// use tenet_core::{SectorLeg, Z2Irrep};
     ///
-    /// let leg = SectorLeg::new([(Z2Irrep::ODD, 3), (Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)], false);
+    /// let leg = SectorLeg::new([(Z2Irrep::ODD, 3), (Z2Irrep::EVEN, 2)], false);
     /// assert_eq!(leg.sectors().len(), 2);
     /// assert_eq!(leg.degeneracies(), &[2, 3]);
     /// assert!(!leg.is_dual());
@@ -186,34 +208,60 @@ impl SectorLeg {
         Pairs: IntoIterator<Item = (Sector, usize)>,
         Sector: Into<SectorId>,
     {
+        Self::try_new(pairs, is_dual).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Fallible counterpart of [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SectorLegConstructionError::DuplicateSector`] when any sector
+    /// is declared more than once, including zero-degeneracy declarations.
+    pub fn try_new<Pairs, Sector>(
+        pairs: Pairs,
+        is_dual: bool,
+    ) -> Result<Self, SectorLegConstructionError>
+    where
+        Pairs: IntoIterator<Item = (Sector, usize)>,
+        Sector: Into<SectorId>,
+    {
         let mut pairs = pairs
             .into_iter()
             .map(|(sector, degeneracy)| (sector.into(), degeneracy))
             .collect::<SmallVec<[(SectorId, usize); 8]>>();
-        pairs.sort_unstable();
-        pairs.dedup();
+        pairs.sort_unstable_by_key(|&(sector, _)| sector);
+        // Why not discard zeros first: duplicate validity must not depend on
+        // input order or storage representation; TeNeT follows TensorKit's
+        // strict tuple invariant, not its SectorDict zero-first corner.
         for window in pairs.windows(2) {
-            assert_ne!(
-                window[0].0, window[1].0,
-                "sector {:?} listed with conflicting degeneracies {} and {}",
-                window[0].0, window[0].1, window[1].1
-            );
+            if window[0].0 == window[1].0 {
+                return Err(SectorLegConstructionError::DuplicateSector {
+                    sector: window[0].0,
+                });
+            }
         }
+        let nonzero_count = pairs
+            .iter()
+            .filter(|(_, degeneracy)| *degeneracy != 0)
+            .count();
         let mut sectors = SectorVec::new();
         let mut degeneracies = DimVec::new();
-        sectors.reserve(pairs.len());
-        degeneracies.reserve(pairs.len());
+        sectors.reserve(nonzero_count);
+        degeneracies.reserve(nonzero_count);
         for (sector, degeneracy) in pairs {
+            if degeneracy == 0 {
+                continue;
+            }
             sectors.push(sector);
             degeneracies.push(degeneracy);
         }
-        Self {
+        Ok(Self {
             data: Arc::new(SectorLegData {
                 sectors,
                 degeneracies,
             }),
             is_dual,
-        }
+        })
     }
 
     pub fn from_sector_id(sector: usize, degeneracy: usize) -> Self {
