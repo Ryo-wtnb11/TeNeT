@@ -1,6 +1,6 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use rustc_hash::FxHashMap;
 use tenet_core::{
@@ -467,11 +467,10 @@ struct ContractedSpaceKey {
     output_axes: DimVec,
 }
 
-fn contracted_space_cache() -> &'static RwLock<FxHashMap<ContractedSpaceKey, DynamicFusionMapSpace>>
-{
-    static CACHE: OnceLock<RwLock<FxHashMap<ContractedSpaceKey, DynamicFusionMapSpace>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+type ContractedSpaceCache = RwLock<FxHashMap<ContractedSpaceKey, DynamicFusionMapSpace>>;
+
+fn contracted_space_cache() -> Arc<ContractedSpaceCache> {
+    registered_operation_cache::<ContractedSpaceCache>().1
 }
 
 /// Identity of a tree-transform (permute / braid / transpose) output space:
@@ -485,11 +484,13 @@ struct TransformedSpaceKey {
     operation: TreeTransformOperation,
 }
 
-fn transformed_space_cache(
-) -> &'static RwLock<FxHashMap<TransformedSpaceKey, DynamicFusionMapSpace>> {
-    static CACHE: OnceLock<RwLock<FxHashMap<TransformedSpaceKey, DynamicFusionMapSpace>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(FxHashMap::default()))
+type TransformedSpaceCache = RwLock<FxHashMap<TransformedSpaceKey, DynamicFusionMapSpace>>;
+
+fn transformed_space_cache() -> Arc<TransformedSpaceCache> {
+    // Why not retain either Arc in a OnceLock: reset replaces the registry
+    // generation, while an operation already holding the old Arc may finish
+    // and publish only into that discarded generation.
+    registered_operation_cache::<TransformedSpaceCache>().1
 }
 
 #[cfg(test)]
@@ -1706,7 +1707,8 @@ impl DynamicFusionMapSpace {
             source_homspace: Arc::clone(&source.homspace),
             operation: operation.clone(),
         };
-        if let Some(cached) = transformed_space_cache()
+        let cache = transformed_space_cache();
+        if let Some(cached) = cache
             .read()
             .ok()
             .and_then(|map| map.get(&cache_key).cloned())
@@ -1725,7 +1727,7 @@ impl DynamicFusionMapSpace {
         // #256 already carried the authoritative degeneracies into the final
         // HomSpace. The miss builder consumes that value directly.
         let space = Self::from_final_homspace_with_prepared(rule, homspace, prepared)?;
-        if let Ok(mut map) = transformed_space_cache().write() {
+        if let Ok(mut map) = cache.write() {
             map.insert(cache_key, space.clone());
         }
         Ok(space)
@@ -1944,18 +1946,15 @@ impl DynamicFusionMapSpace {
             rhs_axes: axes.rhs_contracting_axes().iter().copied().collect(),
             output_axes,
         };
-        if let Some(cached) = contracted_space_cache()
-            .read()
-            .ok()
-            .and_then(|map| map.get(&key).cloned())
-        {
+        let cache = contracted_space_cache();
+        if let Some(cached) = cache.read().ok().and_then(|map| map.get(&key).cloned()) {
             return Ok(cached);
         }
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
         debug_assert_eq!(key.output_axes.as_slice(), axis_plan.output_axes);
         let space =
             Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)?;
-        if let Ok(mut map) = contracted_space_cache().write() {
+        if let Ok(mut map) = cache.write() {
             map.insert(key, space.clone());
         }
         Ok(space)
@@ -3362,19 +3361,14 @@ mod scratch_cache_tests {
     }
 
     fn reset_final_result_layout_test_state() {
-        transformed_space_cache()
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        contracted_space_cache()
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        crate::reset_global_operation_caches();
         reset_final_result_layout_builds();
     }
 
     #[test]
-    fn transformed_cache_miss_builds_once_and_warm_hit_builds_zero() {
+    fn transformed_cache_lifecycle_follows_public_reset_generation() {
+        // What: transformed layouts build once per registry generation and
+        // reuse only the structure published in that generation.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3387,10 +3381,11 @@ mod scratch_cache_tests {
             source_homspace: Arc::clone(&source.homspace),
             operation: operation.clone(),
         };
+        let first_generation = transformed_space_cache();
 
         let first = source.transformed(&rule, &operation).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(transformed_space_cache()
+        assert!(first_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&cache_key));
@@ -3398,15 +3393,34 @@ mod scratch_cache_tests {
         reset_final_result_layout_builds();
         let second = source.transformed(&rule, &operation).unwrap();
         assert_eq!(final_result_layout_builds(), 0);
-        assert!(transformed_space_cache()
+        assert!(first_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&cache_key));
         assert!(Arc::ptr_eq(first.structure(), second.structure()));
+
+        crate::reset_global_operation_caches();
+        let second_generation = transformed_space_cache();
+        assert!(!Arc::ptr_eq(&first_generation, &second_generation));
+        assert!(second_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
+        reset_final_result_layout_builds();
+        let rebuilt = source.transformed(&rule, &operation).unwrap();
+        assert_eq!(final_result_layout_builds(), 1);
+        assert!(!Arc::ptr_eq(first.structure(), rebuilt.structure()));
+        reset_final_result_layout_builds();
+        let replay = source.transformed(&rule, &operation).unwrap();
+        assert_eq!(final_result_layout_builds(), 0);
+        assert!(Arc::ptr_eq(rebuilt.structure(), replay.structure()));
     }
 
     #[test]
-    fn contracted_cache_miss_builds_once_and_warm_hit_builds_zero() {
+    fn contracted_cache_lifecycle_follows_public_reset_generation() {
+        // What: contracted layouts build once per registry generation and
+        // reuse only the structure published in that generation.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3421,10 +3435,11 @@ mod scratch_cache_tests {
             rhs_axes: DimVec::from_slice(&[0]),
             output_axes: DimVec::from_slice(&[0, 1]),
         };
+        let first_generation = contracted_space_cache();
 
         let first = DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(contracted_space_cache()
+        assert!(first_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&cache_key));
@@ -3433,11 +3448,30 @@ mod scratch_cache_tests {
         let second =
             DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
         assert_eq!(final_result_layout_builds(), 0);
-        assert!(contracted_space_cache()
+        assert!(first_generation
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&cache_key));
         assert!(Arc::ptr_eq(first.structure(), second.structure()));
+
+        crate::reset_global_operation_caches();
+        let second_generation = contracted_space_cache();
+        assert!(!Arc::ptr_eq(&first_generation, &second_generation));
+        assert!(second_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
+        reset_final_result_layout_builds();
+        let rebuilt =
+            DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
+        assert_eq!(final_result_layout_builds(), 1);
+        assert!(!Arc::ptr_eq(first.structure(), rebuilt.structure()));
+        reset_final_result_layout_builds();
+        let replay =
+            DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
+        assert_eq!(final_result_layout_builds(), 0);
+        assert!(Arc::ptr_eq(rebuilt.structure(), replay.structure()));
     }
 
     #[test]
