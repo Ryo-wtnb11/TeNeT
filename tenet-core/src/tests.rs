@@ -1537,6 +1537,101 @@ mod tests {
     }
 
     #[test]
+    fn fusion_tree_block_structure_proof_reports_the_first_physical_invalid_pair() {
+        // What: structure admission skips dense blocks and reports the earliest
+        // malformed fusion-tree pair in physical block order.
+        let valid = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1), u1(-1)],
+                Some(u1(0)),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        let mismatched_pair = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1)],
+                Some(u1(1)),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(2)],
+                Some(u1(2)),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+        );
+        let later_bad_shape = FusionTreeBlockKey::pair(
+            FusionTreeKey::new([u1(1), u1(-1)], Some(u1(0)), [false], [], [SectorId::new(1)]),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major(vec![1, 1], 0).unwrap(),
+            BlockSpec::column_major_with_key(valid.into(), vec![1, 1], 1).unwrap(),
+            BlockSpec::column_major_with_key(mismatched_pair.into(), vec![1, 1], 2).unwrap(),
+            BlockSpec::column_major_with_key(later_bad_shape.into(), vec![1, 1], 3).unwrap(),
+        ])
+        .unwrap();
+
+        let error =
+            match ValidatedFusionTreeBlockStructure::try_new(&U1FusionRule, &structure) {
+                Ok(_) => panic!("malformed structure unexpectedly admitted"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
+    }
+
+    #[test]
+    fn fusion_tree_block_structure_proof_indexes_only_its_bound_structure() {
+        // What: a successful proof exposes borrowed keys by physical index from
+        // its exact structure, including dense and out-of-bounds distinctions.
+        let valid = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1), u1(-1)],
+                Some(u1(0)),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major(vec![1, 1], 0).unwrap(),
+            BlockSpec::column_major_with_key(valid.clone().into(), vec![1, 1], 1).unwrap(),
+        ])
+        .unwrap();
+
+        let proof =
+            ValidatedFusionTreeBlockStructure::try_new(&U1FusionRule, &structure).unwrap();
+        assert!(std::ptr::eq(proof.rule(), &U1FusionRule));
+        assert!(std::ptr::eq(proof.structure(), &structure));
+        assert_eq!(proof.fusion_tree_block_key(0).unwrap(), None);
+        assert_eq!(proof.fusion_tree_block_key(1).unwrap(), Some(&valid));
+        assert_eq!(
+            proof.fusion_tree_block_key(2).unwrap_err(),
+            CoreError::BlockIndexOutOfBounds { index: 2, count: 2 }
+        );
+    }
+
+    #[test]
     fn rule_validation_preserves_builtin_multiplicity_free_keys() {
         // What: validation is observational for representative abelian,
         // non-abelian, anyonic, fermionic, and product fusion trees.

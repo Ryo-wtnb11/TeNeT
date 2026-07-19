@@ -6,15 +6,14 @@ use std::{collections::hash_map::Entry, sync::Arc};
 use num_traits::Zero;
 use tenet_core::{
     generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair,
-    multiplicity_free_braid_tree, multiplicity_free_braid_tree_block,
-    multiplicity_free_braid_tree_pair, multiplicity_free_braid_tree_pair_block,
-    multiplicity_free_permute_tree, multiplicity_free_permute_tree_block,
+    multiplicity_free_braid_tree, multiplicity_free_braid_tree_pair,
+    multiplicity_free_braid_tree_pair_block, multiplicity_free_permute_tree,
     multiplicity_free_permute_tree_pair, multiplicity_free_permute_tree_pair_block,
     multiplicity_free_transpose_tree_pair, multiplicity_free_transpose_tree_pair_block,
     unique_braid_tree, unique_permute_tree, BlockKey, BlockStructure, FusionRule, FusionStyleKind,
     FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeKey, GenericBraidScalar,
     GenericRigidSymbols, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    PreparedTreePairOperation,
+    PreparedTreePairOperation, ValidatedFusionTreeBlockStructure,
 };
 
 use crate::OperationError;
@@ -25,6 +24,110 @@ pub use tenet_operations::transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
     TreeTransformKeyBlockSpec,
 };
+
+pub(crate) fn validate_multiplicity_free_tree_pair_preflight<'rule, 'structure, R>(
+    rule: &'rule R,
+    operation: &TreeTransformOperation,
+    src_structure: &'structure BlockStructure,
+) -> Result<ValidatedFusionTreeBlockStructure<'rule, 'structure, R>, OperationError>
+where
+    R: FusionRule,
+{
+    if !rule.fusion_style().is_multiplicity_free() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation: Box::new(operation.clone()),
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    validate_tree_transform_operation_syntax(rule, operation, src_structure)?;
+    ValidatedFusionTreeBlockStructure::try_new(rule, src_structure)
+        .map_err(OperationError::from_core_preserving_context)
+}
+
+pub(crate) struct ValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R> {
+    proof: ValidatedFusionTreeBlockStructure<'rule, 'structure, R>,
+}
+
+impl<'rule, 'structure, R> ValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R>
+where
+    R: FusionRule,
+{
+    fn try_new(
+        rule: &'rule R,
+        operation: &TreeTransformOperation,
+        src_structure: &'structure BlockStructure,
+    ) -> Result<Self, OperationError> {
+        if !rule.fusion_style().is_multiplicity_free() {
+            return Err(OperationError::UnsupportedFusionStyle {
+                operation: Box::new(operation.clone()),
+                style: rule.fusion_style(),
+            });
+        }
+        operation.validate_braiding_support(rule)?;
+        validate_tree_transform_operation_syntax(rule, operation, src_structure)?;
+        validate_all_codomain_operation_scope(operation)?;
+        let proof = ValidatedFusionTreeBlockStructure::try_new(rule, src_structure)
+            .map_err(OperationError::from_core_preserving_context)?;
+        for index in 0..src_structure.block_count() {
+            let Some(key) = proof.fusion_tree_block_key(index)? else {
+                continue;
+            };
+            validate_all_codomain_fusion_tree_block(rule, index, key)?;
+        }
+        Ok(Self { proof })
+    }
+
+    fn proof(&self) -> &ValidatedFusionTreeBlockStructure<'rule, 'structure, R> {
+        &self.proof
+    }
+
+    fn rule(&self) -> &'rule R {
+        self.proof.rule()
+    }
+
+    fn structure(&self) -> &'structure BlockStructure {
+        self.proof.structure()
+    }
+}
+
+pub(crate) fn validate_multiplicity_free_all_codomain_preflight<'rule, 'structure, R>(
+    rule: &'rule R,
+    operation: &TreeTransformOperation,
+    src_structure: &'structure BlockStructure,
+) -> Result<ValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R>, OperationError>
+where
+    R: FusionRule,
+{
+    ValidatedAllCodomainFusionTreeBlockStructure::try_new(rule, operation, src_structure)
+}
+
+fn validate_tree_transform_operation_syntax<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    src_structure: &BlockStructure,
+) -> Result<(), OperationError>
+where
+    R: FusionRule,
+{
+    let mut prepared_splits = SmallVec::<[(usize, usize); 4]>::new();
+    for index in 0..src_structure.block_count() {
+        let block = src_structure.block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let split = (
+            key.codomain_tree().uncoupled().len(),
+            key.domain_tree().uncoupled().len(),
+        );
+        if prepared_splits.contains(&split) {
+            continue;
+        }
+        prepare_tree_pair_operation(rule, operation, split)?;
+        prepared_splits.push(split);
+    }
+    Ok(())
+}
 
 /// Build a TensorKit-style grouped tree-transform plan for multiplicity-free
 /// fusion rules.
@@ -301,7 +404,7 @@ where
 type TransformRows<K, T> = Vec<(K, T)>;
 type SharedTransformRows<K, T> = Arc<TransformRows<K, T>>;
 type TransformBlockRows<K, T> = Vec<TransformRows<K, T>>;
-type StagedSources<'a, K, T> = SmallVec<[(&'a K, Option<SharedTransformRows<K, T>>); 4]>;
+type StagedSources<'a, K, T> = SmallVec<[(usize, &'a K, Option<SharedTransformRows<K, T>>); 4]>;
 type StagedSourceIndices = SmallVec<[usize; 4]>;
 
 enum StagedSourceAlignment {
@@ -338,37 +441,32 @@ fn resolve_staged_group_rows<K, T, F>(
     block_transform: F,
 ) -> Result<(StagedSources<'_, K, T>, Vec<(K, SharedTransformRows<K, T>)>), OperationError>
 where
-    K: Clone,
-    F: FnOnce(&[K]) -> Result<TransformBlockRows<K, T>, OperationError>,
+    F: FnOnce(&[usize]) -> Result<Vec<(K, TransformRows<K, T>)>, OperationError>,
 {
-    if sources.iter().all(|(_, rows)| rows.is_some()) {
+    if sources.iter().all(|(_, _, rows)| rows.is_some()) {
         return Ok((sources, Vec::new()));
     }
 
-    let missing_count = sources.iter().filter(|(_, rows)| rows.is_none()).count();
-    let mut missing_keys = Vec::with_capacity(missing_count);
-    // Collect owned keys exactly once for the block API. Why not inline them:
-    // tree-pair keys are large and groups above four sources are ordinary
-    // non-Abelian blocks, so SmallVec would move substantial storage onto
-    // every worker stack without bounding the general case.
-    missing_keys.extend(
+    let missing_count = sources.iter().filter(|(_, _, rows)| rows.is_none()).count();
+    let mut missing_indices = Vec::with_capacity(missing_count);
+    missing_indices.extend(
         sources
             .iter()
-            .filter_map(|(key, rows)| rows.is_none().then(|| (*key).clone())),
+            .filter_map(|(index, _, rows)| rows.is_none().then_some(*index)),
     );
-    let batched = block_transform(&missing_keys)?;
-    if batched.len() != missing_keys.len() {
+    let batched = block_transform(&missing_indices)?;
+    if batched.len() != missing_indices.len() {
         return Err(OperationError::CoefficientCountMismatch {
-            expected: missing_keys.len(),
+            expected: missing_indices.len(),
             actual: batched.len(),
         });
     }
 
-    let mut computed = Vec::with_capacity(missing_keys.len());
-    let mut missing_rows = missing_keys.into_iter().zip(batched);
+    let mut computed = Vec::with_capacity(missing_indices.len());
+    let mut missing_rows = batched.into_iter();
     // Rescan the short source group in order so publishing each computed row
     // needs no separately owned position list.
-    for (_, slot) in &mut sources {
+    for (_, _, slot) in &mut sources {
         if slot.is_some() {
             continue;
         }
@@ -398,23 +496,23 @@ mod staged_row_resolution_tests {
         let hit_zero = Arc::new(vec![(10usize, 1i32)]);
         let hit_two = Arc::new(vec![(20usize, 2i32)]);
         let mut sources = StagedSources::new();
-        sources.push((&keys[0], Some(Arc::clone(&hit_zero))));
-        sources.push((&keys[1], None));
-        sources.push((&keys[2], Some(Arc::clone(&hit_two))));
-        sources.push((&keys[3], None));
+        sources.push((0, &keys[0], Some(Arc::clone(&hit_zero))));
+        sources.push((1, &keys[1], None));
+        sources.push((2, &keys[2], Some(Arc::clone(&hit_two))));
+        sources.push((3, &keys[3], None));
 
         let (resolved, computed) = resolve_staged_group_rows(sources, |missing| {
             // What: partial misses reach one block transform in original
             // source order, independently of the intervening memo hits.
             assert_eq!(missing, &[1, 3]);
-            Ok(vec![vec![(11, 3)], vec![(31, 4)]])
+            Ok(vec![(1, vec![(11, 3)]), (3, vec![(31, 4)])])
         })
         .unwrap();
 
-        assert!(Arc::ptr_eq(resolved[0].1.as_ref().unwrap(), &hit_zero));
-        assert!(Arc::ptr_eq(resolved[2].1.as_ref().unwrap(), &hit_two));
-        assert_eq!(resolved[1].1.as_deref().unwrap(), &[(11, 3)]);
-        assert_eq!(resolved[3].1.as_deref().unwrap(), &[(31, 4)]);
+        assert!(Arc::ptr_eq(resolved[0].2.as_ref().unwrap(), &hit_zero));
+        assert!(Arc::ptr_eq(resolved[2].2.as_ref().unwrap(), &hit_two));
+        assert_eq!(resolved[1].2.as_deref().unwrap(), &[(11, 3)]);
+        assert_eq!(resolved[3].2.as_deref().unwrap(), &[(31, 4)]);
         assert_eq!(
             computed.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
             [1, 3]
@@ -425,14 +523,14 @@ mod staged_row_resolution_tests {
     fn coefficient_count_mismatch_does_not_publish_partial_rows() {
         let keys = [0usize, 1];
         let mut sources = StagedSources::new();
-        sources.push((&keys[0], None));
-        sources.push((&keys[1], None));
+        sources.push((0, &keys[0], None));
+        sources.push((1, &keys[1], None));
 
         let error = resolve_staged_group_rows(sources, |missing| {
             // What: validating the complete block result remains before any
             // staged row publication.
             assert_eq!(missing, &[0, 1]);
-            Ok(vec![vec![(10, 1i32)]])
+            Ok(vec![(0, vec![(10, 1i32)])])
         })
         .unwrap_err();
 
@@ -551,37 +649,6 @@ where
     rows.map_err(OperationError::from_core_preserving_context)
 }
 
-pub(crate) fn transformed_all_codomain_rows_block<R>(
-    rule: &R,
-    operation: &TreeTransformOperation,
-    codomain_trees: &[FusionTreeKey],
-) -> Result<TransformBlockRows<FusionTreeKey, R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    let rows = match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            ..
-        } => multiplicity_free_permute_tree_block(rule, codomain_trees, codomain_permutation),
-        TreeTransformOperation::Braid {
-            codomain_permutation,
-            codomain_levels,
-            ..
-        } => multiplicity_free_braid_tree_block(
-            rule,
-            codomain_trees,
-            codomain_permutation,
-            codomain_levels,
-        ),
-        TreeTransformOperation::Transpose { .. } => {
-            unreachable!("all-codomain operation scope validation rejected transpose")
-        }
-    };
-    rows.map_err(OperationError::from_core_preserving_context)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized<R, RuleKey>(
     rule: &R,
@@ -598,25 +665,85 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     RuleKey: Clone + Eq + std::hash::Hash,
 {
-    build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_impl(
-        rule,
+    let proof = validate_multiplicity_free_all_codomain_preflight(rule, &operation, src_structure)?;
+    build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_validated(
+        &proof,
         rule_key,
         operation,
-        src_structure,
         memo,
         memo_hits,
         memo_misses,
         threads,
-        transformed_all_codomain_rows_block,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_impl<R, RuleKey, F>(
-    rule: &R,
+pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_validated<
+    R,
+    RuleKey,
+>(
+    proof: &ValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
     rule_key: &RuleKey,
     operation: TreeTransformOperation,
-    src_structure: &BlockStructure,
+    memo: &mut AllCodomainRowMemo<R::Scalar, RuleKey>,
+    memo_hits: &mut usize,
+    memo_misses: &mut usize,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols + Sync,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: Clone + Eq + std::hash::Hash,
+{
+    build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_impl(
+        proof,
+        rule_key,
+        operation,
+        memo,
+        memo_hits,
+        memo_misses,
+        threads,
+        transform_all_codomain_rows_for_block_indices,
+    )
+}
+
+fn transform_all_codomain_rows_for_block_indices<R>(
+    proof: &ValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
+    operation: &TreeTransformOperation,
+    block_indices: &[usize],
+) -> Result<Vec<(FusionTreeKey, TransformRows<FusionTreeKey, R::Scalar>)>, OperationError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rows = match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            ..
+        } => proof
+            .proof()
+            .permute_codomain_rows_for_block_indices(block_indices, codomain_permutation),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            codomain_levels,
+            ..
+        } => proof.proof().braid_codomain_rows_for_block_indices(
+            block_indices,
+            codomain_permutation,
+            codomain_levels,
+        ),
+        TreeTransformOperation::Transpose { .. } => {
+            unreachable!("all-codomain operation scope validation rejected transpose")
+        }
+    };
+    rows.map_err(OperationError::from_core_preserving_context)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_impl<R, RuleKey, F>(
+    proof: &ValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
+    rule_key: &RuleKey,
+    operation: TreeTransformOperation,
     memo: &mut AllCodomainRowMemo<R::Scalar, RuleKey>,
     memo_hits: &mut usize,
     memo_misses: &mut usize,
@@ -628,21 +755,16 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     RuleKey: Clone + Eq + std::hash::Hash,
     F: Fn(
-            &R,
+            &ValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
             &TreeTransformOperation,
-            &[FusionTreeKey],
-        ) -> Result<TransformBlockRows<FusionTreeKey, R::Scalar>, OperationError>
+            &[usize],
+        )
+            -> Result<Vec<(FusionTreeKey, TransformRows<FusionTreeKey, R::Scalar>)>, OperationError>
         + Send
         + Sync,
 {
-    if !rule.fusion_style().is_multiplicity_free() {
-        return Err(OperationError::UnsupportedFusionStyle {
-            operation: Box::new(operation),
-            style: rule.fusion_style(),
-        });
-    }
-    operation.validate_braiding_support(rule)?;
-    validate_all_codomain_operation_scope(&operation)?;
+    let rule = proof.rule();
+    let src_structure = proof.structure();
     let source_axes = operation_source_axes(&operation);
     let groups = src_structure.fusion_tree_groups();
 
@@ -655,14 +777,12 @@ where
         let mut sources = StagedSources::new();
         let mut source_indices = StagedSourceIndices::new();
         for &src_block_index in group.block_indices() {
-            let block = src_structure.block(src_block_index)?;
-            let BlockKey::FusionTree(src_key) = block.key() else {
+            let Some(src_key) = proof.proof().fusion_tree_block_key(src_block_index)? else {
                 return Err(OperationError::ExpectedFusionTreeBlock {
                     tensor: "src",
                     index: src_block_index,
                 });
             };
-            validate_all_codomain_fusion_tree_block(rule, src_block_index, src_key)?;
             let codomain_tree = src_key.codomain_tree();
             if let Some(&source_index) = group_source_index.get(codomain_tree) {
                 source_indices.push(source_index);
@@ -683,7 +803,7 @@ where
             }
             let source_index = sources.len();
             group_source_index.insert(codomain_tree, source_index);
-            sources.push((codomain_tree, rows));
+            sources.push((src_block_index, codomain_tree, rows));
             source_indices.push(source_index);
         }
         staged_groups.push(StagedGroupRows {
@@ -693,8 +813,8 @@ where
         });
     }
     let completed = execute_staged_groups(staged_groups, threads, |staged| {
-        let (resolved, computed) = resolve_staged_group_rows(staged.sources, |missing_keys| {
-            block_transform(rule, &operation, missing_keys)
+        let (resolved, computed) = resolve_staged_group_rows(staged.sources, |missing_indices| {
+            block_transform(proof, &operation, missing_indices)
         })?;
         let StagedSourceAlignment::Explicit(source_indices) = staged.source_alignment else {
             return Err(OperationError::StructureMismatch {
@@ -708,8 +828,8 @@ where
             source_cursor += 1;
             index
                 .and_then(|index| resolved.get(index))
-                .filter(|(key, _)| *key == codomain_tree)
-                .and_then(|(_, rows)| rows.as_ref())
+                .filter(|(_, key, _)| *key == codomain_tree)
+                .and_then(|(_, _, rows)| rows.as_ref())
                 .map(Arc::clone)
                 .ok_or(OperationError::StructureMismatch {
                     tensor: "staged all-codomain rows",
@@ -1177,25 +1297,101 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     RuleKey: Clone + Eq + std::hash::Hash,
 {
-    build_multiplicity_free_tree_pair_transform_group_plan_memoized_impl(
-        rule,
+    let proof = validate_multiplicity_free_tree_pair_preflight(rule, &operation, src_structure)?;
+    build_multiplicity_free_tree_pair_transform_group_plan_memoized_validated(
+        &proof,
         rule_key,
         operation,
-        src_structure,
         memo,
         memo_hits,
         memo_misses,
         threads,
-        transformed_tree_pair_rows_block,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_multiplicity_free_tree_pair_transform_group_plan_memoized_impl<R, RuleKey, F>(
-    rule: &R,
+pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized_validated<
+    R,
+    RuleKey,
+>(
+    proof: &ValidatedFusionTreeBlockStructure<'_, '_, R>,
     rule_key: &RuleKey,
     operation: TreeTransformOperation,
-    src_structure: &BlockStructure,
+    memo: &mut TreePairRowMemo<R::Scalar, RuleKey>,
+    memo_hits: &mut usize,
+    memo_misses: &mut usize,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    RuleKey: Clone + Eq + std::hash::Hash,
+{
+    build_multiplicity_free_tree_pair_transform_group_plan_memoized_impl(
+        proof,
+        rule_key,
+        operation,
+        memo,
+        memo_hits,
+        memo_misses,
+        threads,
+        transform_tree_pair_rows_for_block_indices,
+    )
+}
+
+fn transform_tree_pair_rows_for_block_indices<R>(
+    proof: &ValidatedFusionTreeBlockStructure<'_, '_, R>,
+    operation: &TreeTransformOperation,
+    block_indices: &[usize],
+) -> Result<
+    Vec<(
+        FusionTreeBlockKey,
+        TransformRows<FusionTreeBlockKey, R::Scalar>,
+    )>,
+    OperationError,
+>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let rows = match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            domain_permutation,
+        } => proof.permute_tree_pair_rows_for_block_indices(
+            block_indices,
+            codomain_permutation,
+            domain_permutation,
+        ),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        } => proof.braid_tree_pair_rows_for_block_indices(
+            block_indices,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        TreeTransformOperation::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => proof.transpose_tree_pair_rows_for_block_indices(
+            block_indices,
+            codomain_permutation,
+            domain_permutation,
+        ),
+    };
+    rows.map_err(OperationError::from_core_preserving_context)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_multiplicity_free_tree_pair_transform_group_plan_memoized_impl<R, RuleKey, F>(
+    proof: &ValidatedFusionTreeBlockStructure<'_, '_, R>,
+    rule_key: &RuleKey,
+    operation: TreeTransformOperation,
     memo: &mut TreePairRowMemo<R::Scalar, RuleKey>,
     memo_hits: &mut usize,
     memo_misses: &mut usize,
@@ -1207,20 +1403,19 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     RuleKey: Clone + Eq + std::hash::Hash,
     F: Fn(
-            &R,
+            &ValidatedFusionTreeBlockStructure<'_, '_, R>,
             &TreeTransformOperation,
-            &[FusionTreeBlockKey],
-        ) -> Result<TransformBlockRows<FusionTreeBlockKey, R::Scalar>, OperationError>
-        + Send
+            &[usize],
+        ) -> Result<
+            Vec<(
+                FusionTreeBlockKey,
+                TransformRows<FusionTreeBlockKey, R::Scalar>,
+            )>,
+            OperationError,
+        > + Send
         + Sync,
 {
-    if !rule.fusion_style().is_multiplicity_free() {
-        return Err(OperationError::UnsupportedFusionStyle {
-            operation: Box::new(operation),
-            style: rule.fusion_style(),
-        });
-    }
-    operation.validate_braiding_support(rule)?;
+    let src_structure = proof.structure();
     let source_axes = operation_source_axes(&operation);
     let groups = src_structure.fusion_tree_groups();
 
@@ -1230,8 +1425,7 @@ where
     for group in groups {
         let mut sources = StagedSources::new();
         for &src_block_index in group.block_indices() {
-            let block = src_structure.block(src_block_index)?;
-            let BlockKey::FusionTree(src_key) = block.key() else {
+            let Some(src_key) = proof.fusion_tree_block_key(src_block_index)? else {
                 return Err(OperationError::ExpectedFusionTreeBlock {
                     tensor: "src",
                     index: src_block_index,
@@ -1244,7 +1438,7 @@ where
             } else {
                 staged_misses += 1;
             }
-            sources.push((src_key, rows));
+            sources.push((src_block_index, src_key, rows));
         }
         staged_groups.push(StagedGroupRows {
             group,
@@ -1253,8 +1447,8 @@ where
         });
     }
     let completed = execute_staged_groups(staged_groups, threads, |staged| {
-        let (resolved, computed) = resolve_staged_group_rows(staged.sources, |missing_keys| {
-            block_transform(rule, &operation, missing_keys)
+        let (resolved, computed) = resolve_staged_group_rows(staged.sources, |missing_indices| {
+            block_transform(proof, &operation, missing_indices)
         })?;
         if !matches!(staged.source_alignment, StagedSourceAlignment::Identity) {
             return Err(OperationError::StructureMismatch {
@@ -1268,8 +1462,8 @@ where
             source_cursor += 1;
             resolved
                 .get(index)
-                .filter(|(key, _)| *key == src_key)
-                .and_then(|(_, rows)| rows.as_ref())
+                .filter(|(_, key, _)| *key == src_key)
+                .and_then(|(_, _, rows)| rows.as_ref())
                 .map(Arc::clone)
                 .ok_or(OperationError::StructureMismatch {
                     tensor: "staged tree-pair rows",
@@ -1342,16 +1536,31 @@ where
         + Send
         + Sync,
 {
+    let proof = validate_multiplicity_free_tree_pair_preflight(rule, &operation, src_structure)?;
     build_multiplicity_free_tree_pair_transform_group_plan_memoized_impl(
-        rule,
+        &proof,
         rule_key,
         operation,
-        src_structure,
         memo,
         memo_hits,
         memo_misses,
         threads,
-        block_transform,
+        |proof, operation, block_indices| {
+            let mut source_keys = Vec::with_capacity(block_indices.len());
+            for &index in block_indices {
+                source_keys.push(
+                    proof
+                        .fusion_tree_block_key(index)?
+                        .ok_or(OperationError::ExpectedFusionTreeBlock {
+                            tensor: "src",
+                            index,
+                        })?
+                        .clone(),
+                );
+            }
+            let rows = block_transform(proof.rule(), operation, &source_keys)?;
+            Ok(source_keys.into_iter().zip(rows).collect())
+        },
     )
 }
 
@@ -1578,7 +1787,7 @@ where
         if primary_prepared.is_none() {
             primary_prepared = Some((
                 source_split,
-                prepare_unique_tree_pair_operation(rule, &operation, source_split)?,
+                prepare_tree_pair_operation(rule, &operation, source_split)?,
             ));
         }
         if let Some((primary_split, prepared)) = primary_prepared.as_ref() {
@@ -1591,11 +1800,9 @@ where
         let prepared_by_split = additional_prepared.get_or_insert_with(FxHashMap::default);
         let prepared = match prepared_by_split.entry(source_split) {
             Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(prepare_unique_tree_pair_operation(
-                rule,
-                &operation,
-                source_split,
-            )?),
+            Entry::Vacant(entry) => {
+                entry.insert(prepare_tree_pair_operation(rule, &operation, source_split)?)
+            }
         };
         prepared
             .execute_unique_rigid(rule, src_key)
@@ -1603,7 +1810,7 @@ where
     })
 }
 
-fn prepare_unique_tree_pair_operation<R>(
+fn prepare_tree_pair_operation<R>(
     rule: &R,
     operation: &TreeTransformOperation,
     (source_codomain_rank, source_domain_rank): (usize, usize),

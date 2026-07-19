@@ -3034,6 +3034,33 @@ where
     }))
 }
 
+fn fusion_tree_block_group_from_validated_structure<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreeKey],
+) -> Result<Option<ValidatedFusionTreeBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let Some(reference) = src_keys.first() else {
+        return Ok(None);
+    };
+    for source in src_keys.iter().skip(1) {
+        if source.uncoupled() != reference.uncoupled()
+            || source.is_dual() != reference.is_dual()
+            || source.has_multiplicity() != reference.has_multiplicity()
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion-tree keys must share one group",
+            });
+        }
+    }
+    Ok(Some(ValidatedFusionTreeBlockGroup {
+        rule,
+        src_keys,
+        rank: reference.uncoupled().len(),
+    }))
+}
+
 /// Apply one braid to every source tree in an all-codomain block.
 ///
 /// Sources and result rows retain source order. Floating-point summation can
@@ -3198,6 +3225,41 @@ where
             });
         }
         validate_fusion_tree_pair_for_rule(rule, source)?;
+    }
+    Ok(Some(ValidatedTreePairBlockGroup {
+        rule,
+        src_keys,
+        codomain_rank: reference_codomain.uncoupled().len(),
+        domain_rank: reference_domain.uncoupled().len(),
+    }))
+}
+
+fn tree_pair_block_group_from_validated_structure<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreeBlockKey],
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let Some(reference) = src_keys.first() else {
+        return Ok(None);
+    };
+    let reference_codomain = reference.codomain_tree();
+    let reference_domain = reference.domain_tree();
+    for source in src_keys.iter().skip(1) {
+        let codomain = source.codomain_tree();
+        let domain = source.domain_tree();
+        if codomain.uncoupled() != reference_codomain.uncoupled()
+            || domain.uncoupled() != reference_domain.uncoupled()
+            || codomain.is_dual() != reference_codomain.is_dual()
+            || domain.is_dual() != reference_domain.is_dual()
+            || codomain.has_multiplicity() != reference_codomain.has_multiplicity()
+            || domain.has_multiplicity() != reference_domain.has_multiplicity()
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: TREE_PAIR_BLOCK_GROUP_ERROR,
+            });
+        }
     }
     Ok(Some(ValidatedTreePairBlockGroup {
         rule,
