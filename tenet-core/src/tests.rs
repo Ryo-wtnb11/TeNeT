@@ -425,6 +425,32 @@ mod tests {
         }
     }
 
+    impl MultiplicityFreeRigidSymbols for PlanarZ2Rule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct IdentitySymbolPanicRule;
 
@@ -1628,6 +1654,23 @@ mod tests {
         assert_eq!(
             proof.fusion_tree_block_key(2).unwrap_err(),
             CoreError::BlockIndexOutOfBounds { index: 2, count: 2 }
+        );
+    }
+
+    #[test]
+    fn validated_empty_permute_preserves_planar_braiding_rejection() {
+        let structure = BlockStructure::empty(0);
+        let proof =
+            ValidatedFusionTreeBlockStructure::try_new(&PlanarZ2Rule, &structure).unwrap();
+
+        // What: an empty proof-consuming block call observes the same
+        // symmetric-braiding capability boundary as the public block API.
+        assert_eq!(
+            proof.permute_tree_pair_rows_for_block_indices(&[], &[], &[]),
+            Err(CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: BraidingStyleKind::NoBraiding,
+            })
         );
     }
 
@@ -3748,6 +3791,89 @@ mod tests {
                 rank: 3,
             })
         );
+    }
+
+    #[test]
+    fn public_prepared_braid_preserves_level_then_style_error_precedence() {
+        let rule = Su3FusionRule::new();
+
+        // What: malformed level lengths retain precedence over the public
+        // multiplicity-free style gate.
+        assert_eq!(
+            PreparedTreePairOperation::prepare_braid(
+                &rule,
+                2,
+                0,
+                &[0, 0],
+                &[],
+                &[0],
+                &[],
+            ),
+            Err(CoreError::DimensionMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
+
+        // What: once level lengths are valid, the existing public API rejects
+        // Generic fusion before inspecting an invalid permutation.
+        assert_eq!(
+            PreparedTreePairOperation::prepare_braid(
+                &rule,
+                2,
+                0,
+                &[0, 0],
+                &[],
+                &[0, 1],
+                &[],
+            ),
+            Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: FusionStyleKind::Generic,
+            })
+        );
+    }
+
+    #[test]
+    fn validation_only_tree_pair_syntax_handles_large_and_rank_zero_maps() {
+        let codomain_rank = 10;
+        let domain_rank = 9;
+        let codomain = (0..codomain_rank).collect::<Vec<_>>();
+        let domain =
+            (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+        let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+        let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+
+        // What: the validation-only API handles ranks beyond SmallVec's inline
+        // permutation capacity without requiring a prepared Artin plan.
+        PreparedTreePairOperation::validate_permute_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+        )
+        .unwrap();
+        PreparedTreePairOperation::validate_braid_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+            &codomain_levels,
+            &domain_levels,
+        )
+        .unwrap();
+        PreparedTreePairOperation::validate_transpose_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+        )
+        .unwrap();
+
+        // What: the empty tensor map remains a valid identity operation.
+        PreparedTreePairOperation::validate_permute_syntax(0, 0, &[], &[]).unwrap();
+        PreparedTreePairOperation::validate_braid_syntax(0, 0, &[], &[], &[], &[]).unwrap();
+        PreparedTreePairOperation::validate_transpose_syntax(0, 0, &[], &[]).unwrap();
     }
 
     #[test]

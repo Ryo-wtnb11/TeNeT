@@ -1423,24 +1423,59 @@ impl PreparedTreePairOperation {
     where
         R: FusionRule,
     {
-        if codomain_levels.len() != source_codomain_rank {
-            return Err(CoreError::DimensionMismatch {
-                expected: source_codomain_rank,
-                actual: codomain_levels.len(),
-            });
-        }
-        if domain_levels.len() != source_domain_rank {
-            return Err(CoreError::DimensionMismatch {
-                expected: source_domain_rank,
-                actual: domain_levels.len(),
-            });
-        }
+        Self::validate_braid_level_lengths(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_levels,
+            domain_levels,
+        )?;
         if !rule.fusion_style().is_multiplicity_free() {
             return Err(CoreError::UnsupportedFusionStyle {
                 expected: FusionStyleKind::Simple,
                 actual: rule.fusion_style(),
             });
         }
+        Self::prepare_braid_lowered(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn validate_braid_syntax(
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        codomain_levels: &[usize],
+        domain_levels: &[usize],
+    ) -> Result<(), CoreError> {
+        Self::validate_braid_level_lengths(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_levels,
+            domain_levels,
+        )?;
+        validate_tree_pair_axis_map_inline(
+            codomain_permutation,
+            domain_permutation,
+            source_codomain_rank,
+            source_domain_rank,
+        )
+    }
+
+    fn prepare_braid_lowered(
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        codomain_levels: &[usize],
+        domain_levels: &[usize],
+    ) -> Result<Self, CoreError> {
         let target_codomain_rank = codomain_permutation.len();
         if tree_pair_axis_map_is_identity(
             codomain_permutation,
@@ -1491,6 +1526,27 @@ impl PreparedTreePairOperation {
         })
     }
 
+    fn validate_braid_level_lengths(
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+        codomain_levels: &[usize],
+        domain_levels: &[usize],
+    ) -> Result<(), CoreError> {
+        if codomain_levels.len() != source_codomain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: source_codomain_rank,
+                actual: codomain_levels.len(),
+            });
+        }
+        if domain_levels.len() != source_domain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: source_domain_rank,
+                actual: domain_levels.len(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn prepare_permute<R>(
         rule: &R,
         source_codomain_rank: usize,
@@ -1513,6 +1569,35 @@ impl PreparedTreePairOperation {
                 actual: rule.fusion_style(),
             });
         }
+        Self::prepare_permute_lowered(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn validate_permute_syntax(
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<(), CoreError> {
+        validate_tree_pair_axis_map_inline(
+            codomain_permutation,
+            domain_permutation,
+            source_codomain_rank,
+            source_domain_rank,
+        )
+    }
+
+    fn prepare_permute_lowered(
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<Self, CoreError> {
         let target_codomain_rank = codomain_permutation.len();
         if tree_pair_axis_map_is_identity(
             codomain_permutation,
@@ -1570,20 +1655,13 @@ impl PreparedTreePairOperation {
         codomain_permutation: &[usize],
         domain_permutation: &[usize],
     ) -> Result<Self, CoreError> {
-        let permutation = linearize_tree_pair_permutation_inline(
+        let permutation = Self::validated_transpose_permutation(
             codomain_permutation,
             domain_permutation,
             source_codomain_rank,
             source_domain_rank,
         )?;
         let total_rank = source_codomain_rank + source_domain_rank;
-        if !is_cyclic_permutation(&permutation) {
-            return Err(CoreError::InvalidPermutation {
-                permutation: permutation.to_vec(),
-                rank: total_rank,
-            });
-        }
-
         let target_codomain_rank = codomain_permutation.len();
         let Some(position) = permutation.iter().position(|&axis| axis == 0) else {
             return Ok(Self {
@@ -1614,6 +1692,41 @@ impl PreparedTreePairOperation {
             requires_symmetric_braiding: false,
             plan,
         })
+    }
+
+    #[doc(hidden)]
+    pub fn validate_transpose_syntax(
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<(), CoreError> {
+        validate_cyclic_tree_pair_axis_map_inline(
+            codomain_permutation,
+            domain_permutation,
+            source_codomain_rank,
+            source_domain_rank,
+        )
+    }
+
+    fn validated_transpose_permutation(
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+    ) -> Result<SmallVec<[usize; 8]>, CoreError> {
+        validate_cyclic_tree_pair_axis_map_inline(
+            codomain_permutation,
+            domain_permutation,
+            source_codomain_rank,
+            source_domain_rank,
+        )?;
+        Ok(materialize_linearized_tree_pair_permutation(
+            codomain_permutation,
+            domain_permutation,
+            source_codomain_rank,
+            source_domain_rank,
+        ))
     }
 
     fn validate_source(&self, tree_pair: &FusionTreeBlockKey) -> Result<(), CoreError> {
@@ -3941,26 +4054,165 @@ fn linearize_tree_pair_permutation_inline(
     codomain_rank: usize,
     domain_rank: usize,
 ) -> Result<SmallVec<[usize; 8]>, CoreError> {
-    let total_rank = codomain_rank + domain_rank;
-    let mut original_permutation = SmallVec::<[usize; 8]>::with_capacity(total_rank);
-    original_permutation.extend_from_slice(codomain_permutation);
-    original_permutation.extend_from_slice(domain_permutation);
-    validate_permutation_inline(&original_permutation, total_rank)?;
+    validate_tree_pair_axis_map_inline(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    Ok(materialize_linearized_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    ))
+}
 
-    let mut linearized = SmallVec::<[usize; 8]>::with_capacity(total_rank);
-    linearized.extend(
-        codomain_permutation
+fn validate_tree_pair_axis_map_inline(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> Result<(), CoreError> {
+    let total_rank = codomain_rank + domain_rank;
+    if codomain_permutation.len() + domain_permutation.len() != total_rank {
+        return Err(invalid_tree_pair_axis_map(
+            codomain_permutation,
+            domain_permutation,
+            total_rank,
+        ));
+    }
+    let mut seen = 0u128;
+    for position in 0..total_rank {
+        let axis = raw_tree_pair_axis_at(codomain_permutation, domain_permutation, position);
+        let duplicate = if total_rank <= u128::BITS as usize && axis < total_rank {
+            let bit = 1u128 << axis;
+            let duplicate = seen & bit != 0;
+            seen |= bit;
+            duplicate
+        } else {
+            (0..position).any(|prior| {
+                raw_tree_pair_axis_at(codomain_permutation, domain_permutation, prior) == axis
+            })
+        };
+        if axis >= total_rank || duplicate {
+            return Err(invalid_tree_pair_axis_map(
+                codomain_permutation,
+                domain_permutation,
+                total_rank,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cyclic_tree_pair_axis_map_inline(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> Result<(), CoreError> {
+    validate_tree_pair_axis_map_inline(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let total_rank = codomain_rank + domain_rank;
+    if total_rank == 0 {
+        return Ok(());
+    }
+    for index in 0..total_rank {
+        let current = linearized_tree_pair_axis_at(
+            codomain_permutation,
+            domain_permutation,
+            codomain_rank,
+            domain_rank,
+            index,
+        );
+        let next = linearized_tree_pair_axis_at(
+            codomain_permutation,
+            domain_permutation,
+            codomain_rank,
+            domain_rank,
+            (index + 1) % total_rank,
+        );
+        if next != (current + 1) % total_rank {
+            return Err(CoreError::InvalidPermutation {
+                permutation: materialize_linearized_tree_pair_permutation(
+                    codomain_permutation,
+                    domain_permutation,
+                    codomain_rank,
+                    domain_rank,
+                )
+                .into_vec(),
+                rank: total_rank,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn raw_tree_pair_axis_at(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    position: usize,
+) -> usize {
+    if position < codomain_permutation.len() {
+        codomain_permutation[position]
+    } else {
+        domain_permutation[position - codomain_permutation.len()]
+    }
+}
+
+fn linearized_tree_pair_axis_at(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+    position: usize,
+) -> usize {
+    let axis = if position < codomain_permutation.len() {
+        codomain_permutation[position]
+    } else {
+        domain_permutation[domain_permutation.len() - 1 - (position - codomain_permutation.len())]
+    };
+    linearize_tree_pair_axis(axis, codomain_rank, domain_rank)
+}
+
+fn materialize_linearized_tree_pair_permutation(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> SmallVec<[usize; 8]> {
+    let total_rank = codomain_rank + domain_rank;
+    (0..total_rank)
+        .map(|position| {
+            linearized_tree_pair_axis_at(
+                codomain_permutation,
+                domain_permutation,
+                codomain_rank,
+                domain_rank,
+                position,
+            )
+        })
+        .collect()
+}
+
+fn invalid_tree_pair_axis_map(
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    rank: usize,
+) -> CoreError {
+    CoreError::InvalidPermutation {
+        permutation: codomain_permutation
             .iter()
-            .map(|&axis| linearize_tree_pair_axis(axis, codomain_rank, domain_rank)),
-    );
-    linearized.extend(
-        domain_permutation
-            .iter()
-            .rev()
-            .map(|&axis| linearize_tree_pair_axis(axis, codomain_rank, domain_rank)),
-    );
-    validate_permutation_inline(&linearized, total_rank)?;
-    Ok(linearized)
+            .chain(domain_permutation)
+            .copied()
+            .collect(),
+        rank,
+    }
 }
 
 fn tree_pair_axis_map_is_identity(

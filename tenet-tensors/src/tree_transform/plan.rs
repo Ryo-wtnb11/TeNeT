@@ -40,7 +40,27 @@ where
         });
     }
     operation.validate_braiding_support(rule)?;
-    validate_tree_transform_operation_syntax(rule, operation, src_structure)?;
+    validate_tree_transform_operation_syntax(operation, src_structure)?;
+    ValidatedFusionTreeBlockStructure::try_new(rule, src_structure)
+        .map_err(OperationError::from_core_preserving_context)
+}
+
+pub(crate) fn validate_generic_tree_pair_preflight<'rule, 'structure, R>(
+    rule: &'rule R,
+    operation: &TreeTransformOperation,
+    src_structure: &'structure BlockStructure,
+) -> Result<ValidatedFusionTreeBlockStructure<'rule, 'structure, R>, OperationError>
+where
+    R: FusionRule,
+{
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(OperationError::UnsupportedFusionStyle {
+            operation: Box::new(operation.clone()),
+            style: rule.fusion_style(),
+        });
+    }
+    operation.validate_braiding_support(rule)?;
+    validate_tree_transform_operation_syntax(operation, src_structure)?;
     ValidatedFusionTreeBlockStructure::try_new(rule, src_structure)
         .map_err(OperationError::from_core_preserving_context)
 }
@@ -65,7 +85,7 @@ where
             });
         }
         operation.validate_braiding_support(rule)?;
-        validate_tree_transform_operation_syntax(rule, operation, src_structure)?;
+        validate_tree_transform_operation_syntax(operation, src_structure)?;
         validate_all_codomain_operation_scope(operation)?;
         let proof = ValidatedFusionTreeBlockStructure::try_new(rule, src_structure)
             .map_err(OperationError::from_core_preserving_context)?;
@@ -102,14 +122,10 @@ where
     ValidatedAllCodomainFusionTreeBlockStructure::try_new(rule, operation, src_structure)
 }
 
-fn validate_tree_transform_operation_syntax<R>(
-    rule: &R,
+fn validate_tree_transform_operation_syntax(
     operation: &TreeTransformOperation,
     src_structure: &BlockStructure,
-) -> Result<(), OperationError>
-where
-    R: FusionRule,
-{
+) -> Result<(), OperationError> {
     let mut prepared_splits = SmallVec::<[(usize, usize); 4]>::new();
     for index in 0..src_structure.block_count() {
         let block = src_structure.block(index)?;
@@ -123,7 +139,7 @@ where
         if prepared_splits.contains(&split) {
             continue;
         }
-        prepare_tree_pair_operation(rule, operation, split)?;
+        prepare_tree_pair_operation_syntax(operation, split)?;
         prepared_splits.push(split);
     }
     Ok(())
@@ -544,6 +560,89 @@ mod staged_row_resolution_tests {
     }
 }
 
+#[cfg(test)]
+mod generic_preflight_tests {
+    use super::{validate_generic_tree_pair_preflight, TreeTransformOperation};
+    use tenet_core::{
+        BlockKey, BlockSpec, BlockStructure, CoreError, FusionTreeBlockKey, FusionTreeKey,
+        SectorId, Su3FusionRule,
+    };
+    use tenet_operations::OperationError;
+
+    #[test]
+    fn su3_generic_preflight_accepts_valid_permute_and_braid_before_categorical_admission() {
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of(1, 1).unwrap();
+        let vacuum = SectorId::new(0);
+        let valid = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [eight, eight],
+                Some(vacuum),
+                [false, false],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(&rule, [], Some(vacuum), [], [], []).unwrap(),
+        );
+        let valid_structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+            BlockKey::from(valid),
+            vec![1, 1],
+            0,
+        )
+        .unwrap()])
+        .unwrap();
+
+        for operation in [
+            TreeTransformOperation::permute([1, 0], []),
+            TreeTransformOperation::braid([1, 0], [], [0, 1], []),
+        ] {
+            // What: style-neutral syntax validation admits valid Generic
+            // operations without constructing an Artin execution plan.
+            validate_generic_tree_pair_preflight(&rule, &operation, &valid_structure).unwrap();
+        }
+
+        let malformed = FusionTreeBlockKey::pair_from_sector_ids(
+            [eight.id(), eight.id()],
+            [],
+            Some(vacuum.id()),
+            [false, false],
+            [],
+            [],
+            [],
+            [0],
+            [],
+        );
+        let malformed_structure =
+            BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+                BlockKey::from(malformed),
+                vec![1, 1],
+                0,
+            )
+            .unwrap()])
+            .unwrap();
+        let error = match validate_generic_tree_pair_preflight(
+            &rule,
+            &TreeTransformOperation::braid([0, 0], [], [0, 1], []),
+            &malformed_structure,
+        ) {
+            Ok(_) => panic!("invalid Generic operation unexpectedly admitted"),
+            Err(error) => error,
+        };
+
+        // What: invalid operation syntax retains precedence over malformed
+        // Generic categorical data.
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::InvalidPermutation {
+                permutation: vec![0, 0],
+                rank: 2,
+            })
+        );
+    }
+}
+
 fn execute_staged_groups<I, O, F>(
     inputs: Vec<I>,
     threads: usize,
@@ -650,6 +749,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized<R, RuleKey>(
     rule: &R,
     rule_key: &RuleKey,
@@ -1235,13 +1335,7 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar + Zero,
 {
-    if !rule.fusion_style().has_multiplicity() {
-        return Err(OperationError::UnsupportedFusionStyle {
-            operation: Box::new(operation),
-            style: rule.fusion_style(),
-        });
-    }
-    operation.validate_braiding_support(rule)?;
+    let _source_proof = validate_generic_tree_pair_preflight(rule, &operation, src_structure)?;
     let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::new();
@@ -1282,6 +1376,7 @@ where
 /// specs; memo entries and statistics are committed in source order only after
 /// every group succeeds.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan_memoized<R, RuleKey>(
     rule: &R,
     rule_key: &RuleKey,
@@ -1847,6 +1942,46 @@ where
             codomain_permutation,
             domain_permutation,
         } => PreparedTreePairOperation::prepare_transpose(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        ),
+    }
+    .map_err(OperationError::from_core_preserving_context)
+}
+
+fn prepare_tree_pair_operation_syntax(
+    operation: &TreeTransformOperation,
+    (source_codomain_rank, source_domain_rank): (usize, usize),
+) -> Result<(), OperationError> {
+    match operation {
+        TreeTransformOperation::Permute {
+            codomain_permutation,
+            domain_permutation,
+        } => PreparedTreePairOperation::validate_permute_syntax(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        ),
+        TreeTransformOperation::Braid {
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        } => PreparedTreePairOperation::validate_braid_syntax(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        ),
+        TreeTransformOperation::Transpose {
+            codomain_permutation,
+            domain_permutation,
+        } => PreparedTreePairOperation::validate_transpose_syntax(
             source_codomain_rank,
             source_domain_rank,
             codomain_permutation,

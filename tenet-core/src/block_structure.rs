@@ -1242,6 +1242,12 @@ where
         )>,
         CoreError,
     > {
+        if !self.rule.braiding_style().is_symmetric() {
+            return Err(CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: self.rule.braiding_style(),
+            });
+        }
         let Some(first_index) = block_indices.first().copied() else {
             return Ok(Vec::new());
         };
