@@ -9,7 +9,8 @@ use tenet_core::{
     multiplicity_free_transpose_tree_pair_block, BlockKey, BlockKeyKind, BlockStructure, CoreError,
     FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey,
     GenericBraidScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, PreparedTreePairOperation,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
+    OrderedBlockLinearStorage, PreparedTreePairOperation,
 };
 
 use crate::OperationError;
@@ -1472,14 +1473,14 @@ where
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_groups() {
-        let mut rows_for = |index: usize, source: &FusionTreePairKey| {
-            transform_tree_pair_rows_for_block_index(source_proof, &operation, index, source)
-                .map(Arc::new)
-        };
         if operation.is_identity_for(
             group.group_key().codomain_uncoupled().len(),
             group.group_key().domain_uncoupled().len(),
         ) {
+            let mut rows_for = |index: usize, source: &FusionTreePairKey| {
+                transform_tree_pair_rows_for_block_index(source_proof, &operation, index, source)
+                    .map(Arc::new)
+            };
             specs.extend(assemble_identity_tree_pair_group_specs(
                 src_structure,
                 &group,
@@ -1487,15 +1488,177 @@ where
                 &mut rows_for,
             )?);
         } else {
-            specs.extend(assemble_tree_pair_group_specs(
+            let first_index = *group
+                .block_indices()
+                .first()
+                .ok_or(OperationError::EmptyTransformBlock)?;
+            let first = source_proof.fusion_tree_pair_key(first_index)?.ok_or(
+                OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index: first_index,
+                },
+            )?;
+            let prepared = prepare_tree_pair_operation(
+                source_proof.rule(),
+                &operation,
+                (
+                    first.codomain_tree().uncoupled().len(),
+                    first.domain_tree().uncoupled().len(),
+                ),
+            )?;
+            let indices = group.block_indices().iter().copied();
+            let ordered = match &operation {
+                TreeTransformOperation::Transpose { .. } => source_proof
+                    .execute_multiplicity_free_transpose_ordered_for_block_indices(
+                        indices, prepared,
+                    ),
+                TreeTransformOperation::Permute { .. } | TreeTransformOperation::Braid { .. } => {
+                    source_proof.execute_multiplicity_free_braid_ordered_for_block_indices(
+                        indices, prepared,
+                    )
+                }
+            }
+            .map_err(OperationError::from_core_preserving_context)?;
+            specs.extend(assemble_ordered_tree_pair_group_specs(
                 src_structure,
                 &group,
                 &source_axes,
-                &mut rows_for,
+                ordered,
             )?);
         }
     }
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static ORDERED_TREE_PAIR_LOWERING_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static LEGACY_TREE_PAIR_ASSEMBLY_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_tree_pair_lowering_calls() {
+    ORDERED_TREE_PAIR_LOWERING_CALLS.set(0);
+    LEGACY_TREE_PAIR_ASSEMBLY_CALLS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn tree_pair_lowering_calls() -> (usize, usize) {
+    (
+        ORDERED_TREE_PAIR_LOWERING_CALLS.get(),
+        LEGACY_TREE_PAIR_ASSEMBLY_CALLS.get(),
+    )
+}
+
+fn assemble_ordered_tree_pair_group_specs<T>(
+    src_structure: &BlockStructure,
+    group: &FusionTreeBlockGroup,
+    source_axes: &Arc<[usize]>,
+    ordered: OrderedBlockLinearMap<FusionTreePairKey, T>,
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
+where
+    T: Clone + Zero,
+{
+    #[cfg(test)]
+    ORDERED_TREE_PAIR_LOWERING_CALLS.set(ORDERED_TREE_PAIR_LOWERING_CALLS.get() + 1);
+
+    let mut src_keys = Vec::with_capacity(group.block_indices().len());
+    for &src_block_index in group.block_indices() {
+        let block = src_structure.block(src_block_index)?;
+        let BlockKey::FusionTree(src_key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index: src_block_index,
+            });
+        };
+        src_keys.push(src_key.clone());
+    }
+
+    let (destinations, source_count, storage) = ordered.into_parts();
+    if source_count != src_keys.len() {
+        return Err(OperationError::StructureMismatch {
+            tensor: "ordered tree-pair source columns",
+        });
+    }
+    if destinations.is_empty() {
+        return Err(OperationError::EmptyTransformBlock);
+    }
+
+    match storage {
+        OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows,
+            coefficients,
+        } => {
+            if destination_rows.len() != source_count || coefficients.len() != source_count {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "ordered singleton tree-pair columns",
+                });
+            }
+            let mut destination_seen = vec![false; destinations.len()];
+            let mut is_injective = true;
+            for &destination_row in &destination_rows {
+                let Some(seen) = destination_seen.get_mut(destination_row) else {
+                    return Err(OperationError::StructureMismatch {
+                        tensor: "ordered singleton destination row",
+                    });
+                };
+                if std::mem::replace(seen, true) {
+                    is_injective = false;
+                }
+            }
+            if is_injective {
+                let mut destination_slots = destinations.into_iter().map(Some).collect::<Vec<_>>();
+                return Ok(src_keys
+                    .into_iter()
+                    .zip(destination_rows)
+                    .zip(coefficients)
+                    .map(|((source, destination_row), coefficient)| {
+                        TreeTransformGroupBlockSpec::single(
+                            destination_slots[destination_row]
+                                .take()
+                                .expect("injective destination row is consumed once"),
+                            source,
+                            coefficient,
+                        )
+                        .with_shared_source_axes(Arc::clone(source_axes))
+                    })
+                    .collect());
+            }
+
+            let mut dense = vec![T::zero(); destinations.len().saturating_mul(source_count)];
+            for (source, (destination_row, coefficient)) in
+                destination_rows.into_iter().zip(coefficients).enumerate()
+            {
+                dense[destination_row * source_count + source] = coefficient;
+            }
+            Ok(vec![TreeTransformGroupBlockSpec::try_multi(
+                destinations,
+                src_keys,
+                dense,
+            )?
+            .with_shared_source_axes(Arc::clone(source_axes))])
+        }
+        OrderedBlockLinearStorage::DenseDstSrc(coefficients) => {
+            let expected = destinations.len().saturating_mul(source_count);
+            if coefficients.len() != expected {
+                return Err(OperationError::StructureMismatch {
+                    tensor: "ordered dense tree-pair coefficients",
+                });
+            }
+            let coefficients = coefficients
+                .into_iter()
+                .map(|coefficient| coefficient.unwrap_or_else(T::zero))
+                .collect();
+            Ok(vec![TreeTransformGroupBlockSpec::try_multi(
+                destinations,
+                src_keys,
+                coefficients,
+            )?
+            .with_shared_source_axes(Arc::clone(source_axes))])
+        }
+    }
 }
 
 /// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
@@ -1971,6 +2134,9 @@ where
     T: Clone + Add<Output = T> + Zero,
     F: FnMut(usize, &FusionTreePairKey) -> Result<Arc<Vec<(FusionTreePairKey, T)>>, OperationError>,
 {
+    #[cfg(test)]
+    LEGACY_TREE_PAIR_ASSEMBLY_CALLS.set(LEGACY_TREE_PAIR_ASSEMBLY_CALLS.get() + 1);
+
     let src_block_indices = group.block_indices();
     let mut src_keys = Vec::<FusionTreePairKey>::with_capacity(src_block_indices.len());
     let mut dst_keys = Vec::<FusionTreePairKey>::new();

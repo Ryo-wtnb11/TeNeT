@@ -3924,6 +3924,131 @@ fn multiplicity_free_product_tree_pair_plan_builder_handles_fz2_u1_su2_blocks() 
 }
 
 #[test]
+fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
+    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
+
+    let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+    let legacy = build_tree_transform_group_plan(
+        &rule,
+        operation.clone(),
+        src_space.subblock_structure(),
+        |source| {
+            tenet_core::multiplicity_free_permute_tree_pair(&rule, source, &[1, 0], &[2])
+                .map_err(OperationError::from_core_preserving_context)
+        },
+    )
+    .unwrap();
+
+    reset_tree_pair_lowering_calls();
+    let direct =
+        build_tree_pair_transform_group_plan(&rule, operation, src_space.subblock_structure())
+            .unwrap();
+
+    // What: the eager Simple builder preserves the exact legacy plan while
+    // consuming the core ordered map instead of rebuilding full-key rows.
+    assert_eq!(direct, legacy);
+    assert_eq!(tree_pair_lowering_calls(), (2, 0));
+    direct
+        .compile_structures(
+            dst_space.subblock_structure(),
+            src_space.subblock_structure(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
+    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
+
+    let source0 = all_codomain_fusion_tree_test_key_for_rule(
+        &SU2FusionRule,
+        [1, 1, 1, 1],
+        0,
+        [false, false, false, false],
+        [0, 1],
+        [1, 1, 1],
+    );
+    let source1 = all_codomain_fusion_tree_test_key_for_rule(
+        &SU2FusionRule,
+        [1, 1, 1, 1],
+        0,
+        [false, false, false, false],
+        [2, 1],
+        [1, 1, 1],
+    );
+    let structure = packed_fixture_structure(
+        4,
+        [(source0, vec![1, 1, 1, 1]), (source1, vec![1, 1, 1, 1])],
+    )
+    .unwrap();
+    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let legacy =
+        build_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure, |source| {
+            tenet_core::multiplicity_free_braid_tree_pair(
+                &SU2FusionRule,
+                source,
+                &[0, 2, 1, 3],
+                &[],
+                &[0, 1, 2, 3],
+                &[],
+            )
+            .map_err(OperationError::from_core_preserving_context)
+        })
+        .unwrap();
+
+    reset_tree_pair_lowering_calls();
+    let direct =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
+    assert_eq!(direct, legacy);
+    assert_eq!(tree_pair_lowering_calls(), (1, 0));
+
+    let space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
+    let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![10.0, 20.0],
+        space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut direct_dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+        vec![0.0, 0.0],
+        space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut legacy_dst =
+        TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, structure.clone())
+            .unwrap();
+    let direct_structure = direct.compile(&direct_dst, &src).unwrap();
+    let legacy_structure = legacy.compile(&legacy_dst, &src).unwrap();
+    let mut direct_backend = DenseTreeTransformOperations::default();
+    let mut legacy_backend = DenseTreeTransformOperations::default();
+    let mut direct_workspace = TreeTransformWorkspace::default();
+    let mut legacy_workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut direct_backend,
+        &mut direct_workspace,
+        &direct_structure,
+        &mut direct_dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    tree_transform_execute_with(
+        &mut legacy_backend,
+        &mut legacy_workspace,
+        &legacy_structure,
+        &mut legacy_dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(direct_dst.data(), legacy_dst.data());
+}
+
+#[test]
 fn product_tree_pair_plan_is_thread_count_invariant() {
     use crate::tree_transform::{
         build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,

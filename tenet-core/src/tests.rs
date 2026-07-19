@@ -9705,6 +9705,19 @@ mod tests {
         )
         .unwrap();
         let dimensions = compact_block_dimensions();
+        let group = validate_tree_pair_block_group_for_rule(rule, sources)
+            .unwrap()
+            .expect("oracle cohort is nonempty");
+        let prepared = PreparedTreePairOperation::prepare_transpose(
+            group.codomain_rank,
+            group.domain_rank,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .unwrap();
+        let ordered =
+            multiplicity_free_transpose_tree_pair_block_ordered_validated(group, prepared)
+                .unwrap();
         let full_key = multiplicity_free_transpose_tree_pair_block_full_key_oracle(
             rule,
             sources,
@@ -9712,6 +9725,66 @@ mod tests {
             domain_permutation,
         )
         .unwrap();
+
+        let mut expected_destinations = Vec::new();
+        for source_rows in &compact {
+            for (destination, _) in source_rows {
+                if !expected_destinations.contains(destination) {
+                    expected_destinations.push(destination.clone());
+                }
+            }
+        }
+        assert_eq!(ordered.destinations(), expected_destinations);
+        assert_eq!(ordered.source_count(), sources.len());
+
+        let mut ordered_coefficients =
+            vec![None; ordered.destinations().len().saturating_mul(sources.len())];
+        match ordered.storage() {
+            OrderedBlockLinearStorage::SingletonColumns {
+                destination_rows,
+                coefficients,
+            } => {
+                assert_eq!(destination_rows.len(), sources.len());
+                assert_eq!(coefficients.len(), sources.len());
+                for (source, (&destination_row, coefficient)) in
+                    destination_rows.iter().zip(coefficients).enumerate()
+                {
+                    ordered_coefficients[destination_row * sources.len() + source] =
+                        Some(coefficient.clone());
+                }
+            }
+            OrderedBlockLinearStorage::DenseDstSrc(coefficients) => {
+                assert_eq!(coefficients.len(), ordered_coefficients.len());
+                ordered_coefficients.clone_from_slice(coefficients);
+            }
+        }
+        for destination_row in 0..ordered.destinations().len() {
+            assert!(
+                ordered_coefficients[destination_row * sources.len()
+                    ..(destination_row + 1) * sources.len()]
+                    .iter()
+                    .any(Option::is_some),
+                "ordered maps omit structurally empty destination rows"
+            );
+        }
+        for (source, source_rows) in compact.iter().enumerate() {
+            for (destination_row, destination) in ordered.destinations().iter().enumerate() {
+                let expected = source_rows
+                    .iter()
+                    .find(|(candidate, _)| candidate == destination)
+                    .map(|(_, coefficient)| coefficient);
+                let actual =
+                    ordered_coefficients[destination_row * sources.len() + source].as_ref();
+                assert_eq!(actual.is_some(), expected.is_some());
+                if let (Some(actual), Some(expected)) = (actual, expected) {
+                    assert!(
+                        actual.oracle_distance(expected)
+                            <= 1.0e-12 * (1.0 + expected.oracle_magnitude()),
+                        "ordered coefficient mismatch {expected:?} vs {actual:?}"
+                    );
+                }
+            }
+        }
 
         assert_eq!(compact.len(), full_key.len());
         for (compact_rows, full_key_rows) in compact.iter().zip(&full_key) {
@@ -9753,6 +9826,86 @@ mod tests {
         } else {
             assert_eq!(dimensions, None);
         }
+    }
+
+    #[test]
+    fn ordered_block_linear_storage_preserves_absent_and_zero_structure() {
+        let rule = SU2FusionRule;
+        let half = SectorLeg::new([(su2(1), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([half.clone(), half.clone(), half]),
+            FusionProductSpace::new([SectorLeg::new([(su2(1), 1)], false)]),
+        );
+        let keys = hom.fusion_tree_keys(&rule);
+        assert_eq!(keys.len(), 2);
+        let group = validate_tree_pair_block_group_for_rule(&rule, &keys)
+            .unwrap()
+            .expect("SU2 cohort is nonempty");
+
+        let singleton_basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
+        let mut singleton_columns = DenseColumns::with_capacity(2, 2);
+        let row0 = singleton_columns.push_empty_row();
+        let row1 = singleton_columns.push_empty_row();
+        singleton_columns.row_mut(row0)[0] = Some(0.0);
+        singleton_columns.row_mut(row1)[1] = Some(2.0);
+        let singleton = order_compact_block(singleton_basis, singleton_columns);
+        assert_eq!(singleton.destinations(), keys.as_ref());
+        assert_eq!(
+            singleton.storage(),
+            &OrderedBlockLinearStorage::SingletonColumns {
+                destination_rows: vec![0, 1],
+                coefficients: vec![0.0, 2.0],
+            }
+        );
+
+        let dense_basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
+        let mut dense_columns = DenseColumns::with_capacity(2, 2);
+        let row0 = dense_columns.push_empty_row();
+        let row1 = dense_columns.push_empty_row();
+        dense_columns.row_mut(row0)[0] = Some(0.0);
+        dense_columns.row_mut(row1)[0] = Some(1.0);
+        dense_columns.row_mut(row1)[1] = Some(2.0);
+        let dense = order_compact_block(dense_basis, dense_columns);
+        assert_eq!(dense.destinations(), keys.as_ref());
+        assert_eq!(
+            dense.storage(),
+            &OrderedBlockLinearStorage::DenseDstSrc(vec![
+                Some(0.0),
+                None,
+                Some(1.0),
+                Some(2.0),
+            ])
+        );
+    }
+
+    #[test]
+    fn ordered_transpose_preserves_custom_source_cohort_order() {
+        let rule = FibonacciFAdmissibilityProbe::with_complex_f_phase();
+        let tau = || SectorLeg::new([(SectorId::new(1), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([tau(), tau()]),
+            FusionProductSpace::new([tau(), tau()]),
+        );
+        let mut sources = hom.fusion_tree_keys(&rule).as_ref().to_vec();
+        assert!(sources.len() > 1);
+        sources.reverse();
+
+        // What: a caller-selected source subset/order determines destination
+        // first appearance; canonical HomSpace basis order is not substituted.
+        assert_compact_transpose_matches_full_key_oracle(
+            &rule,
+            &sources,
+            &[1, 3],
+            &[0, 2],
+            true,
+        );
+        assert_compact_transpose_matches_full_key_oracle(
+            &rule,
+            &sources[..2],
+            &[1, 3],
+            &[0, 2],
+            true,
+        );
     }
 
     #[test]

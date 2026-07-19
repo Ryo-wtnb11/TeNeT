@@ -36,5 +36,6 @@ pub(crate) use plan::{
     build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
-    partition_staged_groups_for_test, AllCodomainRowMemo, TreePairRowMemo,
+    partition_staged_groups_for_test, reset_tree_pair_lowering_calls, tree_pair_lowering_calls,
+    AllCodomainRowMemo, TreePairRowMemo,
 };
