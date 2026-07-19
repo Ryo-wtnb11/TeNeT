@@ -92,9 +92,9 @@ where
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
         let source_groups = src_structure
-            .fusion_tree_groups()
+            .fusion_tree_group_slice()
             .into_iter()
-            .map(|group| TreeTransformSourceGroupKey::from_group(src_structure, &group))
+            .map(|group| TreeTransformSourceGroupKey::from_group(src_structure, group))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             rule,

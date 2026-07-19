@@ -2103,6 +2103,197 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_block_execution_rejects_prepared_family_and_source_split_mismatch() {
+        let vacuum = su2(0);
+        let half = su2(1);
+        let pair = FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [half, half],
+                vacuum,
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [],
+                vacuum,
+                [],
+                [],
+                [],
+            )
+            .unwrap(),
+        );
+        let structure = packed_fixture_structure(2, [(pair, vec![1, 1])]).unwrap();
+        let proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&SU2FusionRule, &structure).unwrap();
+        let transpose =
+            PreparedTreePairOperation::prepare_transpose(2, 0, &[1], &[0]).unwrap();
+        let transpose_identity =
+            PreparedTreePairOperation::prepare_transpose(2, 0, &[0, 1], &[]).unwrap();
+        let braid =
+            PreparedTreePairOperation::prepare_permute(&SU2FusionRule, 2, 0, &[1, 0], &[])
+                .unwrap();
+        let wrong_split =
+            PreparedTreePairOperation::prepare_permute(&SU2FusionRule, 1, 1, &[1], &[0])
+                .unwrap();
+
+        // What: safe borrowed block executors reject a prepared operation from
+        // the other family before its private plan variant reaches execution.
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+                    [0],
+                    &transpose,
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "prepared tree-pair operation is incompatible with braid block execution",
+            }
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+                    [0],
+                    &transpose_identity,
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "prepared tree-pair operation is incompatible with braid block execution",
+            }
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
+                    [0], &braid,
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message:
+                    "prepared tree-pair operation is incompatible with transpose block execution",
+            }
+        );
+
+        // What: operation family is a source-independent preflight. Empty and
+        // invalid-index calls cannot bypass it, while a valid empty operation
+        // remains the empty linear map.
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+                    std::iter::empty(),
+                    &transpose,
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "prepared tree-pair operation is incompatible with braid block execution",
+            }
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
+                    std::iter::empty(),
+                    &braid,
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message:
+                    "prepared tree-pair operation is incompatible with transpose block execution",
+            }
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices(
+                    [usize::MAX],
+                    transpose.clone(),
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "prepared tree-pair operation is incompatible with braid block execution",
+            }
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_transpose_ordered_for_block_indices(
+                    [usize::MAX],
+                    braid.clone(),
+                )
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message:
+                    "prepared tree-pair operation is incompatible with transpose block execution",
+            }
+        );
+        for empty in [
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+                    std::iter::empty(),
+                    &braid,
+                )
+                .unwrap(),
+            proof
+                .execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
+                    std::iter::empty(),
+                    &transpose,
+                )
+                .unwrap(),
+        ] {
+            assert!(empty.destinations().is_empty());
+            assert_eq!(empty.source_count(), 0);
+        }
+
+        // What: preparation for the right operation family is still bound to
+        // its exact source codomain/domain split.
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+                    [0],
+                    &wrong_split,
+                )
+                .unwrap_err(),
+            CoreError::DimensionMismatch {
+                expected: 1,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn block_preflight_rejects_prepared_capability_before_empty_or_invalid_source() {
+        let structure = BlockStructure::empty(0);
+        let proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&PlanarZ2Rule, &structure).unwrap();
+        let symmetric_identity =
+            PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 0, 0, &[], &[]).unwrap();
+        let expected = CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: BraidingStyleKind::NoBraiding,
+        };
+
+        // What: rule capability belongs to operation preflight, so neither an
+        // empty iterator nor an invalid source index can bypass it.
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+                    std::iter::empty(),
+                    &symmetric_identity,
+                )
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_ordered_for_block_indices(
+                    [usize::MAX],
+                    symmetric_identity,
+                )
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
     fn rule_validation_preserves_builtin_multiplicity_free_keys() {
         // What: validation is observational for representative abelian,
         // non-abelian, anyonic, fermionic, and product fusion trees.
@@ -9716,7 +9907,7 @@ mod tests {
         )
         .unwrap();
         let ordered =
-            multiplicity_free_transpose_tree_pair_block_ordered_validated(group, prepared)
+            multiplicity_free_transpose_tree_pair_block_ordered_validated(group, &prepared)
                 .unwrap();
         let full_key = multiplicity_free_transpose_tree_pair_block_full_key_oracle(
             rule,
@@ -10329,6 +10520,21 @@ mod tests {
         let sector_groups = sector.fusion_tree_groups();
         let block_groups = block_structure.fusion_tree_groups();
         assert_eq!(sector_groups, block_groups);
+        let mut legacy_groups = Vec::<FusionTreeBlockGroup>::new();
+        for (index, key) in [first, second, same_group_as_first].iter().enumerate() {
+            let group_key = key.fusion_tree_group_key().unwrap();
+            if let Some(group) = legacy_groups
+                .iter_mut()
+                .find(|group| group.group_key() == &group_key)
+            {
+                group.block_indices.push(index);
+            } else {
+                legacy_groups.push(FusionTreeBlockGroup::new(group_key, vec![index]));
+            }
+        }
+        // What: construction-time metadata is exactly the former eager
+        // first-appearance grouping, including interleaved storage indices.
+        assert_eq!(sector_groups, legacy_groups);
         assert_eq!(sector_groups.len(), 2);
         assert_eq!(sector_groups[0].block_indices(), &[0, 2]);
         assert_eq!(sector_groups[1].block_indices(), &[1]);
@@ -10379,7 +10585,9 @@ mod tests {
         }
 
         let dense = BlockStructure::trivial(&[2, 3]).unwrap();
+        let empty = BlockStructure::empty(2);
         assert!(dense.fusion_tree_groups().is_empty());
+        assert!(empty.fusion_tree_groups().is_empty());
     }
 
     #[test]

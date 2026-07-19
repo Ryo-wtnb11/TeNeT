@@ -1296,6 +1296,17 @@ enum PreparedCycleDirection {
     Anticlockwise,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreparedTreePairFamily {
+    BraidLike,
+    Transpose,
+}
+
+const PREPARED_BRAID_BLOCK_FAMILY_ERROR: &str =
+    "prepared tree-pair operation is incompatible with braid block execution";
+const PREPARED_TRANSPOSE_BLOCK_FAMILY_ERROR: &str =
+    "prepared tree-pair operation is incompatible with transpose block execution";
+
 // Why not box the braid variant: rank<=8 preparation is intentionally
 // allocation-free, and this expert plan is reused instead of copied per tree.
 #[allow(clippy::large_enum_variant)]
@@ -1326,6 +1337,7 @@ pub struct PreparedTreePairOperation {
     source_domain_rank: usize,
     target_codomain_rank: usize,
     requires_symmetric_braiding: bool,
+    family: PreparedTreePairFamily,
     plan: PreparedTreePairPlan,
 }
 
@@ -1429,6 +1441,7 @@ impl PreparedTreePairOperation {
                 source_domain_rank,
                 target_codomain_rank,
                 requires_symmetric_braiding: false,
+                family: PreparedTreePairFamily::BraidLike,
                 plan: PreparedTreePairPlan::Identity,
             });
         }
@@ -1449,6 +1462,7 @@ impl PreparedTreePairOperation {
                 source_domain_rank,
                 target_codomain_rank,
                 requires_symmetric_braiding: false,
+                family: PreparedTreePairFamily::BraidLike,
                 plan: PreparedTreePairPlan::Repartition,
             });
         }
@@ -1463,6 +1477,7 @@ impl PreparedTreePairOperation {
             source_domain_rank,
             target_codomain_rank,
             requires_symmetric_braiding: false,
+            family: PreparedTreePairFamily::BraidLike,
             plan: PreparedTreePairPlan::Braid(braid),
         })
     }
@@ -1551,6 +1566,7 @@ impl PreparedTreePairOperation {
                 source_domain_rank,
                 target_codomain_rank,
                 requires_symmetric_braiding: true,
+                family: PreparedTreePairFamily::BraidLike,
                 plan: PreparedTreePairPlan::Identity,
             });
         }
@@ -1571,6 +1587,7 @@ impl PreparedTreePairOperation {
                 source_domain_rank,
                 target_codomain_rank,
                 requires_symmetric_braiding: true,
+                family: PreparedTreePairFamily::BraidLike,
                 plan: PreparedTreePairPlan::Repartition,
             });
         }
@@ -1586,6 +1603,7 @@ impl PreparedTreePairOperation {
             source_domain_rank,
             target_codomain_rank,
             requires_symmetric_braiding: true,
+            family: PreparedTreePairFamily::BraidLike,
             plan: PreparedTreePairPlan::Braid(braid),
         })
     }
@@ -1610,6 +1628,7 @@ impl PreparedTreePairOperation {
                 source_domain_rank,
                 target_codomain_rank,
                 requires_symmetric_braiding: false,
+                family: PreparedTreePairFamily::Transpose,
                 plan: PreparedTreePairPlan::Identity,
             });
         };
@@ -1631,6 +1650,7 @@ impl PreparedTreePairOperation {
             source_domain_rank,
             target_codomain_rank,
             requires_symmetric_braiding: false,
+            family: PreparedTreePairFamily::Transpose,
             plan,
         })
     }
@@ -1696,6 +1716,45 @@ impl PreparedTreePairOperation {
             return Err(CoreError::UnsupportedBraidingStyle {
                 expected: "symmetric braiding",
                 actual: rule.braiding_style(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_block_preflight<R>(
+        &self,
+        rule: &R,
+        expected_family: PreparedTreePairFamily,
+    ) -> Result<(), CoreError>
+    where
+        R: FusionRule,
+    {
+        if self.family != expected_family {
+            return Err(CoreError::MalformedFusionTree {
+                message: match expected_family {
+                    PreparedTreePairFamily::BraidLike => PREPARED_BRAID_BLOCK_FAMILY_ERROR,
+                    PreparedTreePairFamily::Transpose => PREPARED_TRANSPOSE_BLOCK_FAMILY_ERROR,
+                },
+            });
+        }
+        self.validate_rule_capabilities(rule)
+    }
+
+    fn validate_source_split(
+        &self,
+        source_codomain_rank: usize,
+        source_domain_rank: usize,
+    ) -> Result<(), CoreError> {
+        if source_codomain_rank != self.source_codomain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: self.source_codomain_rank,
+                actual: source_codomain_rank,
+            });
+        }
+        if source_domain_rank != self.source_domain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: self.source_domain_rank,
+                actual: source_domain_rank,
             });
         }
         Ok(())
@@ -4092,7 +4151,7 @@ where
 #[allow(clippy::type_complexity)]
 pub(crate) fn multiplicity_free_braid_tree_pair_block_proven<R>(
     batch: ValidatedMultiplicityFreePairBatch<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -4107,7 +4166,7 @@ where
 
 pub(crate) fn multiplicity_free_braid_tree_pair_block_ordered_proven<R>(
     batch: ValidatedMultiplicityFreePairBatch<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -4127,7 +4186,7 @@ where
 #[allow(clippy::type_complexity)]
 pub(crate) fn multiplicity_free_transpose_tree_pair_block_proven<R>(
     batch: ValidatedMultiplicityFreePairBatch<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -4142,7 +4201,7 @@ where
 
 pub(crate) fn multiplicity_free_transpose_tree_pair_block_ordered_proven<R>(
     batch: ValidatedMultiplicityFreePairBatch<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -4205,18 +4264,19 @@ where
     )?;
     let group = validate_tree_pair_block_group_for_rule(rule, src_keys)?
         .expect("nonempty source block produces a validation proof");
-    multiplicity_free_braid_tree_pair_block_validated(group, prepared)
+    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
 }
 
 #[allow(clippy::type_complexity)]
 fn multiplicity_free_braid_tree_pair_block_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     if prepared.is_identity() {
         return Ok(group
             .src_keys
@@ -4230,19 +4290,20 @@ where
 
 fn multiplicity_free_braid_tree_pair_block_ordered_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
         .map(order_compact_tree_pair_block)
 }
 
 fn multiplicity_free_braid_tree_pair_block_compact_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -4380,7 +4441,7 @@ where
     )?;
     let group = validate_tree_pair_block_group_for_rule(rule, src_keys)?
         .expect("nonempty source block produces a validation proof");
-    multiplicity_free_braid_tree_pair_block_validated(group, prepared)
+    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
 }
 
 /// Batched [`multiplicity_free_transpose_tree_pair`] over every source
@@ -4425,18 +4486,19 @@ where
     )?;
     let group = validate_tree_pair_block_group_for_rule(rule, src_keys)?
         .expect("nonempty source block produces a validation proof");
-    multiplicity_free_transpose_tree_pair_block_validated(group, prepared)
+    multiplicity_free_transpose_tree_pair_block_validated(group, &prepared)
 }
 
 #[allow(clippy::type_complexity)]
 fn multiplicity_free_transpose_tree_pair_block_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     if prepared.is_identity() {
         return Ok(group
             .src_keys
@@ -4450,19 +4512,20 @@ where
 
 fn multiplicity_free_transpose_tree_pair_block_ordered_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
         .map(order_compact_tree_pair_block)
 }
 
 fn multiplicity_free_transpose_tree_pair_block_compact_validated<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
-    prepared: PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation,
 ) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,

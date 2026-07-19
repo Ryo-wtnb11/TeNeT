@@ -527,6 +527,15 @@ impl FusionTreeBlockGroup {
         }
     }
 
+    fn singleton(group_key: FusionTreeGroupKey, block_index: usize) -> Self {
+        let mut block_indices = DimVec::new();
+        block_indices.push(block_index);
+        Self {
+            group_key,
+            block_indices,
+        }
+    }
+
     #[inline]
     pub fn group_key(&self) -> &FusionTreeGroupKey {
         &self.group_key
@@ -543,6 +552,7 @@ pub struct SectorStructure {
     rank: usize,
     key_kind: Option<BlockKeyKind>,
     blocks: Vec<SectorBlock>,
+    fusion_tree_groups: Vec<FusionTreeBlockGroup>,
     sorted_indices: DimVec,
     compact_lookup: Option<CompactBlockLookup>,
 }
@@ -557,6 +567,7 @@ impl SectorStructure {
             rank,
             key_kind: None,
             blocks: Vec::new(),
+            fusion_tree_groups: Vec::new(),
             sorted_indices: DimVec::new(),
             compact_lookup: None,
         }
@@ -596,11 +607,26 @@ impl SectorStructure {
                 });
             }
         }
+        let mut fusion_tree_groups = Vec::<FusionTreeBlockGroup>::new();
+        let mut fusion_tree_group_indices =
+            FxHashMap::<FusionTreeGroupKey, usize>::default();
+        for (index, block) in blocks.iter().enumerate() {
+            let Some(group_key) = block.key().fusion_tree_group_key() else {
+                continue;
+            };
+            if let Some(&group_index) = fusion_tree_group_indices.get(&group_key) {
+                fusion_tree_groups[group_index].block_indices.push(index);
+            } else {
+                fusion_tree_group_indices.insert(group_key.clone(), fusion_tree_groups.len());
+                fusion_tree_groups.push(FusionTreeBlockGroup::singleton(group_key, index));
+            }
+        }
         let compact_lookup = CompactBlockLookup::from_blocks(&blocks);
         Ok(Self {
             rank,
             key_kind: expected_kind,
             blocks,
+            fusion_tree_groups,
             sorted_indices,
             compact_lookup,
         })
@@ -627,21 +653,22 @@ impl SectorStructure {
         &self.blocks
     }
 
+    /// Return owned fusion-tree groups in first-appearance storage order.
+    ///
+    /// Use [`Self::fusion_tree_group_slice`] when the groups do not need to
+    /// outlive this structure.
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
-        let mut groups = Vec::<FusionTreeBlockGroup>::new();
-        let mut group_indices = FxHashMap::<FusionTreeGroupKey, usize>::default();
-        for (index, block) in self.blocks.iter().enumerate() {
-            let Some(group_key) = block.key().fusion_tree_group_key() else {
-                continue;
-            };
-            if let Some(&group_index) = group_indices.get(&group_key) {
-                groups[group_index].block_indices.push(index);
-            } else {
-                group_indices.insert(group_key.clone(), groups.len());
-                groups.push(FusionTreeBlockGroup::new(group_key, vec![index]));
-            }
-        }
-        groups
+        self.fusion_tree_groups.clone()
+    }
+
+    /// Borrow construction-time fusion-tree groups without rebuilding them.
+    #[inline]
+    pub fn fusion_tree_group_slice(&self) -> &[FusionTreeBlockGroup] {
+        &self.fusion_tree_groups
+    }
+
+    pub(crate) fn into_fusion_tree_groups(self) -> Vec<FusionTreeBlockGroup> {
+        self.fusion_tree_groups
     }
 
     pub fn block(&self, index: usize) -> Result<&SectorBlock, CoreError> {
@@ -1463,19 +1490,25 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation
+            .validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
         if operation.is_identity() {
             let indices = indices.into_iter();
             let (lower, upper) = indices.size_hint();
             let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
             for index in indices {
                 let source = self.required_fusion_tree_pair_key(index)?;
+                operation.validate_source_split(
+                    source.codomain_tree().uncoupled().len(),
+                    source.domain_tree().uncoupled().len(),
+                )?;
                 rows.push(vec![(source.clone(), self.rule.scalar_one())]);
             }
             return Ok(rows);
         }
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
-        multiplicity_free_braid_tree_pair_block_proven(batch, operation)
+        multiplicity_free_braid_tree_pair_block_proven(batch, &operation)
     }
 
     pub fn execute_multiplicity_free_braid_ordered_for_block_indices<I>(
@@ -1486,7 +1519,23 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
+        self.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+            indices, &operation,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn execute_multiplicity_free_braid_ordered_for_block_indices_borrowed<I>(
+        &self,
+        indices: I,
+        operation: &PreparedTreePairOperation,
+    ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation
+            .validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_braid_tree_pair_block_ordered_proven(batch, operation)
@@ -1501,19 +1550,24 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation.validate_block_preflight(self.rule, PreparedTreePairFamily::Transpose)?;
         if operation.is_identity() {
             let indices = indices.into_iter();
             let (lower, upper) = indices.size_hint();
             let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
             for index in indices {
                 let source = self.required_fusion_tree_pair_key(index)?;
+                operation.validate_source_split(
+                    source.codomain_tree().uncoupled().len(),
+                    source.domain_tree().uncoupled().len(),
+                )?;
                 rows.push(vec![(source.clone(), self.rule.scalar_one())]);
             }
             return Ok(rows);
         }
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
-        multiplicity_free_transpose_tree_pair_block_proven(batch, operation)
+        multiplicity_free_transpose_tree_pair_block_proven(batch, &operation)
     }
 
     pub fn execute_multiplicity_free_transpose_ordered_for_block_indices<I>(
@@ -1524,7 +1578,22 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
+        self.execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
+            indices, &operation,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed<I>(
+        &self,
+        indices: I,
+        operation: &PreparedTreePairOperation,
+    ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation.validate_block_preflight(self.rule, PreparedTreePairFamily::Transpose)?;
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_transpose_tree_pair_block_ordered_proven(batch, operation)
@@ -1889,6 +1958,12 @@ impl BlockStructure {
 
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
         self.sector.fusion_tree_groups()
+    }
+
+    /// Borrow construction-time fusion-tree groups without rebuilding them.
+    #[inline]
+    pub fn fusion_tree_group_slice(&self) -> &[FusionTreeBlockGroup] {
+        self.sector.fusion_tree_group_slice()
     }
 
     pub fn find_block_index_by_key(&self, key: &BlockKey) -> Option<usize> {

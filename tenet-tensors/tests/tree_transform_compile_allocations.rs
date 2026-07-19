@@ -364,7 +364,7 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
         .unwrap();
     reset_global_operation_caches();
 
-    for (missing, expected_allocations) in [(1, 54), (2, 59), (4, 68), (5, 77), (8, 84), (9, 95)] {
+    for (missing, expected_allocations) in [(1, 48), (2, 53), (4, 62), (5, 71), (8, 78), (9, 87)] {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(missing);
         let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
