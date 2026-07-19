@@ -5160,6 +5160,226 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
 }
 
 #[test]
+fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_global_operation_caches();
+    let rule = Z2FusionRule;
+    let vacuum = SectorId::new(0);
+    let leg = || SectorLeg::new([(vacuum, 2)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let canonical_typed = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+        homspace.clone(),
+        &rule,
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let canonical = crate::DynamicFusionMapSpace::from_typed(&canonical_typed);
+    let canonical_block = canonical.structure().block(0).unwrap();
+    let padded_structure = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![
+            BlockSpec::with_key(canonical_block.key().clone(), vec![2, 2], vec![1, 3], 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    let padded_typed = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+        homspace,
+        padded_structure,
+    )
+    .unwrap()
+    .try_inherit_rule_identity(&canonical_typed)
+    .unwrap();
+    let padded = crate::DynamicFusionMapSpace::from_typed(&padded_typed);
+    assert_ne!(
+        canonical.structure().content_id(),
+        padded.structure().content_id()
+    );
+
+    let canonical_data = vec![1.0, 2.0, 3.0, 4.0];
+    let padded_data = vec![0.0, 1.0, 2.0, 0.0, 3.0, 4.0];
+    let rhs_data = vec![2.0, -1.0, 0.5, 3.0];
+    let (logical_lhs, eager_lhs_data) =
+        crate::adjoint::adjoint_dyn(&rule, &canonical, &canonical_data).unwrap();
+    let rhs = canonical.clone();
+    let dst =
+        crate::DynamicFusionMapSpace::contracted(&rule, &logical_lhs, &rhs, &[1], &[0]).unwrap();
+    let provider = Arc::new(rule);
+    let logical_lhs_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        logical_lhs.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let rhs_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        rhs.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dst.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let canonical_operand =
+        crate::FusionOperand::prelowered_adjoint(&logical_lhs, &canonical).unwrap();
+    let padded_operand = crate::FusionOperand::prelowered_adjoint(&logical_lhs, &padded).unwrap();
+    let rhs_operand = crate::FusionOperand::direct(&rhs);
+    let prelowered_axes = || {
+        TensorContractSpec::new_with_conjugation(
+            &[1],
+            &[0],
+            crate::OutputAxisOrder::identity(),
+            true,
+            false,
+        )
+    };
+    let ordinary_axes = || TensorContractSpec::with_default_output_order(&[1], &[0]);
+
+    // What: A^T * B in column-major order, computed independently of every
+    // symmetry-aware contraction route exercised below.
+    let oracle = vec![0.0, 2.0, 6.5, 13.5];
+    assert_eq!(dst.required_len().unwrap(), oracle.len());
+
+    let execute_prelowered = |context: &mut TensorContractFusionExecutionContext<
+        f64,
+        TreeTransformBuiltinRuleCacheKey,
+    >,
+                              lhs: crate::FusionOperand<'_>,
+                              lhs_data: &[f64]| {
+        let mut output = vec![0.0; dst.required_len().unwrap()];
+        context
+            .tensorcontract_fusion_dyn_prelowered_into(
+                &dst_bound,
+                &mut output,
+                lhs,
+                lhs_data,
+                rhs_operand,
+                &rhs_data,
+                prelowered_axes(),
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        output
+    };
+
+    for (first, first_data, second, second_data) in [
+        (
+            canonical_operand,
+            canonical_data.as_slice(),
+            padded_operand,
+            padded_data.as_slice(),
+        ),
+        (
+            padded_operand,
+            padded_data.as_slice(),
+            canonical_operand,
+            canonical_data.as_slice(),
+        ),
+    ] {
+        reset_global_operation_caches();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        let first_output = execute_prelowered(&mut context, first, first_data);
+        assert_eq!(first_output, oracle);
+        let first_entries = context.contraction_resolution_cache_len();
+        let second_output = execute_prelowered(&mut context, second, second_data);
+        // What: equal logical spaces with distinct admissible storage layouts
+        // compile independent resolution entries in either poison order.
+        assert_eq!(second_output, oracle);
+        assert!(context.contraction_resolution_cache_len() > first_entries);
+
+        let fast_hits = context.contraction_resolution_cache_fast_hits();
+        let repeated = execute_prelowered(&mut context, second, second_data);
+        // What: an identical prelowered replay still reaches the pinned fast path.
+        assert_eq!(repeated, oracle);
+        assert!(context.contraction_resolution_cache_fast_hits() > fast_hits);
+
+        reset_global_operation_caches();
+        let mut publisher =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        assert_eq!(
+            execute_prelowered(&mut publisher, first, first_data),
+            oracle
+        );
+        let mut consumer =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        // What: a fresh context cannot consume the storage-dependent global
+        // resolution published for the other admissible layout.
+        assert_eq!(
+            execute_prelowered(&mut consumer, second, second_data),
+            oracle
+        );
+        let consumer_fast_hits = consumer.contraction_resolution_cache_fast_hits();
+        assert_eq!(
+            execute_prelowered(&mut consumer, second, second_data),
+            oracle
+        );
+        assert!(consumer.contraction_resolution_cache_fast_hits() > consumer_fast_hits);
+    }
+
+    reset_global_operation_caches();
+    let mut namespace_context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut ordinary = vec![0.0; dst.required_len().unwrap()];
+    namespace_context
+        .tensorcontract_fusion_dyn_into(
+            &dst_bound,
+            &mut ordinary,
+            &logical_lhs_bound,
+            &eager_lhs_data,
+            &rhs_bound,
+            &rhs_data,
+            ordinary_axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(ordinary, oracle);
+    let ordinary_entries = namespace_context.contraction_resolution_cache_len();
+    let mut direct_prelowered = vec![0.0; dst.required_len().unwrap()];
+    namespace_context
+        .tensorcontract_fusion_dyn_prelowered_into(
+            &dst_bound,
+            &mut direct_prelowered,
+            crate::FusionOperand::direct(&logical_lhs),
+            &eager_lhs_data,
+            rhs_operand,
+            &rhs_data,
+            ordinary_axes(),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    // What: the prelowered API owns a distinct cache namespace even when its
+    // logical and storage spaces are the same ordinary tensor layout.
+    assert_eq!(direct_prelowered, oracle);
+    assert!(namespace_context.contraction_resolution_cache_len() > ordinary_entries);
+
+    let ordinary_tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        eager_lhs_data,
+        crate::lowering::adjoint_fusion_space_view(&canonical_typed).unwrap(),
+    )
+    .unwrap();
+    // What: the ordinary tensor constructor aliases its physical structure to
+    // its fusion subblock structure, so only the prelowered seam needs a
+    // separate storage determinant.
+    assert!(Arc::ptr_eq(
+        ordinary_tensor.structure(),
+        ordinary_tensor.fusion_space().unwrap().subblock_structure(),
+    ));
+}
+
+#[test]
 fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eager() {
     use num_complex::Complex64;
 

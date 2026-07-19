@@ -64,11 +64,8 @@ pub(crate) struct ContractionResolutionStats {
 }
 
 /// Structural full key: reachable identically from typed and dynamic callers.
-/// `core_only` separates the route-resolution namespace from the dynamic
-/// route's internal scratch plans: a scratch contraction can carry exactly
-/// the spaces/axes of the facade contraction that spawned it (identity
-/// operand transforms, e.g. a fermionic twist-only contraction), and its
-/// core plan must never alias the facade's dynamic resolution.
+/// `scope` separates ordinary resolution, prelowered storage-dependent
+/// resolution, and the dynamic route's internal scratch plans.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FullKey<RuleKey> {
     rule: RuleKey,
@@ -76,8 +73,18 @@ struct FullKey<RuleKey> {
     lhs: FullSpaceKey,
     rhs: FullSpaceKey,
     axes: TensorContractSpecOwned,
-    core_only: bool,
+    scope: FullResolutionScope,
     access: OperandAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+enum FullResolutionScope {
+    Ordinary,
+    Prelowered {
+        lhs_storage: FullSpaceKey,
+        rhs_storage: FullSpaceKey,
+    },
+    CoreOnly,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -141,8 +148,18 @@ struct FastKey<RuleKey> {
     lhs: FastSpaceKey,
     rhs: FastSpaceKey,
     axes: TensorContractSpecOwned,
-    core_only: bool,
+    scope: FastResolutionScope,
     access: OperandAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+enum FastResolutionScope {
+    Ordinary,
+    Prelowered {
+        lhs_storage: FastSpaceKey,
+        rhs_storage: FastSpaceKey,
+    },
+    CoreOnly,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -169,10 +186,30 @@ struct LastEntry<RuleKey> {
     lhs: LastSpace,
     rhs: LastSpace,
     axes: RawAxes,
-    core_only: bool,
+    scope: LastResolutionScope,
     access: OperandAccess,
     full_key: Option<FullKey<RuleKey>>,
     resolution: Resolution,
+}
+
+#[derive(Clone, Debug)]
+enum LastResolutionScope {
+    Ordinary,
+    Prelowered {
+        lhs_storage: LastSpace,
+        rhs_storage: LastSpace,
+    },
+    CoreOnly,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LiveResolutionScope<'a> {
+    Ordinary,
+    Prelowered {
+        lhs_storage: &'a DynamicFusionMapSpace,
+        rhs_storage: &'a DynamicFusionMapSpace,
+    },
+    CoreOnly,
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +233,70 @@ impl LastSpace {
             && Arc::ptr_eq(&self.structure, space.structure())
             && (Arc::ptr_eq(&self.homspace, space.homspace_arc())
                 || *self.homspace == *space.homspace())
+    }
+}
+
+impl LastResolutionScope {
+    fn matches(&self, live: LiveResolutionScope<'_>) -> bool {
+        match (self, live) {
+            (Self::Ordinary, LiveResolutionScope::Ordinary)
+            | (Self::CoreOnly, LiveResolutionScope::CoreOnly) => true,
+            (
+                Self::Prelowered {
+                    lhs_storage,
+                    rhs_storage,
+                },
+                LiveResolutionScope::Prelowered {
+                    lhs_storage: live_lhs,
+                    rhs_storage: live_rhs,
+                },
+            ) => lhs_storage.matches(live_lhs) && rhs_storage.matches(live_rhs),
+            _ => false,
+        }
+    }
+}
+
+impl LiveResolutionScope<'_> {
+    fn full(self) -> Result<FullResolutionScope, OperationError> {
+        match self {
+            Self::Ordinary => Ok(FullResolutionScope::Ordinary),
+            Self::Prelowered {
+                lhs_storage,
+                rhs_storage,
+            } => Ok(FullResolutionScope::Prelowered {
+                lhs_storage: FullSpaceKey::from_space(lhs_storage)?,
+                rhs_storage: FullSpaceKey::from_space(rhs_storage)?,
+            }),
+            Self::CoreOnly => Ok(FullResolutionScope::CoreOnly),
+        }
+    }
+
+    fn fast(self) -> FastResolutionScope {
+        match self {
+            Self::Ordinary => FastResolutionScope::Ordinary,
+            Self::Prelowered {
+                lhs_storage,
+                rhs_storage,
+            } => FastResolutionScope::Prelowered {
+                lhs_storage: FastSpaceKey::from_space(lhs_storage),
+                rhs_storage: FastSpaceKey::from_space(rhs_storage),
+            },
+            Self::CoreOnly => FastResolutionScope::CoreOnly,
+        }
+    }
+
+    fn pinned(self) -> LastResolutionScope {
+        match self {
+            Self::Ordinary => LastResolutionScope::Ordinary,
+            Self::Prelowered {
+                lhs_storage,
+                rhs_storage,
+            } => LastResolutionScope::Prelowered {
+                lhs_storage: LastSpace::from_space(lhs_storage),
+                rhs_storage: LastSpace::from_space(rhs_storage),
+            },
+            Self::CoreOnly => LastResolutionScope::CoreOnly,
+        }
     }
 }
 
@@ -364,7 +465,7 @@ where
             lhs,
             rhs,
             axes,
-            false,
+            LiveResolutionScope::Ordinary,
             OperandAccess::default(),
             || {
                 resolve(
@@ -401,6 +502,11 @@ where
             + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
         RuleKey: 'static + Send + Sync,
     {
+        // Why not rely on the public context's preflight: this cache owns the
+        // storage-dependent identity and must reject foreign storage before a
+        // last/fast/global hit if another internal caller is added later.
+        lhs_storage.validate_rule(rule)?;
+        rhs_storage.validate_rule(rule)?;
         let access = OperandAccess {
             lhs: if axes.lhs_conjugate() {
                 OperandAccessMode::AdjointParent
@@ -419,7 +525,10 @@ where
             lhs_logical,
             rhs_logical,
             axes,
-            false,
+            LiveResolutionScope::Prelowered {
+                lhs_storage,
+                rhs_storage,
+            },
             access,
             || {
                 let logical_axes = TensorContractSpec::new(
@@ -488,7 +597,7 @@ where
             lhs,
             rhs,
             axes,
-            true,
+            LiveResolutionScope::CoreOnly,
             OperandAccess::default(),
             || {
                 compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)
@@ -511,7 +620,7 @@ where
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
-        core_only: bool,
+        scope: LiveResolutionScope<'_>,
         access: OperandAccess,
         resolve_cold: impl FnOnce() -> Result<Resolution, OperationError>,
     ) -> Result<Resolution, OperationError>
@@ -525,7 +634,7 @@ where
         if self.policy.stores_entries() {
             let position = self.last.iter().position(|last| {
                 last.rule == rule_key
-                    && last.core_only == core_only
+                    && last.scope.matches(scope)
                     && last.access == access
                     && last.dst.matches(dst)
                     && last.lhs.matches(lhs)
@@ -571,7 +680,7 @@ where
                 lhs: FastSpaceKey::from_space(lhs),
                 rhs: FastSpaceKey::from_space(rhs),
                 axes: axes_key.clone(),
-                core_only,
+                scope: scope.fast(),
                 access,
             };
             if let Some(resolution) = self.fast.get(&fast_key) {
@@ -584,7 +693,7 @@ where
                     lhs,
                     rhs,
                     axes,
-                    core_only,
+                    scope,
                     access,
                     None,
                     &resolution,
@@ -598,7 +707,7 @@ where
                 lhs: FullSpaceKey::from_space(lhs)?,
                 rhs: FullSpaceKey::from_space(rhs)?,
                 axes: axes_key.clone(),
-                core_only,
+                scope: scope.full()?,
                 access,
             };
             if let Some(resolution) = self.resolved.get(&full_key) {
@@ -612,7 +721,7 @@ where
                     lhs,
                     rhs,
                     axes,
-                    core_only,
+                    scope,
                     access,
                     Some(full_key),
                     &resolution,
@@ -640,7 +749,7 @@ where
                     lhs,
                     rhs,
                     axes,
-                    core_only,
+                    scope,
                     access,
                     Some(full_key),
                     &resolution,
@@ -665,7 +774,7 @@ where
                 lhs,
                 rhs,
                 axes,
-                core_only,
+                scope,
                 access,
                 Some(full_key),
                 &resolution,
@@ -685,7 +794,7 @@ where
         lhs: &DynamicFusionMapSpace,
         rhs: &DynamicFusionMapSpace,
         axes: TensorContractSpec<'_>,
-        core_only: bool,
+        scope: LiveResolutionScope<'_>,
         access: OperandAccess,
         full_key: Option<FullKey<RuleKey>>,
         resolution: &Resolution,
@@ -698,7 +807,7 @@ where
                 lhs: LastSpace::from_space(lhs),
                 rhs: LastSpace::from_space(rhs),
                 axes: RawAxes::from_axes(axes),
-                core_only,
+                scope: scope.pinned(),
                 access,
                 full_key,
                 resolution: resolution.clone(),
