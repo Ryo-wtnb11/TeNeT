@@ -9,9 +9,9 @@ use std::hash::Hash;
 use std::sync::{Arc, RwLock};
 
 use tenet_core::{
-    BlockKey, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey,
-    HomSpaceId, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, TensorMap,
-    TensorMapSpace,
+    BlockKey, BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreePairKey, HomSpaceId, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols,
+    TensorMap, TensorMapSpace,
 };
 
 use crate::cache::registered_operation_cache;
@@ -206,6 +206,62 @@ fn validate_adjoint_data_extent(
     Ok(())
 }
 
+fn validate_adjoint_source_structure<R>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+    source: &BlockStructure,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let expected = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    if source.content_id() == expected.content_id() {
+        return Ok(());
+    }
+    if source.rank() != expected.rank() {
+        return Err(OperationError::Core(CoreError::StructureRankMismatch {
+            expected: expected.rank(),
+            actual: source.rank(),
+        }));
+    }
+    if source.block_count() != expected.block_count() {
+        return Err(OperationError::Core(CoreError::BlockCountMismatch {
+            expected: expected.block_count(),
+            actual: source.block_count(),
+        }));
+    }
+    for index in 0..expected.block_count() {
+        let expected_block = expected
+            .block(index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        let source_index = source
+            .find_block_index_by_key(expected_block.key())
+            .ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(expected_block.key().clone()),
+            })?;
+        if source_index != index {
+            return Err(OperationError::StructureMismatch { tensor: "src" });
+        }
+        let source_block = source
+            .block(source_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+        if source_block.shape() != expected_block.shape() {
+            return Err(OperationError::ShapeMismatch {
+                dst: expected_block.shape().to_vec(),
+                src: source_block.shape().to_vec(),
+            });
+        }
+        if source_block.strides() != expected_block.strides()
+            || source_block.offset() != expected_block.offset()
+        {
+            return Err(OperationError::StructureMismatch { tensor: "src" });
+        }
+    }
+    Ok(())
+}
+
 /// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
 /// domain swapped) together with freshly allocated coupled-layout data whose
 /// blocks are the conjugate transposes of the source blocks.
@@ -234,6 +290,7 @@ where
 {
     space.validate_rule(rule)?;
     validate_adjoint_data_extent(space.required_len(), data.len())?;
+    validate_adjoint_source_structure(rule, space.homspace(), space.structure())?;
     let nout = space.nout();
     let nin = space.nin();
     let structure = Arc::clone(space.structure());
@@ -549,6 +606,7 @@ where
         .validate_rule(rule)
         .map_err(OperationError::Core)?;
     validate_adjoint_data_extent(fusion_space.required_len(), tensor.storage_dim())?;
+    validate_adjoint_source_structure(rule, fusion_space.homspace(), tensor.structure())?;
     let homspace = fusion_space.homspace();
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
@@ -674,10 +732,10 @@ mod cache_tests {
     use std::cell::Cell;
     use std::ops::Add;
     use tenet_core::{
-        BlockStructure, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace,
-        FusionStyleKind, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
-        ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-        SectorVec, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
+        BlockSpec, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionStyleKind,
+        FusionTreeKey, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
+        ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorVec,
+        Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
     };
 
     type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -811,6 +869,50 @@ mod cache_tests {
             .unwrap()
     }
 
+    fn rank_one_source<R>(rule: &R, sector: SectorId, deg: usize) -> DynamicFusionMapSpace
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let leg = || FusionProductSpace::new([SectorLeg::new([(sector, deg)], false)]);
+        let hom = FusionTreeHomSpace::new(leg(), leg());
+        let count = hom.fusion_tree_keys(rule).len();
+        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![deg, deg]; count])
+            .unwrap()
+    }
+
+    fn u1_rank_one_pair(charge: i32) -> FusionTreePairKey {
+        let rule = U1FusionRule;
+        let sector = U1Irrep::new(charge).sector_id();
+        let tree = FusionTreeKey::try_new_for_rule(
+            &rule,
+            [sector],
+            sector,
+            [false],
+            std::iter::empty(),
+            std::iter::empty(),
+        )
+        .unwrap();
+        FusionTreePairKey::pair(tree.clone(), tree)
+    }
+
+    fn typed_u1_expert_tensor(
+        codomain_dim: usize,
+        domain_dim: usize,
+        homspace: FusionTreeHomSpace,
+        structure: BlockStructure,
+    ) -> TensorMap<OutputObservedValue, 1, 1> {
+        let len = structure.required_len().unwrap();
+        let space = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([codomain_dim], [domain_dim]).unwrap(),
+            homspace,
+            structure,
+        )
+        .unwrap()
+        .try_bind_rule(&U1FusionRule)
+        .unwrap();
+        TensorMap::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
+    }
+
     fn toy_generic_bound<const ID: u8>() -> BoundDynamicFusionMapSpace<ToyGenericRule<ID>> {
         let one = SectorId::new(1);
         let leg = || SectorLeg::new([(one, 1)], false);
@@ -851,8 +953,8 @@ mod cache_tests {
 
     #[test]
     fn eager_adjoint_accepts_exact_multiplicity_free_storage() {
-        // What: exact raw storage succeeds for a non-self-dual U(1) sector and
-        // the ordinary fZ2 x U(1) x SU(2) product path.
+        // What: exact raw storage succeeds for the ordinary U(1), SU(2), fZ2,
+        // and fZ2 x U(1) x SU(2) multiplicity-free paths.
         let u1 = BoundDynamicFusionMapSpace::bind_multiplicity_free(
             u1_source(1, 2),
             Arc::new(U1FusionRule),
@@ -861,6 +963,30 @@ mod cache_tests {
         let u1_len = u1.space().required_len().unwrap();
         let (_, u1_data) = adjoint_bound_dyn(&u1, &vec![1.0; u1_len]).unwrap();
         assert_eq!(u1_data.len(), u1_len);
+
+        let su2_rule = Arc::new(SU2FusionRule);
+        let su2 = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            rank_one_source(
+                su2_rule.as_ref(),
+                SU2Irrep::from_twice_spin(1).sector_id(),
+                2,
+            ),
+            Arc::clone(&su2_rule),
+        )
+        .unwrap();
+        let su2_len = su2.space().required_len().unwrap();
+        let (_, su2_data) = adjoint_bound_dyn(&su2, &vec![1.0; su2_len]).unwrap();
+        assert_eq!(su2_data.len(), su2_len);
+
+        let fz2_rule = Arc::new(FermionParityFusionRule);
+        let fz2 = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            rank_one_source(fz2_rule.as_ref(), Z2Irrep::ODD.sector_id(), 2),
+            Arc::clone(&fz2_rule),
+        )
+        .unwrap();
+        let fz2_len = fz2.space().required_len().unwrap();
+        let (_, fz2_data) = adjoint_bound_dyn(&fz2, &vec![1.0; fz2_len]).unwrap();
+        assert_eq!(fz2_data.len(), fz2_len);
 
         let rule = triple_rule();
         let product = BoundDynamicFusionMapSpace::bind_multiplicity_free(
@@ -871,6 +997,217 @@ mod cache_tests {
         let product_len = product.space().required_len().unwrap();
         let (_, product_data) = adjoint_bound_dyn(&product, &vec![1.0; product_len]).unwrap();
         assert_eq!(product_data.len(), product_len);
+    }
+
+    #[test]
+    fn eager_adjoint_rejects_extra_expert_block_before_target_work() {
+        // What: a locally valid U(1) block outside the source HomSpace is
+        // rejected by both typed and dynamic eager adjoint without output work.
+        let zero = U1Irrep::new(0).sector_id();
+        let leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]);
+        let homspace = FusionTreeHomSpace::new(leg(), leg());
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![1, 1], 0)
+                    .unwrap(),
+                BlockSpec::column_major_with_key(u1_rank_one_pair(1).into(), vec![1, 1], 1)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let tensor = typed_u1_expert_tensor(1, 1, homspace, structure);
+        let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+
+        let typed_error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+        assert_eq!(
+            typed_error,
+            OperationError::Core(CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+
+        let dynamic_error = adjoint_dyn(&U1FusionRule, &dynamic, tensor.data()).unwrap_err();
+        assert_eq!(
+            dynamic_error,
+            OperationError::Core(CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn eager_adjoint_keeps_rule_mismatch_precedence_over_canonical_preflight() {
+        // What: a wrong rule is rejected before canonical preflight inspects a
+        // safe public expert structure that contains an extra U(1) block.
+        let zero = U1Irrep::new(0).sector_id();
+        let leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]);
+        let homspace = FusionTreeHomSpace::new(leg(), leg());
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![1, 1], 0)
+                    .unwrap(),
+                BlockSpec::column_major_with_key(u1_rank_one_pair(1).into(), vec![1, 1], 1)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let tensor = typed_u1_expert_tensor(1, 1, homspace, structure);
+
+        OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+        let error = adjoint(&SU2FusionRule, &tensor).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn eager_adjoint_rejects_missing_expert_block_before_target_work() {
+        // What: omitting one HomSpace block fails with the canonical block count
+        // before the output vector is allocated or initialized.
+        let sectors = [
+            (U1Irrep::new(0).sector_id(), 1),
+            (U1Irrep::new(1).sector_id(), 1),
+        ];
+        let leg = || FusionProductSpace::new([SectorLeg::new(sectors, false)]);
+        let homspace = FusionTreeHomSpace::new(leg(), leg());
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![1, 1], 0)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let tensor = typed_u1_expert_tensor(2, 2, homspace, structure);
+
+        OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+        let error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::BlockCountMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn eager_adjoint_rejects_wrong_expert_shape_before_target_work() {
+        // What: a source block whose degeneracy shape disagrees with its
+        // HomSpace is rejected before output allocation or initialization.
+        let zero = U1Irrep::new(0).sector_id();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(zero, 2)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(zero, 3)], false)]),
+        );
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![2, 2], 0)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let tensor = typed_u1_expert_tensor(2, 3, homspace, structure);
+
+        OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+        let error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::ShapeMismatch {
+                dst: vec![2, 3],
+                src: vec![2, 2],
+            }
+        );
+        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn eager_adjoint_rejects_noncanonical_order_and_coverage() {
+        // What: complete expert keys still fail when their source block order
+        // or storage coverage differs from the canonical coupled layout.
+        let sectors = [
+            (U1Irrep::new(0).sector_id(), 1),
+            (U1Irrep::new(1).sector_id(), 1),
+        ];
+        let leg = || FusionProductSpace::new([SectorLeg::new(sectors, false)]);
+        let homspace = FusionTreeHomSpace::new(leg(), leg());
+        let canonical = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+
+        let reordered = BlockStructure::from_blocks_with_rank(
+            2,
+            [1, 0]
+                .into_iter()
+                .map(|index| {
+                    let block = canonical.block(index).unwrap();
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let overlapping = BlockStructure::from_blocks_with_rank(
+            2,
+            (0..canonical.block_count())
+                .map(|index| {
+                    let block = canonical.block(index).unwrap();
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        0,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+
+        for structure in [reordered, overlapping] {
+            let tensor = typed_u1_expert_tensor(2, 2, homspace.clone(), structure);
+            OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+
+            let error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+
+            assert_eq!(error, OperationError::StructureMismatch { tensor: "src" });
+            assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+        }
+    }
+
+    #[test]
+    fn duplicate_expert_blocks_are_rejected_at_construction() {
+        // What: safe expert construction rejects duplicate fusion-tree keys
+        // before a malformed source can reach eager adjoint.
+        let key = u1_rank_one_pair(0);
+        let error = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![
+                BlockSpec::column_major_with_key(key.clone().into(), vec![1, 1], 0).unwrap(),
+                BlockSpec::column_major_with_key(key.into(), vec![1, 1], 1).unwrap(),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CoreError::DuplicateBlockKey { .. }));
     }
 
     #[test]
