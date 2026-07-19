@@ -230,6 +230,9 @@ impl SectorLeg {
             .map(|(sector, degeneracy)| (sector.into(), degeneracy))
             .collect::<SmallVec<[(SectorId, usize); 8]>>();
         pairs.sort_unstable_by_key(|&(sector, _)| sector);
+        // Why not discard zeros first: duplicate validity must not depend on
+        // input order or storage representation; TeNeT follows TensorKit's
+        // strict tuple invariant, not its SectorDict zero-first corner.
         for window in pairs.windows(2) {
             if window[0].0 == window[1].0 {
                 return Err(SectorLegConstructionError::DuplicateSector {
