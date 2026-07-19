@@ -961,51 +961,15 @@ mod cache_tests {
     }
 
     #[test]
-    fn typed_eager_adjoint_rejects_storage_resized_through_the_public_api() {
-        // What: typed eager adjoint accepts exact storage, while public
-        // storage mutation cannot make short or oversized backing vectors
-        // reach target construction or output zero-fill.
+    fn typed_eager_adjoint_accepts_exact_storage() {
+        // What: typed eager adjoint keeps its ordinary exact-storage path after
+        // the obsolete length-changing TensorMap test escape is removed.
         let exact = typed_u1_tensor();
         let expected = exact.structure().required_len().unwrap();
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
         let output = adjoint(&U1FusionRule, &exact).unwrap();
         assert_eq!(output.storage_dim(), expected);
         assert!(OUTPUT_ZERO_CALLS.with(Cell::get) > 0);
-
-        for oversized in [false, true] {
-            let mut source = typed_u1_tensor();
-            if oversized {
-                source.storage_mut().push(OutputObservedValue(2.0));
-            } else {
-                source.storage_mut().pop();
-            }
-            let actual = source.storage_dim();
-            OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-
-            let error = adjoint(&U1FusionRule, &source).unwrap_err();
-
-            assert_eq!(
-                error,
-                OperationError::ElementCountMismatch { expected, actual }
-            );
-            assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
-            assert_eq!(source.storage_dim(), actual);
-        }
-    }
-
-    #[test]
-    fn typed_eager_adjoint_keeps_rule_mismatch_precedence_over_extent() {
-        // What: a typed source with both a wrong rule and short backing storage
-        // reports the structural rule mismatch before its extent defect.
-        let mut source = typed_u1_tensor();
-        source.storage_mut().clear();
-
-        let error = adjoint(&SU2FusionRule, &source).unwrap_err();
-
-        assert!(matches!(
-            error,
-            OperationError::Core(CoreError::FusionRuleMismatch { .. })
-        ));
     }
 
     #[test]
