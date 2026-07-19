@@ -413,7 +413,10 @@ impl<T: Copy> TreeTransformStructure<T> {
                 actual: src_structure.rank(),
             });
         }
-        validate_destination_injective(&dst_structure)?;
+        validate_destination_layouts_injective(
+            &dst_structure,
+            "tree transform destination layouts overlap",
+        )?;
 
         let mut layouts = TreeTransformLayoutTable::default();
         let mut blocks = Vec::with_capacity(specs.len());
@@ -677,7 +680,11 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 }
 
-fn validate_destination_injective(dst_structure: &BlockStructure) -> Result<(), OperationError> {
+#[doc(hidden)]
+pub fn validate_destination_layouts_injective(
+    dst_structure: &BlockStructure,
+    overlap_message: &'static str,
+) -> Result<(), OperationError> {
     // Why-not deduplicate only the beta scale: aliased logical destination
     // blocks can also require distinct alpha contributions, so no replay order
     // can represent their outputs in one physical element.
@@ -734,7 +741,7 @@ fn validate_destination_injective(dst_structure: &BlockStructure) -> Result<(), 
                 // OperationError is a public exhaustive enum, so that would
                 // break downstream matches for a validation-only diagnostic.
                 return Err(OperationError::InvalidArgument {
-                    message: "tree transform destination layouts overlap",
+                    message: overlap_message,
                 });
             }
         }

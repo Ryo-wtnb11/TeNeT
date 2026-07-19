@@ -10,7 +10,10 @@ use tenet_dense::DenseDotConfig;
 use crate::strided::{column_major_strides_usize, element_count, offset_to_isize};
 use crate::{DenseBlockScalar, OperationError, RecouplingCoefficientAction};
 use tenet_operations::structure_identity::validate_structure_identity;
-use tenet_operations::{permutation_axes, TensorContractSpec};
+use tenet_operations::{
+    fusion_scale_block_layouts_excluding, permutation_axes, validate_destination_layouts_injective,
+    FusionScaleBlockLayout, TensorContractSpec,
+};
 
 use super::backend::TensorContractBackend;
 
@@ -26,6 +29,7 @@ pub struct TensorContractStructure<C = f64> {
     rhs_conjugate: bool,
     terms: Vec<TensorContractStructureTerm<C>>,
     descriptor: TensorContractDescriptor<C>,
+    inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
     dst_structure: Arc<BlockStructure>,
     lhs_structure: Arc<BlockStructure>,
     rhs_structure: Arc<BlockStructure>,
@@ -284,6 +288,16 @@ impl TensorContractStructure {
             &lhs_structure,
             &rhs_structure,
         )?;
+        validate_destination_layouts_injective(
+            &dst_structure,
+            "tensor contract destination layouts overlap",
+        )?;
+        let active_dst_blocks = terms
+            .iter()
+            .map(TensorContractStructureTerm::dst_block)
+            .collect::<HashSet<_>>();
+        let inactive_dst_scale_blocks =
+            fusion_scale_block_layouts_excluding(&dst_structure, &active_dst_blocks)?;
 
         Ok(Self {
             dst_rank,
@@ -296,6 +310,7 @@ impl TensorContractStructure {
             rhs_conjugate: axis_plan.rhs_conjugate,
             terms,
             descriptor,
+            inactive_dst_scale_blocks,
             dst_structure,
             lhs_structure,
             rhs_structure,
@@ -359,6 +374,11 @@ where
     #[inline]
     pub(super) fn descriptor(&self) -> &TensorContractDescriptor<C> {
         &self.descriptor
+    }
+
+    #[inline]
+    pub(super) fn inactive_destination_scale_blocks(&self) -> &[FusionScaleBlockLayout] {
+        &self.inactive_dst_scale_blocks
     }
 
     #[cfg(test)]

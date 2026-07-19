@@ -11,7 +11,7 @@ use tenet_operations::fusion_replay::{
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::storage_scratch::StorageTensorContractWorkspace;
-use tenet_operations::tensoradd_raw_strided_kernel;
+use tenet_operations::{scale_raw_strided_kernel_trusted, tensoradd_raw_strided_kernel};
 
 use crate::{
     ConjugateValue, DenseBlockScalar, DenseTreeTransformOperations, OperationError,
@@ -608,6 +608,10 @@ where
     C: Copy + One,
 {
     structure.validate_replay_structures(dst_structure, lhs_structure, rhs_structure)?;
+    validate_contract_replay_storage_len(dst_structure, dst_data.len())?;
+    validate_contract_replay_storage_len(lhs_structure, lhs_data.len())?;
+    validate_contract_replay_storage_len(rhs_structure, rhs_data.len())?;
+    scale_inactive_contract_destinations(structure, dst_data, beta)?;
     let descriptor = structure.descriptor();
     for term in descriptor.terms() {
         workspace.prepare_output(term.workspace_len, D::zero());
@@ -667,6 +671,10 @@ where
     let lhs_structure = Arc::clone(lhs.structure());
     let rhs_structure = Arc::clone(rhs.structure());
     structure.validate_replay_structures(&dst_structure, &lhs_structure, &rhs_structure)?;
+    validate_contract_replay_storage_len(&dst_structure, dst.data().len())?;
+    validate_contract_replay_storage_len(&lhs_structure, lhs.data().len())?;
+    validate_contract_replay_storage_len(&rhs_structure, rhs.data().len())?;
+    scale_inactive_contract_destinations(structure, dst.data_mut(), beta)?;
     let descriptor = structure.descriptor();
     let lhs_data = lhs.data();
     let rhs_data = rhs.data();
@@ -683,6 +691,43 @@ where
             lhs_data,
             rhs_data,
             alpha,
+            beta,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_contract_replay_storage_len(
+    structure: &BlockStructure,
+    actual: usize,
+) -> Result<(), OperationError> {
+    let expected = structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    if actual != expected {
+        return Err(OperationError::ElementCountMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+fn scale_inactive_contract_destinations<D, C>(
+    structure: &TensorContractStructure<C>,
+    dst_data: &mut [D],
+    beta: D,
+) -> Result<(), OperationError>
+where
+    D: DenseBlockScalar,
+    C: Copy + One,
+{
+    if beta == D::one() {
+        return Ok(());
+    }
+    for layout in structure.inactive_destination_scale_blocks() {
+        scale_raw_strided_kernel_trusted(
+            dst_data,
+            &layout.block.shape,
+            &layout.block.strides,
+            layout.block.offset,
             beta,
         )?;
     }

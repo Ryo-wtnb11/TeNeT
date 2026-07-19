@@ -1111,6 +1111,138 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
 }
 
 #[test]
+fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle() {
+    let rule = Z2FusionRule;
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let leg = || SectorLeg::new([(even, 1), (odd, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let keys = homspace.fusion_tree_keys(&rule);
+    let key_for_sector = |sector| {
+        keys.iter()
+            .find(|key| key.codomain_tree().coupled() == sector)
+            .cloned()
+            .expect("Z2 one-leg homspace contains requested sector")
+    };
+    let even_key = key_for_sector(even);
+    let odd_key = key_for_sector(odd);
+    // What: the production Structure route consumes a sparse physical subset
+    // of the broad Z2 HomSpace, while the eager-adjoint oracle uses its
+    // equivalent canonical even-only source.
+    let source_leg = || SectorLeg::new([(even, 1)], false);
+    let source_homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([source_leg()]),
+        FusionProductSpace::new([source_leg()]),
+    );
+    let source_space = || {
+        FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            homspace.clone(),
+            packed_fixture_structure(2, [(even_key.clone(), vec![1, 1])]).unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap()
+    };
+    let dst_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+        homspace.clone(),
+        packed_fixture_structure(2, [(even_key.clone(), vec![1, 1]), (odd_key, vec![1, 1])])
+            .unwrap(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let lhs_space = source_space();
+    let rhs_space = source_space();
+    let oracle_source_space = || {
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            source_homspace.clone(),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let lhs_dynamic = crate::DynamicFusionMapSpace::from_typed(&oracle_source_space());
+    let rhs_dynamic = crate::DynamicFusionMapSpace::from_typed(&oracle_source_space());
+    let lhs_data = vec![Complex64::new(2.0, 3.0)];
+    let rhs_data = vec![Complex64::new(5.0, -1.0)];
+    let initial = vec![Complex64::new(10.0, 4.0), Complex64::new(20.0, -2.0)];
+    let alpha = Complex64::new(0.75, -0.25);
+    let beta = Complex64::new(0.5, 0.125);
+
+    let (adjoint_space, adjoint_data) =
+        crate::adjoint::adjoint_dyn(&rule, &lhs_dynamic, &lhs_data).unwrap();
+    let oracle_dst_space =
+        crate::DynamicFusionMapSpace::contracted(&rule, &adjoint_space, &rhs_dynamic, &[1], &[0])
+            .unwrap();
+    let provider = Arc::new(rule);
+    let oracle_dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        oracle_dst_space,
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let adjoint_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        adjoint_space,
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let rhs_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        rhs_dynamic,
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let mut oracle = vec![initial[0]];
+    crate::TensorContractFusionExecutionContext::<Complex64, _>::default()
+        .tensorcontract_fusion_dyn_into(
+            &oracle_dst_bound,
+            &mut oracle,
+            &adjoint_bound,
+            &adjoint_data,
+            &rhs_bound,
+            &rhs_data,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            alpha,
+            beta,
+        )
+        .unwrap();
+    // What: the independent eager contraction produces the active block; the
+    // whole-destination axpby oracle also scales the absent odd block.
+    oracle.push(beta * initial[1]);
+
+    let lhs =
+        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(lhs_data, lhs_space).unwrap();
+    let rhs =
+        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(rhs_data, rhs_space).unwrap();
+    let mut actual =
+        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(initial, dst_space).unwrap();
+    let conjugate_axes =
+        TensorContractSpec::with_default_output_order_and_conjugation(&[0], &[0], true, false);
+    let structure =
+        tensorcontract_fusion_structure(&rule, &actual, &lhs, &rhs, conjugate_axes).unwrap();
+    assert_eq!(structure.terms().len(), 1);
+
+    let mut context = TensorContractFusionExecutionContext::<
+        Complex64,
+        TreeTransformBuiltinRuleCacheKey,
+    >::default();
+    for _ in 0..2 {
+        actual
+            .data_mut()
+            .copy_from_slice(&[Complex64::new(10.0, 4.0), Complex64::new(20.0, -2.0)]);
+        context
+            .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, conjugate_axes, alpha, beta)
+            .unwrap();
+        assert_eq!(actual.data(), oracle.as_slice());
+    }
+    assert!(context.contraction_resolution_cache_hits() >= 1);
+}
+
+#[test]
 fn tensorcontract_fusion_block_replay_scatter_beta_supports_dense_dtypes() {
     assert_fusion_block_scatter_beta_dtype(2.0_f32, 5.0, 10.0, 20.0, 2.0, 3.0);
     assert_fusion_block_scatter_beta_dtype(2.0_f64, 5.0, 10.0, 20.0, 2.0, 3.0);

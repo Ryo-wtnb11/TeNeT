@@ -31,6 +31,11 @@ pub use api::{
     tensorproduct_fusion_into_with_conjugation, tensorproduct_into,
     tensorproduct_into_with_conjugation,
 };
+#[cfg(test)]
+pub(crate) use backend::{
+    tensorcontract_structure_with_dense_executor_raw,
+    tensorcontract_structure_with_storage_workspace_dense_executor,
+};
 pub use backend::{
     HostTensorContractBackend, HostTensorContractWorkspace, TensorContractBackend,
     TensorContractWorkspace,
