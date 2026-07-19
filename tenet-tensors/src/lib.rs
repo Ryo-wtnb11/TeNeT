@@ -126,7 +126,7 @@ pub(crate) use tree_transform::{
     build_multiplicity_free_tree_pair_transform_group_plan,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
-    global_tree_transform_cache_lengths, TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
+    TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
 };
 
 #[cfg(test)]

@@ -24,9 +24,7 @@ pub(crate) use plan::{
 };
 
 #[cfg(test)]
-pub(crate) use cache::{
-    global_tree_transform_cache_lengths, TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
-};
+pub(crate) use cache::{TreeTransformGroupPlanCache, TreeTransformGroupPlanKey};
 #[cfg(test)]
 pub(crate) use plan::{
     build_multiplicity_free_all_codomain_tree_transform_group_plan,
