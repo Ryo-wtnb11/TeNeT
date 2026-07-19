@@ -4,6 +4,20 @@ struct CoupledFusionTrees {
     trees: Vec<FusionTreeKey>,
 }
 
+fn validate_multiplicity_free_execution_style<R>(rule: &R) -> Result<(), CoreError>
+where
+    R: FusionRule,
+{
+    if rule.fusion_style().is_multiplicity_free() {
+        Ok(())
+    } else {
+        Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: rule.fusion_style(),
+        })
+    }
+}
+
 fn collect_selected_leg_tuples(
     legs: &[SectorLeg],
     remaining: usize,
@@ -740,52 +754,17 @@ pub struct FusionTreeKey {
     is_dual: DualVec,
     innerlines: SectorVec,
     vertices: SectorVec,
-    // Outer-multiplicity flag (`FusionStyleKind::has_multiplicity`, i.e.
-    // `Generic`). Gates whether `vertices` participates in Hash/Eq/Ord below.
-    // See the big comment on the Hash impl for why this exists and why it
-    // is itself compared in Eq/Ord (not just used to gate `vertices`).
     has_multiplicity: bool,
 }
 
-// Identity of a `FusionTreeKey` is `(uncoupled, coupled, is_dual, innerlines)`
-// — `vertices` is deliberately excluded from Hash/Eq/Ord *when the tree comes
-// from a multiplicity-free rule* (`has_multiplicity == false`, every rule in
-// this crate today). For multiplicity-free fusion the vertex labels are
-// functionally determined by those four fields (always the trivial vertex),
-// so two keys that agree on them agree on `vertices` too: excluding it
-// changes no equivalence class or ordering, only the per-op cost.
-// FusionTreeKey comparison/hashing is the hottest logic in the cold
-// recoupling-plan build; TensorKit likewise keys its `SimpleFusion` fusion
-// trees on the sectors alone.
-//
-// For outer-multiplicity (`FusionStyleKind::Generic`, `has_multiplicity ==
-// true`) rules, `vertices` distinguishes trees that share the same four
-// fields but took different fusion channels at a vertex with nsymbol > 1
-// (e.g. SU(3)), so it must be included.
-//
-// `has_multiplicity` is included in Eq/Ord (not just used to *gate* the
-// `vertices` comparison) because gating alone is order-dependent and breaks
-// the Eq/Ord contracts: with `eq(a,b) = <4 fields> && (!a.has_multiplicity
-// || a.vertices == b.vertices)`, if `a.has_multiplicity == false` and
-// `b.has_multiplicity == true` with differing vertices, `eq(a,b)` would be
-// true (vertices check skipped, using `a`'s flag) while `eq(b,a)` would be
-// false (vertices check applied, using `b`'s flag) — not symmetric. Same
-// issue for `cmp`'s antisymmetry. Comparing `has_multiplicity` itself first
-// closes that hole: once it's confirmed equal on both sides, "use self's
-// flag to decide whether to compare vertices" is unambiguous. The extra
-// bool comparison is negligible next to a `SectorVec` compare and does not
-// reopen the zero-cost gate: `Hash` still hashes `vertices` (and nothing
-// else new) only when `has_multiplicity` is true, so mult-free hashing is
-// byte-identical to before this field existed.
 impl std::hash::Hash for FusionTreeKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.uncoupled.hash(state);
         self.coupled.hash(state);
         self.is_dual.hash(state);
         self.innerlines.hash(state);
-        if self.has_multiplicity {
-            self.vertices.hash(state);
-        }
+        self.vertices.hash(state);
+        self.has_multiplicity.hash(state);
     }
 }
 
@@ -795,8 +774,8 @@ impl PartialEq for FusionTreeKey {
             && self.coupled == other.coupled
             && self.is_dual == other.is_dual
             && self.innerlines == other.innerlines
+            && self.vertices == other.vertices
             && self.has_multiplicity == other.has_multiplicity
-            && (!self.has_multiplicity || self.vertices == other.vertices)
     }
 }
 
@@ -809,14 +788,8 @@ impl Ord for FusionTreeKey {
             .then_with(|| self.coupled.cmp(&other.coupled))
             .then_with(|| self.is_dual.cmp(&other.is_dual))
             .then_with(|| self.innerlines.cmp(&other.innerlines))
+            .then_with(|| self.vertices.cmp(&other.vertices))
             .then_with(|| self.has_multiplicity.cmp(&other.has_multiplicity))
-            .then_with(|| {
-                if self.has_multiplicity {
-                    self.vertices.cmp(&other.vertices)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
     }
 }
 
@@ -829,10 +802,11 @@ impl PartialOrd for FusionTreeKey {
 impl FusionTreeKey {
     /// Construct and validate a categorical fusion tree for `rule`.
     ///
-    /// This validates categorical structure for [`SectorId`] values already in
-    /// the provider domain. It does not turn arbitrary numeric IDs into checked
-    /// provider inputs and has the same provider-domain limitation documented on
-    /// [`Self::validate_for_rule`].
+    /// # Provider-domain precondition
+    ///
+    /// Every [`SectorId`] must already belong to `rule`'s provider domain.
+    /// This validates categorical structure, not provider membership, and has
+    /// the same limitation documented on [`Self::validate_for_rule`].
     pub fn try_new_for_rule<R, Uncoupled, Dual, Innerlines, Vertices>(
         rule: &R,
         uncoupled: Uncoupled,
@@ -921,9 +895,11 @@ impl FusionTreeKey {
 
     /// Construct and validate a categorical fusion tree from numeric IDs.
     ///
-    /// The IDs must already belong to the provider domain. This method checks
-    /// categorical structure, not provider membership, and has the same
-    /// provider-domain limitation documented on [`Self::validate_for_rule`].
+    /// # Provider-domain precondition
+    ///
+    /// Every ID must already name a sector in `rule`'s provider domain. This
+    /// method checks categorical structure, not provider membership, and has
+    /// the same limitation documented on [`Self::validate_for_rule`].
     pub fn try_from_sector_ids_for_rule<R, Uncoupled, Dual, Innerlines, Vertices>(
         rule: &R,
         uncoupled: Uncoupled,
@@ -992,9 +968,14 @@ impl FusionTreeKey {
     ///
     /// Ruleless constructors remain available because block structures also
     /// carry opaque labels. Call this boundary before interpreting such a key
-    /// as a fusion tree. The infallible [`FusionRule`] contract assumes every
-    /// [`SectorId`] belongs to the provider domain; arbitrary out-of-domain
-    /// labels, provider nonclosure, and coherence are not checked here.
+    /// as a fusion tree.
+    ///
+    /// # Provider-domain precondition
+    ///
+    /// The infallible [`FusionRule`] contract assumes every [`SectorId`]
+    /// belongs to the provider domain. Arbitrary out-of-domain labels, provider
+    /// nonclosure, and coherence are not checked here; a finite-table provider
+    /// may panic when queried with such a label.
     pub fn validate_for_rule<R>(&self, rule: &R) -> Result<(), CoreError>
     where
         R: FusionRule,
@@ -1009,10 +990,11 @@ impl FusionTreeKey {
             && self.innerlines.is_empty()
             && self.vertices.is_empty()
         {
+            let is_dual = self.is_dual.first().copied()?;
             self.uncoupled[0]
                 .id()
                 .checked_mul(2)?
-                .checked_add(usize::from(self.is_dual[0]))
+                .checked_add(usize::from(is_dual))
         } else {
             None
         }
@@ -1100,6 +1082,11 @@ impl FusionTreeBlockKey {
     ///
     /// Empty trees use the provider vacuum for pair comparison, accepting both
     /// existing raw encodings `None` and `Some(vacuum)`.
+    ///
+    /// # Provider-domain precondition
+    ///
+    /// Both trees follow [`FusionTreeKey::validate_for_rule`]'s provider-domain
+    /// precondition.
     pub fn validate_for_rule<R>(&self, rule: &R) -> Result<(), CoreError>
     where
         R: FusionRule,
@@ -1145,6 +1132,9 @@ where
 /// then contains the remaining uncoupled sectors. This is a structural
 /// categorical operation: no dense storage is touched and no coefficient is
 /// introduced.
+///
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn split_fusion_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -1293,6 +1283,8 @@ fn validate_fusion_tree_key_shape(tree: &FusionTreeKey) -> Result<(), CoreError>
     Ok(())
 }
 
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn unique_artin_braid_first<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -1304,6 +1296,8 @@ where
     unique_artin_braid_at(rule, tree, 0)
 }
 
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn unique_artin_braid_at<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -1411,6 +1405,10 @@ pub struct PreparedTreePairOperation {
 }
 
 impl PreparedTreePairOperation {
+    pub(crate) fn is_identity(&self) -> bool {
+        matches!(self.plan, PreparedTreePairPlan::Identity)
+    }
+
     pub fn prepare_braid<R>(
         rule: &R,
         source_codomain_rank: usize,
@@ -1762,6 +1760,10 @@ impl PreparedTreePairOperation {
 }
 
 impl PreparedTreePairOperation {
+    /// Execute this prepared operation on one multiplicity-free tree pair.
+    ///
+    /// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+    /// provider-domain precondition.
     pub fn execute_multiplicity_free<R>(
         &self,
         rule: &R,
@@ -1780,6 +1782,38 @@ impl PreparedTreePairOperation {
             });
         }
         let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
+        self.execute_multiplicity_free_validated(validated)
+    }
+
+    pub(crate) fn execute_multiplicity_free_proven<R>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    {
+        self.validate_source(validated.key)?;
+        self.validate_rule_capabilities(validated.rule)?;
+        if !validated.rule.fusion_style().is_multiplicity_free() {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: validated.rule.fusion_style(),
+            });
+        }
+        self.execute_multiplicity_free_validated(validated)
+    }
+
+    fn execute_multiplicity_free_validated<R>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+    {
+        let rule = validated.rule;
+        let tree_pair = validated.key;
         match &self.plan {
             PreparedTreePairPlan::Identity => {
                 Ok(vec![(tree_pair.clone(), rule.scalar_one())])
@@ -1845,6 +1879,10 @@ impl PreparedTreePairOperation {
         }
     }
 
+    /// Execute this prepared operation on one unique-fusion tree pair.
+    ///
+    /// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+    /// provider-domain precondition.
     pub fn execute_unique_rigid<R>(
         &self,
         rule: &R,
@@ -1863,6 +1901,37 @@ impl PreparedTreePairOperation {
             });
         }
         let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
+        self.execute_unique_rigid_validated(validated)
+    }
+
+    pub(crate) fn execute_unique_rigid_proven<R>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+    ) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+    {
+        self.validate_source(validated.key)?;
+        self.validate_rule_capabilities(validated.rule)?;
+        if validated.rule.fusion_style() != FusionStyleKind::Unique {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Unique,
+                actual: validated.rule.fusion_style(),
+            });
+        }
+        self.execute_unique_rigid_validated(validated)
+    }
+
+    fn execute_unique_rigid_validated<R>(
+        &self,
+        validated: ValidatedFusionTreePair<'_, R>,
+    ) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError>
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Mul<Output = R::Scalar>,
+    {
+        let rule = validated.rule;
         match &self.plan {
             PreparedTreePairPlan::Identity => {
                 Ok((validated.key.clone(), rule.scalar_one()))
@@ -1984,6 +2053,8 @@ impl PreparedTreePairOperation {
     }
 }
 
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn unique_braid_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -2009,12 +2080,14 @@ where
     }
     let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
     validate_fusion_tree_for_rule(rule, tree)?;
-    if permutation.iter().copied().eq(0..rank) {
+    if prepared.permutation.iter().copied().eq(0..rank) {
         return Ok((tree.clone(), rule.scalar_one()));
     }
     execute_unique_tree_braid(rule, tree, &prepared)
 }
 
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn unique_permute_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -2046,6 +2119,8 @@ where
     execute_unique_tree_braid(rule, tree, &prepared)
 }
 
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn multiplicity_free_braid_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -2070,8 +2145,34 @@ where
         });
     }
     let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
-    validate_fusion_tree_for_rule(rule, tree)?;
-    if permutation.iter().copied().eq(0..rank) {
+    let validated = validate_fusion_tree_for_rule(rule, tree)?;
+    execute_multiplicity_free_tree_braid_proven(validated, prepared)
+}
+
+fn execute_multiplicity_free_tree_braid_proven<R>(
+    validated: ValidatedFusionTree<'_, R>,
+    prepared: PreparedTreeBraid,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !validated.rule.fusion_style().is_multiplicity_free() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: validated.rule.fusion_style(),
+        });
+    }
+    if prepared.permutation.len() != validated.key.uncoupled().len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: validated.key.uncoupled().len(),
+            actual: prepared.permutation.len(),
+        });
+    }
+    let rule = validated.rule;
+    let tree = validated.key;
+    let rank = tree.uncoupled().len();
+    if prepared.permutation.iter().copied().eq(0..rank) {
         return Ok(vec![(tree.clone(), rule.scalar_one())]);
     }
     execute_multiplicity_free_tree_braid(rule, tree, &prepared)
@@ -2114,6 +2215,8 @@ where
     Ok(current)
 }
 
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn multiplicity_free_permute_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -2138,13 +2241,12 @@ where
     let rank = tree.uncoupled().len();
     let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
     let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
-    validate_fusion_tree_for_rule(rule, tree)?;
-    if permutation.iter().copied().eq(0..rank) {
-        return Ok(vec![(tree.clone(), rule.scalar_one())]);
-    }
-    execute_multiplicity_free_tree_braid(rule, tree, &prepared)
+    let validated = validate_fusion_tree_for_rule(rule, tree)?;
+    execute_multiplicity_free_tree_braid_proven(validated, prepared)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn multiplicity_free_repartition_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -2199,6 +2301,8 @@ where
     Ok(current)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn multiplicity_free_braid_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -2225,6 +2329,8 @@ where
     .execute_multiplicity_free(rule, tree_pair)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn multiplicity_free_permute_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -2247,6 +2353,8 @@ where
     .execute_multiplicity_free(rule, tree_pair)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn multiplicity_free_transpose_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3120,6 +3228,19 @@ fn validate_fusion_tree_block_group_for_rule<'a, R>(
 where
     R: FusionRule,
 {
+    for source in src_keys {
+        validate_fusion_tree_for_rule(rule, source)?;
+    }
+    validate_fusion_tree_block_group_proven(rule, src_keys)
+}
+
+fn validate_fusion_tree_block_group_proven<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreeKey],
+) -> Result<Option<ValidatedFusionTreeBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
     let Some(reference) = src_keys.first() else {
         return Ok(None);
     };
@@ -3138,7 +3259,6 @@ where
                 message: "fusion-tree keys must share one group",
             });
         }
-        validate_fusion_tree_for_rule(rule, source)?;
     }
     Ok(Some(ValidatedFusionTreeBlockGroup {
         rule,
@@ -3147,42 +3267,8 @@ where
     }))
 }
 
-fn fusion_tree_block_group_from_validated_structure<'a, R>(
-    rule: &'a R,
-    src_keys: &'a [FusionTreeKey],
-) -> Result<Option<ValidatedFusionTreeBlockGroup<'a, R>>, CoreError>
-where
-    R: FusionRule,
-{
-    let Some(reference) = src_keys.first() else {
-        return Ok(None);
-    };
-    for source in src_keys.iter().skip(1) {
-        if source.uncoupled() != reference.uncoupled()
-            || source.is_dual() != reference.is_dual()
-            || source.has_multiplicity() != reference.has_multiplicity()
-        {
-            return Err(CoreError::MalformedFusionTree {
-                message: "fusion-tree keys must share one group",
-            });
-        }
-    }
-    Ok(Some(ValidatedFusionTreeBlockGroup {
-        rule,
-        src_keys,
-        rank: reference.uncoupled().len(),
-    }))
-}
-
-/// Apply one braid to every source tree in an all-codomain block.
-///
-/// Sources and result rows retain source order. Floating-point summation can
-/// differ from repeated scalar calls, so coefficients agree numerically rather
-/// than necessarily bit-for-bit. Empty input returns an empty result. Every
-/// nonempty source must share external sectors, duality, and fusion style;
-/// malformed mixed groups fail before symbol evaluation.
 #[allow(clippy::type_complexity)]
-pub fn multiplicity_free_braid_tree_block<R>(
+pub(crate) fn multiplicity_free_braid_tree_block_proven<R>(
     rule: &R,
     src_keys: &[FusionTreeKey],
     permutation: &[usize],
@@ -3202,10 +3288,42 @@ where
             actual: levels.len(),
         });
     }
-    if !rule.fusion_style().is_multiplicity_free() {
-        return Err(CoreError::UnsupportedFusionStyle {
-            expected: FusionStyleKind::Simple,
-            actual: rule.fusion_style(),
+    let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
+    let group = validate_fusion_tree_block_group_proven(rule, src_keys)?
+        .expect("nonempty proven source block produces a group proof");
+    multiplicity_free_braid_tree_block_validated(group, prepared)
+}
+
+/// Apply one braid to every source tree in an all-codomain block.
+///
+/// Sources and result rows retain source order. Floating-point summation can
+/// differ from repeated scalar calls, so coefficients agree numerically rather
+/// than necessarily bit-for-bit. Empty input returns an empty result. Every
+/// nonempty source must share external sectors, duality, and fusion style;
+/// malformed mixed groups fail before symbol evaluation.
+///
+/// Every source follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_braid_tree_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreeKey],
+    permutation: &[usize],
+    levels: &[usize],
+) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(first) = src_keys.first() else {
+        return Ok(Vec::new());
+    };
+    let rank = first.uncoupled().len();
+    if levels.len() != rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: levels.len(),
         });
     }
     let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
@@ -3262,6 +3380,9 @@ where
 /// Symmetric-braiding convenience wrapper for
 /// [`multiplicity_free_braid_tree_block`], with the same ordering, validation,
 /// and empty-input contract.
+///
+/// Every source follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 #[allow(clippy::type_complexity)]
 pub fn multiplicity_free_permute_tree_block<R>(
     rule: &R,
@@ -3278,15 +3399,10 @@ where
             actual: rule.braiding_style(),
         });
     }
+    validate_multiplicity_free_execution_style(rule)?;
     let Some(first) = src_keys.first() else {
         return Ok(Vec::new());
     };
-    if !rule.fusion_style().is_multiplicity_free() {
-        return Err(CoreError::UnsupportedFusionStyle {
-            expected: FusionStyleKind::Simple,
-            actual: rule.fusion_style(),
-        });
-    }
     let rank = first.uncoupled().len();
     let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
     let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
@@ -3306,6 +3422,19 @@ struct ValidatedTreePairBlockGroup<'a, R> {
 const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
 
 fn validate_tree_pair_block_group_for_rule<'a, R>(
+    rule: &'a R,
+    src_keys: &'a [FusionTreeBlockKey],
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    for source in src_keys {
+        validate_fusion_tree_pair_for_rule(rule, source)?;
+    }
+    validate_tree_pair_block_group_proven(rule, src_keys)
+}
+
+fn validate_tree_pair_block_group_proven<'a, R>(
     rule: &'a R,
     src_keys: &'a [FusionTreeBlockKey],
 ) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
@@ -3337,7 +3466,6 @@ where
                 message: TREE_PAIR_BLOCK_GROUP_ERROR,
             });
         }
-        validate_fusion_tree_pair_for_rule(rule, source)?;
     }
     Ok(Some(ValidatedTreePairBlockGroup {
         rule,
@@ -3347,39 +3475,36 @@ where
     }))
 }
 
-fn tree_pair_block_group_from_validated_structure<'a, R>(
-    rule: &'a R,
-    src_keys: &'a [FusionTreeBlockKey],
-) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+#[allow(clippy::type_complexity)]
+pub(crate) fn multiplicity_free_braid_tree_pair_block_proven<R>(
+    rule: &R,
+    src_keys: &[FusionTreeBlockKey],
+    prepared: PreparedTreePairOperation,
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
 where
-    R: FusionRule,
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    let Some(reference) = src_keys.first() else {
-        return Ok(None);
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(Vec::new());
     };
-    let reference_codomain = reference.codomain_tree();
-    let reference_domain = reference.domain_tree();
-    for source in src_keys.iter().skip(1) {
-        let codomain = source.codomain_tree();
-        let domain = source.domain_tree();
-        if codomain.uncoupled() != reference_codomain.uncoupled()
-            || domain.uncoupled() != reference_domain.uncoupled()
-            || codomain.is_dual() != reference_codomain.is_dual()
-            || domain.is_dual() != reference_domain.is_dual()
-            || codomain.has_multiplicity() != reference_codomain.has_multiplicity()
-            || domain.has_multiplicity() != reference_domain.has_multiplicity()
-        {
-            return Err(CoreError::MalformedFusionTree {
-                message: TREE_PAIR_BLOCK_GROUP_ERROR,
-            });
-        }
-    }
-    Ok(Some(ValidatedTreePairBlockGroup {
-        rule,
-        src_keys,
-        codomain_rank: reference_codomain.uncoupled().len(),
-        domain_rank: reference_domain.uncoupled().len(),
-    }))
+    multiplicity_free_braid_tree_pair_block_validated(group, prepared)
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn multiplicity_free_transpose_tree_pair_block_proven<R>(
+    rule: &R,
+    src_keys: &[FusionTreeBlockKey],
+    prepared: PreparedTreePairOperation,
+) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(Vec::new());
+    };
+    multiplicity_free_transpose_tree_pair_block_validated(group, prepared)
 }
 
 /// Batched [`multiplicity_free_braid_tree_pair`] over every source tree-pair of
@@ -3396,6 +3521,9 @@ where
 /// `src_keys` must be empty or share one external-sector, duality, and
 /// multiplicity group. Empty input returns an empty transform; mixed groups
 /// return [`CoreError::MalformedFusionTree`] before any symbol evaluation.
+///
+/// Every source follows
+/// [`FusionTreeBlockKey::validate_for_rule`]'s provider-domain precondition.
 pub fn multiplicity_free_braid_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -3408,6 +3536,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    validate_multiplicity_free_execution_style(rule)?;
     let Some(first) = src_keys.first() else {
         return Ok(Vec::new());
     };
@@ -3539,6 +3668,9 @@ where
 /// The group contract is identical to
 /// [`multiplicity_free_braid_tree_pair_block`]. Symmetric braiding remains a
 /// required capability even for an empty source block.
+///
+/// Every source follows
+/// [`FusionTreeBlockKey::validate_for_rule`]'s provider-domain precondition.
 pub fn multiplicity_free_permute_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -3555,6 +3687,7 @@ where
             actual: rule.braiding_style(),
         });
     }
+    validate_multiplicity_free_execution_style(rule)?;
     let Some(first) = src_keys.first() else {
         return Ok(Vec::new());
     };
@@ -3587,6 +3720,9 @@ where
 ///
 /// The empty/group contract is identical to
 /// [`multiplicity_free_braid_tree_pair_block`].
+///
+/// Every source follows
+/// [`FusionTreeBlockKey::validate_for_rule`]'s provider-domain precondition.
 pub fn multiplicity_free_transpose_tree_pair_block<R>(
     rule: &R,
     src_keys: &[FusionTreeBlockKey],
@@ -3597,6 +3733,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    validate_multiplicity_free_execution_style(rule)?;
     let Some(first) = src_keys.first() else {
         return Ok(Vec::new());
     };
@@ -3740,6 +3877,8 @@ where
     Ok(current)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_braid_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3789,6 +3928,8 @@ where
 /// This is an implementation hook for the tensor-plan compiler. Public callers
 /// should use the multiplicity-free operation APIs.
 #[doc(hidden)]
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_rigid_braid_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3838,6 +3979,8 @@ where
 /// This is an implementation hook for the tensor-plan compiler. Public callers
 /// should use the multiplicity-free operation APIs.
 #[doc(hidden)]
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_rigid_permute_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3877,6 +4020,8 @@ where
 /// This is an implementation hook for the tensor-plan compiler. Public callers
 /// should use the multiplicity-free operation APIs.
 #[doc(hidden)]
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_rigid_transpose_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3898,6 +4043,8 @@ where
     .execute_unique_rigid(rule, tree_pair)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_permute_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3932,6 +4079,8 @@ where
     .execute_unique_pivotal(rule, tree_pair)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_transpose_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -3953,6 +4102,8 @@ where
     .execute_unique_pivotal(rule, tree_pair)
 }
 
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn unique_repartition_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -4082,26 +4233,27 @@ fn validate_tree_pair_axis_map_inline(
             total_rank,
         ));
     }
-    let mut seen = 0u128;
+    let mut seen = SmallVec::<[u64; 2]>::new();
+    seen.resize(total_rank.div_ceil(u64::BITS as usize), 0);
     for position in 0..total_rank {
         let axis = raw_tree_pair_axis_at(codomain_permutation, domain_permutation, position);
-        let duplicate = if total_rank <= u128::BITS as usize && axis < total_rank {
-            let bit = 1u128 << axis;
-            let duplicate = seen & bit != 0;
-            seen |= bit;
-            duplicate
-        } else {
-            (0..position).any(|prior| {
-                raw_tree_pair_axis_at(codomain_permutation, domain_permutation, prior) == axis
-            })
-        };
-        if axis >= total_rank || duplicate {
+        if axis >= total_rank {
             return Err(invalid_tree_pair_axis_map(
                 codomain_permutation,
                 domain_permutation,
                 total_rank,
             ));
         }
+        let word = axis / u64::BITS as usize;
+        let bit = 1u64 << (axis % u64::BITS as usize);
+        if seen[word] & bit != 0 {
+            return Err(invalid_tree_pair_axis_map(
+                codomain_permutation,
+                domain_permutation,
+                total_rank,
+            ));
+        }
+        seen[word] |= bit;
     }
     Ok(())
 }
@@ -5224,6 +5376,8 @@ fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreErro
 // its per-swap artin helper private). Being a public root also keeps
 // `generic_artin_braid_at_with_inverse` / `mu_index` reachable, so they emit no
 // dead-code warning before Stage B2's recouple wrapper consumes them.
+/// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn generic_braid_tree<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -5827,6 +5981,8 @@ where
 /// their coefficient matrices (`U = Utmp * U`), which is exactly this
 /// accumulate-and-compose loop. Structural twin of
 /// [`multiplicity_free_repartition_tree_pair`] :794-827.
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_repartition_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6301,6 +6457,8 @@ where
 /// Structural twin of [`multiplicity_free_foldright_tree_pair`], with the scalar
 /// `coeff₁ · A · conj(coeff₂)` promoted to the vector–matrix–vector contraction
 /// through the A-move matrix (which connects the two topmost `λ` vertices).
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_foldright_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6411,6 +6569,8 @@ where
 /// Generic-fusion `foldleft` = swap + conjugate of `foldright`, verbatim mirror
 /// of TensorKit `foldleft((f₁,f₂))` (`duality_manipulations.jl:315-319`).
 /// Structural twin of [`multiplicity_free_foldleft_tree_pair`].
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_foldleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6475,6 +6635,8 @@ where
 /// when the codomain is empty), composing coefficient matrices. Verbatim mirror
 /// of TensorKit `cycleclockwise` (`duality_manipulations.jl:401-410`) and
 /// structural twin of [`multiplicity_free_cycle_clockwise_tree_pair`].
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_cycle_clockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6529,6 +6691,8 @@ where
 /// order when the domain is empty). Verbatim mirror of TensorKit
 /// `cycleanticlockwise` (`duality_manipulations.jl:431-440`) and structural
 /// twin of [`multiplicity_free_cycle_anticlockwise_tree_pair`].
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_cycle_anticlockwise_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6625,6 +6789,8 @@ where
 /// difference is the primitive family (`generic_repartition_tree_pair` /
 /// `generic_braid_tree` / `generic_repartition_terms`) and the `braid_one` seed;
 /// no new recoupling formula is introduced.
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_braid_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6657,6 +6823,47 @@ where
             actual: rule.fusion_style(),
         });
     }
+    let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
+    generic_braid_tree_pair_proven(
+        validated,
+        codomain_permutation,
+        domain_permutation,
+        codomain_levels,
+        domain_levels,
+    )
+}
+
+pub(crate) fn generic_braid_tree_pair_proven<R>(
+    tree_pair: ValidatedFusionTreePair<'_, R>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if tree_pair.rule.fusion_style() != FusionStyleKind::Generic {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: tree_pair.rule.fusion_style(),
+        });
+    }
+    let codomain_rank = tree_pair.key.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.key.domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        });
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        });
+    }
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
         domain_permutation,
@@ -6674,9 +6881,8 @@ where
     let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
     levels.extend_from_slice(codomain_levels);
     levels.extend(domain_levels.iter().rev().copied());
-    let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
     generic_braid_tree_pair_validated(
-        validated,
+        tree_pair,
         codomain_permutation.len(),
         &permutation,
         &levels,
@@ -6730,6 +6936,8 @@ where
 /// Generic-fusion `permute` = [`generic_braid_tree_pair`] with the identity
 /// level order (symmetric braiding only). Structural twin of
 /// [`multiplicity_free_permute_tree_pair`] (:886).
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_permute_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6746,14 +6954,39 @@ where
             actual: rule.braiding_style(),
         });
     }
-    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
-    let domain_rank = tree_pair.domain_tree().uncoupled().len();
     if !rule.fusion_style().has_multiplicity() {
         return Err(CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Generic,
             actual: rule.fusion_style(),
         });
     }
+    let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
+    generic_permute_tree_pair_proven(validated, codomain_permutation, domain_permutation)
+}
+
+pub(crate) fn generic_permute_tree_pair_proven<R>(
+    tree_pair: ValidatedFusionTreePair<'_, R>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if !tree_pair.rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: tree_pair.rule.braiding_style(),
+        });
+    }
+    if tree_pair.rule.fusion_style() != FusionStyleKind::Generic {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: tree_pair.rule.fusion_style(),
+        });
+    }
+    let codomain_rank = tree_pair.key.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.key.domain_tree().uncoupled().len();
     let permutation = linearize_tree_pair_permutation(
         codomain_permutation,
         domain_permutation,
@@ -6772,9 +7005,8 @@ where
     let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
     levels.extend_from_slice(&codomain_levels);
     levels.extend(domain_levels.iter().rev().copied());
-    let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
     generic_braid_tree_pair_validated(
-        validated,
+        tree_pair,
         codomain_permutation.len(),
         &permutation,
         &levels,
@@ -6787,6 +7019,8 @@ where
 /// partition, then cycle the coupled tree into place via fold/bend. Structural
 /// twin of [`multiplicity_free_transpose_tree_pair`] (:916); braid-free, so it
 /// runs on planar (non-symmetric) Generic rules too.
+/// `tree_pair` follows [`FusionTreeBlockKey::validate_for_rule`]'s
+/// provider-domain precondition.
 pub fn generic_transpose_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreeBlockKey,
@@ -6817,10 +7051,42 @@ where
             actual: rule.fusion_style(),
         });
     }
-    let position = permutation.iter().position(|&axis| axis == 0);
     let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
+    generic_transpose_tree_pair_proven(validated, codomain_permutation, domain_permutation)
+}
+
+pub(crate) fn generic_transpose_tree_pair_proven<R>(
+    tree_pair: ValidatedFusionTreePair<'_, R>,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if tree_pair.rule.fusion_style() != FusionStyleKind::Generic {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: tree_pair.rule.fusion_style(),
+        });
+    }
+    let codomain_rank = tree_pair.key.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.key.domain_tree().uncoupled().len();
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    if !is_cyclic_permutation(&permutation) {
+        return Err(CoreError::InvalidPermutation {
+            permutation,
+            rank: codomain_rank + domain_rank,
+        });
+    }
+    let position = permutation.iter().position(|&axis| axis == 0);
     generic_transpose_tree_pair_validated(
-        validated,
+        tree_pair,
         codomain_permutation.len(),
         codomain_rank + domain_rank,
         position,

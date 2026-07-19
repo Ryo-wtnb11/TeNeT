@@ -1,5 +1,8 @@
 use super::*;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 #[test]
 fn tree_transform_compile_keyed_pairs_tree_blocks_by_key_not_index_for_all_numeric_dtypes() {
@@ -188,26 +191,39 @@ fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
 
 #[test]
 fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
-    let src_key1 = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
-    let src_key2 = fusion_tree_test_key([0, 1], [1], 1, [false, false], [false]);
-    let dst_key1 = fusion_tree_test_key([0, 1], [1], 1, [false, false], [false]);
-    let dst_key2 = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+    let key = |codomain| {
+        BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+            codomain,
+            [1],
+            Some(1),
+            [false, false],
+            [false],
+            [],
+            [],
+            [1],
+            [],
+        ))
+    };
+    let src_key1 = key([1, 0]);
+    let src_key2 = key([0, 1]);
+    let dst_key1 = key([0, 1]);
+    let dst_key2 = key([1, 0]);
     let src_tree1 = expect_tree_key(&src_key1);
     let src_tree2 = expect_tree_key(&src_key2);
     let dst_tree1 = expect_tree_key(&dst_key1);
     let dst_tree2 = expect_tree_key(&dst_key2);
     let src_structure = packed_fixture_structure(
-        2,
+        3,
         [
-            (src_key1.clone(), vec![1, 1]),
-            (src_key2.clone(), vec![1, 1]),
+            (src_key1.clone(), vec![1, 1, 1]),
+            (src_key2.clone(), vec![1, 1, 1]),
         ],
     )
     .unwrap();
 
     let plan = build_unique_tree_transform_group_plan(
         &UniqueZ2Rule,
-        TreeTransformOperation::transpose([1, 0], [0]),
+        TreeTransformOperation::permute([1, 0], [2]),
         &src_structure,
         |src| {
             if src == &src_tree1 {
@@ -1905,6 +1921,784 @@ fn tree_row_memo_survives_structure_change() {
     assert!(cache.stats().tree_row_misses() > misses_after_first);
 }
 
+fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<f64, 2, 0>) {
+    let valid = all_codomain_fusion_tree_test_key_for_rule(
+        &SU2FusionRule,
+        [1, 1],
+        Some(0),
+        [false, false],
+        [],
+        [1],
+    );
+    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(1),
+        [false, false],
+        [],
+        [],
+        [],
+        [1],
+        [],
+    ));
+    let dst_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(malformed, vec![1, 1])]).unwrap();
+    let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
+            .unwrap();
+    let src =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
+    (dst, src)
+}
+
+fn simple_su2_vertex_structure(vertex: usize) -> Arc<BlockStructure> {
+    let key = BlockKey::from(FusionTreeBlockKey::new(
+        vec![SectorId::new(1), SectorId::new(1)],
+        Some(SectorId::new(0)),
+        vec![SectorId::new(vertex)],
+    ));
+    Arc::new(packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap())
+}
+
+#[derive(Clone)]
+struct AdmissionCountingSu2Rule {
+    nsymbol_calls: Arc<AtomicUsize>,
+}
+
+impl FusionRule for AdmissionCountingSu2Rule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        SU2FusionRule.rule_identity()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        SU2FusionRule.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        SU2FusionRule.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SU2FusionRule.vacuum()
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        SU2FusionRule.dual(sector)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        SU2FusionRule.fusion_channels(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_calls.fetch_add(1, Ordering::Relaxed);
+        SU2FusionRule.nsymbol(left, right, coupled)
+    }
+}
+
+impl MultiplicityFreeFusionRule for AdmissionCountingSu2Rule {}
+
+impl MultiplicityFreeFusionSymbols for AdmissionCountingSu2Rule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        SU2FusionRule.scalar_one()
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        SU2FusionRule.scalar_conj(value)
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        left: SectorId,
+        middle: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+        left_coupled: SectorId,
+        right_coupled: SectorId,
+    ) -> Self::Scalar {
+        SU2FusionRule.f_symbol_scalar(left, middle, right, coupled, left_coupled, right_coupled)
+    }
+
+    fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
+        SU2FusionRule.r_symbol_scalar(left, right, coupled)
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for AdmissionCountingSu2Rule {
+    fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.dim_scalar(sector)
+    }
+
+    fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.inv_dim_scalar(sector)
+    }
+
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.sqrt_dim_scalar(sector)
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.inv_sqrt_dim_scalar(sector)
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.twist_scalar(sector)
+    }
+
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        SU2FusionRule.frobenius_schur_phase_scalar(sector)
+    }
+}
+
+impl TreeTransformRuleCacheKey for AdmissionCountingSu2Rule {
+    type Key = TreeTransformBuiltinRuleCacheKey;
+
+    fn tree_transform_rule_cache_key(&self) -> Self::Key {
+        SU2FusionRule.tree_transform_rule_cache_key()
+    }
+}
+
+fn builtin_tree_cache_state(
+    cache: &TreeTransformCache<f64, TreeTransformBuiltinRuleCacheKey>,
+) -> (TreeTransformCacheStats, usize, usize, usize, usize, usize) {
+    (
+        cache.stats(),
+        cache.plan_len(),
+        cache.structure_len(),
+        cache.tree_row_len(),
+        cache.all_codomain_row_len(),
+        cache.fast_structure_len(),
+    )
+}
+
+fn assert_invalid_simple_vertex(error: OperationError) {
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree vertex labels are 1-based",
+        })
+    );
+}
+
+fn valid_simple_source_and_nonalias_malformed_destination(
+) -> (TensorMap<f64, 2, 0>, TensorMap<f64, 2, 0>) {
+    let valid = all_codomain_fusion_tree_test_key_for_rule(
+        &SU2FusionRule,
+        [1, 1],
+        Some(0),
+        [false, false],
+        [],
+        [1],
+    );
+    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(0),
+        [false, false],
+        [],
+        [],
+        [],
+        [0],
+        [],
+    ));
+    let src_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
+    let dst_structure = packed_fixture_structure(2, [(malformed, vec![2, 1])]).unwrap();
+    assert_ne!(src_structure.content_id(), dst_structure.content_id());
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![3.0],
+        TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
+        src_structure,
+    )
+    .unwrap();
+    let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![17.0, 19.0],
+        TensorMapSpace::<2, 0>::from_dims([2, 1], []).unwrap(),
+        dst_structure,
+    )
+    .unwrap();
+    (dst, src)
+}
+
+#[test]
+fn callback_builder_admits_whole_source_before_first_callback() {
+    let valid = BlockKey::from(FusionTreeBlockKey::new(
+        vec![SectorId::new(1), SectorId::new(1)],
+        Some(SectorId::new(0)),
+        vec![SectorId::new(1)],
+    ));
+    let malformed_later = BlockKey::from(FusionTreeBlockKey::new(
+        vec![SectorId::new(1), SectorId::new(1)],
+        Some(SectorId::new(2)),
+        vec![SectorId::new(0)],
+    ));
+    let structure =
+        packed_fixture_structure(2, [(valid, vec![1, 1]), (malformed_later, vec![1, 1])]).unwrap();
+    let callbacks = std::cell::Cell::new(0usize);
+
+    let error = build_tree_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::permute([0, 1], []),
+        &structure,
+        |source| {
+            callbacks.set(callbacks.get() + 1);
+            Ok(vec![(source.clone(), 1.0)])
+        },
+    )
+    .unwrap_err();
+
+    // What: a malformed later source block prevents source-major callbacks
+    // from observing the valid prefix.
+    assert_invalid_simple_vertex(error);
+    assert_eq!(callbacks.get(), 0);
+}
+
+#[test]
+fn callback_builder_rejects_malformed_destination_before_assembly() {
+    let source = FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            Some(SectorId::new(0)),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], Some(SectorId::new(0)), [], [], [])
+            .unwrap(),
+    );
+    let malformed_destination = FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(0),
+        [false, false],
+        [],
+        [],
+        [],
+        [0],
+        [],
+    );
+    assert_ne!(source, malformed_destination);
+    let structure = packed_fixture_structure(2, [(BlockKey::from(source), vec![1, 1])]).unwrap();
+
+    let error = build_tree_transform_group_plan(
+        &SU2FusionRule,
+        TreeTransformOperation::permute([0, 1], []),
+        &structure,
+        |_| Ok(vec![(malformed_destination.clone(), 1.0)]),
+    )
+    .unwrap_err();
+
+    // What: a malformed callback destination is rejected before group assembly
+    // even though its external sectors match the admitted source.
+    assert_invalid_simple_vertex(error);
+}
+
+#[test]
+fn warm_structure_aliases_are_rejected_before_local_or_global_cache_lookup() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_global_operation_caches();
+
+    let valid_structure = simple_su2_vertex_structure(1);
+    let invalid_structure = simple_su2_vertex_structure(0);
+    assert_ne!(valid_structure.content_id(), invalid_structure.content_id());
+    assert_ne!(
+        valid_structure.block(0).unwrap().key(),
+        invalid_structure.block(0).unwrap().key()
+    );
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &valid_structure,
+            &valid_structure,
+            false,
+        )
+        .unwrap();
+
+    let local_before = builtin_tree_cache_state(&cache);
+    let global_before =
+        global_tree_transform_cache_lengths::<f64, TreeTransformBuiltinRuleCacheKey>();
+    let error = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &invalid_structure,
+            &valid_structure,
+            false,
+        )
+        .unwrap_err();
+    assert_invalid_simple_vertex(error);
+
+    // What: a malformed destination is rejected before any local/global cache
+    // observation changes, even after a valid sibling structure is warm.
+    assert_eq!(builtin_tree_cache_state(&cache), local_before);
+    assert_eq!(
+        global_tree_transform_cache_lengths::<f64, TreeTransformBuiltinRuleCacheKey>(),
+        global_before
+    );
+
+    let error = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &valid_structure,
+            &invalid_structure,
+            false,
+        )
+        .unwrap_err();
+    assert_invalid_simple_vertex(error);
+    assert_eq!(builtin_tree_cache_state(&cache), local_before);
+    assert_eq!(
+        global_tree_transform_cache_lengths::<f64, TreeTransformBuiltinRuleCacheKey>(),
+        global_before
+    );
+
+    let mut independent = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let independent_before = builtin_tree_cache_state(&independent);
+    let error = independent
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &invalid_structure,
+            &valid_structure,
+            false,
+        )
+        .unwrap_err();
+    assert_invalid_simple_vertex(error);
+
+    // What: an independent cache cannot use the valid process-global plan or
+    // structure to admit a malformed raw structure.
+    assert_eq!(builtin_tree_cache_state(&independent), independent_before);
+    assert_eq!(
+        global_tree_transform_cache_lengths::<f64, TreeTransformBuiltinRuleCacheKey>(),
+        global_before
+    );
+}
+
+#[test]
+fn exact_warm_structure_reuses_prior_local_admission_proof() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_global_operation_caches();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rule = AdmissionCountingSu2Rule {
+        nsymbol_calls: Arc::clone(&calls),
+    };
+    let structure = simple_su2_vertex_structure(1);
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    let cold = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, false,
+        )
+        .unwrap();
+    assert!(calls.load(Ordering::Relaxed) > 0);
+
+    calls.store(0, Ordering::Relaxed);
+    let same_content = Arc::new((*structure).clone());
+    assert_eq!(same_content.content_id(), structure.content_id());
+    assert!(!Arc::ptr_eq(&same_content, &structure));
+    let warm = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule,
+            &operation,
+            &same_content,
+            &same_content,
+            false,
+        )
+        .unwrap();
+
+    // What: an exact semantic-key/content replay reuses the LOCAL admission
+    // proof carried by the published compiled structure.
+    assert!(Arc::ptr_eq(&cold, &warm));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    cache.set_policy(OperationCachePolicy::NoCache);
+    calls.store(0, Ordering::Relaxed);
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, false,
+        )
+        .unwrap();
+
+    // What: clearing retained entries removes proof reuse; the next call
+    // performs LOCAL admission again.
+    assert!(calls.load(Ordering::Relaxed) > 0);
+}
+
+#[test]
+fn prelowered_same_content_roles_share_one_local_admission() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_global_operation_caches();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rule = AdmissionCountingSu2Rule {
+        nsymbol_calls: Arc::clone(&calls),
+    };
+    let logical = simple_su2_vertex_structure(1);
+    let storage = Arc::new((*logical).clone());
+    let destination = Arc::new((*logical).clone());
+    assert_eq!(logical.content_id(), storage.content_id());
+    assert_eq!(logical.content_id(), destination.content_id());
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    cache
+        .get_or_compile_tree_pair_prelowered(
+            &rule,
+            &TreeTransformOperation::braid([1, 0], [], [0, 1], []),
+            &destination,
+            &logical,
+            &storage,
+            false,
+            Ok,
+            Ok,
+        )
+        .unwrap();
+
+    // What: logical, storage, and destination roles sharing immutable content
+    // perform one LOCAL categorical admission, even through distinct Arcs.
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn warm_prelowered_raw_arc_aliases_do_not_observe_or_mutate_cache_state() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_global_operation_caches();
+
+    let valid = simple_su2_vertex_structure(1);
+    let invalid = simple_su2_vertex_structure(0);
+    assert_ne!(valid.content_id(), invalid.content_id());
+    assert!(!Arc::ptr_eq(&valid, &invalid));
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    cache
+        .get_or_compile_tree_pair_prelowered(
+            &SU2FusionRule,
+            &operation,
+            &valid,
+            &valid,
+            &valid,
+            false,
+            Ok,
+            Ok,
+        )
+        .unwrap();
+    let local_before = builtin_tree_cache_state(&cache);
+    let global_before =
+        global_tree_transform_cache_lengths::<f64, TreeTransformBuiltinRuleCacheKey>();
+
+    for (destination, logical_source, storage_source) in [
+        (&valid, &invalid, &valid),
+        (&valid, &valid, &invalid),
+        (&invalid, &valid, &valid),
+    ] {
+        let error = cache
+            .get_or_compile_tree_pair_prelowered(
+                &SU2FusionRule,
+                &operation,
+                destination,
+                logical_source,
+                storage_source,
+                false,
+                Ok,
+                Ok,
+            )
+            .unwrap_err();
+        assert_invalid_simple_vertex(error);
+
+        // What: each raw-Arc role is categorically admitted before a warm
+        // plan/structure lookup can observe its shared content identity.
+        assert_eq!(builtin_tree_cache_state(&cache), local_before);
+        assert_eq!(
+            global_tree_transform_cache_lengths::<f64, TreeTransformBuiltinRuleCacheKey>(),
+            global_before
+        );
+    }
+}
+
+#[test]
+fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
+    // What: malformed categorical input is rejected before cache statistics or
+    // retained plan/structure state change under either execution policy.
+    for policy in [
+        OperationCachePolicy::default(),
+        OperationCachePolicy::NoCache,
+    ] {
+        let (dst, src) = malformed_simple_su2_tree_pair_tensors();
+        let mut cache =
+            TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(policy);
+        let before_stats = cache.stats();
+
+        let error = cache
+            .get_or_compile_tree_pair(
+                &SU2FusionRule,
+                TreeTransformOperation::braid([0, 1], [], [0, 1], []),
+                &dst,
+                &src,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::MalformedFusionTree {
+                message: "fusion tree contains an inadmissible fusion vertex",
+            })
+        );
+        assert_eq!(cache.stats(), before_stats);
+        assert_eq!(cache.plan_len(), 0);
+        assert_eq!(cache.structure_len(), 0);
+    }
+}
+
+#[test]
+fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
+    // What: operation syntax has deterministic precedence over categorical
+    // source admission and neither failure is counted as a cache miss.
+    let (dst, src) = malformed_simple_su2_tree_pair_tensors();
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    let error = cache
+        .get_or_compile_tree_pair(
+            &SU2FusionRule,
+            TreeTransformOperation::braid([0, 0], [], [0, 1], []),
+            &dst,
+            &src,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::InvalidPermutation {
+            permutation: vec![0, 0],
+            rank: 2,
+        })
+    );
+    assert_eq!(cache.stats(), TreeTransformCacheStats::default());
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn invalid_unique_source_does_not_count_eager_compile_misses() {
+    // What: a failed Unique eager build reports no successful plan or structure
+    // compile in cache statistics.
+    let valid = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
+    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(1),
+        [false, false],
+        [],
+        [],
+        [],
+        [1],
+        [],
+    ));
+    let dst_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
+    let src_structure = packed_fixture_structure(2, [(malformed, vec![1, 1])]).unwrap();
+    let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space.clone(), dst_structure)
+            .unwrap();
+    let src =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    let error = cache
+        .get_or_compile_tree_pair(
+            &Z2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &dst,
+            &src,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree contains an inadmissible fusion vertex",
+        })
+    );
+    assert_eq!(cache.stats(), TreeTransformCacheStats::default());
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn direct_tree_pair_rejects_nonalias_malformed_destination_without_writing() {
+    let (mut dst, src) = valid_simple_source_and_nonalias_malformed_destination();
+    let before = dst.data().to_vec();
+
+    let error = tree_transform_into(
+        &SU2FusionRule,
+        TreeTransformOperation::permute([0, 1], []),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap_err();
+
+    // What: noncached tree-pair admission validates the destination before
+    // replay can modify caller-owned storage.
+    assert_invalid_simple_vertex(error);
+    assert_eq!(dst.data(), before);
+}
+
+#[test]
+fn typed_all_codomain_rejects_nonalias_malformed_destination_without_state_or_output_change() {
+    let (mut dst, src) = valid_simple_source_and_nonalias_malformed_destination();
+    let before_output = dst.data().to_vec();
+    let mut context =
+        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let before_cache = builtin_tree_cache_state(context.cache());
+
+    let error = context
+        .all_codomain_tree_transform_into(
+            &SU2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap_err();
+
+    // What: typed constructors canonicalize equal content identities, so this
+    // nonalias fixture proves all-codomain destination admission without a
+    // fabricated raw-Arc alias.
+    assert_invalid_simple_vertex(error);
+    assert_eq!(builtin_tree_cache_state(context.cache()), before_cache);
+    assert_eq!(dst.data(), before_output);
+}
+
+#[test]
+fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
+    // What: whole-pair categorical admission precedes the all-codomain source
+    // restriction, so mismatched coupled sectors retain the core error.
+    let nonempty_domain = BlockKey::from(FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            Some(SectorId::new(0)),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(0)],
+            Some(SectorId::new(0)),
+            [false],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
+    let mismatched = BlockKey::from(FusionTreeBlockKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            Some(SectorId::new(0)),
+            [false, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [SectorId::new(2)],
+            Some(SectorId::new(2)),
+            [false],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
+    let src_structure = packed_fixture_structure(
+        3,
+        [
+            (nonempty_domain, vec![1, 1, 1]),
+            (mismatched, vec![1, 1, 1]),
+        ],
+    )
+    .unwrap();
+    let dst_structure = BlockStructure::trivial(&[1, 1, 1]).unwrap();
+    let src_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
+    let dst_space = TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap();
+    let src =
+        TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![1.0, 2.0], src_space, src_structure)
+            .unwrap();
+    let dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
+        .unwrap();
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    let error = cache
+        .get_or_compile_all_codomain(
+            &SU2FusionRule,
+            TreeTransformOperation::permute([0, 1, 2], []),
+            &dst,
+            &src,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree pair requires matching coupled sectors",
+        })
+    );
+
+    let error = cache
+        .get_or_compile_all_codomain(
+            &SU2FusionRule,
+            TreeTransformOperation::permute([0, 0, 2], []),
+            &dst,
+            &src,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree pair requires matching coupled sectors",
+        })
+    );
+
+    let error = cache
+        .get_or_compile_all_codomain(
+            &SU2FusionRule,
+            TreeTransformOperation::transpose([0, 1, 2], []),
+            &dst,
+            &src,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree pair requires matching coupled sectors",
+        })
+    );
+
+    // What: whole-pair source admission also precedes all-codomain operation
+    // scope without publishing cache state.
+    assert_eq!(cache.stats(), TreeTransformCacheStats::default());
+    assert!(cache.is_empty());
+}
+
 #[test]
 fn process_global_tree_transform_cache_warms_independent_contexts() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
@@ -3571,13 +4365,23 @@ fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding
 
 #[test]
 fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_logic() {
-    let src_key = fusion_tree_test_key([1, 0], [1], 1, [false, false], [false]);
+    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 0],
+        [1],
+        Some(1),
+        [false, false],
+        [false],
+        [],
+        [],
+        [1],
+        [],
+    ));
     let src_tree = expect_tree_key(&src_key);
     let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
 
     let plan = build_unique_tree_transform_group_plan(
         &UniquePlanarRule,
-        TreeTransformOperation::braid([1, 0], [0], [1, 0], [0]),
+        TreeTransformOperation::braid([1, 0], [2], [1, 0], [0]),
         &src_structure,
         |src| Ok((src.clone(), 1.0_f64)),
     )
@@ -6150,6 +6954,61 @@ fn b3a_toy_tensormap(value: f64) -> (BlockStructure, TensorMap<f64, 2, 0>) {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure.clone())
             .unwrap();
     (structure, tensor)
+}
+
+#[test]
+fn direct_generic_tree_pair_rejects_malformed_destination_without_writing() {
+    let rule = ToyGenericRule {
+        style: FusionStyleKind::Generic,
+    };
+    let src_structure =
+        packed_fixture_structure(2, [(BlockKey::from(b2c_toy_src_pair()), vec![1, 1])]).unwrap();
+    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(0),
+        [false, false],
+        [],
+        [],
+        [],
+        [0],
+        [],
+    ));
+    let dst_structure = packed_fixture_structure(2, [(malformed, vec![2, 1])]).unwrap();
+    assert_ne!(src_structure.content_id(), dst_structure.content_id());
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![3.0],
+        TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
+        src_structure,
+    )
+    .unwrap();
+    let mut dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![17.0, 19.0],
+        TensorMapSpace::<2, 0>::from_dims([2, 1], []).unwrap(),
+        dst_structure,
+    )
+    .unwrap();
+    let before = dst.data().to_vec();
+
+    let error = tree_transform_into_generic(
+        &rule,
+        TreeTransformOperation::permute([0, 1], []),
+        &mut dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap_err();
+
+    // What: the noncached Generic facade validates caller-owned destination
+    // structure before lowering or replay changes its data.
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree multiplicity style disagrees with the fusion rule",
+        })
+    );
+    assert_eq!(dst.data(), before);
 }
 
 // Gate 1 (highest reachable level = TensorMap facade): each generic facade

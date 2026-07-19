@@ -5,8 +5,8 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     BlockView, BlockViewMut, CoreError, GenericBraidScalar, GenericRigidSymbols,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, TensorMap,
-    TensorStorage,
+    HostReadableStorage, HostWritableStorage, LocallyValidatedFusionTreeBlockStructure,
+    MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
 
 use crate::lowering::{adjoint_fusion_space_view, lower_tensoradd_source_operation};
@@ -16,8 +16,10 @@ use crate::tensortrace::{
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{
-    build_generic_tree_pair_transform_group_plan, build_tree_pair_transform_group_plan,
-    TreeTransformOperation, TreeTransformRuleCacheKey,
+    build_generic_tree_pair_transform_group_plan_validated, build_tree_pair_transform_group_plan,
+    build_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
+    validate_multiplicity_free_tree_pair_preflight, TreeTransformOperation,
+    TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformStructure;
@@ -784,6 +786,12 @@ where
 /// `dst` and `src` block structures. The returned structure can be reused with
 /// [`tree_transform_execute_with`] as long as replay tensors have matching
 /// structures.
+///
+/// # Provider-domain precondition
+///
+/// Fusion-tree block keys in `dst` and `src` follow
+/// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn tree_transform_structure<
     R,
     TDst,
@@ -808,7 +816,12 @@ where
     DDst: TensorStorage<TDst>,
     DSrc: TensorStorage<TSrc>,
 {
-    let plan = build_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+    let source_proof =
+        validate_multiplicity_free_tree_pair_preflight(rule, &operation, src.structure())?;
+    let _destination_proof =
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
+    let plan = build_tree_pair_transform_group_plan_validated(&source_proof, operation)?;
     plan.compile(dst, src)
 }
 
@@ -817,6 +830,9 @@ where
 /// This is a convenience API. It rebuilds the transform structure on every call;
 /// hot tensor-network loops should call [`tree_transform_structure`] once
 /// and replay the returned structure with [`tree_transform_execute_with`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn tree_transform_into<
     R,
     D,
@@ -857,6 +873,8 @@ where
     )
 }
 
+/// Overwrite variant of [`tree_transform_into`], with the same provider-domain
+/// precondition.
 pub fn tree_transform_overwrite_into<
     R,
     D,
@@ -904,6 +922,9 @@ where
 /// replay descriptor should be cached behind a caller-owned context. Use
 /// [`tree_transform_structure`] plus [`tree_transform_execute_with`] for
 /// the tightest loop when the exact replay descriptor is already known.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn tree_transform_into_with<
     B,
     R,
@@ -938,6 +959,8 @@ where
     tree_transform_execute_with(backend, workspace, &structure, dst, src, alpha, beta)
 }
 
+/// Overwrite variant of [`tree_transform_into_with`], with the same
+/// provider-domain precondition.
 pub fn tree_transform_overwrite_into_with<
     B,
     R,
@@ -971,6 +994,8 @@ where
     tree_transform_overwrite_execute_with(backend, workspace, &structure, dst, src, alpha)
 }
 
+/// Cached-context variant of [`tree_transform_into`], with the same
+/// provider-domain precondition.
 pub fn tree_transform_into_with_context<
     B,
     R,
@@ -1012,6 +1037,8 @@ where
     context.tree_transform_into(rule, operation, dst, src, alpha, beta)
 }
 
+/// Overwrite variant of [`tree_transform_into_with_context`], with the same
+/// provider-domain precondition.
 pub fn tree_transform_overwrite_into_with_context<
     B,
     R,
@@ -1057,6 +1084,9 @@ where
 /// Thin wrapper over [`tree_transform_into`] with
 /// [`TreeTransformOperation::permute`]; see [`TreeTransformOperation::permute`]
 /// for the axis-numbering convention.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn permute_into<
     R,
     D,
@@ -1098,6 +1128,9 @@ where
 ///
 /// Thin wrapper over [`tree_transform_into_with`] with
 /// [`TreeTransformOperation::permute`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn permute_into_with<
     B,
     R,
@@ -1145,6 +1178,9 @@ where
 ///
 /// Thin wrapper over [`tree_transform_into_with_context`] with
 /// [`TreeTransformOperation::permute`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn permute_into_with_context<
     B,
     R,
@@ -1200,6 +1236,9 @@ where
 /// Thin wrapper over [`tree_transform_into`] with
 /// [`TreeTransformOperation::braid`]; see [`TreeTransformOperation::braid`]
 /// for the axis-numbering convention.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn braid_into<
     R,
     D,
@@ -1248,6 +1287,9 @@ where
 ///
 /// Thin wrapper over [`tree_transform_into_with`] with
 /// [`TreeTransformOperation::braid`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn braid_into_with<
     B,
     R,
@@ -1302,6 +1344,9 @@ where
 ///
 /// Thin wrapper over [`tree_transform_into_with_context`] with
 /// [`TreeTransformOperation::braid`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn braid_into_with_context<
     B,
     R,
@@ -1364,6 +1409,9 @@ where
 /// Thin wrapper over [`tree_transform_into`] with
 /// [`TreeTransformOperation::transpose`]; see [`TreeTransformOperation::transpose`]
 /// for the axis-numbering convention.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn transpose_into<
     R,
     D,
@@ -1405,6 +1453,9 @@ where
 ///
 /// Thin wrapper over [`tree_transform_into_with`] with
 /// [`TreeTransformOperation::transpose`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn transpose_into_with<
     B,
     R,
@@ -1452,6 +1503,9 @@ where
 ///
 /// Thin wrapper over [`tree_transform_into_with_context`] with
 /// [`TreeTransformOperation::transpose`].
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn transpose_into_with_context<
     B,
     R,
@@ -1535,8 +1589,11 @@ where
 // ======================================================================
 
 /// Generic-fusion sibling of [`tree_transform_structure`]: builds the Stage B2c
-/// [`build_generic_tree_pair_transform_group_plan`] and compiles it against the
-/// live `dst`/`src` block structures.
+/// [`crate::build_generic_tree_pair_transform_group_plan`] and compiles it
+/// against the live `dst`/`src` block structures.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 pub fn tree_transform_structure_generic<
     R,
     TDst,
@@ -1561,12 +1618,19 @@ where
     DDst: TensorStorage<TDst>,
     DSrc: TensorStorage<TSrc>,
 {
-    let plan = build_generic_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+    let source_proof = validate_generic_tree_pair_preflight(rule, &operation, src.structure())?;
+    let _destination_proof =
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
+    let plan = build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)?;
     plan.compile(dst, src)
 }
 
 /// Generic-fusion sibling of [`tree_transform_into_with`] with caller-owned
 /// backend/workspace.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 #[allow(clippy::too_many_arguments)]
 pub fn tree_transform_into_with_generic<
     B,
@@ -1604,6 +1668,9 @@ where
 
 /// Generic-fusion sibling of [`tree_transform_into`]: compile-and-execute a
 /// tree-pair transform with a default dense backend.
+///
+/// The raw block keys follow [`tree_transform_structure`]'s provider-domain
+/// precondition.
 #[allow(clippy::too_many_arguments)]
 pub fn tree_transform_into_generic<
     R,
@@ -1645,7 +1712,8 @@ where
     )
 }
 
-/// Generic-fusion sibling of [`permute_into`].
+/// Generic-fusion sibling of [`permute_into`], with the same provider-domain
+/// precondition.
 #[allow(clippy::too_many_arguments)]
 pub fn permute_into_generic<
     R,
@@ -1684,7 +1752,8 @@ where
     )
 }
 
-/// Generic-fusion sibling of [`braid_into`].
+/// Generic-fusion sibling of [`braid_into`], with the same provider-domain
+/// precondition.
 #[allow(clippy::too_many_arguments)]
 pub fn braid_into_generic<
     R,
@@ -1730,7 +1799,8 @@ where
     )
 }
 
-/// Generic-fusion sibling of [`transpose_into`].
+/// Generic-fusion sibling of [`transpose_into`], with the same provider-domain
+/// precondition.
 #[allow(clippy::too_many_arguments)]
 pub fn transpose_into_generic<
     R,

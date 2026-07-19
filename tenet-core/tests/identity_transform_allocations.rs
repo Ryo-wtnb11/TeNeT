@@ -106,8 +106,8 @@ fn large_tree_pair_syntax_validation_does_not_allocate() {
 
     let (_, allocations) = measured_allocations(|| black_box(run()));
 
-    // What: successful cache admission above the inline rank validates all
-    // operation kinds without materializing permutations or Artin plans.
+    // What: rank-19 syntax preflight, beyond the former per-axis `[usize; 8]`
+    // scratch size, remains allocation-free on successful validation.
     assert_eq!(allocations, 0);
 }
 

@@ -30,6 +30,15 @@ impl FusionTreeBlockKey {
         }
     }
 
+    /// Construct a raw tree pair from numeric sector IDs.
+    ///
+    /// # Provider-domain precondition
+    ///
+    /// Every ID must already name a sector in the intended provider. This
+    /// constructor cannot check provider membership; call
+    /// [`Self::validate_for_rule`] before categorical use. Providers with a
+    /// finite table may otherwise panic through their infallible
+    /// [`FusionRule`] methods.
     pub fn pair_from_sector_ids<
         Codomain,
         Domain,
@@ -1149,14 +1158,25 @@ pub struct BlockStructure {
     required_len: usize,
 }
 
+/// Proof that one exact [`BlockStructure`] is categorically valid for `rule`.
+///
+/// This proof is deliberately LOCAL: it covers tree shape, fusion
+/// admissibility, multiplicity style, and structure rank for provider-domain
+/// sector IDs in this borrowed structure. It is neither a
+/// [`FusionTensorMapSpace`] construction proof nor a firewall for arbitrary
+/// numeric sector IDs.
+///
+/// Why not make this crate-private: `tenet-tensors` consumes the proof across
+/// the crate boundary while the type remains hidden from generated public API
+/// documentation.
 #[doc(hidden)]
-pub struct ValidatedFusionTreeBlockStructure<'rule, 'structure, R> {
+pub struct LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R> {
     rule: &'rule R,
     structure: &'structure BlockStructure,
 }
 
 #[doc(hidden)]
-impl<'rule, 'structure, R> ValidatedFusionTreeBlockStructure<'rule, 'structure, R>
+impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
 where
     R: FusionRule,
 {
@@ -1167,6 +1187,14 @@ where
         for index in 0..structure.block_count() {
             let block = structure.block(index)?;
             if let BlockKey::FusionTree(key) = block.key() {
+                let key_rank = key.codomain_tree().uncoupled().len()
+                    + key.domain_tree().uncoupled().len();
+                if key_rank != structure.rank() {
+                    return Err(CoreError::StructureRankMismatch {
+                        expected: structure.rank(),
+                        actual: key_rank,
+                    });
+                }
                 key.validate_for_rule(rule)?;
             }
         }
@@ -1195,142 +1223,121 @@ where
 }
 
 #[doc(hidden)]
-impl<'rule, 'structure, R> ValidatedFusionTreeBlockStructure<'rule, 'structure, R>
+impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    pub fn braid_tree_pair_rows_for_block_indices(
+    pub fn execute_unique_rigid_for_block_index(
         &self,
-        block_indices: &[usize],
-        codomain_permutation: &[usize],
-        domain_permutation: &[usize],
-        codomain_levels: &[usize],
-        domain_levels: &[usize],
-    ) -> Result<
-        Vec<(
-            FusionTreeBlockKey,
-            Vec<(FusionTreeBlockKey, R::Scalar)>,
-        )>,
-        CoreError,
-    > {
-        let Some(first_index) = block_indices.first().copied() else {
-            return Ok(Vec::new());
-        };
-        let first = self.required_fusion_tree_block_key(first_index)?;
-        let prepared = PreparedTreePairOperation::prepare_braid(
-            self.rule,
-            first.codomain_tree().uncoupled().len(),
-            first.domain_tree().uncoupled().len(),
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
-        )?;
-        self.execute_tree_pair_block_indices(block_indices, prepared, false)
-    }
-
-    pub fn permute_tree_pair_rows_for_block_indices(
-        &self,
-        block_indices: &[usize],
-        codomain_permutation: &[usize],
-        domain_permutation: &[usize],
-    ) -> Result<
-        Vec<(
-            FusionTreeBlockKey,
-            Vec<(FusionTreeBlockKey, R::Scalar)>,
-        )>,
-        CoreError,
-    > {
-        if !self.rule.braiding_style().is_symmetric() {
-            return Err(CoreError::UnsupportedBraidingStyle {
-                expected: "symmetric braiding",
-                actual: self.rule.braiding_style(),
+        index: usize,
+        operation: &PreparedTreePairOperation,
+    ) -> Result<(FusionTreeBlockKey, R::Scalar), CoreError> {
+        if self.rule.fusion_style() != FusionStyleKind::Unique {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Unique,
+                actual: self.rule.fusion_style(),
             });
         }
-        let Some(first_index) = block_indices.first().copied() else {
-            return Ok(Vec::new());
-        };
-        let first = self.required_fusion_tree_block_key(first_index)?;
-        let prepared = PreparedTreePairOperation::prepare_permute(
-            self.rule,
-            first.codomain_tree().uncoupled().len(),
-            first.domain_tree().uncoupled().len(),
-            codomain_permutation,
-            domain_permutation,
-        )?;
-        self.execute_tree_pair_block_indices(block_indices, prepared, false)
+        let key = self.required_fusion_tree_block_key(index)?;
+        operation.execute_unique_rigid_proven(ValidatedFusionTreePair {
+            rule: self.rule,
+            key,
+        })
     }
 
-    pub fn transpose_tree_pair_rows_for_block_indices(
+    pub fn execute_multiplicity_free_for_block_index(
         &self,
-        block_indices: &[usize],
-        codomain_permutation: &[usize],
-        domain_permutation: &[usize],
-    ) -> Result<
-        Vec<(
-            FusionTreeBlockKey,
-            Vec<(FusionTreeBlockKey, R::Scalar)>,
-        )>,
-        CoreError,
-    > {
-        let Some(first_index) = block_indices.first().copied() else {
-            return Ok(Vec::new());
-        };
-        let first = self.required_fusion_tree_block_key(first_index)?;
-        let prepared = PreparedTreePairOperation::prepare_transpose(
-            first.codomain_tree().uncoupled().len(),
-            first.domain_tree().uncoupled().len(),
-            codomain_permutation,
-            domain_permutation,
-        )?;
-        self.execute_tree_pair_block_indices(block_indices, prepared, true)
-    }
-
-    fn execute_tree_pair_block_indices(
-        &self,
-        block_indices: &[usize],
-        prepared: PreparedTreePairOperation,
-        transpose: bool,
-    ) -> Result<
-        Vec<(
-            FusionTreeBlockKey,
-            Vec<(FusionTreeBlockKey, R::Scalar)>,
-        )>,
-        CoreError,
-    > {
-        let mut source_keys = Vec::with_capacity(block_indices.len());
-        for &index in block_indices {
-            source_keys.push(self.required_fusion_tree_block_key(index)?.clone());
+        index: usize,
+        operation: &PreparedTreePairOperation,
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
+        if !self.rule.fusion_style().is_multiplicity_free() {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: self.rule.fusion_style(),
+            });
         }
-        let group = tree_pair_block_group_from_validated_structure(self.rule, &source_keys)?
-            .expect("nonempty block indices produce a validated group");
-        let rows = if transpose {
-            multiplicity_free_transpose_tree_pair_block_validated(group, prepared)?
-        } else {
-            multiplicity_free_braid_tree_pair_block_validated(group, prepared)?
-        };
-        Ok(source_keys.into_iter().zip(rows).collect())
+        let key = self.required_fusion_tree_block_key(index)?;
+        operation.execute_multiplicity_free_proven(ValidatedFusionTreePair {
+            rule: self.rule,
+            key,
+        })
+    }
+
+    pub fn execute_multiplicity_free_braid_for_block_indices<I>(
+        &self,
+        indices: I,
+        operation: PreparedTreePairOperation,
+    ) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        validate_multiplicity_free_execution_style(self.rule)?;
+        if operation.is_identity() {
+            let indices = indices.into_iter();
+            let (lower, upper) = indices.size_hint();
+            let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
+            for index in indices {
+                let source = self.required_fusion_tree_block_key(index)?;
+                rows.push(vec![(source.clone(), self.rule.scalar_one())]);
+            }
+            return Ok(rows);
+        }
+        let sources = indices
+            .into_iter()
+            .map(|index| self.required_fusion_tree_block_key(index).cloned())
+            .collect::<Result<SmallVec<[FusionTreeBlockKey; 8]>, _>>()?;
+        multiplicity_free_braid_tree_pair_block_proven(self.rule, &sources, operation)
+    }
+
+    pub fn execute_multiplicity_free_transpose_for_block_indices<I>(
+        &self,
+        indices: I,
+        operation: PreparedTreePairOperation,
+    ) -> Result<Vec<Vec<(FusionTreeBlockKey, R::Scalar)>>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        validate_multiplicity_free_execution_style(self.rule)?;
+        if operation.is_identity() {
+            let indices = indices.into_iter();
+            let (lower, upper) = indices.size_hint();
+            let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
+            for index in indices {
+                let source = self.required_fusion_tree_block_key(index)?;
+                rows.push(vec![(source.clone(), self.rule.scalar_one())]);
+            }
+            return Ok(rows);
+        }
+        let sources = indices
+            .into_iter()
+            .map(|index| self.required_fusion_tree_block_key(index).cloned())
+            .collect::<Result<SmallVec<[FusionTreeBlockKey; 8]>, _>>()?;
+        multiplicity_free_transpose_tree_pair_block_proven(self.rule, &sources, operation)
     }
 }
 
 #[doc(hidden)]
-impl<'rule, 'structure, R> ValidatedFusionTreeBlockStructure<'rule, 'structure, R>
+impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    pub fn braid_codomain_rows_for_block_indices(
+    pub fn braid_codomain_rows_for_block_index(
         &self,
-        block_indices: &[usize],
+        block_index: usize,
         permutation: &[usize],
         levels: &[usize],
-    ) -> Result<Vec<(FusionTreeKey, Vec<(FusionTreeKey, R::Scalar)>)>, CoreError> {
-        let Some(first_index) = block_indices.first().copied() else {
-            return Ok(Vec::new());
-        };
-        let first = self.required_fusion_tree_block_key(first_index)?;
-        let rank = first.codomain_tree().uncoupled().len();
+    ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError> {
+        if !self.rule.fusion_style().is_multiplicity_free() {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: self.rule.fusion_style(),
+            });
+        }
+        let source = self.required_fusion_tree_block_key(block_index)?;
+        let tree = source.codomain_tree();
+        let rank = tree.uncoupled().len();
         if levels.len() != rank {
             return Err(CoreError::DimensionMismatch {
                 expected: rank,
@@ -1338,51 +1345,170 @@ where
             });
         }
         let prepared = PreparedTreeBraid::new(permutation, levels, rank)?;
-        self.execute_codomain_block_indices(block_indices, prepared)
+        execute_multiplicity_free_tree_braid_proven(
+            ValidatedFusionTree {
+                rule: self.rule,
+                key: tree,
+            },
+            prepared,
+        )
     }
 
-    pub fn permute_codomain_rows_for_block_indices(
+    pub fn permute_codomain_rows_for_block_index(
         &self,
-        block_indices: &[usize],
+        block_index: usize,
         permutation: &[usize],
-    ) -> Result<Vec<(FusionTreeKey, Vec<(FusionTreeKey, R::Scalar)>)>, CoreError> {
+    ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError> {
         if !self.rule.braiding_style().is_symmetric() {
             return Err(CoreError::UnsupportedBraidingStyle {
                 expected: "symmetric braiding",
                 actual: self.rule.braiding_style(),
             });
         }
-        let Some(first_index) = block_indices.first().copied() else {
-            return Ok(Vec::new());
-        };
-        let first = self.required_fusion_tree_block_key(first_index)?;
-        let rank = first.codomain_tree().uncoupled().len();
+        if !self.rule.fusion_style().is_multiplicity_free() {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: self.rule.fusion_style(),
+            });
+        }
+        let source = self.required_fusion_tree_block_key(block_index)?;
+        let tree = source.codomain_tree();
+        let rank = tree.uncoupled().len();
         let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
         let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
-        self.execute_codomain_block_indices(block_indices, prepared)
+        execute_multiplicity_free_tree_braid_proven(
+            ValidatedFusionTree {
+                rule: self.rule,
+                key: tree,
+            },
+            prepared,
+        )
     }
 
-    fn execute_codomain_block_indices(
+    pub fn braid_codomain_rows_for_block_indices<I>(
         &self,
-        block_indices: &[usize],
-        prepared: PreparedTreeBraid,
-    ) -> Result<Vec<(FusionTreeKey, Vec<(FusionTreeKey, R::Scalar)>)>, CoreError> {
-        let mut source_keys = Vec::with_capacity(block_indices.len());
-        for &index in block_indices {
-            source_keys.push(
-                self.required_fusion_tree_block_key(index)?
-                    .codomain_tree()
-                    .clone(),
-            );
+        indices: I,
+        permutation: &[usize],
+        levels: &[usize],
+    ) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        validate_multiplicity_free_execution_style(self.rule)?;
+        let sources = indices
+            .into_iter()
+            .map(|index| {
+                self.required_fusion_tree_block_key(index)
+                    .map(|key| key.codomain_tree().clone())
+            })
+            .collect::<Result<SmallVec<[FusionTreeKey; 8]>, _>>()?;
+        multiplicity_free_braid_tree_block_proven(self.rule, &sources, permutation, levels)
+    }
+
+    pub fn permute_codomain_rows_for_block_indices<I>(
+        &self,
+        indices: I,
+        permutation: &[usize],
+    ) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        if !self.rule.braiding_style().is_symmetric() {
+            return Err(CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: self.rule.braiding_style(),
+            });
         }
-        let group = fusion_tree_block_group_from_validated_structure(self.rule, &source_keys)?
-            .expect("nonempty block indices produce a validated group");
-        let rows = multiplicity_free_braid_tree_block_validated(group, prepared)?;
-        Ok(source_keys.into_iter().zip(rows).collect())
+        let indices = indices.into_iter().collect::<SmallVec<[usize; 8]>>();
+        let rank = indices
+            .first()
+            .map(|&index| {
+                self.required_fusion_tree_block_key(index)
+                    .map(|key| key.codomain_tree().uncoupled().len())
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
+        self.braid_codomain_rows_for_block_indices(indices, permutation, &levels)
     }
 }
 
-impl<'rule, 'structure, R> ValidatedFusionTreeBlockStructure<'rule, 'structure, R>
+#[doc(hidden)]
+impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    pub fn generic_permute_tree_pair_for_block_index(
+        &self,
+        block_index: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
+        let source = self.required_generic_fusion_tree_block_key(block_index)?;
+        generic_permute_tree_pair_proven(
+            ValidatedFusionTreePair {
+                rule: self.rule,
+                key: source,
+            },
+            codomain_permutation,
+            domain_permutation,
+        )
+    }
+
+    pub fn generic_braid_tree_pair_for_block_index(
+        &self,
+        block_index: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        codomain_levels: &[usize],
+        domain_levels: &[usize],
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
+        let source = self.required_generic_fusion_tree_block_key(block_index)?;
+        generic_braid_tree_pair_proven(
+            ValidatedFusionTreePair {
+                rule: self.rule,
+                key: source,
+            },
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        )
+    }
+
+    pub fn generic_transpose_tree_pair_for_block_index(
+        &self,
+        block_index: usize,
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+    ) -> Result<Vec<(FusionTreeBlockKey, R::Scalar)>, CoreError> {
+        let source = self.required_generic_fusion_tree_block_key(block_index)?;
+        generic_transpose_tree_pair_proven(
+            ValidatedFusionTreePair {
+                rule: self.rule,
+                key: source,
+            },
+            codomain_permutation,
+            domain_permutation,
+        )
+    }
+
+    fn required_generic_fusion_tree_block_key(
+        &self,
+        block_index: usize,
+    ) -> Result<&FusionTreeBlockKey, CoreError> {
+        if self.rule.fusion_style() != FusionStyleKind::Generic {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: self.rule.fusion_style(),
+            });
+        }
+        self.required_fusion_tree_block_key(block_index)
+    }
+}
+
+impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
 where
     R: FusionRule,
 {

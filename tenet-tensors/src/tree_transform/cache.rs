@@ -10,7 +10,8 @@ use std::sync::{Arc, RwLock};
 use num_traits::Zero;
 use tenet_core::{
     BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeBlockKey, FusionTreeGroupKey,
-    FusionTreeKey, GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeFusionSymbols,
+    FusionTreeKey, GenericBraidScalar, GenericRigidSymbols,
+    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
@@ -25,8 +26,15 @@ use super::operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use super::plan::{
-    build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    build_all_codomain_tree_transform_group_plan_validated,
+    build_generic_tree_pair_transform_group_plan_validated,
+    build_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
+    validate_multiplicity_free_all_codomain_preflight_after_capability,
+    validate_multiplicity_free_tree_pair_preflight,
+    validate_multiplicity_free_tree_pair_preflight_after_capability,
+    validate_multiplicity_free_tree_transform_capability,
+    LocallyValidatedAllCodomainFusionTreeBlockStructure, TreeTransformGroupBlockSpec,
+    TreeTransformGroupPlan,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -303,6 +311,31 @@ where
     typed_global_map()
 }
 
+#[cfg(test)]
+pub(crate) fn global_tree_transform_cache_lengths<T, RuleKey>() -> (usize, usize, usize, usize)
+where
+    T: 'static + Send + Sync,
+    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
+{
+    let plan_len = global_tree_transform_plans::<T, RuleKey>()
+        .read()
+        .expect("global tree-transform plan cache poisoned")
+        .len();
+    let structure_len = global_tree_transform_structures::<T, RuleKey>()
+        .read()
+        .expect("global tree-transform structure cache poisoned")
+        .len();
+    let tree_row_len = global_tree_pair_rows::<T, RuleKey>()
+        .read()
+        .expect("global tree-pair row cache poisoned")
+        .len();
+    let all_codomain_row_len = global_all_codomain_rows::<T, RuleKey>()
+        .read()
+        .expect("global all-codomain row cache poisoned")
+        .len();
+    (plan_len, structure_len, tree_row_len, all_codomain_row_len)
+}
+
 const TREE_PLAN_CACHE_MAGIC: &[u8] = b"TENET_TREE_PLAN_CACHE";
 const TREE_PLAN_CACHE_VERSION: u64 = 2;
 const TREE_PLAN_CACHE_FILE: &str = "tree_transform_plans_v2.bin";
@@ -434,12 +467,43 @@ fn encode_builtin_tree_plan_cache(
     let mut out = Vec::new();
     out.extend_from_slice(TREE_PLAN_CACHE_MAGIC);
     write_u64(&mut out, TREE_PLAN_CACHE_VERSION);
-    write_usize(&mut out, plans.len());
-    for (key, plan) in plans {
+    // Why-not add the missing multiplicity identity bit to v2 here: the
+    // imminent Opaque/FusionTree + MultiplicityIndex wire migration owns v3.
+    // Until then Generic plans stay supported in memory but do not cross this
+    // lossy persistent boundary, avoiding two incompatible cache bumps.
+    let persistent_plans = plans
+        .iter()
+        .filter(|(key, plan)| builtin_tree_plan_is_multiplicity_free(key, plan));
+    write_usize(&mut out, persistent_plans.clone().count());
+    for (key, plan) in persistent_plans {
         encode_builtin_tree_plan_key(&mut out, key);
         encode_tree_transform_group_plan_f64(&mut out, plan);
     }
     out
+}
+
+fn builtin_tree_plan_is_multiplicity_free(
+    key: &TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>,
+    plan: &TreeTransformGroupPlan<f64>,
+) -> bool {
+    key.source_groups()
+        .iter()
+        .flat_map(TreeTransformSourceGroupKey::src_keys)
+        .chain(
+            plan.specs()
+                .iter()
+                .flat_map(|spec| spec.src_keys().iter().chain(spec.dst_keys())),
+        )
+        .all(block_key_is_multiplicity_free)
+}
+
+fn block_key_is_multiplicity_free(key: &BlockKey) -> bool {
+    match key {
+        BlockKey::Dense => true,
+        BlockKey::FusionTree(tree) => {
+            !tree.codomain_tree().has_multiplicity() && !tree.domain_tree().has_multiplicity()
+        }
+    }
 }
 
 fn decode_builtin_tree_plan_cache(
@@ -732,9 +796,21 @@ fn encode_fusion_tree_block_key(out: &mut Vec<u8>, key: &FusionTreeBlockKey) {
 }
 
 fn decode_fusion_tree_block_key(input: &mut CacheBytes<'_>) -> Result<FusionTreeBlockKey, ()> {
-    Ok(FusionTreeBlockKey::pair(
-        decode_fusion_tree_key(input)?,
-        decode_fusion_tree_key(input)?,
+    let codomain = decode_fusion_tree_key_parts(input)?;
+    let domain = decode_fusion_tree_key_parts(input)?;
+    if codomain.coupled != domain.coupled {
+        return Err(());
+    }
+    Ok(FusionTreeBlockKey::pair_from_sector_ids(
+        codomain.uncoupled.into_iter().map(SectorId::id),
+        domain.uncoupled.into_iter().map(SectorId::id),
+        codomain.coupled.map(SectorId::id),
+        codomain.is_dual,
+        domain.is_dual,
+        codomain.innerlines.into_iter().map(SectorId::id),
+        domain.innerlines.into_iter().map(SectorId::id),
+        codomain.vertices.into_iter().map(SectorId::id),
+        domain.vertices.into_iter().map(SectorId::id),
     ))
 }
 
@@ -752,7 +828,15 @@ fn encode_fusion_tree_key(out: &mut Vec<u8>, key: &FusionTreeKey) {
     encode_sector_slice(out, key.vertices());
 }
 
-fn decode_fusion_tree_key(input: &mut CacheBytes<'_>) -> Result<FusionTreeKey, ()> {
+struct DecodedFusionTreeKey {
+    uncoupled: Vec<SectorId>,
+    coupled: Option<SectorId>,
+    is_dual: Vec<bool>,
+    innerlines: Vec<SectorId>,
+    vertices: Vec<SectorId>,
+}
+
+fn decode_fusion_tree_key_parts(input: &mut CacheBytes<'_>) -> Result<DecodedFusionTreeKey, ()> {
     let uncoupled = decode_sector_vec(input)?;
     let coupled = if input.read_u8()? == 0 {
         None
@@ -762,15 +846,13 @@ fn decode_fusion_tree_key(input: &mut CacheBytes<'_>) -> Result<FusionTreeKey, (
     let is_dual = decode_bool_vec(input)?;
     let innerlines = decode_sector_vec(input)?;
     let vertices = decode_sector_vec(input)?;
-    FusionTreeKey::try_new_for_rule(
-        &tenet_core::Z2FusionRule,
+    Ok(DecodedFusionTreeKey {
         uncoupled,
         coupled,
         is_dual,
         innerlines,
         vertices,
-    )
-    .map_err(|_| ())
+    })
 }
 
 fn encode_sector_slice(out: &mut Vec<u8>, sectors: &[SectorId]) {
@@ -881,6 +963,38 @@ impl<'a> CacheBytes<'a> {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+    use tenet_core::{BraidingStyleKind, FusionRule, FusionStyleKind, RuleIdentity, SectorVec};
+
+    #[derive(Clone, Copy)]
+    struct GenericCacheProbeRule;
+
+    impl FusionRule for GenericCacheProbeRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            if left == self.vacuum() {
+                [right].into_iter().collect()
+            } else if right == self.vacuum() {
+                [left].into_iter().collect()
+            } else {
+                SectorVec::new()
+            }
+        }
+    }
 
     fn decode_hex_fixture(hex: &str) -> Vec<u8> {
         fn nibble(byte: u8) -> u8 {
@@ -1004,6 +1118,71 @@ mod persistence_tests {
         let authority_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8 + 1;
         bytes[authority_offset] = tenet_core::SU2_EXACT_AUTHORITY_VERSION + 1;
         assert!(decode_builtin_tree_plan_cache(&bytes).is_err());
+    }
+
+    #[test]
+    fn persistent_v2_omits_generic_tree_identity_without_mutating_memory() {
+        let rule = GenericCacheProbeRule;
+        let generic_codomain = FusionTreeKey::try_new_for_rule(
+            &rule,
+            [SectorId::new(0)],
+            Some(SectorId::new(0)),
+            [false],
+            [],
+            [],
+        )
+        .unwrap();
+        let generic_domain = FusionTreeKey::try_new_for_rule(&rule, [], None, [], [], []).unwrap();
+        let generic_key =
+            BlockKey::FusionTree(FusionTreeBlockKey::pair(generic_codomain, generic_domain));
+        let group_key = FusionTreeGroupKey::from_sector_ids([0], [], [false], []);
+        let operation = TreeTransformOperation::braid([0], [], [0], []);
+        let generic_plan_key = TreeTransformSectorPlanKey {
+            rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            },
+            scope: TreeTransformPlanScope::TreePair,
+            operation: operation.clone(),
+            source_groups: vec![TreeTransformSourceGroupKey {
+                group_key: group_key.clone(),
+                src_keys: vec![generic_key.clone()],
+            }],
+        };
+        let generic_plan = Arc::new(TreeTransformGroupPlan::new(vec![
+            TreeTransformGroupBlockSpec::single(
+                group_key.clone(),
+                generic_key.clone(),
+                generic_key,
+                1.0,
+            ),
+        ]));
+        let multiplicity_free_plan_key = TreeTransformSectorPlanKey {
+            rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            },
+            scope: TreeTransformPlanScope::TreePair,
+            operation,
+            source_groups: vec![TreeTransformSourceGroupKey {
+                group_key: group_key.clone(),
+                src_keys: vec![BlockKey::Dense],
+            }],
+        };
+        let multiplicity_free_plan = Arc::new(TreeTransformGroupPlan::new(vec![
+            TreeTransformGroupBlockSpec::single(group_key, BlockKey::Dense, BlockKey::Dense, 1.0),
+        ]));
+        let mut plans = FxHashMap::default();
+        plans.insert(generic_plan_key.clone(), generic_plan);
+        plans.insert(multiplicity_free_plan_key.clone(), multiplicity_free_plan);
+
+        let decoded = decode_builtin_tree_plan_cache(&encode_builtin_tree_plan_cache(&plans))
+            .expect("multiplicity-free persistent entry decodes");
+
+        // What: v2 cannot encode the outer-multiplicity identity bit, so only
+        // the multiplicity-free entry crosses the persistent boundary.
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].0, multiplicity_free_plan_key);
+        assert_eq!(plans.len(), 2);
+        assert!(plans.contains_key(&generic_plan_key));
     }
 }
 
@@ -1165,6 +1344,21 @@ where
         self.structures.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn tree_row_len(&self) -> usize {
+        self.tree_rows.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_codomain_row_len(&self) -> usize {
+        self.all_codomain_rows.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fast_structure_len(&self) -> usize {
+        self.fast_structures.len()
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.plans.is_empty() && self.structures.is_empty()
@@ -1300,10 +1494,9 @@ where
 
     fn get_or_compile_global_tree_pair_plan<R>(
         &mut self,
-        rule: &R,
+        source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
         rule_key: &RuleKey,
         operation: TreeTransformOperation,
-        src_structure: &BlockStructure,
         plan_key: &TreeTransformSectorPlanKey<RuleKey>,
     ) -> Result<Arc<TreeTransformGroupPlan<T>>, OperationError>
     where
@@ -1334,11 +1527,10 @@ where
             }
         }
         let plan =
-            crate::tree_transform::plan::build_multiplicity_free_tree_pair_transform_group_plan_memoized(
-            rule,
+            crate::tree_transform::plan::build_multiplicity_free_tree_pair_transform_group_plan_memoized_validated(
+            source_proof,
             rule_key,
             operation,
-            src_structure,
             &mut self.tree_rows,
             &mut self.stats.tree_row_hits,
             &mut self.stats.tree_row_misses,
@@ -1365,10 +1557,9 @@ where
 
     fn get_or_compile_global_all_codomain_plan<R>(
         &mut self,
-        rule: &R,
+        source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
         rule_key: &RuleKey,
         operation: TreeTransformOperation,
-        src_structure: &BlockStructure,
         plan_key: &TreeTransformSectorPlanKey<RuleKey>,
     ) -> Result<Arc<TreeTransformGroupPlan<T>>, OperationError>
     where
@@ -1399,11 +1590,10 @@ where
             }
         }
         let plan =
-            crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
-            rule,
+            crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_validated(
+            source_proof,
             rule_key,
             operation,
-            src_structure,
             &mut self.all_codomain_rows,
             &mut self.stats.tree_row_hits,
             &mut self.stats.tree_row_misses,
@@ -1428,6 +1618,10 @@ where
         Ok(plan)
     }
 
+    /// Resolve an exact tree-pair replay structure.
+    ///
+    /// Raw block keys follow
+    /// [`FusionTreeKey::validate_for_rule`]'s provider-domain precondition.
     pub fn get_or_compile_tree_pair<
         R,
         TDst,
@@ -1454,7 +1648,15 @@ where
         DDst: TensorStorage<TDst>,
         DSrc: TensorStorage<TSrc>,
     {
+        validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
         if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+            let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
+                rule,
+                &operation,
+                src.structure(),
+            )?;
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+                .map_err(OperationError::from_core_preserving_context)?;
             // Why-not cache Unique plans: Unique removes fusion multiplicity,
             // but does not imply a single total destination. Retaining
             // plan/row state costs more than direct compilation here and
@@ -1462,7 +1664,7 @@ where
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
+                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
         let rule_key = rule.tree_transform_rule_cache_key();
@@ -1476,6 +1678,13 @@ where
         ) {
             return Ok(structure);
         }
+        let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
+            rule,
+            &operation,
+            src.structure(),
+        )?;
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
             TreeTransformPlanScope::TreePair,
@@ -1486,7 +1695,7 @@ where
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src.structure())?;
+                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
         if self.plans.contains_key(&plan_key) {
@@ -1495,10 +1704,9 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan = self.get_or_compile_global_tree_pair_plan(
-                rule,
+                &source_proof,
                 &rule_key,
                 operation.clone(),
-                src.structure(),
                 &plan_key,
             )?;
             self.insert_plan_arc(plan_key.clone(), plan);
@@ -1513,6 +1721,8 @@ where
         )
     }
 
+    /// Structure-only variant of [`Self::get_or_compile_tree_pair`], with the
+    /// same provider-domain precondition.
     pub fn get_or_compile_tree_pair_structures_with_storage_conjugation<R>(
         &mut self,
         rule: &R,
@@ -1535,6 +1745,9 @@ where
         )
     }
 
+    /// Borrowed-operation variant of
+    /// [`Self::get_or_compile_tree_pair_structures_with_storage_conjugation`],
+    /// with the same provider-domain precondition.
     pub fn get_or_compile_tree_pair_structures_with_storage_conjugation_ref<R>(
         &mut self,
         rule: &R,
@@ -1548,7 +1761,15 @@ where
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
     {
+        validate_multiplicity_free_tree_transform_capability(rule, operation)?;
         if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+            let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
+                rule,
+                operation,
+                src_structure,
+            )?;
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
+                .map_err(OperationError::from_core_preserving_context)?;
             // Why-not cache Unique plans: Unique removes fusion multiplicity,
             // but does not imply a single total destination. The storage-only
             // form still has cheap, layout-specific entries, so retaining a
@@ -1557,7 +1778,7 @@ where
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(
                 plan.compile_shared_structures_with_storage_conjugation(
                     Arc::clone(dst_structure),
@@ -1577,6 +1798,13 @@ where
         ) {
             return Ok(structure);
         }
+        let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
+            rule,
+            operation,
+            src_structure,
+        )?;
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
+            .map_err(OperationError::from_core_preserving_context)?;
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
             TreeTransformPlanScope::TreePair,
@@ -1587,7 +1815,7 @@ where
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
             let plan =
-                build_tree_pair_transform_group_plan(rule, operation.clone(), src_structure)?;
+                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(
                 plan.compile_shared_structures_with_storage_conjugation(
                     Arc::clone(dst_structure),
@@ -1602,10 +1830,9 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan = self.get_or_compile_global_tree_pair_plan(
-                rule,
+                &source_proof,
                 &rule_key,
                 operation.clone(),
-                src_structure,
                 &plan_key,
             )?;
             self.insert_plan_arc(plan_key.clone(), plan);
@@ -1639,6 +1866,19 @@ where
         FBlock: Fn(usize) -> Result<usize, OperationError>,
         FAxis: Fn(usize) -> Result<usize, OperationError>,
     {
+        let source_proof =
+            validate_multiplicity_free_tree_pair_preflight(rule, operation, logical_src_structure)?;
+        let logical_source_id = logical_src_structure.content_id();
+        let storage_source_id = storage_src_structure.content_id();
+        let destination_id = dst_structure.content_id();
+        if storage_source_id != logical_source_id {
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, storage_src_structure)
+                .map_err(OperationError::from_core_preserving_context)?;
+        }
+        if destination_id != logical_source_id && destination_id != storage_source_id {
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
+                .map_err(OperationError::from_core_preserving_context)?;
+        }
         let rule_key = rule.tree_transform_rule_cache_key();
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
@@ -1649,11 +1889,8 @@ where
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
-            let plan = build_tree_pair_transform_group_plan(
-                rule,
-                operation.clone(),
-                logical_src_structure,
-            )?;
+            let plan =
+                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(
                 plan.compile_shared_structures_with_storage_mapping(
                     Arc::clone(dst_structure),
@@ -1671,10 +1908,9 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan = self.get_or_compile_global_tree_pair_plan(
-                rule,
+                &source_proof,
                 &rule_key,
                 operation.clone(),
-                logical_src_structure,
                 &plan_key,
             )?;
             self.insert_plan_arc(plan_key.clone(), plan);
@@ -1721,6 +1957,9 @@ where
     /// `TreeTransformRuleCacheKey` bound is still required: the Su3 `Key` embeds
     /// the table's provenance hash, so once memoization lands a swapped table
     /// can never reuse another table's plans.
+    ///
+    /// Raw block keys follow
+    /// [`FusionTreeKey::validate_for_rule`]'s provider-domain precondition.
     pub fn get_or_compile_tree_pair_generic<
         R,
         TDst,
@@ -1748,15 +1987,21 @@ where
         DDst: TensorStorage<TDst>,
         DSrc: TensorStorage<TSrc>,
     {
+        let source_proof = validate_generic_tree_pair_preflight(rule, &operation, src.structure())?;
+        let _destination_proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+                .map_err(OperationError::from_core_preserving_context)?;
         self.stats.plan_misses += 1;
         self.stats.structure_misses += 1;
-        let plan = build_generic_tree_pair_transform_group_plan(rule, operation, src.structure())?;
+        let plan =
+            build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)?;
         Ok(Arc::new(plan.compile(dst, src)?))
     }
 
     /// Structure-only generic sibling for the dynamic-rank (raw-slice) path —
     /// the top-level `tenet::Tensor` SU(3) `permute`/`braid`/`transpose` route.
     /// Same non-memoized rationale as [`Self::get_or_compile_tree_pair_generic`].
+    /// It has the same provider-domain precondition.
     pub fn get_or_compile_tree_pair_structures_generic<R>(
         &mut self,
         rule: &R,
@@ -1770,9 +2015,14 @@ where
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
     {
+        let source_proof = validate_generic_tree_pair_preflight(rule, &operation, src_structure)?;
+        let _destination_proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
+                .map_err(OperationError::from_core_preserving_context)?;
         self.stats.plan_misses += 1;
         self.stats.structure_misses += 1;
-        let plan = build_generic_tree_pair_transform_group_plan(rule, operation, src_structure)?;
+        let plan =
+            build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)?;
         Ok(Arc::new(
             plan.compile_shared_structures_with_storage_conjugation(
                 Arc::clone(dst_structure),
@@ -1782,6 +2032,10 @@ where
         ))
     }
 
+    /// Resolve an exact all-codomain replay structure.
+    ///
+    /// Raw block keys follow
+    /// [`FusionTreeKey::validate_for_rule`]'s provider-domain precondition.
     pub fn get_or_compile_all_codomain<
         R,
         TDst,
@@ -1810,7 +2064,15 @@ where
         DDst: TensorStorage<TDst>,
         DSrc: TensorStorage<TSrc>,
     {
+        validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
         if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+            let source_proof = validate_multiplicity_free_all_codomain_preflight_after_capability(
+                rule,
+                &operation,
+                src.structure(),
+            )?;
+            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+                .map_err(OperationError::from_core_preserving_context)?;
             // Why-not cache Unique all-codomain transforms: with no fusion
             // multiplicity this lowering is a direct tree relabeling.  A
             // process/context cache only retains layout descriptors for a
@@ -1818,10 +2080,9 @@ where
             // by tree-pair transforms.
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
-            let plan = build_all_codomain_tree_transform_group_plan(
-                rule,
+            let plan = build_all_codomain_tree_transform_group_plan_validated(
+                &source_proof,
                 operation.clone(),
-                src.structure(),
             )?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
@@ -1836,6 +2097,13 @@ where
         ) {
             return Ok(structure);
         }
+        let source_proof = validate_multiplicity_free_all_codomain_preflight_after_capability(
+            rule,
+            &operation,
+            src.structure(),
+        )?;
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
         let plan_key = TreeTransformSectorPlanKey::new(
             rule_key.clone(),
             TreeTransformPlanScope::AllCodomain,
@@ -1845,10 +2113,9 @@ where
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
-            let plan = crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan(
-                rule,
+            let plan = build_all_codomain_tree_transform_group_plan_validated(
+                &source_proof,
                 operation.clone(),
-                src.structure(),
             )?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
@@ -1858,10 +2125,9 @@ where
         } else {
             self.stats.plan_misses += 1;
             let plan = self.get_or_compile_global_all_codomain_plan(
-                rule,
+                &source_proof,
                 &rule_key,
                 operation.clone(),
-                src.structure(),
                 &plan_key,
             )?;
             self.insert_plan_arc(plan_key.clone(), plan);
