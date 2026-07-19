@@ -1,8 +1,8 @@
 use std::array;
 
 use tenet_core::{
-    BlockKey, BlockSpec, BlockStructure, FusionTensorMapSpace, FusionTreeBlockKey,
-    FusionTreeHomSpace, TensorMapSpace,
+    BlockKey, BlockSpec, BlockStructure, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreePairKey, TensorMapSpace,
 };
 
 use crate::DynamicFusionMapSpace;
@@ -409,10 +409,14 @@ pub(crate) fn adjoint_block_structure_view(
 fn adjoint_block_key(key: &BlockKey) -> Result<BlockKey, OperationError> {
     match key {
         BlockKey::Dense => Ok(BlockKey::Dense),
-        BlockKey::FusionTree(tree) => Ok(BlockKey::from(FusionTreeBlockKey::pair(
+        BlockKey::Opaque(key) => Ok(BlockKey::from(key.clone())),
+        BlockKey::FusionTree(tree) => Ok(BlockKey::from(FusionTreePairKey::pair(
             tree.domain_tree().clone(),
             tree.codomain_tree().clone(),
         ))),
+        _ => Err(OperationError::InvalidArgument {
+            message: "unsupported block key kind in adjoint lowering",
+        }),
     }
 }
 

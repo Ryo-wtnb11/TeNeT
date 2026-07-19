@@ -1658,13 +1658,7 @@ mod tests {
         // fusion is group-agnostic (it sees only shapes and strides), so charge
         // labels do not change the baked normalization.
         let block = |sector, offset| {
-            BlockSpec::with_key(
-                BlockKey::sector_ids([sector]),
-                vec![2, 2],
-                vec![1, 2],
-                offset,
-            )
-            .unwrap()
+            BlockSpec::with_key(BlockKey::ordinal(sector), vec![2, 2], vec![1, 2], offset).unwrap()
         };
         let structure = BlockStructure::from_blocks_with_rank(
             2,
@@ -1693,7 +1687,7 @@ mod tests {
         // the plan-size table.
         let block = |sector, offset| {
             BlockSpec::with_key(
-                BlockKey::sector_ids([sector]),
+                BlockKey::ordinal(sector),
                 vec![2, 2, 2, 2],
                 vec![1, 2, 4, 8],
                 offset,
@@ -1781,7 +1775,7 @@ mod tests {
     #[test]
     fn compiled_parallel_schedule_is_stable_for_equivalent_structures() {
         let block = |sector, offset| {
-            BlockSpec::with_key(BlockKey::sector_ids([sector]), vec![2], vec![1], offset).unwrap()
+            BlockSpec::with_key(BlockKey::ordinal(sector), vec![2], vec![1], offset).unwrap()
         };
         let dst = BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 2)]).unwrap();
         let src = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();
@@ -1890,7 +1884,7 @@ mod tests {
         // What: storage padding that belongs to no destination block cannot be
         // exposed as initialized owned tensor data.
         let block = |sector, offset| {
-            BlockSpec::with_key(BlockKey::sector_ids([sector]), vec![2], vec![1], offset).unwrap()
+            BlockSpec::with_key(BlockKey::ordinal(sector), vec![2], vec![1], offset).unwrap()
         };
         let dst = BlockStructure::from_blocks_with_rank(1, vec![block(0, 0), block(1, 3)]).unwrap();
         let src = BlockStructure::packed_column_major(1, [vec![2], vec![2]]).unwrap();

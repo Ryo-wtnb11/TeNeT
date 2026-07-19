@@ -582,16 +582,16 @@ fn tensoradd_structure_pairs_blocks_by_key_not_index() {
     let src_structure = packed_fixture_structure(
         2,
         [
-            (BlockKey::sector_ids([10]), vec![2, 3]),
-            (BlockKey::sector_ids([20]), vec![1, 4]),
+            (BlockKey::opaque([10]), vec![2, 3]),
+            (BlockKey::opaque([20]), vec![1, 4]),
         ],
     )
     .unwrap();
     let dst_structure = packed_fixture_structure(
         2,
         [
-            (BlockKey::sector_ids([20]), vec![4, 1]),
-            (BlockKey::sector_ids([10]), vec![3, 2]),
+            (BlockKey::opaque([20]), vec![4, 1]),
+            (BlockKey::opaque([10]), vec![3, 2]),
         ],
     )
     .unwrap();
@@ -609,10 +609,10 @@ fn tensoradd_structure_pairs_blocks_by_key_not_index() {
     let mut backend = HostTensorOperations;
     let mut allocator = HostAllocator::default();
 
-    assert_eq!(structure.terms()[0].key(), &BlockKey::sector_ids([20]));
+    assert_eq!(structure.terms()[0].key(), &BlockKey::opaque([20]));
     assert_eq!(structure.terms()[0].dst_block(), 0);
     assert_eq!(structure.terms()[0].src_block(), 1);
-    assert_eq!(structure.terms()[1].key(), &BlockKey::sector_ids([10]));
+    assert_eq!(structure.terms()[1].key(), &BlockKey::opaque([10]));
     assert_eq!(structure.terms()[1].dst_block(), 1);
     assert_eq!(structure.terms()[1].src_block(), 0);
 

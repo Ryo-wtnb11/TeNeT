@@ -126,8 +126,8 @@ fn tree_transform_rejects_invalid_block_specs_at_compile_time() {
 fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let key1 = BlockKey::sector_ids([1]);
-    let key2 = BlockKey::sector_ids([2]);
+    let key1 = BlockKey::opaque([1]);
+    let key2 = BlockKey::opaque([2]);
     let src_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(key1.clone(), vec![2, 2])]).unwrap();
     let src =
@@ -155,9 +155,9 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
 #[test]
 fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
     let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let dst_key1 = BlockKey::sector_ids([101, 201]);
-    let dst_key2 = BlockKey::sector_ids([102, 202]);
-    let src_key = BlockKey::sector_ids([301, 401]);
+    let dst_key1 = BlockKey::opaque([101, 201]);
+    let dst_key2 = BlockKey::opaque([102, 202]);
+    let src_key = BlockKey::opaque([301, 401]);
     let spec = TreeTransformGroupBlockSpec::multi(
         group_key.clone(),
         [dst_key1.clone(), dst_key2.clone()],
@@ -192,7 +192,7 @@ fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
 #[test]
 fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
     let key = |codomain| {
-        BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+        BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
             codomain,
             [1],
             Some(1),
@@ -258,7 +258,7 @@ fn single_output_unique_tree_transform_helper_rejects_simple_fusion() {
         &SimpleSu2Rule,
         operation.clone(),
         &src_structure,
-        |_| -> Result<(FusionTreeBlockKey, f64), OperationError> {
+        |_| -> Result<(FusionTreePairKey, f64), OperationError> {
             unreachable!("non-Unique fusion must be rejected before transforming keys")
         },
     )
@@ -627,7 +627,7 @@ fn nested_fz2_u1_su2_first_pair_braid_preserves_product_phases_in_singles() {
     let even_triplet = sector(SectorId::new(0), 0, 2);
     let odd_half_inner = sector(SectorId::new(1), 0, 1);
     let keys = [even_singlet, even_triplet].map(|first_inner| {
-        BlockKey::from(FusionTreeBlockKey::pair(
+        BlockKey::from(FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [odd_half; 4],
@@ -1102,8 +1102,8 @@ fn all_codomain_duplicate_rows_count_one_lookup_for_every_thread_count() {
     let domain_none = empty_fusion_tree();
     let domain_vacuum = empty_fusion_tree_with_coupled(Some(0));
     let keys = [
-        FusionTreeBlockKey::pair(codomain.clone(), domain_none),
-        FusionTreeBlockKey::pair(codomain, domain_vacuum),
+        FusionTreePairKey::pair(codomain.clone(), domain_none),
+        FusionTreePairKey::pair(codomain, domain_vacuum),
     ];
     let structure =
         packed_fixture_structure(2, keys.iter().cloned().map(|key| (key, vec![1, 1]))).unwrap();
@@ -1156,7 +1156,7 @@ fn all_codomain_worker_error_does_not_commit_rows_or_stats() {
     };
 
     let keys = [1, 2].map(|sector| {
-        FusionTreeBlockKey::pair(
+        FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
                 [SectorId::new(sector), SectorId::new(sector)],
@@ -1519,7 +1519,7 @@ fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
         build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
     };
 
-    let source = FusionTreeBlockKey::pair_from_sector_ids(
+    let source = FusionTreePairKey::pair_from_sector_ids(
         [1, 2],
         [2, 1],
         Some(1),
@@ -1718,7 +1718,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
 fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() {
     // What: exact 2|1 fZ2 and SU2 transposes preserve the source tree with a
     // unit coefficient, while a cyclic split change retains recoupling.
-    let fz2_source = FusionTreeBlockKey::pair(
+    let fz2_source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &FermionParityFusionRule,
             [SectorId::new(1), SectorId::new(0)],
@@ -1760,7 +1760,7 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
         .has_pack_gemm_scatter_blocks());
 
     let one = SU2Irrep::from_twice_spin(2).sector_id();
-    let su2_source = FusionTreeBlockKey::pair(
+    let su2_source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [one, one],
@@ -1797,7 +1797,7 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
         .has_pack_gemm_scatter_blocks());
 
     let control_keys = [0, 2, 4].map(|inner| {
-        BlockKey::from(FusionTreeBlockKey::pair(
+        BlockKey::from(FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
                 [one, one, one],
@@ -1930,7 +1930,7 @@ fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<
         [],
         [1],
     );
-    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [],
         Some(1),
@@ -1953,10 +1953,16 @@ fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<
 }
 
 fn simple_su2_vertex_structure(vertex: usize) -> Arc<BlockStructure> {
-    let key = BlockKey::from(FusionTreeBlockKey::new(
-        vec![SectorId::new(1), SectorId::new(1)],
-        Some(SectorId::new(0)),
-        vec![SectorId::new(vertex)],
+    let key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(0),
+        [false, false],
+        [],
+        [],
+        [],
+        [vertex],
+        [],
     ));
     Arc::new(packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap())
 }
@@ -2093,7 +2099,7 @@ fn valid_simple_source_and_nonalias_malformed_destination(
         [],
         [1],
     );
-    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [],
         Some(0),
@@ -2124,15 +2130,27 @@ fn valid_simple_source_and_nonalias_malformed_destination(
 
 #[test]
 fn callback_builder_admits_whole_source_before_first_callback() {
-    let valid = BlockKey::from(FusionTreeBlockKey::new(
-        vec![SectorId::new(1), SectorId::new(1)],
-        Some(SectorId::new(0)),
-        vec![SectorId::new(1)],
+    let valid = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(0),
+        [false, false],
+        [],
+        [],
+        [],
+        [1],
+        [],
     ));
-    let malformed_later = BlockKey::from(FusionTreeBlockKey::new(
-        vec![SectorId::new(1), SectorId::new(1)],
-        Some(SectorId::new(2)),
-        vec![SectorId::new(0)],
+    let malformed_later = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        [1, 1],
+        [],
+        Some(2),
+        [false, false],
+        [],
+        [],
+        [],
+        [0],
+        [],
     ));
     let structure =
         packed_fixture_structure(2, [(valid, vec![1, 1]), (malformed_later, vec![1, 1])]).unwrap();
@@ -2157,7 +2175,7 @@ fn callback_builder_admits_whole_source_before_first_callback() {
 
 #[test]
 fn callback_builder_rejects_malformed_destination_before_assembly() {
-    let source = FusionTreeBlockKey::pair(
+    let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
@@ -2170,7 +2188,7 @@ fn callback_builder_rejects_malformed_destination_before_assembly() {
         FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], Some(SectorId::new(0)), [], [], [])
             .unwrap(),
     );
-    let malformed_destination = FusionTreeBlockKey::pair_from_sector_ids(
+    let malformed_destination = FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [],
         Some(0),
@@ -2466,6 +2484,39 @@ fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
 }
 
 #[test]
+fn malformed_source_precedes_noncategorical_destination_without_cache_mutation() {
+    let (_, src) = malformed_simple_su2_tree_pair_tensors();
+    let dst_structure = packed_fixture_structure(2, [(BlockKey::opaque([9]), vec![1, 1])]).unwrap();
+    let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![0.0],
+        TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap(),
+        dst_structure,
+    )
+    .unwrap();
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+    let error = cache
+        .get_or_compile_tree_pair(
+            &SU2FusionRule,
+            TreeTransformOperation::permute([0, 1], []),
+            &dst,
+            &src,
+        )
+        .unwrap_err();
+
+    // What: cold admission proves the categorical source before diagnosing
+    // the destination namespace, without touching cache state.
+    assert_eq!(
+        error,
+        OperationError::Core(CoreError::MalformedFusionTree {
+            message: "fusion tree contains an inadmissible fusion vertex",
+        })
+    );
+    assert_eq!(cache.stats(), TreeTransformCacheStats::default());
+    assert!(cache.is_empty());
+}
+
+#[test]
 fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
     // What: operation syntax has deterministic precedence over categorical
     // source admission and neither failure is counted as a cache miss.
@@ -2493,11 +2544,69 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
 }
 
 #[test]
+fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation() {
+    for key in [BlockKey::Dense, BlockKey::opaque([7, 11])] {
+        let structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+            key.clone(),
+            vec![1, 1],
+            0,
+        )
+        .unwrap()])
+        .unwrap();
+        let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+        let dst = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+            vec![0.0],
+            space.clone(),
+            structure.clone(),
+        )
+        .unwrap();
+        let src =
+            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
+        let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+
+        let error = cache
+            .get_or_compile_tree_pair(
+                &SU2FusionRule,
+                TreeTransformOperation::permute([0, 0], []),
+                &dst,
+                &src,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::InvalidPermutation {
+                permutation: vec![0, 0],
+                rank: 2,
+            })
+        );
+        assert_eq!(cache.stats(), TreeTransformCacheStats::default());
+        assert!(cache.is_empty());
+
+        let error = cache
+            .get_or_compile_tree_pair(
+                &SU2FusionRule,
+                TreeTransformOperation::permute([0, 1], []),
+                &dst,
+                &src,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::ExpectedFusionTreePairKey { actual: key.kind() })
+        );
+        // What: syntax and namespace failures occur before any cache lookup or
+        // categorical coefficient provider can compile a row.
+        assert_eq!(cache.stats(), TreeTransformCacheStats::default());
+        assert!(cache.is_empty());
+    }
+}
+
+#[test]
 fn invalid_unique_source_does_not_count_eager_compile_misses() {
     // What: a failed Unique eager build reports no successful plan or structure
     // compile in cache statistics.
     let valid = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
-    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [],
         Some(1),
@@ -2589,7 +2698,7 @@ fn typed_all_codomain_rejects_nonalias_malformed_destination_without_state_or_ou
 fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
     // What: whole-pair categorical admission precedes the all-codomain source
     // restriction, so mismatched coupled sectors retain the core error.
-    let nonempty_domain = BlockKey::from(FusionTreeBlockKey::pair(
+    let nonempty_domain = BlockKey::from(FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
@@ -2609,7 +2718,7 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
         )
         .unwrap(),
     ));
-    let mismatched = BlockKey::from(FusionTreeBlockKey::pair(
+    let mismatched = BlockKey::from(FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
@@ -2637,7 +2746,9 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
         ],
     )
     .unwrap();
-    let dst_structure = BlockStructure::trivial(&[1, 1, 1]).unwrap();
+    let dst_key =
+        all_codomain_fusion_tree_test_key([0, 0, 0], Some(0), [false, false, false], [0], [1, 1]);
+    let dst_structure = packed_fixture_structure(3, [(dst_key, vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
     let dst_space = TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap();
     let src =
@@ -3324,7 +3435,7 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
 
 #[test]
 fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -3335,7 +3446,7 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
         [],
         [],
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -3369,7 +3480,7 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
 
 #[test]
 fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -3380,7 +3491,7 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
         [],
         [],
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -3409,7 +3520,7 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
 
 #[test]
 fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -3420,7 +3531,7 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
         [],
         [],
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -3466,7 +3577,7 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
 
 #[test]
 fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 0],
         [1],
         Some(1),
@@ -3505,7 +3616,7 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
 fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
     // Why-not: UniqueFusion intentionally bypasses reusable plan/row caches;
     // this protects the process from retaining cheap, layout-specific keys.
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [0, 1],
         Some(1),
@@ -3590,7 +3701,7 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
 
 #[test]
 fn tree_pair_transform_public_helper_executes_split_changing_permute() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [0, 1],
         Some(1),
@@ -3624,7 +3735,7 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
 
 #[test]
 fn tree_pair_transform_public_helper_compiles_against_actual_destination_structure() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [0, 1],
         Some(1),
@@ -4316,7 +4427,7 @@ fn unique_tree_transform_plan_builder_rejects_generic_fusion() {
         &GenericMultiplicityRule,
         operation.clone(),
         &src_structure,
-        |_| -> Result<(FusionTreeBlockKey, f64), OperationError> {
+        |_| -> Result<(FusionTreePairKey, f64), OperationError> {
             unreachable!("GenericFusion must be rejected before transforming keys")
         },
     )
@@ -4348,7 +4459,7 @@ fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding
         &UniqueAnyonicRule,
         operation.clone(),
         &src_structure,
-        |_| -> Result<(FusionTreeBlockKey, f64), OperationError> {
+        |_| -> Result<(FusionTreePairKey, f64), OperationError> {
             unreachable!("permutation must reject non-symmetric braiding before key transform")
         },
     )
@@ -4365,7 +4476,7 @@ fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding
 
 #[test]
 fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_logic() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 0],
         [1],
         Some(1),
@@ -4500,7 +4611,7 @@ fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
 
 #[test]
 fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair(
+    let src_key = BlockKey::from(FusionTreePairKey::pair(
         FusionTreeKey::try_from_sector_ids_for_rule(
             &UniqueZ2Rule,
             [1, 1],
@@ -4512,7 +4623,7 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
         .unwrap(),
         empty_fusion_tree_with_coupled(Some(0)),
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair(
         FusionTreeKey::try_from_sector_ids_for_rule(
             &UniqueZ2Rule,
             [1, 1],
@@ -4541,7 +4652,7 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
 
 #[test]
 fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 0],
         [],
         Some(1),
@@ -4611,7 +4722,7 @@ fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [0, 1],
         Some(1),
@@ -4622,7 +4733,7 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
         [],
         [1],
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1, 0],
         Some(1),
@@ -4652,7 +4763,7 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -4663,7 +4774,7 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
         [],
         [],
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -4691,7 +4802,7 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1],
         [1],
         Some(1),
@@ -4718,7 +4829,7 @@ fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
-    let src_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 0],
         [1, 0],
         Some(1),
@@ -4729,7 +4840,7 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
         [1],
         [1],
     ));
-    let expected_dst_key = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [0, 0],
         Some(0),
@@ -4878,9 +4989,9 @@ impl MultiplicityFreeRigidSymbols for TensorKitZ4Element2Rule {
     }
 }
 
-fn tensor_kit_z4_rank_three_pair() -> FusionTreeBlockKey {
+fn tensor_kit_z4_rank_three_pair() -> FusionTreePairKey {
     let rule = TensorKitZ4Element2Rule;
-    FusionTreeBlockKey::pair(
+    FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(1), SectorId::new(2), SectorId::new(3)],
@@ -4913,7 +5024,7 @@ fn assert_complex_oracle(actual: Complex64, expected: Complex64) {
 fn unique_production_domain_fermion_crossing_matches_tensorkit_oracle() {
     let rule = FermionParityFusionRule;
     let odd = SectorId::new(1);
-    let source = FusionTreeBlockKey::pair(
+    let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
         FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [true], [], []).unwrap(),
     );
@@ -4940,7 +5051,7 @@ fn unique_production_complex_artin_and_inverse_match_tensorkit_oracle() {
     let source = tensor_kit_z4_rank_three_pair();
     let source_structure =
         packed_fixture_structure(4, [(BlockKey::from(source.clone()), vec![1; 4])]).unwrap();
-    let expected = FusionTreeBlockKey::pair(
+    let expected = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(1), SectorId::new(3), SectorId::new(2)],
@@ -4981,7 +5092,7 @@ fn unique_production_complex_artin_and_inverse_match_tensorkit_oracle() {
 #[test]
 fn unique_production_pivotal_transpose_matches_tensorkit_oracle() {
     let rule = TensorKitZ4Element2Rule;
-    let source = FusionTreeBlockKey::pair(
+    let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(1), SectorId::new(2)],
@@ -5001,7 +5112,7 @@ fn unique_production_pivotal_transpose_matches_tensorkit_oracle() {
         )
         .unwrap(),
     );
-    let expected = FusionTreeBlockKey::pair(
+    let expected = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(2), SectorId::new(1)],
@@ -5054,12 +5165,12 @@ fn tensorkit_unique_oracle_provenance_is_pinned() {
     assert!(RAW.contains("fz2.domain_crossing.coeff=-1+0im"));
 }
 
-fn unique_rank_three_tree_pair<R>(rule: &R, left: SectorId, right: SectorId) -> FusionTreeBlockKey
+fn unique_rank_three_tree_pair<R>(rule: &R, left: SectorId, right: SectorId) -> FusionTreePairKey
 where
     R: FusionRule,
 {
     let coupled = rule.fusion_channels(left, right)[0];
-    FusionTreeBlockKey::pair(
+    FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             rule,
             [left, right],
@@ -5075,7 +5186,7 @@ where
 
 fn assert_unique_and_generic_plan_are_identical<R>(
     rule: &R,
-    source: FusionTreeBlockKey,
+    source: FusionTreePairKey,
     operation: TreeTransformOperation,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -5153,7 +5264,7 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
     let odd_charge = product.encode_sector(SectorId::new(1), U1Irrep::new(2).sector_id());
     let even_charge = product.encode_sector(SectorId::new(0), U1Irrep::new(-1).sector_id());
     let coupled = product.fusion_channels(odd_charge, even_charge)[0];
-    let product_source = FusionTreeBlockKey::pair(
+    let product_source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &product,
             [odd_charge, even_charge],
@@ -5179,7 +5290,7 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
         TreeTransformOperation::braid([0, 1, 3], [2], [0, 1], [2, 3]),
     );
 
-    let anyonic_source = FusionTreeBlockKey::pair(
+    let anyonic_source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &UniqueAnyonicRule,
             [SectorId::new(1)],
@@ -5224,7 +5335,7 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
 
 #[test]
 fn unique_production_lowering_matches_generic_at_rank_zero_and_one() {
-    let scalar = FusionTreeBlockKey::pair(
+    let scalar = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(U1FusionRule.vacuum()), [], [], [])
             .unwrap(),
         FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(U1FusionRule.vacuum()), [], [], [])
@@ -5236,7 +5347,7 @@ fn unique_production_lowering_matches_generic_at_rank_zero_and_one() {
         TreeTransformOperation::permute([], []),
     );
 
-    let rank_one = FusionTreeBlockKey::pair(
+    let rank_one = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             [Z2FusionRule.vacuum()],
@@ -5258,7 +5369,7 @@ fn unique_production_lowering_matches_generic_at_rank_zero_and_one() {
 
 #[test]
 fn unique_all_codomain_production_lowering_matches_generic_replay_exactly() {
-    let source = FusionTreeBlockKey::pair(
+    let source = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
@@ -5363,10 +5474,10 @@ fn unique_production_lowering_preserves_generic_error_precedence() {
 fn z2_two_leg_pair_with_empty_domain(
     uncoupled: [SectorId; 2],
     empty_coupled: Option<SectorId>,
-) -> FusionTreeBlockKey {
+) -> FusionTreePairKey {
     let rule = Z2FusionRule;
     let coupled = rule.fusion_channels(uncoupled[0], uncoupled[1])[0];
-    FusionTreeBlockKey::pair(
+    FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             uncoupled,
@@ -5424,11 +5535,11 @@ fn unique_production_prepares_each_distinct_source_split() {
     let rule = Z2FusionRule;
     let vacuum = rule.vacuum();
     let odd = SectorId::new(1);
-    let split_one_one = FusionTreeBlockKey::pair(
+    let split_one_one = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
         FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
     );
-    let split_two_zero = FusionTreeBlockKey::pair(
+    let split_two_zero = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             [odd, odd],
@@ -5470,93 +5581,78 @@ fn unique_production_prepares_each_distinct_source_split() {
 }
 
 #[test]
-fn unique_production_preserves_generic_nonfusion_error_precedence() {
-    let valid_tree = z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], None);
-    let dense_first = packed_fixture_structure(
-        2,
-        [
-            (BlockKey::Dense, vec![1, 1]),
-            (BlockKey::from(valid_tree.clone()), vec![1, 1]),
-        ],
-    )
-    .unwrap();
-    let tree_first = packed_fixture_structure(
-        2,
-        [
-            (BlockKey::from(valid_tree), vec![1, 1]),
-            (BlockKey::Dense, vec![1, 1]),
-        ],
-    )
-    .unwrap();
+fn unique_production_preserves_generic_noncategorical_error_precedence() {
+    let dense = BlockStructure::trivial(&[1, 1]).unwrap();
+    let opaque = packed_fixture_structure(2, [(BlockKey::opaque([7]), vec![1, 1])]).unwrap();
     let malformed = TreeTransformOperation::permute([0, 0], []);
 
-    // What: non-fusion blocks stay outside the fusion-group census, so a
-    // malformed fusion-tree operation wins independently of dense block order.
-    assert_eq!(
-        build_tree_pair_transform_group_plan(&Z2FusionRule, malformed.clone(), &dense_first,),
-        build_multiplicity_free_tree_pair_transform_group_plan(
-            &Z2FusionRule,
-            malformed.clone(),
-            &dense_first,
-        ),
-    );
-    assert_eq!(
-        build_tree_pair_transform_group_plan(&Z2FusionRule, malformed.clone(), &tree_first,),
-        build_multiplicity_free_tree_pair_transform_group_plan(
-            &Z2FusionRule,
-            malformed.clone(),
-            &tree_first,
-        ),
-    );
-    assert_eq!(
-        build_all_codomain_tree_transform_group_plan(
-            &Z2FusionRule,
-            malformed.clone(),
-            &dense_first,
-        ),
-        build_multiplicity_free_all_codomain_tree_transform_group_plan(
-            &Z2FusionRule,
-            malformed,
-            &dense_first,
-        ),
-    );
+    for structure in [&dense, &opaque] {
+        // What: Unique and general multiplicity-free builders both report
+        // malformed syntax before either noncategorical namespace.
+        assert_eq!(
+            build_tree_pair_transform_group_plan(&Z2FusionRule, malformed.clone(), structure,),
+            build_multiplicity_free_tree_pair_transform_group_plan(
+                &Z2FusionRule,
+                malformed.clone(),
+                structure,
+            ),
+        );
+    }
+}
 
-    // What: a valid operation also preserves the generic path's treatment of
-    // non-fusion blocks instead of introducing a new direct-path rejection.
-    assert_eq!(
-        build_tree_pair_transform_group_plan(
-            &Z2FusionRule,
-            TreeTransformOperation::permute([0, 1], []),
-            &dense_first,
-        ),
-        build_multiplicity_free_tree_pair_transform_group_plan(
-            &Z2FusionRule,
-            TreeTransformOperation::permute([0, 1], []),
-            &dense_first,
-        ),
-    );
-    assert_eq!(
-        build_all_codomain_tree_transform_group_plan(
-            &Z2FusionRule,
-            TreeTransformOperation::permute([0, 1], []),
-            &dense_first,
-        ),
-        build_multiplicity_free_all_codomain_tree_transform_group_plan(
-            &Z2FusionRule,
-            TreeTransformOperation::permute([0, 1], []),
-            &dense_first,
-        ),
-    );
+#[test]
+fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
+    for key in [BlockKey::Dense, BlockKey::opaque([7, 11])] {
+        let structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+            key.clone(),
+            vec![1],
+            0,
+        )
+        .unwrap()])
+        .unwrap();
+        let space = TensorMapSpace::<1, 0>::from_dims([1], []).unwrap();
+        let src = TensorMap::<f64, 1, 0>::from_vec_with_structure(
+            vec![3.0],
+            space.clone(),
+            structure.clone(),
+        )
+        .unwrap();
+        let mut dst =
+            TensorMap::<f64, 1, 0>::from_vec_with_structure(vec![0.0], space, structure).unwrap();
+        let replay = TreeTransformStructure::compile_keyed(
+            &dst,
+            &src,
+            &[TreeTransformKeyBlockSpec::single(key.clone(), key, 2.0)],
+        )
+        .unwrap();
+        let mut backend = HostTensorOperations;
+        let mut workspace = TreeTransformWorkspace::default();
+
+        tree_transform_execute_with(
+            &mut backend,
+            &mut workspace,
+            &replay,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        // What: explicit application-key replay remains namespace-neutral; only
+        // categorical tree-transform planning requires FusionTreePairKey.
+        assert_eq!(dst.data(), &[6.0]);
+    }
 }
 
 #[test]
 fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let key10 = BlockKey::sector_ids([10]);
-    let key20 = BlockKey::sector_ids([20]);
-    let key100 = BlockKey::sector_ids([100]);
-    let key200 = BlockKey::sector_ids([200]);
-    let key300 = BlockKey::sector_ids([300]);
+    let key10 = BlockKey::opaque([10]);
+    let key20 = BlockKey::opaque([20]);
+    let key100 = BlockKey::opaque([100]);
+    let key200 = BlockKey::opaque([200]);
+    let key300 = BlockKey::opaque([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(
@@ -5616,8 +5712,8 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
 #[test]
 fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
     let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
-    let present = BlockKey::sector_ids([1]);
-    let missing = BlockKey::sector_ids([2]);
+    let present = BlockKey::opaque([1]);
+    let missing = BlockKey::opaque([2]);
     let dst_structure = packed_fixture_structure(2, [(present.clone(), vec![1, 1])]).unwrap();
     let src_structure = packed_fixture_structure(1, [(present.clone(), vec![1])]).unwrap();
     let coefficient_mismatch = TreeTransformGroupBlockSpec::multi(
@@ -5658,7 +5754,7 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
 
     let coefficient_mismatch =
         TreeTransformKeyBlockSpec::multi([present.clone()], [present.clone()], Vec::<f64>::new());
-    let missing_later = TreeTransformKeyBlockSpec::single(BlockKey::sector_ids([2]), present, 1.0);
+    let missing_later = TreeTransformKeyBlockSpec::single(BlockKey::opaque([2]), present, 1.0);
     let err = TreeTransformStructure::compile_keyed_structures(
         &dst_structure,
         &src_structure,
@@ -5668,7 +5764,7 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
     assert_eq!(
         err,
         OperationError::MissingBlockKey {
-            key: Box::new(BlockKey::sector_ids([2]))
+            key: Box::new(BlockKey::opaque([2]))
         }
     );
 }
@@ -5676,8 +5772,8 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
 #[test]
 fn grouped_storage_mapping_preserves_callback_error_order() {
     let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
-    let present = BlockKey::sector_ids([1]);
-    let missing = BlockKey::sector_ids([2]);
+    let present = BlockKey::opaque([1]);
+    let missing = BlockKey::opaque([2]);
     let structure = Arc::new(packed_fixture_structure(1, [(present.clone(), vec![1])]).unwrap());
     let plan = TreeTransformGroupPlan::new(vec![
         TreeTransformGroupBlockSpec::single(
@@ -5711,12 +5807,12 @@ fn grouped_storage_mapping_preserves_callback_error_order() {
 #[test]
 fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay() {
     let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
-    let dst0 = BlockKey::sector_ids([10]);
-    let dst1 = BlockKey::sector_ids([20]);
-    let dst2 = BlockKey::sector_ids([25]);
-    let src0 = BlockKey::sector_ids([30]);
-    let src1 = BlockKey::sector_ids([40]);
-    let src2 = BlockKey::sector_ids([50]);
+    let dst0 = BlockKey::opaque([10]);
+    let dst1 = BlockKey::opaque([20]);
+    let dst2 = BlockKey::opaque([25]);
+    let src0 = BlockKey::opaque([30]);
+    let src1 = BlockKey::opaque([40]);
+    let src2 = BlockKey::opaque([50]);
     let dst_structure = Arc::new(
         packed_fixture_structure(
             2,
@@ -5982,11 +6078,11 @@ impl<T: Clone> tenet_core::ScratchStorage<T> for TrackingScratch<T> {
 #[test]
 fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage() {
     let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let key10 = BlockKey::sector_ids([10]);
-    let key20 = BlockKey::sector_ids([20]);
-    let key100 = BlockKey::sector_ids([100]);
-    let key200 = BlockKey::sector_ids([200]);
-    let key300 = BlockKey::sector_ids([300]);
+    let key10 = BlockKey::opaque([10]);
+    let key20 = BlockKey::opaque([20]);
+    let key100 = BlockKey::opaque([100]);
+    let key200 = BlockKey::opaque([200]);
+    let key300 = BlockKey::opaque([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(
@@ -6126,8 +6222,8 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [true]);
-    let present_key = BlockKey::sector_ids([1]);
-    let missing_key = BlockKey::sector_ids([2]);
+    let present_key = BlockKey::opaque([1]);
+    let missing_key = BlockKey::opaque([2]);
     let src_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let src =
@@ -6615,11 +6711,11 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
 #[test]
 fn tree_transform_replay_dispatches_through_kernel_adapter() {
     let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let key10 = BlockKey::sector_ids([10]);
-    let key20 = BlockKey::sector_ids([20]);
-    let key100 = BlockKey::sector_ids([100]);
-    let key200 = BlockKey::sector_ids([200]);
-    let key300 = BlockKey::sector_ids([300]);
+    let key10 = BlockKey::opaque([10]);
+    let key20 = BlockKey::opaque([20]);
+    let key100 = BlockKey::opaque([100]);
+    let key200 = BlockKey::opaque([200]);
+    let key300 = BlockKey::opaque([300]);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(
@@ -6774,7 +6870,7 @@ impl GenericRigidSymbols for ToyGenericRule {
     }
 }
 
-fn b2c_toy_src_pair() -> FusionTreeBlockKey {
+fn b2c_toy_src_pair() -> FusionTreePairKey {
     // cod [1,1]->0 (vacuum-coupled, N(1,1,0)=1, single vertex label 1), dom []->0.
     let cod = FusionTreeKey::try_new_for_rule(
         &ToyGenericRule {
@@ -6798,7 +6894,7 @@ fn b2c_toy_src_pair() -> FusionTreeBlockKey {
         [],
     )
     .unwrap();
-    FusionTreeBlockKey::pair(cod, dom)
+    FusionTreePairKey::pair(cod, dom)
 }
 
 // The generic plan compile reproduces the core `generic_permute_tree_pair`
@@ -6819,7 +6915,7 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
     // arm). cod [1,1]->0 with an empty domain stays a pure 1×1 R braid, so the
     // codomain permute/braid and the cyclic transpose all resolve numerically.
     let assert_plan_matches =
-        |operation: TreeTransformOperation, core_rows: Vec<(FusionTreeBlockKey, f64)>| {
+        |operation: TreeTransformOperation, core_rows: Vec<(FusionTreePairKey, f64)>| {
             assert_eq!(core_rows.len(), 1);
             let (core_dst, core_coeff) = &core_rows[0];
             let plan =
@@ -6871,7 +6967,7 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
         style: FusionStyleKind::Generic,
     };
     let pairs = [SectorId::new(1), SectorId::new(2)].map(|vertex| {
-        FusionTreeBlockKey::pair(
+        FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [SectorId::new(1), SectorId::new(1)],
@@ -6963,7 +7059,7 @@ fn direct_generic_tree_pair_rejects_malformed_destination_without_writing() {
     };
     let src_structure =
         packed_fixture_structure(2, [(BlockKey::from(b2c_toy_src_pair()), vec![1, 1])]).unwrap();
-    let malformed = BlockKey::from(FusionTreeBlockKey::pair_from_sector_ids(
+    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [],
         Some(0),
@@ -7122,7 +7218,7 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
         )
         .unwrap();
         let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
-        let key = BlockKey::from(FusionTreeBlockKey::pair(cod, dom));
+        let key = BlockKey::from(FusionTreePairKey::pair(cod, dom));
         let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
         let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure).unwrap()
@@ -7234,7 +7330,7 @@ mod b3c1_su4_smoke {
             )
             .unwrap();
             let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
-            let key = BlockKey::from(FusionTreeBlockKey::pair(cod, dom));
+            let key = BlockKey::from(FusionTreePairKey::pair(cod, dom));
             let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
             let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
             TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure).unwrap()

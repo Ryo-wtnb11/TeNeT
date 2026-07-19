@@ -420,9 +420,9 @@ where
 
     pub fn subblock_by_tree(
         &self,
-        key: &FusionTreeBlockKey,
+        key: &FusionTreePairKey,
     ) -> Result<BlockView<'_, T>, CoreError> {
-        let block = self.structure.fusion_tree_block(key)?;
+        let block = self.structure.fusion_tree_pair_block(key)?;
         BlockView::new(
             self.storage.as_slice(),
             block.shape(),
@@ -550,9 +550,9 @@ where
 
     pub fn subblock_mut_by_tree(
         &mut self,
-        key: &FusionTreeBlockKey,
+        key: &FusionTreePairKey,
     ) -> Result<BlockViewMut<'_, T>, CoreError> {
-        let block = self.structure.fusion_tree_block(key)?;
+        let block = self.structure.fusion_tree_pair_block(key)?;
         BlockViewMut::new(
             self.storage.as_mut_slice(),
             block.shape(),

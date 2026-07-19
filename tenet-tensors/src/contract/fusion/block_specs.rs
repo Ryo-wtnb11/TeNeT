@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
-    FusionTensorMapSpace, FusionTreeBlockKey, FusionTreeHomSpace, FusionTreeKey,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
@@ -434,7 +434,7 @@ where
             ) {
                 continue;
             }
-            let dst_key = FusionTreeBlockKey::pair(
+            let dst_key = FusionTreePairKey::pair(
                 lhs_key.codomain_tree().clone(),
                 rhs_key.domain_tree().clone(),
             );
@@ -448,12 +448,12 @@ where
             // missing dst key. A prior `fusion_tree_keys_from_external_sectors`
             // + `contains` membership test is redundant — dst's structure
             // blocks are exactly the homspace's valid fusion trees, so
-            // `find_block_index_by_fusion_tree_key` is `Some` iff the key is a
+            // `find_block_index_by_fusion_tree_pair` is `Some` iff the key is a
             // valid output tree — and it costs an uncached fusion-tree
             // enumeration + allocation per block pair (issue #52).
             let dst_index = dst
                 .structure()
-                .find_block_index_by_fusion_tree_key(&dst_key)
+                .find_block_index_by_fusion_tree_pair(&dst_key)
                 .ok_or_else(|| OperationError::MissingBlockKey {
                     key: Box::new(BlockKey::from(dst_key.clone())),
                 })?;
@@ -522,7 +522,7 @@ where
                     ) {
                         continue;
                     }
-                    let core_dst_key = FusionTreeBlockKey::pair(
+                    let core_dst_key = FusionTreePairKey::pair(
                         lhs_core.codomain_tree().clone(),
                         rhs_core.domain_tree().clone(),
                     );
@@ -542,7 +542,7 @@ where
                     for (dst_key, dst_coeff) in dst_terms {
                         let dst_index = dst
                             .structure()
-                            .find_block_index_by_fusion_tree_key(&dst_key)
+                            .find_block_index_by_fusion_tree_pair(&dst_key)
                             .ok_or_else(|| OperationError::MissingBlockKey {
                                 key: Box::new(BlockKey::from(dst_key.clone())),
                             })?;

@@ -4,9 +4,9 @@ use std::hint::black_box;
 
 use tenet_core::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
-    unique_permute_tree, FermionParityFusionRule, FusionProductSpace, FusionTreeBlockKey,
-    FusionTreeHomSpace, FusionTreeKey, PreparedTreePairOperation, SU2FusionRule, SU2Irrep,
-    SectorId, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    unique_permute_tree, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
+    FusionTreeKey, FusionTreePairKey, PreparedTreePairOperation, SU2FusionRule, SU2Irrep, SectorId,
+    SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -113,7 +113,7 @@ fn large_tree_pair_syntax_validation_does_not_allocate() {
 
 #[test]
 fn block_identity_permute_allocates_only_owned_output() {
-    let source = FusionTreeBlockKey::pair_from_sector_ids(
+    let source = FusionTreePairKey::pair_from_sector_ids(
         [1, 1],
         [0],
         Some(0),
@@ -246,13 +246,13 @@ fn tree_pair_shared_frames_do_not_allocate_per_source_above_inline_rank() {
             std::iter::empty(),
         )
         .unwrap();
-        let source = FusionTreeBlockKey::pair(codomain, domain);
+        let source = FusionTreePairKey::pair(codomain, domain);
         let single = [source.clone()];
         let cohort = std::iter::repeat_n(source, 16).collect::<Vec<_>>();
         let mut permutation = (0..rank).collect::<Vec<_>>();
         permutation.swap(0, 1);
 
-        let run = |sources: &[FusionTreeBlockKey]| {
+        let run = |sources: &[FusionTreePairKey]| {
             multiplicity_free_permute_tree_pair_block(&Z2FusionRule, sources, &permutation, &[])
                 .unwrap()
         };
@@ -319,7 +319,7 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
         )
         .unwrap()
     };
-    let source = FusionTreeBlockKey::pair(tree(), tree());
+    let source = FusionTreePairKey::pair(tree(), tree());
     let single = [source.clone()];
     let cohort = std::iter::repeat_n(source, 16).collect::<Vec<_>>();
     let permute = PreparedTreePairOperation::prepare_permute(
@@ -375,7 +375,7 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
     }
 
     for prepared in [&permute, &braid, &transpose] {
-        let run = |sources: &[FusionTreeBlockKey]| {
+        let run = |sources: &[FusionTreePairKey]| {
             for source in sources {
                 black_box(
                     prepared
