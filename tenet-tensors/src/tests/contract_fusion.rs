@@ -2358,7 +2358,8 @@ fn tensorcontract_fusion_into_absorbs_source_tree_transform_terms() {
 #[test]
 fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
     let rule = SU2FusionRule;
-    let src_key = all_codomain_fusion_tree_test_key(
+    let src_key = all_codomain_fusion_tree_test_key_for_rule(
+        &rule,
         [1, 1, 1, 1],
         Some(0),
         [false, false, false, false],
@@ -2366,7 +2367,8 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
         [1, 1, 1],
     );
     let dst_key0 = src_key.clone();
-    let dst_key1 = all_codomain_fusion_tree_test_key(
+    let dst_key1 = all_codomain_fusion_tree_test_key_for_rule(
+        &rule,
         [1, 1, 1, 1],
         Some(0),
         [false, false, false, false],

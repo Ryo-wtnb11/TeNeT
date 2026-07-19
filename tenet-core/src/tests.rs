@@ -425,6 +425,32 @@ mod tests {
         }
     }
 
+    impl MultiplicityFreeRigidSymbols for PlanarZ2Rule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct IdentitySymbolPanicRule;
 
@@ -531,10 +557,118 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct MisreportedGenericMultiplicityFreeRule;
+
+    impl FusionRule for MisreportedGenericMultiplicityFreeRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            IdentitySymbolPanicRule.vacuum()
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            IdentitySymbolPanicRule.fusion_channels(left, right)
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for MisreportedGenericMultiplicityFreeRule {}
+
+    impl MultiplicityFreeFusionSymbols for MisreportedGenericMultiplicityFreeRule {
+        type Scalar = f64;
+
+        fn scalar_one(&self) -> Self::Scalar {
+            1.0
+        }
+
+        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+            value
+        }
+
+        fn f_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _middle: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+            _left_coupled: SectorId,
+            _right_coupled: SectorId,
+        ) -> Self::Scalar {
+            panic!("misreported Generic provider evaluated an F symbol")
+        }
+
+        fn r_symbol_scalar(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Self::Scalar {
+            panic!("misreported Generic provider evaluated an R symbol")
+        }
+    }
+
+    impl MultiplicityFreePivotalSymbols for MisreportedGenericMultiplicityFreeRule {
+        fn bendright_scalar(
+            &self,
+            _left_coupled: SectorId,
+            _bent_sector: SectorId,
+            _coupled: SectorId,
+            _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            panic!("misreported Generic provider evaluated a bend symbol")
+        }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
+        ) -> Self::Scalar {
+            panic!("misreported Generic provider evaluated a fold symbol")
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for MisreportedGenericMultiplicityFreeRule {
+        fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+
+        fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
     #[derive(Debug, Default)]
     struct SplitOnlyCountingRule {
+        n_calls: std::sync::atomic::AtomicUsize,
         f_calls: std::sync::atomic::AtomicUsize,
         r_calls: std::sync::atomic::AtomicUsize,
+        bend_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FusionRule for SplitOnlyCountingRule {
@@ -556,6 +690,12 @@ mod tests {
 
         fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
             smallvec![SectorId::new(left.id() ^ right.id())]
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            self.n_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            usize::from(left.id() ^ right.id() == coupled.id())
         }
     }
 
@@ -620,6 +760,28 @@ mod tests {
         }
 
         fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+            1.0
+        }
+    }
+
+    impl MultiplicityFreePivotalSymbols for SplitOnlyCountingRule {
+        fn bendright_scalar(
+            &self,
+            _left_coupled: SectorId,
+            _bent_sector: SectorId,
+            _coupled: SectorId,
+            _bent_leg_is_dual: bool,
+        ) -> Self::Scalar {
+            self.bend_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            1.0
+        }
+
+        fn foldright_scalar(
+            &self,
+            _source: &FusionTreeBlockKey,
+            _destination: &FusionTreeBlockKey,
+        ) -> Self::Scalar {
             1.0
         }
     }
@@ -1245,31 +1407,968 @@ mod tests {
     }
 
     #[test]
-    fn symmetric_unique_direct_braid_preserves_noncanonical_public_keys() {
-        // What: a Unique key accepted by the public constructor but carrying
-        // a noncanonical innerline retains the exact legacy Artin result
-        // instead of being silently normalized by the direct rebuild.
-        let tree = FusionTreeKey::try_new_for_rule(
+    fn rule_aware_constructor_rejects_inadmissible_unique_innerline() {
+        // What: a rule-aware constructor rejects a stored vertex that is
+        // outside the Unique rule's fusion graph.
+        assert_eq!(
+            FusionTreeKey::try_new_for_rule(
             &FermionParityFusionRule,
             [SectorId::new(1), SectorId::new(1), SectorId::new(1)],
             Some(SectorId::new(1)),
             [false, false, false],
             [SectorId::new(1)],
             [SectorId::new(1), SectorId::new(1)],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree contains an inadmissible fusion vertex",
+            }
+        );
+    }
+
+    #[test]
+    fn rule_aware_tree_validation_covers_rank_shape_style_and_vertices() {
+        // What: categorical interpretation accepts both empty-tree vacuum
+        // encodings and rejects every malformed left-associated tree field.
+        let empty_none = FusionTreeKey::new([], None, [], [], []);
+        let empty_vacuum =
+            FusionTreeKey::new([], Some(z2_even()), [], [], []);
+        empty_none.validate_for_rule(&Z2FusionRule).unwrap();
+        empty_vacuum.validate_for_rule(&Z2FusionRule).unwrap();
+        assert_ne!(empty_none, empty_vacuum);
+        assert_eq!(
+            FusionTreeKey::new([], Some(z2_odd()), [], [], [])
+                .validate_for_rule(&Z2FusionRule)
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "rank-0 fusion tree coupled sector must normalize to the vacuum",
+            }
+        );
+
+        let rank_one =
+            FusionTreeKey::new([z2_odd()], Some(z2_odd()), [true], [], []);
+        rank_one.validate_for_rule(&Z2FusionRule).unwrap();
+        for malformed in [
+            FusionTreeKey::new([z2_odd()], None, [true], [], []),
+            FusionTreeKey::new([z2_odd()], Some(z2_even()), [true], [], []),
+        ] {
+            assert_eq!(
+                malformed.validate_for_rule(&Z2FusionRule).unwrap_err(),
+                CoreError::MalformedFusionTree {
+                    message: "rank-1 fusion tree coupled sector must equal its uncoupled sector",
+                }
+            );
+        }
+        assert_eq!(
+            FusionTreeKey::new(
+                [z2_odd(), z2_odd()],
+                None,
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .validate_for_rule(&Z2FusionRule)
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "rank >= 2 fusion tree requires a coupled sector",
+            }
+        );
+
+        let bad_shapes = [
+            (
+                FusionTreeKey::new([z2_odd(), z2_odd()], Some(z2_even()), [false], [], [SectorId::new(1)]),
+                "fusion tree sectors and duality flags must have matching length",
+            ),
+            (
+                FusionTreeKey::new(
+                    [z2_odd(), z2_odd(), z2_odd()],
+                    Some(z2_odd()),
+                    [false; 3],
+                    [],
+                    [SectorId::new(1); 2],
+                ),
+                "fusion tree has an invalid number of innerlines",
+            ),
+            (
+                FusionTreeKey::new(
+                    [z2_odd(), z2_odd()],
+                    Some(z2_even()),
+                    [false; 2],
+                    [],
+                    [],
+                ),
+                "fusion tree has an invalid number of vertices",
+            ),
+        ];
+        for (tree, message) in bad_shapes {
+            assert_eq!(
+                tree.validate_for_rule(&Z2FusionRule).unwrap_err(),
+                CoreError::MalformedFusionTree { message }
+            );
+        }
+
+        let wrong_simple_style = FusionTreeKey::new(
+            [z2_odd(), z2_odd()],
+            Some(z2_even()),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
+        )
+        .with_has_multiplicity(true);
+        assert_eq!(
+            wrong_simple_style
+                .validate_for_rule(&Z2FusionRule)
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree multiplicity style disagrees with the fusion rule",
+            }
+        );
+        let wrong_generic_style = FusionTreeKey::new(
+            [SectorId::new(ToyOmRule::A), SectorId::new(ToyOmRule::A)],
+            Some(SectorId::new(ToyOmRule::C)),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
+        );
+        assert_eq!(
+            wrong_generic_style
+                .validate_for_rule(&ToyOmRule)
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree multiplicity style disagrees with the fusion rule",
+            }
+        );
+
+        for tree in [
+            FusionTreeKey::new(
+                [z2_odd(); 4],
+                Some(z2_even()),
+                [false; 4],
+                [z2_even(), z2_even()],
+                [SectorId::new(1); 3],
+            ),
+            FusionTreeKey::new(
+                [z2_odd(); 4],
+                Some(z2_odd()),
+                [false; 4],
+                [z2_even(), z2_odd()],
+                [SectorId::new(1); 3],
+            ),
+        ] {
+            assert_eq!(
+                tree.validate_for_rule(&Z2FusionRule).unwrap_err(),
+                CoreError::MalformedFusionTree {
+                    message: "fusion tree contains an inadmissible fusion vertex",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn rule_aware_constructor_enforces_one_based_vertex_bounds() {
+        // What: vertex labels are checked against the actual N-symbol for
+        // both multiplicity-free and Generic rules.
+        assert_eq!(
+            FusionTreeKey::try_new_for_rule(
+                &Z2FusionRule,
+                [z2_odd(), z2_odd()],
+                Some(z2_even()),
+                [false; 2],
+                [],
+                [SectorId::new(2)],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree vertex label exceeds its fusion multiplicity",
+            }
+        );
+        for (label, message) in [
+            (0, "fusion tree vertex labels are 1-based"),
+            (3, "fusion tree vertex label exceeds its fusion multiplicity"),
+        ] {
+            assert_eq!(
+                FusionTreeKey::try_new_for_rule(
+                    &ToyOmRule,
+                    [SectorId::new(ToyOmRule::A), SectorId::new(ToyOmRule::A)],
+                    Some(SectorId::new(ToyOmRule::C)),
+                    [false; 2],
+                    [],
+                    [SectorId::new(label)],
+                )
+                .unwrap_err(),
+                CoreError::MalformedFusionTree { message }
+            );
+        }
+    }
+
+    #[test]
+    fn tree_pair_validation_normalizes_empty_vacuum_but_not_dual_coupled() {
+        // What: pair compatibility compares the same coupled sector on both
+        // sides, while treating None and Some(vacuum) as the same empty root.
+        let empty_pair = FusionTreeBlockKey::pair(
+            FusionTreeKey::new([], None, [], [], []),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        empty_pair.validate_for_rule(&U1FusionRule).unwrap();
+        FusionTreeBlockKey::pair(
+            FusionTreeKey::new([], None, [], [], []),
+            FusionTreeKey::new([u1(0)], Some(u1(0)), [false], [], []),
+        )
+        .validate_for_rule(&U1FusionRule)
+        .unwrap();
+        assert_eq!(
+            FusionTreeBlockKey::pair(
+                FusionTreeKey::new([], None, [], [], []),
+                FusionTreeKey::new([u1(1)], Some(u1(1)), [false], [], []),
+            )
+            .validate_for_rule(&U1FusionRule)
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
+
+        let codomain = FusionTreeKey::try_new_for_rule(
+            &U1FusionRule,
+            [u1(1), u1(2)],
+            Some(u1(3)),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
         )
         .unwrap();
-        assert!(!is_unique_direct_braid_source(
+        let same_c_domain = FusionTreeKey::try_new_for_rule(
+            &U1FusionRule,
+            [u1(4), u1(-1)],
+            Some(u1(3)),
+            [true, false],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap();
+        FusionTreeBlockKey::pair(codomain.clone(), same_c_domain)
+            .validate_for_rule(&U1FusionRule)
+            .unwrap();
+        let dual_c_domain = FusionTreeKey::try_new_for_rule(
+            &U1FusionRule,
+            [u1(-4), u1(1)],
+            Some(u1(-3)),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
+        )
+        .unwrap();
+        assert_eq!(
+            FusionTreeBlockKey::pair(codomain, dual_c_domain)
+                .validate_for_rule(&U1FusionRule)
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
+    }
+
+    #[test]
+    fn fusion_tree_block_structure_proof_reports_the_first_physical_invalid_pair() {
+        // What: structure admission skips dense blocks and reports the earliest
+        // malformed fusion-tree pair in physical block order.
+        let valid = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1), u1(-1)],
+                Some(u1(0)),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        let mismatched_pair = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1)],
+                Some(u1(1)),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(2)],
+                Some(u1(2)),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+        );
+        let later_bad_shape = FusionTreeBlockKey::pair(
+            FusionTreeKey::new([u1(1), u1(-1)], Some(u1(0)), [false], [], [SectorId::new(1)]),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major(vec![1, 1], 0).unwrap(),
+            BlockSpec::column_major_with_key(valid.into(), vec![1, 1], 1).unwrap(),
+            BlockSpec::column_major_with_key(mismatched_pair.into(), vec![1, 1], 2).unwrap(),
+            BlockSpec::column_major_with_key(later_bad_shape.into(), vec![1, 1], 3).unwrap(),
+        ])
+        .unwrap();
+
+        let error =
+            match LocallyValidatedFusionTreeBlockStructure::try_new(&U1FusionRule, &structure) {
+                Ok(_) => panic!("malformed structure unexpectedly admitted"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            CoreError::MalformedFusionTree {
+                message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
+    }
+
+    #[test]
+    fn fusion_tree_block_structure_proof_rejects_local_rank_mismatch() {
+        // What: categorical admission requires every tree pair to describe the
+        // same number of external legs as its containing block structure.
+        let key = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &Z2FusionRule,
+                [z2_even()],
+                Some(z2_even()),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::new([], Some(z2_even()), [], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major_with_key(key.into(), vec![1, 1], 0).unwrap(),
+        ])
+        .unwrap();
+
+        let error = match LocallyValidatedFusionTreeBlockStructure::try_new(&Z2FusionRule, &structure) {
+            Ok(_) => panic!("rank-mismatched structure unexpectedly admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            CoreError::StructureRankMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_compact_tree_key_is_panic_free_for_structure_lookup() {
+        // What: a raw one-leg key with missing dual metadata remains a fallible
+        // categorical input rather than panicking during structure indexing.
+        let malformed = FusionTreeBlockKey::pair(
+            FusionTreeKey::new([z2_even()], None, [], [], []),
+            FusionTreeKey::new([], None, [], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major_with_key(malformed.clone().into(), vec![1], 0).unwrap(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            structure.find_block_index_by_fusion_tree_key(&malformed),
+            Some(0)
+        );
+        assert_eq!(
+            structure.fusion_tree_block(&malformed).unwrap().key(),
+            &BlockKey::from(malformed)
+        );
+    }
+
+    #[test]
+    fn fusion_tree_block_structure_proof_indexes_only_its_bound_structure() {
+        // What: a successful proof exposes borrowed keys by physical index from
+        // its exact structure, including dense and out-of-bounds distinctions.
+        let valid = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1), u1(-1)],
+                Some(u1(0)),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major(vec![1, 1], 0).unwrap(),
+            BlockSpec::column_major_with_key(valid.clone().into(), vec![1, 1], 1).unwrap(),
+        ])
+        .unwrap();
+
+        let proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&U1FusionRule, &structure).unwrap();
+        assert!(std::ptr::eq(proof.rule(), &U1FusionRule));
+        assert!(std::ptr::eq(proof.structure(), &structure));
+        assert_eq!(proof.fusion_tree_block_key(0).unwrap(), None);
+        assert_eq!(proof.fusion_tree_block_key(1).unwrap(), Some(&valid));
+        assert_eq!(
+            proof.fusion_tree_block_key(2).unwrap_err(),
+            CoreError::BlockIndexOutOfBounds { index: 2, count: 2 }
+        );
+    }
+
+    #[test]
+    fn validated_per_index_permute_preserves_planar_braiding_rejection_before_index_lookup() {
+        let structure = BlockStructure::empty(0);
+        let proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&PlanarZ2Rule, &structure).unwrap();
+
+        // What: a proof-consuming per-index call observes the symmetric-
+        // braiding boundary before attempting to read its requested block.
+        assert_eq!(
+            proof.permute_codomain_rows_for_block_index(0, &[]),
+            Err(CoreError::UnsupportedBraidingStyle {
+                expected: "symmetric braiding",
+                actual: BraidingStyleKind::NoBraiding,
+            })
+        );
+    }
+
+    #[test]
+    fn multiplicity_free_block_boundaries_reject_misreported_style_before_empty_identity() {
+        let rule = MisreportedGenericMultiplicityFreeRule;
+        let structure = BlockStructure::empty(0);
+        let proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&rule, &structure).unwrap();
+        let identity = PreparedTreePairOperation::prepare_transpose(0, 0, &[], &[]).unwrap();
+        let expected = CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Simple,
+            actual: FusionStyleKind::Generic,
+        };
+
+        // What: neither proof-bound nor raw block entry points let empty or
+        // identity work bypass the runtime fusion-style capability.
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_braid_for_block_indices(
+                    std::iter::empty(),
+                    identity.clone(),
+                )
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            proof
+                .execute_multiplicity_free_transpose_for_block_indices(
+                    std::iter::empty(),
+                    identity,
+                )
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree_block(&rule, &[], &[], &[]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_block(&rule, &[], &[]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree_pair_block(&rule, &[], &[], &[], &[], &[])
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_permute_tree_pair_block(&rule, &[], &[], &[]).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            multiplicity_free_transpose_tree_pair_block(&rule, &[], &[], &[]).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn unique_proof_hook_rechecks_style_and_prepared_source_rank() {
+        // What: downstream callers cannot use a general categorical proof to
+        // bypass the Unique-style or prepared source-split contract.
+        let vacuum = su2(0);
+        let half = su2(1);
+        let simple_pair = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [half, half],
+                Some(vacuum),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [],
+                Some(vacuum),
+                [],
+                [],
+                [],
+            )
+            .unwrap(),
+        );
+        let simple_structure =
+            packed_fixture_structure(2, [(simple_pair, vec![1, 1])]).unwrap();
+        let simple_proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&SU2FusionRule, &simple_structure).unwrap();
+        let rank_two_identity =
+            PreparedTreePairOperation::prepare_transpose(2, 0, &[0, 1], &[]).unwrap();
+        assert_eq!(
+            simple_proof
+                .execute_unique_rigid_for_block_index(0, &rank_two_identity)
+                .unwrap_err(),
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Unique,
+                actual: FusionStyleKind::Simple,
+            }
+        );
+
+        let unique_pair = FusionTreeBlockKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1), u1(-1)],
+                Some(u1(0)),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(u1(0)), [], [], []).unwrap(),
+        );
+        let unique_structure =
+            packed_fixture_structure(2, [(unique_pair, vec![1, 1])]).unwrap();
+        let unique_proof =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&U1FusionRule, &unique_structure).unwrap();
+        let rank_one_identity =
+            PreparedTreePairOperation::prepare_transpose(1, 0, &[0], &[]).unwrap();
+        assert_eq!(
+            unique_proof
+                .execute_unique_rigid_for_block_index(0, &rank_one_identity)
+                .unwrap_err(),
+            CoreError::DimensionMismatch {
+                expected: 1,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn rule_validation_preserves_builtin_multiplicity_free_keys() {
+        // What: validation is observational for representative abelian,
+        // non-abelian, anyonic, fermionic, and product fusion trees.
+        fn assert_preserved<R: FusionRule>(rule: &R, tree: FusionTreeKey) {
+            let before = tree.clone();
+            tree.validate_for_rule(rule).unwrap();
+            assert_eq!(tree, before);
+        }
+
+        assert_preserved(
+            &U1FusionRule,
+            FusionTreeKey::try_new_for_rule(
+                &U1FusionRule,
+                [u1(1), u1(-2), u1(3)],
+                Some(u1(2)),
+                [false; 3],
+                [u1(-1)],
+                [SectorId::new(1); 2],
+            )
+            .unwrap(),
+        );
+        let half = su2(1);
+        let one = su2(2);
+        assert_preserved(
+            &SU2FusionRule,
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [half, half, one],
+                Some(one),
+                [false, true, false],
+                [su2(0)],
+                [SectorId::new(1); 2],
+            )
+            .unwrap(),
+        );
+        assert_preserved(
+            &FibonacciFusionRule,
+            FusionTreeKey::try_new_for_rule(
+                &FibonacciFusionRule,
+                [SectorId::new(1); 3],
+                Some(SectorId::new(1)),
+                [false; 3],
+                [SectorId::new(0)],
+                [SectorId::new(1); 2],
+            )
+            .unwrap(),
+        );
+        assert_preserved(
             &FermionParityFusionRule,
-            &tree
+            FusionTreeKey::try_new_for_rule(
+                &FermionParityFusionRule,
+                [z2_odd(); 3],
+                Some(z2_odd()),
+                [false, true, false],
+                [z2_even()],
+                [SectorId::new(1); 2],
+            )
+            .unwrap(),
+        );
+
+        type ProductRule = ProductFusionRule<U1FusionRule, SU2FusionRule>;
+        let product = ProductRule::default();
+        let left = product.encode_sector(u1(1), half);
+        let right = product.encode_sector(u1(-1), half);
+        let coupled = product.encode_sector(u1(0), su2(0));
+        assert_preserved(
+            &product,
+            FusionTreeKey::try_new_for_rule(
+                &product,
+                [left, right],
+                Some(coupled),
+                [false; 2],
+                [],
+                [SectorId::new(1)],
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn inadmissible_tree_is_rejected_before_every_identity_path() {
+        // What: a shape-correct but inadmissible tree cannot pass through
+        // scalar, prepared, or whole-block identity shortcuts.
+        fn assert_inadmissible<T: std::fmt::Debug>(result: Result<T, CoreError>) {
+            assert_eq!(
+                result.unwrap_err(),
+                CoreError::MalformedFusionTree {
+                    message: "fusion tree contains an inadmissible fusion vertex",
+                }
+            );
+        }
+
+        let rule = SplitOnlyCountingRule::default();
+        let odd = SectorId::new(1);
+        let vacuum = SectorId::new(0);
+        let source = FusionTreeKey::new(
+            [odd; 3],
+            Some(vacuum),
+            [false; 3],
+            [vacuum],
+            [SectorId::new(1); 2],
+        );
+        let identity = [0, 1, 2];
+        let levels = [0, 1, 2];
+        assert_inadmissible(multiplicity_free_braid_tree(&rule, &source, &identity, &levels));
+        assert_inadmissible(multiplicity_free_permute_tree(
+            &rule, &source, &identity,
+        ));
+        assert_inadmissible(multiplicity_free_braid_tree_block(
+            &rule,
+            std::slice::from_ref(&source),
+            &identity,
+            &levels,
+        ));
+        assert_inadmissible(multiplicity_free_permute_tree_block(
+            &rule,
+            std::slice::from_ref(&source),
+            &identity,
         ));
 
-        let actual =
-            unique_braid_tree(&FermionParityFusionRule, &tree, &[1, 0, 2], &[0, 1, 2]).unwrap();
-        let oracle =
-            unique_artin_braid_at_with_inverse(&FermionParityFusionRule, &tree, 0, false).unwrap();
+        let pair = FusionTreeBlockKey::pair(
+            source,
+            FusionTreeKey::new([], Some(vacuum), [], [], []),
+        );
+        let prepared = PreparedTreePairOperation::prepare_braid(
+            &rule,
+            3,
+            0,
+            &identity,
+            &[],
+            &levels,
+            &[],
+        )
+        .unwrap();
+        assert_inadmissible(prepared.execute_multiplicity_free(&rule, &pair));
+        assert_inadmissible(multiplicity_free_braid_tree_pair(
+            &rule, &pair, &identity, &[], &levels, &[],
+        ));
+        assert_inadmissible(multiplicity_free_permute_tree_pair(
+            &rule, &pair, &identity, &[],
+        ));
+        assert_inadmissible(multiplicity_free_transpose_tree_pair(
+            &rule, &pair, &identity, &[],
+        ));
+        assert_inadmissible(multiplicity_free_braid_tree_pair_block(
+            &rule,
+            std::slice::from_ref(&pair),
+            &identity,
+            &[],
+            &levels,
+            &[],
+        ));
+        assert_inadmissible(multiplicity_free_permute_tree_pair_block(
+            &rule,
+            std::slice::from_ref(&pair),
+            &identity,
+            &[],
+        ));
+        assert_inadmissible(multiplicity_free_transpose_tree_pair_block(
+            &rule,
+            std::slice::from_ref(&pair),
+            &identity,
+            &[],
+        ));
+        assert_eq!(
+            rule.f_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            rule.r_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
 
-        assert_eq!(actual, oracle);
-        assert_eq!(actual.0.innerlines(), &[SectorId::new(1)]);
+    #[test]
+    fn public_operation_errors_precede_categorical_source_errors() {
+        // What: deterministic argument and capability failures retain their
+        // public precedence over a malformed source.
+        let tau = SectorId::new(1);
+        let vacuum = SectorId::new(0);
+        let invalid = FusionTreeKey::new(
+            [tau; 3],
+            Some(vacuum),
+            [false; 3],
+            [vacuum],
+            [SectorId::new(1); 2],
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree(
+                &FibonacciFusionRule,
+                &invalid,
+                &[0, 1, 2],
+                &[],
+            )
+            .unwrap_err(),
+            CoreError::DimensionMismatch {
+                expected: 3,
+                actual: 0,
+            }
+        );
+        assert!(matches!(
+            multiplicity_free_braid_tree(
+                &FibonacciFusionRule,
+                &invalid,
+                &[0, 0, 2],
+                &[0, 1, 2],
+            ),
+            Err(CoreError::InvalidPermutation { .. })
+        ));
+        assert_eq!(
+            unique_braid_tree(
+                &FibonacciFusionRule,
+                &invalid,
+                &[0, 1, 2],
+                &[0, 1, 2],
+            )
+            .unwrap_err(),
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Unique,
+                actual: FusionStyleKind::Simple,
+            }
+        );
+        assert!(matches!(
+            multiplicity_free_permute_tree(
+                &FibonacciFusionRule,
+                &invalid,
+                &[0, 1, 2],
+            ),
+            Err(CoreError::UnsupportedBraidingStyle { .. })
+        ));
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &FibonacciFusionRule,
+                std::slice::from_ref(&invalid),
+                &[0, 1, 2],
+                &[],
+            )
+            .unwrap_err(),
+            CoreError::DimensionMismatch {
+                expected: 3,
+                actual: 0,
+            }
+        );
+
+        let pair = FusionTreeBlockKey::pair(
+            invalid,
+            FusionTreeKey::new([], Some(vacuum), [], [], []),
+        );
+        let wrong_rank = PreparedTreePairOperation::prepare_braid(
+            &FibonacciFusionRule,
+            2,
+            0,
+            &[0, 1],
+            &[],
+            &[0, 1],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_rank
+                .execute_multiplicity_free(&FibonacciFusionRule, &pair)
+                .unwrap_err(),
+            CoreError::DimensionMismatch {
+                expected: 2,
+                actual: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_sources_do_not_evaluate_symbols_or_bends() {
+        // What: categorical rejection occurs before F, R, or pivotal bend
+        // providers can observe a malformed source.
+        let rule = SplitOnlyCountingRule::default();
+        let invalid = FusionTreeKey::new(
+            [SectorId::new(1); 2],
+            Some(SectorId::new(1)),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
+        );
+        assert!(unique_braid_tree(&rule, &invalid, &[0, 1], &[0, 1]).is_err());
+        let pair = FusionTreeBlockKey::pair(
+            invalid,
+            FusionTreeKey::new(
+                [SectorId::new(1)],
+                Some(SectorId::new(1)),
+                [false],
+                [],
+                [],
+            ),
+        );
+        assert!(unique_repartition_tree_pair(&rule, &pair, 1).is_err());
+        assert_eq!(
+            rule.f_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            rule.r_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            rule.bend_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn block_validation_is_source_major_and_runs_once_per_source() {
+        // What: block proofs report the first source in slice order and do one
+        // N-symbol validation pass before identity execution.
+        let tau = SectorId::new(1);
+        let vacuum = SectorId::new(0);
+        let invalid_first = FusionTreeKey::new(
+            [tau; 3],
+            Some(vacuum),
+            [false; 3],
+            [vacuum],
+            [SectorId::new(1); 2],
+        );
+        let valid_first = FusionTreeKey::new(
+            [tau; 3],
+            Some(tau),
+            [false; 3],
+            [vacuum],
+            [SectorId::new(1); 2],
+        );
+        let different_group = FusionTreeKey::new(
+            [tau; 2],
+            Some(vacuum),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &FibonacciFusionRule,
+                &[invalid_first, different_group.clone()],
+                &[0, 1, 2],
+                &[0, 1, 2],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree contains an inadmissible fusion vertex",
+            }
+        );
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &FibonacciFusionRule,
+                &[valid_first, different_group],
+                &[0, 1, 2],
+                &[0, 1, 2],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion-tree keys must share one group",
+            }
+        );
+
+        let rule = SplitOnlyCountingRule::default();
+        let valid = FusionTreeKey::new(
+            [SectorId::new(1); 2],
+            Some(SectorId::new(0)),
+            [false; 2],
+            [],
+            [SectorId::new(1)],
+        );
+        let rows = multiplicity_free_braid_tree_block(
+            &rule,
+            &[valid.clone(), valid.clone()],
+            &[0, 1],
+            &[0, 1],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rule.n_calls.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+
+        rule.n_calls
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let pair = FusionTreeBlockKey::pair(
+            valid,
+            FusionTreeKey::new(
+                [SectorId::new(0)],
+                Some(SectorId::new(0)),
+                [false],
+                [],
+                [],
+            ),
+        );
+        let rows = multiplicity_free_permute_tree_pair_block(
+            &rule,
+            &[pair.clone(), pair],
+            &[0, 1],
+            &[2],
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rule.n_calls.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
     }
 
     #[test]
@@ -1881,22 +2980,21 @@ mod tests {
     }
 
     #[test]
-    fn tree_block_rejects_mixed_groups_before_symbol_evaluation() {
+    fn tree_block_admits_every_source_before_group_check_and_symbols() {
         let base =
             FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
-        let mixed = [
-            FusionTreeKey::from_sector_ids([1, 4], Some(3), [false, false], [], [1]),
+        let valid_mixed = [
+            FusionTreeKey::from_sector_ids([1, 4], Some(5), [false, false], [], [1]),
             FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, true], [], [1]),
-            base.clone().with_has_multiplicity(true),
         ];
         let expected = CoreError::MalformedFusionTree {
             message: "fusion-tree keys must share one group",
         };
 
-        for other in mixed {
+        for other in valid_mixed {
             let sources = [base.clone(), other];
-            // What: identity and general entry paths reject a mixed block
-            // before the panic-on-symbol fixture can evaluate F or R data.
+            // What: admitted mixed groups fail before the panic-on-symbol
+            // fixture can evaluate F or R data.
             assert_eq!(
                 multiplicity_free_braid_tree_block(
                     &IdentitySymbolPanicRule,
@@ -1917,6 +3015,22 @@ mod tests {
                 expected
             );
         }
+
+        // What: categorical admission of every source precedes the group check.
+        let style_mismatch = [base.clone(), base.with_has_multiplicity(true)];
+        let expected_style = CoreError::MalformedFusionTree {
+            message: "fusion tree multiplicity style disagrees with the fusion rule",
+        };
+        assert_eq!(
+            multiplicity_free_braid_tree_block(
+                &IdentitySymbolPanicRule,
+                &style_mismatch,
+                &[0, 1],
+                &[0, 1],
+            )
+            .unwrap_err(),
+            expected_style
+        );
     }
 
     #[test]
@@ -1937,9 +3051,22 @@ mod tests {
             Vec::<Vec<(FusionTreeKey, f64)>>::new()
         );
 
+        let half = su2(1);
         let sources = [
-            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]),
-            FusionTreeKey::from_sector_ids([1, 2], Some(7), [false, false], [], [1]),
+            FusionTreeKey::from_sector_ids(
+                [half.id(), half.id()],
+                Some(su2(0).id()),
+                [false; 2],
+                [],
+                [1],
+            ),
+            FusionTreeKey::from_sector_ids(
+                [half.id(), half.id()],
+                Some(su2(2).id()),
+                [false; 2],
+                [],
+                [1],
+            ),
         ];
         let expected = sources
             .iter()
@@ -1950,7 +3077,7 @@ mod tests {
         // the symbol-free identity path returns exact rows in source order.
         assert_eq!(
             multiplicity_free_braid_tree_block(
-                &IdentitySymbolPanicRule,
+                &SU2FusionRule,
                 &sources,
                 &[0, 1],
                 &[13, 5],
@@ -1960,7 +3087,7 @@ mod tests {
         );
         assert_eq!(
             multiplicity_free_permute_tree_block(
-                &IdentitySymbolPanicRule,
+                &SU2FusionRule,
                 &sources,
                 &[0, 1],
             )
@@ -1976,6 +3103,8 @@ mod tests {
         codomain_dual: &[bool],
         domain_dual: &[bool],
     ) -> FusionTreeBlockKey {
+        let codomain_vertices = vec![1; codomain.len().saturating_sub(1)];
+        let domain_vertices = vec![1; domain.len().saturating_sub(1)];
         FusionTreeBlockKey::pair_from_sector_ids(
             codomain.iter().copied(),
             domain.iter().copied(),
@@ -1984,22 +3113,25 @@ mod tests {
             domain_dual.iter().copied(),
             [],
             [],
-            [],
-            [],
+            codomain_vertices,
+            domain_vertices,
         )
     }
 
-    fn assert_mixed_tree_pair_block_group_is_rejected(keys: &[FusionTreeBlockKey]) {
-        let expected = CoreError::MalformedFusionTree {
-            message: TREE_PAIR_BLOCK_GROUP_ERROR,
-        };
-        let rule = IdentitySymbolPanicRule;
-
+    fn assert_mixed_tree_pair_block_group_is_rejected<R>(
+        rule: &R,
+        keys: &[FusionTreeBlockKey],
+        expected: CoreError,
+    )
+    where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + std::fmt::Debug,
+    {
         // What: identity and non-identity braid entry paths reject before
         // returning a shared coefficient matrix or evaluating rigid symbols.
         assert_eq!(
             multiplicity_free_braid_tree_pair_block(
-                &rule,
+                rule,
                 keys,
                 &[0, 1],
                 &[2],
@@ -2011,7 +3143,7 @@ mod tests {
         );
         assert_eq!(
             multiplicity_free_braid_tree_pair_block(
-                &rule,
+                rule,
                 keys,
                 &[1, 0],
                 &[2],
@@ -2025,42 +3157,45 @@ mod tests {
         // What: symmetric permutation validates the same block invariant on
         // both its identity shortcut and general braid delegation.
         assert_eq!(
-            multiplicity_free_permute_tree_pair_block(&rule, keys, &[0, 1], &[2]).unwrap_err(),
+            multiplicity_free_permute_tree_pair_block(rule, keys, &[0, 1], &[2]).unwrap_err(),
             expected
         );
         assert_eq!(
-            multiplicity_free_permute_tree_pair_block(&rule, keys, &[1, 0], &[2]).unwrap_err(),
+            multiplicity_free_permute_tree_pair_block(rule, keys, &[1, 0], &[2]).unwrap_err(),
             expected
         );
 
         // What: planar transpose validates before either its identity return or
         // cyclic repartition path can consume symbols.
         assert_eq!(
-            multiplicity_free_transpose_tree_pair_block(&rule, keys, &[0, 1], &[2]).unwrap_err(),
+            multiplicity_free_transpose_tree_pair_block(rule, keys, &[0, 1], &[2]).unwrap_err(),
             expected
         );
         assert_eq!(
-            multiplicity_free_transpose_tree_pair_block(&rule, keys, &[1, 2], &[0]).unwrap_err(),
+            multiplicity_free_transpose_tree_pair_block(rule, keys, &[1, 2], &[0]).unwrap_err(),
             expected
         );
     }
 
     #[test]
     fn tree_pair_block_apis_reject_mixed_fusion_tree_groups_before_symbols() {
-        let base = tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[false]);
+        let base = tree_pair_group_fixture(&[1, 2], &[3], 3, &[false, false], &[false]);
         let mixed = [
-            tree_pair_group_fixture(&[1, 2, 4], &[3], 7, &[false, false, false], &[false]),
-            tree_pair_group_fixture(&[1, 2], &[3, 4], 7, &[false, false], &[false, false]),
-            tree_pair_group_fixture(&[1, 4], &[3], 7, &[false, false], &[false]),
-            tree_pair_group_fixture(&[1, 2], &[4], 7, &[false, false], &[false]),
-            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, true], &[false]),
-            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[true]),
+            tree_pair_group_fixture(&[1, 4], &[5], 5, &[false, false], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3], 3, &[false, true], &[false]),
+            tree_pair_group_fixture(&[1, 2], &[3], 3, &[false, false], &[true]),
         ];
 
         for other in mixed {
             let keys = [base.clone(), other];
             let snapshot = keys.clone();
-            assert_mixed_tree_pair_block_group_is_rejected(&keys);
+            assert_mixed_tree_pair_block_group_is_rejected(
+                &IdentitySymbolPanicRule,
+                &keys,
+                CoreError::MalformedFusionTree {
+                    message: TREE_PAIR_BLOCK_GROUP_ERROR,
+                },
+            );
             // What: validation errors do not alter caller-owned source keys.
             assert_eq!(keys, snapshot);
         }
@@ -2072,15 +3207,34 @@ mod tests {
         let rule = FpU1Rule::default();
         let sector_a = rule.encode_sector(z2_even(), u1(2)).id();
         let sector_b = rule.encode_sector(z2_even(), u1(3)).id();
-        let coupled = rule.encode_sector(z2_even(), u1(5)).id();
+        let coupled_a = rule.encode_sector(z2_even(), u1(4)).id();
+        let coupled_b = rule.encode_sector(z2_even(), u1(5)).id();
         let keys = [
-            tree_pair_group_fixture(&[sector_a, sector_a], &[sector_a], coupled, &[false; 2], &[false]),
-            tree_pair_group_fixture(&[sector_a, sector_b], &[sector_a], coupled, &[false; 2], &[false]),
+            tree_pair_group_fixture(
+                &[sector_a, sector_a],
+                &[coupled_a],
+                coupled_a,
+                &[false; 2],
+                &[false],
+            ),
+            tree_pair_group_fixture(
+                &[sector_a, sector_b],
+                &[coupled_b],
+                coupled_b,
+                &[false; 2],
+                &[false],
+            ),
         ];
 
         // What: a changed component of an interned product-sector label is a
         // different shared basis group, even when ranks and duality match.
-        assert_mixed_tree_pair_block_group_is_rejected(&keys);
+        assert_mixed_tree_pair_block_group_is_rejected(
+            &rule,
+            &keys,
+            CoreError::MalformedFusionTree {
+                message: TREE_PAIR_BLOCK_GROUP_ERROR,
+            },
+        );
     }
 
     #[test]
@@ -2101,9 +3255,10 @@ mod tests {
             Vec::<Vec<(FusionTreeBlockKey, f64)>>::new()
         );
 
+        let half = su2(1).id();
         let keys = vec![
-            tree_pair_group_fixture(&[1, 2], &[3], 7, &[false, false], &[false]),
-            tree_pair_group_fixture(&[1, 2], &[3], 8, &[false, false], &[false]),
+            tree_pair_group_fixture(&[half, half], &[half, half], su2(0).id(), &[false; 2], &[false; 2]),
+            tree_pair_group_fixture(&[half, half], &[half, half], su2(2).id(), &[false; 2], &[false; 2]),
         ];
         let expected = keys
             .iter()
@@ -2115,12 +3270,12 @@ mod tests {
         // coefficients on the symbol-free identity path.
         assert_eq!(
             multiplicity_free_braid_tree_pair_block(
-                &rule,
+                &SU2FusionRule,
                 &keys,
                 &[0, 1],
-                &[2],
+                &[2, 3],
                 &[0, 1],
-                &[2],
+                &[2, 3],
             )
             .unwrap(),
             expected
@@ -2148,14 +3303,21 @@ mod tests {
 
     #[test]
     fn tree_pair_block_apis_reject_mixed_multiplicity_flags() {
-        let codomain = FusionTreeKey::from_sector_ids([1, 2], Some(7), [false, false], [], []);
-        let domain = FusionTreeKey::from_sector_ids([3], Some(7), [false], [], []);
+        let codomain =
+            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let domain = FusionTreeKey::from_sector_ids([3], Some(3), [false], [], []);
         let base = FusionTreeBlockKey::pair(codomain.clone(), domain.clone());
         let generic = FusionTreeBlockKey::pair(codomain.with_has_multiplicity(true), domain);
 
-        // What: equal external labels do not form one block group when their
-        // outer-multiplicity semantics differ.
-        assert_mixed_tree_pair_block_group_is_rejected(&[base, generic]);
+        // What: every source pair is categorically admitted before a later
+        // group comparison can observe outer-multiplicity semantics.
+        assert_mixed_tree_pair_block_group_is_rejected(
+            &IdentitySymbolPanicRule,
+            &[base, generic],
+            CoreError::MalformedFusionTree {
+                message: "fusion tree multiplicity style disagrees with the fusion rule",
+            },
+        );
     }
 
     #[test]
@@ -2306,7 +3468,7 @@ mod tests {
             su2(1),
         );
         let domain_right = rule.encode_sector(
-            left_rule.encode_sector(z2_odd(), u1(1)),
+            left_rule.encode_sector(z2_odd(), u1(-1)),
             su2(2),
         );
         let source = FusionTreeBlockKey::pair(
@@ -2842,8 +4004,12 @@ mod tests {
                 }
             );
             let actual = prepared.execute_unique_rigid(&Z2FusionRule, &source).unwrap();
-            let repartitioned =
-                unique_rigid_repartition_tree_pair(&Z2FusionRule, &source, codomain.len()).unwrap();
+            let repartitioned = unique_rigid_repartition_tree_pair_unchecked(
+                &Z2FusionRule,
+                &source,
+                codomain.len(),
+            )
+            .unwrap();
             let (oracle_tree, cycle_coefficient) = match expected_direction {
                 PreparedCycleDirection::Clockwise => {
                     unique_rigid_cycle_clockwise_tree_pair(&Z2FusionRule, &repartitioned.0).unwrap()
@@ -2951,6 +4117,89 @@ mod tests {
                 rank: 3,
             })
         );
+    }
+
+    #[test]
+    fn public_prepared_braid_preserves_level_then_style_error_precedence() {
+        let rule = Su3FusionRule::new();
+
+        // What: malformed level lengths retain precedence over the public
+        // multiplicity-free style gate.
+        assert_eq!(
+            PreparedTreePairOperation::prepare_braid(
+                &rule,
+                2,
+                0,
+                &[0, 0],
+                &[],
+                &[0],
+                &[],
+            ),
+            Err(CoreError::DimensionMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
+
+        // What: once level lengths are valid, the existing public API rejects
+        // Generic fusion before inspecting an invalid permutation.
+        assert_eq!(
+            PreparedTreePairOperation::prepare_braid(
+                &rule,
+                2,
+                0,
+                &[0, 0],
+                &[],
+                &[0, 1],
+                &[],
+            ),
+            Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: FusionStyleKind::Generic,
+            })
+        );
+    }
+
+    #[test]
+    fn validation_only_tree_pair_syntax_handles_large_and_rank_zero_maps() {
+        let codomain_rank = 10;
+        let domain_rank = 9;
+        let codomain = (0..codomain_rank).collect::<Vec<_>>();
+        let domain =
+            (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+        let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+        let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+
+        // What: the validation-only API handles ranks beyond SmallVec's inline
+        // permutation capacity without requiring a prepared Artin plan.
+        PreparedTreePairOperation::validate_permute_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+        )
+        .unwrap();
+        PreparedTreePairOperation::validate_braid_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+            &codomain_levels,
+            &domain_levels,
+        )
+        .unwrap();
+        PreparedTreePairOperation::validate_transpose_syntax(
+            codomain_rank,
+            domain_rank,
+            &codomain,
+            &domain,
+        )
+        .unwrap();
+
+        // What: the empty tensor map remains a valid identity operation.
+        PreparedTreePairOperation::validate_permute_syntax(0, 0, &[], &[]).unwrap();
+        PreparedTreePairOperation::validate_braid_syntax(0, 0, &[], &[], &[], &[]).unwrap();
+        PreparedTreePairOperation::validate_transpose_syntax(0, 0, &[], &[]).unwrap();
     }
 
     #[test]
@@ -4174,7 +5423,7 @@ mod tests {
         let odd_half =
             rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(1));
         let odd_one =
-            rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(1)), su2(2));
+            rule.encode_sector(left_rule.encode_sector(z2_odd(), u1(-1)), su2(2));
         let source = FusionTreeBlockKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
@@ -7234,8 +8483,8 @@ mod tests {
             ),
         ];
 
-        // What: source 0's second-bend failure precedes source 1's first-bend
-        // coupled mismatch, matching the legacy per-source traversal.
+        // What: the public categorical boundary rejects source 0's malformed
+        // tree before compact bend-local validation can inspect later sources.
         assert_eq!(
             multiplicity_free_permute_tree_pair_block(
                 &U1FusionRule,
@@ -7245,7 +8494,7 @@ mod tests {
             )
             .unwrap_err(),
             CoreError::MalformedFusionTree {
-                message: "bendright requires the last codomain innerline",
+                message: "fusion tree has an invalid number of innerlines",
             }
         );
     }
@@ -7868,6 +9117,195 @@ mod tests {
     }
 
     #[test]
+    fn generic_split_preserves_multiplicity_style_and_vertex_labels() {
+        // What: splitting a valid Generic tree returns two keys that remain
+        // valid for the same rule and retain the selected multiplicity basis.
+        let rule = ToyOmRule;
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let source = FusionTreeKey::try_new_for_rule(
+            &rule,
+            [a, a, a],
+            Some(a),
+            [false; 3],
+            [c],
+            [SectorId::new(2), SectorId::new(1)],
+        )
+        .unwrap();
+
+        let (front, tail) = split_fusion_tree(&rule, &source, 2).unwrap();
+
+        front.validate_for_rule(&rule).unwrap();
+        tail.validate_for_rule(&rule).unwrap();
+        assert!(front.has_multiplicity());
+        assert!(tail.has_multiplicity());
+        assert_eq!(front.vertices(), &[SectorId::new(2)]);
+        assert_eq!(tail.vertices(), &[SectorId::new(1)]);
+    }
+
+    #[test]
+    fn generic_identity_braid_rejects_an_inadmissible_source() {
+        // What: the Generic identity shortcut is behind the same categorical
+        // boundary as multiplicity-free tree operations.
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let invalid = FusionTreeKey::new(
+            [a; 3],
+            Some(c),
+            [false; 3],
+            [c],
+            [SectorId::new(1); 2],
+        )
+        .with_has_multiplicity(true);
+
+        assert_eq!(
+            generic_braid_tree(&ToyOmRule, &invalid, &[0, 1, 2], &[0, 1, 2])
+                .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree contains an inadmissible fusion vertex",
+            }
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct CrossIncompatibleGenericRule {
+        f_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CrossIncompatibleGenericRule {
+        const VACUUM: usize = 0;
+        const A: usize = 1;
+        const B: usize = 2;
+        const C: usize = 3;
+        const X: usize = 4;
+        const E: usize = 5;
+        const D: usize = 6;
+        const F: usize = 7;
+        const G: usize = 8;
+        const Q: usize = 9;
+    }
+
+    impl FusionRule for CrossIncompatibleGenericRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(Self::VACUUM)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            let channel = match (left.id(), right.id()) {
+                (Self::VACUUM, sector) | (sector, Self::VACUUM) => Some(sector),
+                (Self::A, Self::B) => Some(Self::E),
+                (Self::E, Self::C) => Some(Self::D),
+                (Self::D, Self::X) => Some(Self::Q),
+                (Self::B, Self::C) => Some(Self::F),
+                (Self::F, Self::X) => Some(Self::G),
+                (Self::G, Self::X) => Some(Self::F),
+                (Self::A, Self::G) => Some(Self::Q),
+                (Self::A, Self::Q) => Some(Self::G),
+                (Self::Q, Self::X) => Some(Self::D),
+                (Self::D, Self::C) => Some(Self::E),
+                _ => None,
+            };
+            channel
+                .map(|sector| smallvec![SectorId::new(sector)])
+                .unwrap_or_default()
+        }
+    }
+
+    impl GenericFusionSymbols for CrossIncompatibleGenericRule {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+            _d: SectorId,
+            _e: SectorId,
+            _f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            self.f_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            panic!("cross-incompatible candidate reached the F provider")
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            let rows = self.nsymbol(a, b, c);
+            let cols = self.nsymbol(b, a, c);
+            GenericRMatrix::new(vec![1.0; rows * cols], rows, cols)
+        }
+    }
+
+    #[test]
+    fn generic_multi_fmove_filters_cross_incompatible_trees_before_f() {
+        // What: forward and inverse multi-F moves discard individually valid
+        // long/short trees whose cross-tree F vertex does not exist.
+        let rule = CrossIncompatibleGenericRule::default();
+        let sector = SectorId::new;
+        let long = FusionTreeKey::new(
+            [
+                sector(CrossIncompatibleGenericRule::A),
+                sector(CrossIncompatibleGenericRule::B),
+                sector(CrossIncompatibleGenericRule::C),
+                sector(CrossIncompatibleGenericRule::X),
+            ],
+            Some(sector(CrossIncompatibleGenericRule::Q)),
+            [false; 4],
+            [
+                sector(CrossIncompatibleGenericRule::E),
+                sector(CrossIncompatibleGenericRule::D),
+            ],
+            [SectorId::new(1); 3],
+        )
+        .with_has_multiplicity(true);
+        let short = FusionTreeKey::new(
+            [
+                sector(CrossIncompatibleGenericRule::B),
+                sector(CrossIncompatibleGenericRule::C),
+                sector(CrossIncompatibleGenericRule::X),
+            ],
+            Some(sector(CrossIncompatibleGenericRule::G)),
+            [false; 3],
+            [sector(CrossIncompatibleGenericRule::F)],
+            [SectorId::new(1); 2],
+        )
+        .with_has_multiplicity(true);
+        long.validate_for_rule(&rule).unwrap();
+        short.validate_for_rule(&rule).unwrap();
+
+        assert!(generic_multi_fmove_tree(&rule, &long).unwrap().is_empty());
+        assert!(generic_multi_fmove_inv_tree(
+            &rule,
+            sector(CrossIncompatibleGenericRule::A),
+            sector(CrossIncompatibleGenericRule::Q),
+            &short,
+            false,
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            rule.f_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
     fn toy_om_rule_f_symbol_generic_has_nsymbol_shaped_block() {
         let rule = ToyOmRule;
         let a = SectorId::new(ToyOmRule::A);
@@ -7918,22 +9356,23 @@ mod tests {
     }
 
     #[test]
-    fn fusion_tree_key_mult_free_equality_ignores_vertices() {
-        // Zero-cost-degeneration gate: with has_multiplicity left at its
-        // default (false, as every existing rule in this crate produces),
-        // two keys that agree on (uncoupled, coupled, is_dual, innerlines)
-        // but disagree on vertices are still `==`/same hash/`Ordering::Equal`
-        // — unchanged from before `has_multiplicity` existed.
+    fn fusion_tree_key_raw_identity_preserves_mult_free_vertices() {
+        // What: raw keys retain invalid or noncanonical vertex payloads until
+        // categorical admission rejects them, including through intern maps.
         let (first, second) = generic_tree_pair(0, 1);
         assert!(!first.has_multiplicity());
         assert!(!second.has_multiplicity());
-        assert_eq!(first, second);
-        assert_eq!(first.cmp(&second), std::cmp::Ordering::Equal);
+        assert_ne!(first, second);
+        assert_ne!(first.cmp(&second), std::cmp::Ordering::Equal);
 
         let mut set = std::collections::HashSet::new();
         set.insert(first);
         set.insert(second);
-        assert_eq!(set.len(), 1, "mult-free keys differing only in vertices must collapse to one");
+        assert_eq!(
+            set.len(),
+            2,
+            "raw mult-free keys differing in vertices must remain distinct"
+        );
     }
 
     #[test]
@@ -7957,16 +9396,45 @@ mod tests {
 
     #[test]
     fn fusion_tree_key_has_multiplicity_is_itself_part_of_identity() {
-        // A key with has_multiplicity=false and one with true, but
-        // otherwise-identical fields including vertices, must not compare
-        // equal either direction (see the Hash impl comment: gating the
-        // vertices comparison on only one side's flag would be asymmetric).
+        // What: fusion-style provenance remains part of raw identity even
+        // when every stored sector and vertex label agrees.
         let (mult_free, _) = generic_tree_pair(0, 0);
         let generic = mult_free.clone().with_has_multiplicity(true);
         assert_ne!(mult_free, generic);
         assert_ne!(generic, mult_free);
         assert_ne!(mult_free.cmp(&generic), std::cmp::Ordering::Equal);
         assert_ne!(generic.cmp(&mult_free), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn tree_pair_axis_validation_remains_linear_above_inline_bitset_capacity() {
+        let rule = Z2FusionRule;
+        let rank = 129;
+        let codomain = FusionTreeKey::try_new_for_rule(
+            &rule,
+            vec![SectorId::new(0); rank],
+            Some(SectorId::new(0)),
+            vec![false; rank],
+            vec![SectorId::new(0); rank - 2],
+            vec![SectorId::new(1); rank - 1],
+        )
+        .unwrap();
+        let domain =
+            FusionTreeKey::try_new_for_rule(&rule, [], Some(SectorId::new(0)), [], [], [])
+                .unwrap();
+        let pair = FusionTreeBlockKey::pair(codomain, domain);
+        let identity = (0..rank).collect::<Vec<_>>();
+
+        let rows =
+            multiplicity_free_permute_tree_pair(&rule, &pair, &identity, &[]).unwrap();
+        assert_eq!(rows, vec![(pair.clone(), 1.0)]);
+
+        let mut duplicate = identity;
+        duplicate[rank - 1] = rank - 2;
+        assert!(matches!(
+            multiplicity_free_permute_tree_pair(&rule, &pair, &duplicate, &[]),
+            Err(CoreError::InvalidPermutation { .. })
+        ));
     }
 
     // --- Stage B1: Generic-fusion Artin braid (braid × inverse == identity) --
@@ -8908,6 +10376,78 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct MisreportedSimpleA4Rule;
+
+    impl FusionRule for MisreportedSimpleA4Rule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            A4BendRule.braiding_style()
+        }
+
+        fn vacuum(&self) -> SectorId {
+            A4BendRule.vacuum()
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            A4BendRule.dual(sector)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            A4BendRule.fusion_channels(left, right)
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            A4BendRule.nsymbol(left, right, coupled)
+        }
+    }
+
+    impl GenericFusionSymbols for MisreportedSimpleA4Rule {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            A4BendRule.f_symbol_generic(a, b, c, d, e, f)
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            A4BendRule.r_symbol_generic(a, b, c)
+        }
+    }
+
+    impl GenericRigidSymbols for MisreportedSimpleA4Rule {
+        fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            A4BendRule.sqrt_dim_scalar(sector)
+        }
+
+        fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+            A4BendRule.inv_sqrt_dim_scalar(sector)
+        }
+
+        fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+            A4BendRule.frobenius_schur_phase_scalar(sector)
+        }
+    }
+
     fn a4_three() -> SectorId {
         SectorId::new(3)
     }
@@ -8934,6 +10474,24 @@ mod tests {
         .with_has_multiplicity(true);
         let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
         FusionTreeBlockKey::pair(cod, dom)
+    }
+
+    #[test]
+    fn generic_proof_hook_rechecks_reported_style() {
+        // What: the proof-consuming Generic hook rejects a provider that
+        // implements Generic symbols but reports a multiplicity-free style.
+        let empty = BlockStructure::empty(0);
+        let wrong_style =
+            LocallyValidatedFusionTreeBlockStructure::try_new(&MisreportedSimpleA4Rule, &empty).unwrap();
+        assert_eq!(
+            wrong_style
+                .generic_permute_tree_pair_for_block_index(0, &[], &[])
+                .unwrap_err(),
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Simple,
+            }
+        );
     }
 
     fn round_trip_bend(

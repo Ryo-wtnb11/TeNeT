@@ -1485,19 +1485,21 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
                         panic!("fixture source must use fusion-tree keys");
                     };
                     let codomain = key.codomain_tree();
-                    FusionTreeBlockKey::pair(
-                        FusionTreeKey::try_new_for_rule(
-                            &rule,
-                            codomain.uncoupled().iter().copied(),
-                            None,
-                            codomain.is_dual().iter().copied(),
-                            codomain.innerlines().iter().copied(),
-                            codomain.vertices().iter().copied(),
-                        )
-                        .unwrap(),
-                        key.domain_tree().clone(),
-                    )
-                    .into()
+                    // What: the later member is deliberately malformed so the
+                    // public trace boundary proves source-major group admission.
+                    let raw = FusionTreeBlockKey::pair_from_sector_ids(
+                        codomain.uncoupled().iter().map(|sector| sector.id()),
+                        Vec::<usize>::new(),
+                        None,
+                        codomain.is_dual().iter().copied(),
+                        Vec::<bool>::new(),
+                        codomain.innerlines().iter().map(|sector| sector.id()),
+                        Vec::<usize>::new(),
+                        codomain.vertices().iter().map(|sector| sector.id()),
+                        Vec::<usize>::new(),
+                    );
+                    FusionTreeBlockKey::pair(raw.codomain_tree().clone(), key.domain_tree().clone())
+                        .into()
                 } else {
                     block.key().clone()
                 };

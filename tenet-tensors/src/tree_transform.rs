@@ -18,9 +18,16 @@ pub use plan::{
     build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreeTransformBlockSpec,
     TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
 };
+pub(crate) use plan::{
+    build_generic_tree_pair_transform_group_plan_validated,
+    build_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
+    validate_multiplicity_free_tree_pair_preflight,
+};
 
 #[cfg(test)]
-pub(crate) use cache::{TreeTransformGroupPlanCache, TreeTransformGroupPlanKey};
+pub(crate) use cache::{
+    global_tree_transform_cache_lengths, TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
+};
 #[cfg(test)]
 pub(crate) use plan::{
     build_multiplicity_free_all_codomain_tree_transform_group_plan,

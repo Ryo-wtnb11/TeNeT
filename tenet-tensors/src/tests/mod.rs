@@ -203,9 +203,36 @@ fn all_codomain_fusion_tree_test_key<
     codomain_innerlines: [usize; COD_INNER],
     codomain_vertices: [usize; COD_VERTICES],
 ) -> BlockKey {
-    BlockKey::from(FusionTreeBlockKey::pair(
+    all_codomain_fusion_tree_test_key_for_rule(
+        &Z2FusionRule,
+        codomain,
+        coupled,
+        codomain_is_dual,
+        codomain_innerlines,
+        codomain_vertices,
+    )
+}
+
+fn all_codomain_fusion_tree_test_key_for_rule<
+    R,
+    const COD: usize,
+    const COD_DUAL: usize,
+    const COD_INNER: usize,
+    const COD_VERTICES: usize,
+>(
+    rule: &R,
+    codomain: [usize; COD],
+    coupled: Option<usize>,
+    codomain_is_dual: [bool; COD_DUAL],
+    codomain_innerlines: [usize; COD_INNER],
+    codomain_vertices: [usize; COD_VERTICES],
+) -> BlockKey
+where
+    R: FusionRule,
+{
+    let tree_pair = FusionTreeBlockKey::pair(
         FusionTreeKey::try_from_sector_ids_for_rule(
-            &Z2FusionRule,
+            rule,
             codomain,
             coupled,
             codomain_is_dual,
@@ -213,8 +240,18 @@ fn all_codomain_fusion_tree_test_key<
             codomain_vertices,
         )
         .unwrap(),
-        empty_fusion_tree(),
-    ))
+        FusionTreeKey::try_new_for_rule(
+            rule,
+            Vec::<SectorId>::new(),
+            None,
+            Vec::<bool>::new(),
+            Vec::<SectorId>::new(),
+            Vec::<SectorId>::new(),
+        )
+        .unwrap(),
+    );
+    tree_pair.validate_for_rule(rule).unwrap();
+    BlockKey::from(tree_pair)
 }
 
 type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
