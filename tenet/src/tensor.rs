@@ -5596,7 +5596,8 @@ impl Tensor {
     }
 
     /// Left polar decomposition `t = w * p` (MatrixAlgebraKit `left_polar`):
-    /// `w` isometric, `p` positive on the domain.
+    /// `w` isometric, `p` positive on the domain. Every coupled-sector matrix
+    /// must have at least as many rows as columns.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.left_polar();
@@ -5620,7 +5621,8 @@ impl Tensor {
     }
 
     /// Right polar decomposition `t = p * w` (MatrixAlgebraKit
-    /// `right_polar`): `p` positive on the codomain, `w` isometric.
+    /// `right_polar`): `p` positive on the codomain, `w` isometric. Every
+    /// coupled-sector matrix must have at least as many columns as rows.
     pub fn right_polar(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.right_polar();
