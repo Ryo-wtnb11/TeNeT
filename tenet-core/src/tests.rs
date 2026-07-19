@@ -21,7 +21,66 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use smallvec::smallvec;
-    use std::hash::Hasher;
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn sector_leg_treats_zero_degeneracy_as_an_absent_sector() {
+        // What: explicit zero degeneracies and omitted sectors identify the same
+        // mathematical leg, fusion-tree keys, and hash identity.
+        let even = z2_even();
+        let odd = z2_odd();
+        let omitted = SectorLeg::new([(even, 2)], false);
+        let explicit_zero = SectorLeg::new([(odd, 0), (even, 2)], false);
+
+        assert_eq!(explicit_zero, omitted);
+        assert_eq!(explicit_zero.degeneracy(odd), None);
+
+        let hash = |leg: &SectorLeg| {
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            leg.hash(&mut state);
+            state.finish()
+        };
+        assert_eq!(hash(&explicit_zero), hash(&omitted));
+
+        let hom = |leg| {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg]),
+                FusionProductSpace::new([SectorLeg::new([(even, 2)], false)]),
+            )
+        };
+        assert_eq!(
+            hom(explicit_zero).fusion_tree_keys(&Z2FusionRule),
+            hom(omitted).fusion_tree_keys(&Z2FusionRule)
+        );
+    }
+
+    #[test]
+    fn sector_leg_try_new_reports_every_duplicate_sector_declaration() {
+        // What: duplicate sector declarations are construction errors
+        // independent of degeneracy and input order.
+        let sector = z2_even();
+        for pairs in [
+            [(sector, 2), (sector, 2)],
+            [(sector, 2), (sector, 3)],
+            [(sector, 0), (sector, 2)],
+            [(sector, 2), (sector, 0)],
+            [(sector, 0), (sector, 0)],
+        ] {
+            assert_eq!(
+                SectorLeg::try_new(pairs, false),
+                Err(SectorLegConstructionError::DuplicateSector { sector })
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "appears multiple times")]
+    fn sector_leg_new_preserves_the_infallible_panic_boundary() {
+        // What: the compatibility constructor still rejects duplicate positive
+        // sectors instead of silently selecting one declaration.
+        let sector = z2_even();
+        let _ = SectorLeg::new([(sector, 2), (sector, 2)], false);
+    }
 
     /// Fixture layout: subblocks packed contiguously in key order. Not a product
     /// layout (the only one is the coupled sector matrix); fixtures use it to

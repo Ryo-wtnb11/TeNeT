@@ -3750,8 +3750,9 @@ mod scratch_cache_tests {
     }
 
     #[test]
-    fn layout_authority_separates_zero_legs_and_storage_geometry() {
-        // What: structural-zero legs and storage geometry remain distinct authorities.
+    fn layout_authority_normalizes_zero_legs_but_not_storage_geometry() {
+        // What: explicit zero sectors share one mathematical layout authority,
+        // while a genuinely different storage geometry remains distinct.
         let provider = Arc::new(Z2FusionRule);
         let even = Z2Irrep::EVEN.sector_id();
         let odd = Z2Irrep::ODD.sector_id();
@@ -3787,7 +3788,7 @@ mod scratch_cache_tests {
             zero_shapes,
         )
         .unwrap();
-        assert_ne!(
+        assert_eq!(
             without_zero.validated_layout(),
             with_zero.validated_layout()
         );

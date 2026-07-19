@@ -740,8 +740,9 @@ fn eigh_vectors_retain_each_callers_exact_provider_arc() {
 }
 
 #[test]
-fn eigh_accepts_a_zero_square_sector_without_dense_execution() {
-    // What: a natural zero-dimensional endomorphism publishes empty vectors and spectrum.
+fn eigh_zero_only_input_normalizes_to_an_empty_factorization_result() {
+    // What: a zero-only endomorphism has no phantom output sector or spectrum
+    // entry and does not invoke the dense executor.
     let tensor = rectangular_svd_tensor(0, 0);
     let mut dense = RejectExecutorCalls;
 
@@ -753,8 +754,13 @@ fn eigh_accepts_a_zero_square_sector_without_dense_execution() {
 
     assert!(eigh.v.data().is_empty());
     assert!(eigh.d.data().is_empty());
-    assert_eq!(eigh.eigenvalues.len(), 1);
-    assert!(eigh.eigenvalues[0].values.is_empty());
+    assert!(eigh.eigenvalues.is_empty());
+    assert!(eigh.v.space().space().homspace().domain().legs()[0]
+        .sectors()
+        .is_empty());
+    assert!(eigh.d.space().space().homspace().codomain().legs()[0]
+        .sectors()
+        .is_empty());
 }
 
 #[test]
@@ -1085,11 +1091,16 @@ fn rectangular_svd_tensor(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
         FusionProductSpace::new([SectorLeg::new([(even, rows)], false)]),
         FusionProductSpace::new([SectorLeg::new([(even, cols)], false)]),
     );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|_| vec![rows, cols])
+        .collect::<Vec<_>>();
     let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
         homspace,
         &rule,
-        [vec![rows, cols]],
+        shapes,
     )
     .unwrap();
     TensorMap::from_vec_with_fusion_space(
@@ -1112,7 +1123,20 @@ fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
         crate::factorize::CompactSvdCopyProbe::default()
     );
     let rank = rows.min(cols);
-    let singular = &svd.singular_values[0].values;
+    if rank == 0 {
+        assert!(svd.u.space().space().homspace().domain().legs()[0]
+            .sectors()
+            .is_empty());
+        assert!(svd.vh.space().space().homspace().codomain().legs()[0]
+            .sectors()
+            .is_empty());
+    }
+    let singular = svd
+        .singular_values
+        .first()
+        .map(|entry| entry.values.as_slice())
+        .unwrap_or_default();
+    assert_eq!(singular.len(), rank);
     for col in 0..cols {
         for row in 0..rows {
             let reconstructed = (0..rank)
@@ -1135,8 +1159,9 @@ fn compact_svd_direct_spans_reconstruct_tall_and_wide_matrices() {
 }
 
 #[test]
-fn compact_svd_direct_plan_accepts_zero_rank_sectors() {
-    // What: empty row or column sectors publish an empty spectrum without factor routes.
+fn compact_svd_zero_only_input_normalizes_to_an_empty_factorization_result() {
+    // What: a zero-only row or column produces empty factors and no phantom
+    // spectrum entry or factor route.
     assert_rectangular_direct_svd(0, 3);
     assert_rectangular_direct_svd(3, 0);
 }
@@ -1152,6 +1177,14 @@ fn assert_rectangular_direct_qr(rows: usize, cols: usize) {
         crate::factorize::CompactQrCopyProbe::default()
     );
     let rank = rows.min(cols);
+    if rank == 0 {
+        assert!(q.space().space().homspace().domain().legs()[0]
+            .sectors()
+            .is_empty());
+        assert!(r.space().space().homspace().codomain().legs()[0]
+            .sectors()
+            .is_empty());
+    }
     for col in 0..cols {
         for row in 0..rows {
             let reconstructed = (0..rank)
@@ -1170,8 +1203,9 @@ fn compact_qr_direct_spans_reconstruct_tall_and_wide_matrices() {
 }
 
 #[test]
-fn compact_qr_direct_plan_accepts_zero_rank_sectors() {
-    // What: empty row or column sectors publish empty Q/R without calling invalid routes.
+fn compact_qr_zero_only_input_normalizes_to_an_empty_factorization_result() {
+    // What: a zero-only row or column produces empty Q/R spaces without
+    // calling an invalid factor route.
     assert_rectangular_direct_qr(0, 3);
     assert_rectangular_direct_qr(3, 0);
 }
@@ -1188,6 +1222,14 @@ fn assert_rectangular_direct_lq(rows: usize, cols: usize) {
     assert_eq!(probe.output_scatter_bytes, 0);
     assert_eq!(probe.scratch_buffer_count, 3);
     let rank = rows.min(cols);
+    if rank == 0 {
+        assert!(left.space().space().homspace().domain().legs()[0]
+            .sectors()
+            .is_empty());
+        assert!(right.space().space().homspace().codomain().legs()[0]
+            .sectors()
+            .is_empty());
+    }
     for col in 0..cols {
         for row in 0..rows {
             let reconstructed = (0..rank)
@@ -2853,8 +2895,9 @@ fn assert_zero_axis_svd_trunc(rows: usize, cols: usize) {
 }
 
 #[test]
-fn svd_trunc_accepts_zero_row_and_zero_column_sectors() {
-    // What: natural empty sectors remain rank zero for full and partial truncation.
+fn svd_trunc_zero_only_input_normalizes_to_an_empty_factorization_result() {
+    // What: full and partial truncation expose no phantom sector when either
+    // side of the zero-only input is absent.
     assert_zero_axis_svd_trunc(0, 3);
     assert_zero_axis_svd_trunc(3, 0);
 }
