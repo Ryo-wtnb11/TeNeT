@@ -84,7 +84,7 @@ where
 /// Returns the generation used for lock-free downstream front-cache validation.
 ///
 /// Why not treat this as a cross-layer quiescence barrier: reset also chains
-/// persistent and core intern state, while overlapping immutable operations
+/// core intern state, while overlapping immutable operations
 /// may finish against their previously acquired generation.
 pub fn operation_cache_reset_epoch() -> u64 {
     OPERATION_CACHE_RESET_EPOCH.load(Ordering::Acquire)
@@ -98,6 +98,10 @@ where
     registered_operation_cache::<RwLock<FxHashMap<K, V>>>().1
 }
 
+/// Clears process-resident operation caches and core intern tables.
+///
+/// Tree-transform execution plans are not persisted to disk, so this function
+/// has no filesystem ownership or cross-process reset effect.
 pub fn reset_global_operation_caches() {
     let _reset_guard = operation_cache_reset_lock()
         .lock()
@@ -116,7 +120,6 @@ pub fn reset_global_operation_caches() {
     // downstream cache initialization may acquire those locks before entering
     // this registry, creating the inverse lock order. The final phase removes
     // every cache registered during this deliberately unlocked interval.
-    crate::tree_transform::reset_tree_transform_persistent_cache_state();
     // Chain the tenet-core intern tables. Safe to run after the registry clear:
     // core content ids are monotonic and never reset, so no id survives here to
     // alias a fresh structure (see `reset_core_intern_tables`).

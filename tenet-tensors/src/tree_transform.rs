@@ -3,7 +3,6 @@ mod helpers;
 mod operation;
 mod plan;
 
-pub(crate) use cache::reset_tree_transform_persistent_cache_state;
 pub use cache::{
     TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats, TreeTransformPlanScope,
     TreeTransformSectorPlanKey, TreeTransformSourceGroupKey,

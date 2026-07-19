@@ -839,7 +839,7 @@ where
     }
 
     /// Built-in multiplicity-free sibling that carries typed sectors through
-    /// cold layout enumeration before encoding the persistent block keys.
+    /// cold layout enumeration before encoding reusable block keys.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcontract_fusion_dyn_into_lowered<R>(

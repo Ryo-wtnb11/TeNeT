@@ -1,3 +1,14 @@
+> **Current implementation boundary (issue #322, N3a):** tree-transform plans,
+> structures, and recoupling rows are reused only in validated process-resident
+> caches. Cache bounds remain separate policy work; retiring disk persistence
+> does not claim or introduce a new bound. The former automatic v1/v2 disk
+> execution-plan cache has been retired, so stale `tree_transform_plans_v1.bin` and
+> `tree_transform_plans_v2.bin` files are ignored and may be deleted manually.
+> The persistent-cache sections below are historical design exploration, not
+> the current implementation plan. Explicit network contraction-order
+> persistence through `tenet-network::{save_plan_cache, load_plan_cache}` is a
+> separate application-owned feature and remains supported.
+
 以下では **best な最終設計** と **そこへ向かう実装計画** を明確に分けます。ここでは将来の対象を **現在の multiplicity-free だけでなく、Generic fusion、つまり multiplicity あり** まで含むものとして扱います。
 
 ---

@@ -652,8 +652,8 @@ fn reset_fusion_tree_layout_caches() {
 /// back to the full immutable key only for matching prehashes.
 ///
 /// Why-not (persist to disk): the cached prehash is an implementation detail,
-/// so a loaded operation cache reconstructs identity from the semantic space
-/// value instead of carrying this process-local acceleration object.
+/// so it remains a process-local acceleration object while the semantic space
+/// value remains the portable identity.
 ///
 /// Why-not (unbounded intern): applications can construct arbitrarily many
 /// temporary spaces. The bounded table follows TensorKit's metadata-cache
