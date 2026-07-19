@@ -1127,7 +1127,7 @@ impl BlockStructureContent {
     /// intern table). Content-stable within one process — identical content
     /// interns to one `Arc` and thus one id — so it is a sound O(1) cache key.
     /// It is NOT semantically stable across processes or runs and must never be
-    /// persisted; a loaded cache reconstructs identity from the block content.
+    /// serialized; process-resident caches reconstruct identity from content.
     #[inline]
     pub fn id(&self) -> usize {
         self.id

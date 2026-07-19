@@ -1,3 +1,35 @@
+> **Current implementation boundary (issue #322, N3a):** tree-transform plans,
+> structures, and recoupling rows are reused only in validated process-resident
+> caches. Cache bounds remain separate policy work; retiring disk persistence
+> does not claim or introduce a new bound. The former automatic v1/v2 disk
+> execution-plan cache has been retired, so stale `tree_transform_plans_v1.bin` and
+> `tree_transform_plans_v2.bin` files are ignored and may be deleted manually.
+> The persistent-cache sections below are historical design exploration, not
+> the current implementation plan. Explicit network contraction-order
+> persistence through `tenet-network::{save_plan_cache, load_plan_cache}` is a
+> separate application-owned feature and remains supported.
+
+## Current production reference map
+
+- TensorKit revision
+  `cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91` constructs tree-transform
+  execution through
+  `src/tensors/treetransformers.jl::GenericTreeTransformer`,
+  `treebraider` (lines 162-167), and `treetransposer` (lines 175-179), with
+  process reuse provided by
+  `src/auxiliary/caches.jl::GlobalLRUCache` (lines 14-23 and 135-173). These
+  production paths do not persist a `TreeTransformer` disk artifact.
+- QSpace revision `dd2cc7e10dc7d3917b23309a44d1fe67adb4dc43`
+  uses `Source/clebsch_io.cc::get_file_name`,
+  `RCStore::save_CData` (lines 313-367), and `RCStore::load_CData` (lines
+  369-414) to persist representation coefficient data described by
+  `Source/QSpace.hh::QSpace` (`QIDX`/`DATA`/`CGR`). It does not persist a
+  lowered tensor-layout execution plan.
+- TeNeT therefore keeps validated tree-transform plans, structures, and
+  recoupling rows process-resident. This follows TensorKit's execution-cache
+  boundary while retaining QSpace's distinction between reusable category
+  data and workload-specific lowered execution state.
+
 以下では **best な最終設計** と **そこへ向かう実装計画** を明確に分けます。ここでは将来の対象を **現在の multiplicity-free だけでなく、Generic fusion、つまり multiplicity あり** まで含むものとして扱います。
 
 ---
@@ -74,7 +106,7 @@ FxHashMap<(RuleKey, TreeTransformOperation, FusionTreeBlockKey), Arc<...>>
 ```
 
 のような形で、`FusionTreeBlockKey` を memo key にしています。memo pre-pass でも `src_key.clone()` が出てきます。([raw.githubusercontent.com](https://raw.githubusercontent.com/Ryo-wtnb11/TeNeT/ac636fefb5864a1f6e5bf843cd419f958494da7e/tenet-tensors/src/tree_transform/plan.rs))  
-また process-global cache / row memo は `RwLock<FxHashMap<...>>` 系で持たれており、persistent cache もすでに存在します。([raw.githubusercontent.com](https://raw.githubusercontent.com/Ryo-wtnb11/TeNeT/ac636fefb5864a1f6e5bf843cd419f958494da7e/tenet-tensors/src/tree_transform/cache.rs))
+この設計案を作成した `ac636fef` 時点では、process-global cache / row memo は `RwLock<FxHashMap<...>>` 系で持たれ、tree-plan persistent cache も併存していました。後者は N3a で廃止されています。([raw.githubusercontent.com](https://raw.githubusercontent.com/Ryo-wtnb11/TeNeT/ac636fefb5864a1f6e5bf843cd419f958494da7e/tenet-tensors/src/tree_transform/cache.rs))
 
 したがって、ここにさらに naïve な global interner を足すと、**キーは軽くなるが lock 系がさらに増える**危険があります。
 
@@ -471,7 +503,7 @@ static INTERNER: RwLock<FxHashMap<FusionTreeKey, TreeId>>;
 - eviction しないなら memory が増え続ける
 - parallel cold compile で id assignment が非決定的になりやすい
 
-TeNeT にはすでに global `RwLock` 系の plan/structure/row cache と persistent cache があるので、さらに global interner を足すのは設計として重いです。([raw.githubusercontent.com](https://raw.githubusercontent.com/Ryo-wtnb11/TeNeT/ac636fefb5864a1f6e5bf843cd419f958494da7e/tenet-tensors/src/tree_transform/cache.rs))
+`ac636fef` 時点の TeNeT では global `RwLock` 系の plan/structure/row cache と persistent cache が併存していたため、さらに global interner を足すのは設計として重い、という診断でした。persistent cache は N3a で廃止されています。([raw.githubusercontent.com](https://raw.githubusercontent.com/Ryo-wtnb11/TeNeT/ac636fefb5864a1f6e5bf843cd419f958494da7e/tenet-tensors/src/tree_transform/cache.rs))
 
 ---
 

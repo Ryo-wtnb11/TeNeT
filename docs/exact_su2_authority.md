@@ -4,7 +4,7 @@ TeNeT delegates SU(2) Wigner 6j evaluation and Regge canonicalization to
 `wigner-symbols 0.5.1`. TeNeT retains the tensor-network convention boundary:
 checked doubled-spin labels, TensorKit-compatible argument order, phase and
 dimension factors, bounded publication of the final `f64`, fusion-rule identity,
-and persistent-plan invalidation.
+and in-process cache invalidation.
 
 The supported public range is `0 <= 2j <= 254`. The dependency's canonical key
 stores components as `u8`, and its complete-domain sizing reserves the following
@@ -22,8 +22,9 @@ silently defining a truncated SU(2) category.
 - All three authority crates are exact-pinned because this library repository
   intentionally does not track `Cargo.lock`. The canonical key is
   version-sensitive, and even a one-ULP conversion change would invalidate
-  persisted coefficient bits. Updating any pin therefore requires incrementing
-  `SU2_EXACT_AUTHORITY_VERSION` and the persistent-plan format.
+  cached coefficient bits. Updating any pin therefore requires incrementing
+  `SU2_EXACT_AUTHORITY_VERSION`, which participates in the in-process rule and
+  operation-cache identity.
 - Binary distributors must satisfy the applicable LGPL obligations for the
   linked GMP/Rug components, including notices and the required replacement or
   relinking mechanism. This audit records the dependency boundary; it is not a
