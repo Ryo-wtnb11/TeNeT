@@ -77,3 +77,37 @@ pub fn block_indices_for_keys(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenet_core::BlockSpec;
+
+    #[test]
+    fn block_key_lookup_preserves_request_order_and_missing_identity() {
+        // What: opaque block-key resolution returns indices in request order
+        // and reports the exact first key absent from the structure.
+        let first = BlockKey::opaque([2, 3]);
+        let second = BlockKey::opaque([5, 7]);
+        let missing = BlockKey::opaque([11, 13]);
+        let structure = BlockStructure::from_blocks_with_rank(
+            1,
+            vec![
+                BlockSpec::column_major_with_key(first.clone(), vec![1], 0).unwrap(),
+                BlockSpec::column_major_with_key(second.clone(), vec![1], 1).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            block_indices_for_keys(&structure, &[second, first]).unwrap(),
+            vec![1, 0]
+        );
+        assert_eq!(
+            block_indices_for_keys(&structure, std::slice::from_ref(&missing)),
+            Err(OperationError::MissingBlockKey {
+                key: Box::new(missing),
+            })
+        );
+    }
+}
