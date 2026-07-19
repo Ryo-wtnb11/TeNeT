@@ -265,12 +265,8 @@ where
             });
         }
         let required_len = structure.required_len()?;
-        if storage.len() != required_len {
-            return Err(CoreError::DimensionMismatch {
-                expected: required_len,
-                actual: storage.len(),
-            });
-        }
+        let storage_len = storage.len();
+        validate_exact_storage_extent(required_len, storage_len, storage_len)?;
         Ok(Self {
             storage,
             space,
@@ -280,14 +276,48 @@ where
         })
     }
 
+    /// Borrows the concrete storage immutably.
+    ///
+    /// The default `Vec<T>` storage cannot be resized through this borrow. Safe
+    /// element mutation for host storage remains available through
+    /// [`Self::data_mut`]; custom storage with interior mutability is checked
+    /// again at execution boundaries.
+    ///
+    /// ```compile_fail
+    /// use tenet_core::{TensorMap, TensorMapSpace};
+    ///
+    /// let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    /// let mut tensor = TensorMap::<i32, 1, 0>::from_vec(vec![1, 2], space).unwrap();
+    /// tensor.storage_mut().clear();
+    /// ```
     #[inline]
     pub fn storage(&self) -> &D {
         &self.storage
     }
 
+    /// Validates the storage extent immediately before an execution boundary.
+    ///
+    /// `actual_len` is the extent of the concrete view that execution will
+    /// access. Host callers must pass their slice length; callers for opaque
+    /// storage pass the corresponding backend-visible extent. The reported
+    /// [`TensorStorage::len`] is checked independently so custom storage cannot
+    /// hide a changed or inconsistent extent.
+    ///
+    /// Constructor-only validation or a stable-length marker would not cover
+    /// safe interior mutability reachable through [`Self::storage`]. Exact
+    /// execution-time validation preserves external storage support without
+    /// sealing the storage traits or adding an unsafe capability contract.
+    ///
+    /// This stays crate-local until an execution crate has a concrete
+    /// view-boundary contract that can tie `actual_len` to the view it will
+    /// access.
     #[inline]
-    pub fn storage_mut(&mut self) -> &mut D {
-        &mut self.storage
+    pub(crate) fn validate_storage_extent(&self, actual_len: usize) -> Result<(), CoreError> {
+        validate_exact_storage_extent(
+            self.structure.required_len()?,
+            self.storage.len(),
+            actual_len,
+        )
     }
 
     #[inline]
@@ -349,6 +379,13 @@ where
     D: HostReadableStorage<T>,
 {
     #[inline]
+    fn validated_host_data(&self) -> Result<&[T], CoreError> {
+        let data = self.storage.as_slice();
+        self.validate_storage_extent(data.len())?;
+        Ok(data)
+    }
+
+    #[inline]
     pub fn data(&self) -> &[T] {
         self.storage.as_slice()
     }
@@ -360,7 +397,7 @@ where
         F: FnMut(&BlockKey, &[usize], &T),
     {
         let structure = Arc::clone(&self.structure);
-        let data = self.storage.as_slice();
+        let data = self.validated_host_data()?;
         for index in 0..structure.block_count() {
             let block = structure.block(index)?;
             let shape = block.shape();
@@ -391,7 +428,7 @@ where
     pub fn subblock(&self) -> Result<BlockView<'_, T>, CoreError> {
         let block = self.structure.only_block()?;
         BlockView::new(
-            self.storage.as_slice(),
+            self.validated_host_data()?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -401,7 +438,7 @@ where
     pub fn block(&self, index: usize) -> Result<BlockView<'_, T>, CoreError> {
         let block = self.structure.block(index)?;
         BlockView::new(
-            self.storage.as_slice(),
+            self.validated_host_data()?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -411,7 +448,7 @@ where
     pub fn block_by_key(&self, key: &BlockKey) -> Result<BlockView<'_, T>, CoreError> {
         let block = self.structure.block_by_key(key)?;
         BlockView::new(
-            self.storage.as_slice(),
+            self.validated_host_data()?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -424,7 +461,7 @@ where
     ) -> Result<BlockView<'_, T>, CoreError> {
         let block = self.structure.fusion_tree_pair_block(key)?;
         BlockView::new(
-            self.storage.as_slice(),
+            self.validated_host_data()?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -464,9 +501,16 @@ where
         let keys = fusion_space
             .homspace()
             .fusion_tree_keys_from_external_sectors(rule, sectors)?;
+        let data = self.validated_host_data()?;
         let mut blocks = Vec::with_capacity(keys.len());
         for key in keys {
-            blocks.push(self.subblock_by_tree(&key)?);
+            let block = self.structure.fusion_tree_pair_block(&key)?;
+            blocks.push(BlockView::new(
+                data,
+                block.shape(),
+                block.strides(),
+                block.offset(),
+            )?);
         }
         Ok(blocks)
     }
@@ -476,6 +520,18 @@ impl<T, const NOUT: usize, const NIN: usize, S, D> TensorMap<T, NOUT, NIN, S, D>
 where
     D: HostWritableStorage<T>,
 {
+    /// Mutates host elements without exposing a length-changing storage API.
+    ///
+    /// ```
+    /// use tenet_core::{TensorMap, TensorMapSpace};
+    ///
+    /// let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+    /// let mut tensor = TensorMap::<i32, 1, 0>::from_vec(vec![1, 2], space).unwrap();
+    /// let len = tensor.data_mut().len();
+    /// tensor.data_mut()[1] = 7;
+    /// assert_eq!(tensor.data(), &[1, 7]);
+    /// assert_eq!(tensor.data().len(), len);
+    /// ```
     #[inline]
     pub fn data_mut(&mut self) -> &mut [T] {
         self.storage.as_mut_slice()
@@ -490,7 +546,7 @@ where
         F: FnMut(&BlockKey, &[usize]) -> T,
     {
         let structure = Arc::clone(&self.structure);
-        let data = self.storage.as_mut_slice();
+        let data = validated_host_data_mut(structure.as_ref(), &mut self.storage)?;
         for index in 0..structure.block_count() {
             let block = structure.block(index)?;
             let shape = block.shape();
@@ -521,7 +577,7 @@ where
     pub fn subblock_mut(&mut self) -> Result<BlockViewMut<'_, T>, CoreError> {
         let block = self.structure.only_block()?;
         BlockViewMut::new(
-            self.storage.as_mut_slice(),
+            validated_host_data_mut(self.structure.as_ref(), &mut self.storage)?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -531,7 +587,7 @@ where
     pub fn block_mut(&mut self, index: usize) -> Result<BlockViewMut<'_, T>, CoreError> {
         let block = self.structure.block(index)?;
         BlockViewMut::new(
-            self.storage.as_mut_slice(),
+            validated_host_data_mut(self.structure.as_ref(), &mut self.storage)?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -541,7 +597,7 @@ where
     pub fn block_mut_by_key(&mut self, key: &BlockKey) -> Result<BlockViewMut<'_, T>, CoreError> {
         let block = self.structure.block_by_key(key)?;
         BlockViewMut::new(
-            self.storage.as_mut_slice(),
+            validated_host_data_mut(self.structure.as_ref(), &mut self.storage)?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -554,7 +610,7 @@ where
     ) -> Result<BlockViewMut<'_, T>, CoreError> {
         let block = self.structure.fusion_tree_pair_block(key)?;
         BlockViewMut::new(
-            self.storage.as_mut_slice(),
+            validated_host_data_mut(self.structure.as_ref(), &mut self.storage)?,
             block.shape(),
             block.strides(),
             block.offset(),
@@ -578,6 +634,42 @@ where
             .unique_fusion_tree_key_from_external_sectors(rule, sectors)?;
         self.subblock_mut_by_tree(&key)
     }
+}
+
+#[inline]
+fn validated_host_data_mut<'a, T, D>(
+    structure: &BlockStructure,
+    storage: &'a mut D,
+) -> Result<&'a mut [T], CoreError>
+where
+    D: HostWritableStorage<T>,
+{
+    let required_len = structure.required_len()?;
+    let reported_len = storage.len();
+    let data = storage.as_mut_slice();
+    validate_exact_storage_extent(required_len, reported_len, data.len())?;
+    Ok(data)
+}
+
+#[inline]
+fn validate_exact_storage_extent(
+    required_len: usize,
+    reported_len: usize,
+    actual_len: usize,
+) -> Result<(), CoreError> {
+    if reported_len != required_len {
+        return Err(CoreError::DimensionMismatch {
+            expected: required_len,
+            actual: reported_len,
+        });
+    }
+    if actual_len != reported_len {
+        return Err(CoreError::DimensionMismatch {
+            expected: reported_len,
+            actual: actual_len,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

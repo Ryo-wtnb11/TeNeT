@@ -10468,6 +10468,282 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct OpaqueReportedStorage {
+        reported_len: std::cell::Cell<usize>,
+    }
+
+    impl TensorStorage<i32> for OpaqueReportedStorage {
+        fn len(&self) -> usize {
+            self.reported_len.get()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    #[test]
+    fn generic_storage_extent_rechecks_interior_mutable_reported_length() {
+        // What: custom opaque storage is still supported, but changing its
+        // reported extent after construction is rejected in both directions.
+        for reported_len in [1, 3] {
+            let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+            let tensor =
+                TensorMap::<i32, 1, 0, Trivial, OpaqueReportedStorage>::from_storage_with_structure(
+                    OpaqueReportedStorage {
+                        reported_len: std::cell::Cell::new(2),
+                    },
+                    space,
+                    BlockStructure::packed_column_major(1, [vec![2]]).unwrap(),
+                )
+                .unwrap();
+            tensor.storage().reported_len.set(reported_len);
+
+            assert_eq!(
+                tensor.validate_storage_extent(reported_len),
+                Err(CoreError::DimensionMismatch {
+                    expected: 2,
+                    actual: reported_len,
+                })
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct AdversarialHostStorage<T> {
+        data: Vec<T>,
+        reported_len: std::cell::Cell<usize>,
+    }
+
+    impl<T> TensorStorage<T> for AdversarialHostStorage<T> {
+        fn len(&self) -> usize {
+            self.reported_len.get()
+        }
+
+        fn placement(&self) -> Placement {
+            Placement::Host
+        }
+    }
+
+    impl<T> HostReadableStorage<T> for AdversarialHostStorage<T> {
+        fn as_slice(&self) -> &[T] {
+            &self.data
+        }
+    }
+
+    impl<T> HostWritableStorage<T> for AdversarialHostStorage<T> {
+        fn as_mut_slice(&mut self) -> &mut [T] {
+            &mut self.data
+        }
+    }
+
+    type AdversarialHostTensor =
+        TensorMap<i32, 1, 0, Trivial, AdversarialHostStorage<i32>>;
+
+    fn adversarial_host_tensor(actual_len: usize) -> AdversarialHostTensor {
+        let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+        let storage = AdversarialHostStorage {
+            data: (0..actual_len).map(|value| value as i32 + 10).collect(),
+            reported_len: std::cell::Cell::new(2),
+        };
+        AdversarialHostTensor::from_storage_with_structure(
+            storage,
+            space,
+            BlockStructure::packed_column_major(1, [vec![2]]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn assert_host_execution_rejects_extent(
+        mut tensor: AdversarialHostTensor,
+        error: CoreError,
+    ) {
+        let before = tensor.data().to_vec();
+        let visits = std::cell::Cell::new(0);
+        assert_eq!(
+            tensor.for_each_block_element(|_, _, _| visits.set(visits.get() + 1)),
+            Err(error.clone())
+        );
+        assert_eq!(visits.get(), 0);
+
+        let fills = std::cell::Cell::new(0);
+        assert_eq!(
+            tensor.fill_block_elements(|_, _| {
+                fills.set(fills.get() + 1);
+                -1
+            }),
+            Err(error.clone())
+        );
+        assert_eq!(fills.get(), 0);
+        assert_eq!(tensor.data(), before);
+
+        assert_eq!(tensor.subblock().unwrap_err(), error);
+        assert_eq!(tensor.block(0).unwrap_err(), error);
+        assert_eq!(
+            tensor.block_by_key(&BlockKey::ordinal(0)).unwrap_err(),
+            error
+        );
+        assert_eq!(tensor.subblock_mut().unwrap_err(), error);
+        assert_eq!(tensor.block_mut(0).unwrap_err(), error);
+        assert_eq!(
+            tensor
+                .block_mut_by_key(&BlockKey::ordinal(0))
+                .unwrap_err(),
+            error
+        );
+        assert_eq!(tensor.data(), before);
+    }
+
+    #[test]
+    fn host_execution_rejects_reported_extent_changes_before_callbacks_or_writes() {
+        // What: safe interior mutability in external storage cannot make a
+        // short or oversized reported extent reach callbacks, views, or writes.
+        for reported_len in [1, 3] {
+            let tensor = adversarial_host_tensor(2);
+            tensor.storage().reported_len.set(reported_len);
+            assert_host_execution_rejects_extent(
+                tensor,
+                CoreError::DimensionMismatch {
+                    expected: 2,
+                    actual: reported_len,
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn host_execution_rejects_slice_and_reported_extent_disagreement() {
+        // What: host execution checks the actual slice independently of the
+        // length reported during construction, for both short and oversized
+        // external storage, before callbacks, views, or writes.
+        for actual_len in [1, 3] {
+            let tensor = adversarial_host_tensor(actual_len);
+            assert_eq!(tensor.data().len(), actual_len);
+            assert_host_execution_rejects_extent(
+                tensor,
+                CoreError::DimensionMismatch {
+                    expected: 2,
+                    actual: actual_len,
+                },
+            );
+        }
+    }
+
+    fn adversarial_fusion_host_tensor(
+        actual_len: usize,
+    ) -> (
+        TensorMap<i32, 1, 1, Trivial, AdversarialHostStorage<i32>>,
+        FusionTreePairKey,
+    ) {
+        let rule = Z2FusionRule;
+        let fusion_space = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sectors(
+                [(Z2Irrep::EVEN, 1)],
+                [(Z2Irrep::EVEN, 1)],
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let key = fusion_space.homspace().fusion_tree_keys(&rule)[0].clone();
+        let tensor = TensorMap::from_storage_with_fusion_space(
+            AdversarialHostStorage {
+                data: vec![10; actual_len],
+                reported_len: std::cell::Cell::new(1),
+            },
+            fusion_space,
+        )
+        .unwrap();
+        (tensor, key)
+    }
+
+    #[test]
+    fn fusion_subblock_getters_reject_inexact_host_slices() {
+        // What: fusion-tree and external-sector getter siblings share the same
+        // exact host-slice boundary for immutable and mutable access.
+        for actual_len in [0, 2] {
+            let (mut tensor, key) = adversarial_fusion_host_tensor(actual_len);
+            let error = CoreError::DimensionMismatch {
+                expected: 1,
+                actual: actual_len,
+            };
+            let sectors = [Z2Irrep::EVEN.sector_id(), Z2Irrep::EVEN.sector_id()];
+
+            assert_eq!(tensor.subblock_by_tree(&key).unwrap_err(), error);
+            assert_eq!(
+                tensor
+                    .subblock_by_sectors(&Z2FusionRule, &sectors)
+                    .unwrap_err(),
+                error
+            );
+            assert_eq!(
+                tensor
+                    .subblocks_by_sectors(&Z2FusionRule, &sectors)
+                    .unwrap_err(),
+                error
+            );
+            assert_eq!(tensor.subblock_mut_by_tree(&key).unwrap_err(), error);
+            assert_eq!(
+                tensor
+                    .subblock_mut_by_sectors(&Z2FusionRule, &sectors)
+                    .unwrap_err(),
+                error
+            );
+            assert_eq!(tensor.data(), vec![10; actual_len]);
+        }
+    }
+
+    #[test]
+    fn fusion_sector_getters_report_sector_metadata_errors_before_storage_extent() {
+        // What: immutable sector getters preserve the mutable getter's error
+        // precedence when both the sector tuple and host slice are malformed.
+        let sectors = [Z2Irrep::EVEN.sector_id()];
+        let metadata_error = CoreError::DimensionMismatch {
+            expected: 2,
+            actual: 1,
+        };
+
+        for actual_len in [0, 2] {
+            let (mut tensor, _) = adversarial_fusion_host_tensor(actual_len);
+
+            assert_eq!(
+                tensor
+                    .subblocks_by_sectors(&Z2FusionRule, &sectors)
+                    .unwrap_err(),
+                metadata_error
+            );
+            assert_eq!(
+                tensor
+                    .subblock_by_sectors(&Z2FusionRule, &sectors)
+                    .unwrap_err(),
+                metadata_error
+            );
+            assert_eq!(
+                tensor
+                    .subblock_mut_by_sectors(&Z2FusionRule, &sectors)
+                    .unwrap_err(),
+                metadata_error
+            );
+            assert_eq!(tensor.data(), vec![10; actual_len]);
+        }
+    }
+
+    #[test]
+    fn data_mut_changes_elements_without_changing_storage_length() {
+        // What: ordinary host mutation remains available through a fixed-length
+        // slice after the concrete mutable-storage escape is removed.
+        let space = TensorMapSpace::<1, 0>::from_dims([2], []).unwrap();
+        let mut tensor = TensorMap::<i32, 1, 0>::from_vec(vec![1, 2], space).unwrap();
+        let len = tensor.data_mut().len();
+
+        tensor.data_mut()[1] = 7;
+
+        assert_eq!(tensor.data(), &[1, 7]);
+        assert_eq!(tensor.data().len(), len);
+    }
+
     #[test]
     fn vec_storage_allocates_similar_host_scratch() {
         let storage = vec![1.0_f64, 2.0];
