@@ -33,7 +33,7 @@ fn b_fill(mu: usize, k1: usize, k2: usize, j: usize) -> f64 {
 }
 
 fn vertex(tree: &tenet_core::FusionTreeKey) -> usize {
-    tree.vertices().first().map(|s| s.id()).unwrap_or(0)
+    tree.vertices().first().map(|s| s.get()).unwrap_or(0)
 }
 
 #[test]

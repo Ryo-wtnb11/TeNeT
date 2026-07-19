@@ -1,4 +1,4 @@
-> **Current implementation boundary (issue #322, N3a):** tree-transform plans,
+> **Current implementation boundary (issue #322, N3b):** tree-transform plans,
 > structures, and recoupling rows are reused only in validated process-resident
 > caches. Cache bounds remain separate policy work; retiring disk persistence
 > does not claim or introduce a new bound. The former automatic v1/v2 disk
@@ -8,6 +8,42 @@
 > the current implementation plan. Explicit network contraction-order
 > persistence through `tenet-network::{save_plan_cache, load_plan_cache}` is a
 > separate application-owned feature and remains supported.
+
+### Current categorical identity
+
+The production `FusionTreeKey` follows TensorKit's categorical identity:
+
+```rust
+pub struct FusionTreeKey {
+    uncoupled: SectorVec,
+    coupled: SectorId,
+    is_dual: DualVec,
+    innerlines: SectorVec,
+    vertices: MultiplicityVec,
+}
+```
+
+- `coupled` is mandatory. A rank-zero tree stores the provider's vacuum
+  exactly; there is no `None`/vacuum alias.
+- `vertices` contains one-based `MultiplicityIndex` values and always
+  participates in `Hash`, equality, and ordering.
+- fusion style is owned by the provider's `FusionStyleKind`; it is not copied
+  into each tree key.
+- raw numeric import is fallible and rejects vertex label zero with
+  `CoreError::InvalidMultiplicityIndex`.
+- multiplicity-free compact execution may omit vertex storage only behind a
+  proof tied to the exact checked source slice. Materialization restores
+  `MultiplicityIndex::ONE`; Generic trees cannot enter this projection.
+
+Migration from the pre-N3b API:
+
+| Before | Current |
+|---|---|
+| `coupled: Option<SectorId>` | mandatory `SectorId` |
+| rank-zero `None` or `Some(vacuum)` | exact provider vacuum |
+| vertex `SectorId` / raw zero | `MultiplicityIndex` / zero rejected |
+| tree-local `has_multiplicity` | provider `FusionStyleKind` |
+| infallible raw pair import | `try_pair_from_sector_ids` |
 
 ## Current production reference map
 
@@ -19,16 +55,34 @@
   process reuse provided by
   `src/auxiliary/caches.jl::GlobalLRUCache` (lines 14-23 and 135-173). These
   production paths do not persist a `TreeTransformer` disk artifact.
+  `src/fusiontrees/fusiontrees.jl::FusionTree`, `hash`, `==`, and
+  `treeindex_data` provide the N3b identity reference: coupled sector is
+  mandatory and Generic vertex labels are one-based identity data.
 - QSpace revision `dd2cc7e10dc7d3917b23309a44d1fe67adb4dc43`
   uses `Source/clebsch_io.cc::get_file_name`,
   `RCStore::save_CData` (lines 313-367), and `RCStore::load_CData` (lines
   369-414) to persist representation coefficient data described by
   `Source/QSpace.hh::QSpace` (`QIDX`/`DATA`/`CGR`). It does not persist a
-  lowered tensor-layout execution plan.
+  lowered tensor-layout execution plan. QSpace has no direct FusionTree-key
+  analogue: `Source/QSpace.cc::QSpace<TQ,TD>::initOpZ_WET` (definition near
+  line 2342; outer-multiplicity loop at lines 2617-2637) materializes every
+  outer-multiplicity component `im` as a distinct `QIDX`/`DATA`/`CGR` row,
+  while `Source/clebsch.hh::CStore` and its `cdata` layout comments (lines
+  24-68) define that extra outer-multiplicity dimension and indexing. TeNeT's
+  typed, one-based `MultiplicityIndex` is the semantic-key representation of
+  the same non-aliasing requirement. The mandatory coupled tree sector has no
+  direct QSpace-tree counterpart because QSpace stores block quantum-number
+  records rather than fusion trees.
 - TeNeT therefore keeps validated tree-transform plans, structures, and
   recoupling rows process-resident. This follows TensorKit's execution-cache
   boundary while retaining QSpace's distinction between reusable category
   data and workload-specific lowered execution state.
+
+> **Historical design record:** The long-form analysis below predates the N3b
+> migration and preserves the reasoning that led to it. Statements phrased as
+> "current" or "future" describe that pre-N3b state. The production contract
+> and migration table above supersede them: TeNeT already supports Generic
+> fusion, and semantic `FusionTreeKey` identity always includes vertex labels.
 
 以下では **best な最終設計** と **そこへ向かう実装計画** を明確に分けます。ここでは将来の対象を **現在の multiplicity-free だけでなく、Generic fusion、つまり multiplicity あり** まで含むものとして扱います。
 
@@ -52,21 +106,23 @@ CompactKey          // arena lookup 用の exact compact key
 現在の `FusionTreeKey` は semantic key と runtime key を兼ねています。  
 これが問題です。
 
-現在の構造は、
+N3b で採用した構造は、
 
 ```rust
 pub struct FusionTreeKey {
     uncoupled:  SectorVec,
-    coupled:    Option<SectorId>,
+    coupled:    SectorId,
     is_dual:    DualVec,
     innerlines: SectorVec,
-    vertices:   SectorVec,
+    vertices:   MultiplicityVec,
 }
 ```
 
-で、`vertices` は `Hash/Eq/Ord` から除外されています。これは現行の multiplicity-free 前提では正しいです。TeNeT のコードコメントにも、multipity-free では vertices が常に trivial label なので identity から除外している、と書かれています。([raw.githubusercontent.com](https://raw.githubusercontent.com/Ryo-wtnb11/TeNeT/ac636fefb5864a1f6e5bf843cd419f958494da7e/tenet-core/src/fusion_tree.rs))
+N3b では `vertices` は常に `Hash/Eq/Ord` に含まれます。
+multiplicity-free の局所表現でだけ、検査済み source slice に結び付いた
+proof の下で `MultiplicityIndex::ONE` を省略します。
 
-しかし、将来 **multiplicity あり**まで行くなら、`vertices` は identity に入る必要があります。TensorKit 側も `FusionTree` に `vertices::NTuple{L,Int}` を持ち、multiplicity-free では constant `1`、Generic fusion では vertex label として扱っています。さらに TensorKit の hash/eq は Generic fusion では `vertices` を含めます。([raw.githubusercontent.com](https://raw.githubusercontent.com/QuantumKitHub/TensorKit.jl/v0.17.0/src/fusiontrees/fusiontrees.jl))
+Generic fusion では `vertices` が identity に入る必要があります。TensorKit 側も `FusionTree` に `vertices::NTuple{L,Int}` を持ち、multiplicity-free では constant `1`、Generic fusion では vertex label として扱っています。N3b の TeNeT は fusion style にかかわらず semantic key の hash/eq/ord に `vertices` を含めます。([raw.githubusercontent.com](https://raw.githubusercontent.com/QuantumKitHub/TensorKit.jl/v0.17.0/src/fusiontrees/fusiontrees.jl))
 
 したがって最終的な方針はこれです。
 
@@ -173,10 +229,9 @@ pub struct TreePairId {
 
 ---
 
-## 3.2 `coupled: Option<SectorId>` は runtime key から外す
+## 3.2 mandatory `coupled: SectorId`（N3b で完了）
 
-現在の `FusionTreeKey` は `coupled: Option<SectorId>` です。  
-しかし canonical runtime tree では、`coupled` は基本的に **必ず存在する値**にした方がよいです。
+現在の `FusionTreeKey` では `coupled` は **必ず存在する値**です。
 
 つまり best design では、
 
@@ -189,17 +244,8 @@ pub struct TreeSpaceKey {
 
 とする。
 
-`Option<SectorId>` は legacy API、partial tree、または construction helper のために残すのはよいです。  
-しかし **arena に intern される canonical tree** では `coupled` を non-optional にする。
-
-理由は単純です。
-
-```text
-None を持つ tree と Some(vacuum) を持つ tree が混ざると、
-canonical identity が曖昧になる
-```
-
-からです。
+rank 0 も provider vacuum を正確に格納します。partial tree や raw
+constructor にも `Option` alias は残していません。
 
 ---
 
@@ -982,8 +1028,9 @@ same innerlines but different vertices
 
 が別の basis state になることです。
 
-したがって `vertices` を hash/eq から除外する設計は、最終的には不可です。  
-現在は multiplicity-free だから除外してよいだけです。
+したがって full semantic key から `vertices` を hash/eq/ord で除外する
+設計は不可です。N3b では常に identity に含め、private な検査済み
+multiplicity-free projection だけが label `ONE` の保存・処理を省略します。
 
 ---
 
@@ -1466,7 +1513,8 @@ vertices が F/R-symbol の matrix indices になる
 
 という点です。
 
-この Phase では、multiplicity-free の path は `Simple` のまま、Generic だけ `vertices` を明示的に持つ。
+Semantic tree は両 style で `vertices` を明示的に持ちます。検査済みの
+multiplicity-free compact execution だけが `ONE` を暗黙化できます。
 
 ---
 
@@ -1525,14 +1573,14 @@ After:
 ```rust
 pub struct FusionTreeKey {
     uncoupled: SectorVec,
-    coupled: Option<SectorId>,
+    coupled: SectorId,
     is_dual: DualVec,
     innerlines: SectorVec,
-    vertices: SectorVec,
+    vertices: MultiplicityVec,
 }
 ```
 
-これは既存コードとの互換性が高い。
+N3b の current compatibility surface はこの mandatory form です。
 
 ### Option B: `FusionTreeSpec` wrapper にする
 

@@ -747,7 +747,6 @@ pub fn diagonal_bond_bound_space_like<R, V>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let rule = authority.provider();
     let new_leg = SectorLeg::new(
         spectrum
             .iter()
@@ -767,7 +766,7 @@ where
             .iter()
             .map(|key| {
                 let count = length_by_sector
-                    .get(&coupled_of(rule, key.codomain_tree()))
+                    .get(&coupled_of(key.codomain_tree()))
                     .copied()
                     .unwrap_or(0);
                 vec![count, count]
@@ -803,7 +802,7 @@ where
         .iter()
         .map(|key| {
             let count = length_by_sector
-                .get(&coupled_of(rule, key.codomain_tree()))
+                .get(&coupled_of(key.codomain_tree()))
                 .copied()
                 .unwrap_or(0);
             vec![count, count]
@@ -839,10 +838,7 @@ where
         let BlockKey::FusionTree(tree) = block.key() else {
             continue;
         };
-        let sector = tree
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        let sector = tree.codomain_tree().coupled();
         let Some(&entry) = spectrum_by_sector.get(&sector) else {
             continue;
         };
@@ -1225,20 +1221,17 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    Ok(sector_matricizations(
-        input.space().provider(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?
-    .into_iter()
-    .map(|matrix| SectorMatricizationDiagnostic {
-        sector: matrix.sector,
-        rows: matrix.rows,
-        cols: matrix.cols,
-        elements: matrix.data.len(),
-    })
-    .collect())
+    Ok(
+        sector_matricizations(space.structure(), input.data(), space.nout())?
+            .into_iter()
+            .map(|matrix| SectorMatricizationDiagnostic {
+                sector: matrix.sector,
+                rows: matrix.rows,
+                cols: matrix.cols,
+                elements: matrix.data.len(),
+            })
+            .collect(),
+    )
 }
 
 /// All singular values per coupled sector, descending (MatrixAlgebraKit
@@ -1266,7 +1259,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     // Values-only: per coupled sector call the no-vector SVD (`svd_vals`,
     // LAPACK `job='N'`) and keep the spectrum. Unlike `svd_compact_dyn` this
@@ -1275,8 +1267,7 @@ where
     // `svd_compact_dyn(..).map(|svd| svd.singular_values)` computed then threw
     // away. LAPACK computes the singular values identically with or without
     // vectors, so the spectrum is bit-for-bit the full-SVD spectrum.
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut singular_values = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
@@ -1377,13 +1368,11 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     if let Some(plan) = compact_factor_plan(input.space())? {
         return svd_compact_direct_regions(dense, input, &plan);
     }
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_svd_input_pack(&matricizations);
 
@@ -1467,18 +1456,10 @@ where
                 .map(Into::into)
                 .collect(),
         });
-        scatter_left_sector_blocks(
-            rule,
-            u_space.space(),
-            &mut u_data,
-            matrix,
-            &u_workspace,
-            max_rows,
-        )?;
+        scatter_left_sector_blocks(u_space.space(), &mut u_data, matrix, &u_workspace, max_rows)?;
         #[cfg(test)]
         record_compact_svd_output_scatter::<D>(matrix.rows * rank);
         scatter_right_sector_blocks(
-            rule,
             vt_space.space(),
             &mut vt_data,
             matrix,
@@ -1623,11 +1604,11 @@ where
         .regions
         .iter()
         .map(|region| SectorRank {
-            sector: region_sector(input.provider(), region),
+            sector: region_sector(region),
             kept: region.rows().min(region.cols()),
         })
         .collect::<Vec<_>>();
-    let layouts = region_matricization_skeletons::<R, f64>(input.provider(), &source.regions);
+    let layouts = region_matricization_skeletons::<f64>(&source.regions);
     let (u_space, vh_space) =
         build_left_right_bound_spaces::<R, f64>(input, space.homspace(), &layouts, &ranks)?;
     let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
@@ -1640,12 +1621,7 @@ where
                 message: "compact right factor is not a coupled-sector matrix layout",
             },
         )?;
-    let routes = compile_compact_factor_routes(
-        input.provider(),
-        &source.regions,
-        &left_regions,
-        &right_regions,
-    )?;
+    let routes = compile_compact_factor_routes(&source.regions, &left_regions, &right_regions)?;
     Ok(Some(Arc::new(CompactFactorPlan {
         source,
         left_layout: u_space.validated_layout(),
@@ -1656,22 +1632,18 @@ where
     })))
 }
 
-fn compile_compact_factor_routes<R>(
-    rule: &R,
+fn compile_compact_factor_routes(
     source_regions: &[CoupledSectorRegion],
     left_regions: &[CoupledSectorRegion],
     right_regions: &[CoupledSectorRegion],
-) -> Result<Arc<[CompactFactorRoute]>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let left_by_sector = sector_region_index_map(rule, left_regions)?;
-    let right_by_sector = sector_region_index_map(rule, right_regions)?;
+) -> Result<Arc<[CompactFactorRoute]>, OperationError> {
+    let left_by_sector = sector_region_index_map(left_regions)?;
+    let right_by_sector = sector_region_index_map(right_regions)?;
     let mut routes = Vec::with_capacity(source_regions.len());
     let mut used_left = vec![false; left_regions.len()];
     let mut used_right = vec![false; right_regions.len()];
     for (source_region, region) in source_regions.iter().enumerate() {
-        let sector = region_sector(rule, region);
+        let sector = region_sector(region);
         let rank = region.rows().min(region.cols());
         let (left_region, right_region) = if rank == 0 {
             (None, None)
@@ -1723,16 +1695,12 @@ pub(crate) fn compact_factor_plan_regions_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn validate_compact_factor_routes_for_test<R>(
-    rule: &R,
+pub(crate) fn validate_compact_factor_routes_for_test(
     source: &[CoupledSectorRegion],
     u: &[CoupledSectorRegion],
     vh: &[CoupledSectorRegion],
-) -> Result<(), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    compile_compact_factor_routes(rule, source, u, vh).map(|_| ())
+) -> Result<(), OperationError> {
+    compile_compact_factor_routes(source, u, vh).map(|_| ())
 }
 
 fn svd_compact_direct_regions<E, R, D>(
@@ -1821,17 +1789,13 @@ where
     Ok((u, vh, singular_values))
 }
 
-fn region_matricization_skeletons<R, D>(
-    rule: &R,
+fn region_matricization_skeletons<D>(
     regions: &[CoupledSectorRegion],
-) -> Vec<SectorMatricization<D>>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
+) -> Vec<SectorMatricization<D>> {
     regions
         .iter()
         .map(|region| SectorMatricization {
-            sector: region_sector(rule, region),
+            sector: region_sector(region),
             rows: region.rows(),
             cols: region.cols(),
             row_trees: region
@@ -1849,26 +1813,16 @@ where
         .collect()
 }
 
-fn region_sector<R>(rule: &R, region: &CoupledSectorRegion) -> SectorId
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    region.coupled().unwrap_or_else(|| rule.vacuum())
+fn region_sector(region: &CoupledSectorRegion) -> SectorId {
+    region.coupled()
 }
 
-fn sector_region_index_map<R>(
-    rule: &R,
+fn sector_region_index_map(
     regions: &[CoupledSectorRegion],
-) -> Result<HashMap<SectorId, usize>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
+) -> Result<HashMap<SectorId, usize>, OperationError> {
     let mut by_sector = HashMap::with_capacity(regions.len());
     for (index, region) in regions.iter().enumerate() {
-        if by_sector
-            .insert(region_sector(rule, region), index)
-            .is_some()
-        {
+        if by_sector.insert(region_sector(region), index).is_some() {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "coupled-sector region description contains a duplicate sector",
             });
@@ -2146,7 +2100,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = authority.provider();
     let source_space = authority.space();
     let nout = source_space.nout();
     let source_structure = Arc::clone(source_space.structure());
@@ -2190,7 +2143,7 @@ where
                 } else {
                     key.domain_tree()
                 };
-                shape[axis] = kept_of(coupled_of(rule, bond_tree));
+                shape[axis] = kept_of(coupled_of(bond_tree));
                 Ok(shape)
             })
             .collect::<Result<Vec<_>, OperationError>>()
@@ -2244,7 +2197,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = authority.provider();
     let rank_by_sector: HashMap<SectorId, usize> =
         ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
     let matrix_by_sector = matricization_map(matricizations);
@@ -2259,7 +2211,7 @@ where
     let left = authority.derive_from_fusion_tree_shapes(left_hom, |keys| {
         keys.iter()
             .map(|key| {
-                let sector = coupled_of(rule, key.codomain_tree());
+                let sector = coupled_of(key.codomain_tree());
                 let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
                 shape.push(sector_rank(sector));
                 Ok(shape)
@@ -2274,7 +2226,7 @@ where
     let right = authority.derive_from_fusion_tree_shapes(right_hom, |keys| {
         keys.iter()
             .map(|key| {
-                let sector = coupled_of(rule, key.domain_tree());
+                let sector = coupled_of(key.domain_tree());
                 let mut shape = vec![sector_rank(sector)];
                 shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
                 Ok(shape)
@@ -2294,7 +2246,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = authority.provider();
     let rank_by_sector: HashMap<SectorId, usize> =
         ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
     let matrix_by_sector = matricization_map(matricizations);
@@ -2306,7 +2257,7 @@ where
     authority.derive_from_fusion_tree_shapes(hom, |keys| {
         keys.iter()
             .map(|key| {
-                let sector = coupled_of(rule, key.codomain_tree());
+                let sector = coupled_of(key.codomain_tree());
                 let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
                 shape.push(rank_by_sector.get(&sector).copied().unwrap_or(0));
                 Ok(shape)
@@ -2327,7 +2278,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = authority.provider();
     let ranks = pairs
         .iter()
         .map(|pair| SectorRank {
@@ -2346,7 +2296,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let sector = coupled_of(rule, key.codomain_tree());
+        let sector = coupled_of(key.codomain_tree());
         let matrix = matricization_of(&matrix_by_sector, sector)?;
         let pair = pair_by_sector[&sector];
         let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
@@ -2367,7 +2317,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let sector = coupled_of(rule, key.domain_tree());
+        let sector = coupled_of(key.domain_tree());
         let matrix = matricization_of(&matrix_by_sector, sector)?;
         let pair = pair_by_sector[&sector];
         let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
@@ -2413,21 +2363,13 @@ where
         pairs.iter().map(|pair| (pair.sector, pair)).collect();
     for matrix in matricizations {
         let pair = pair_by_sector[&matrix.sector];
-        scatter_left_sector_blocks(
-            authority.provider(),
-            space.space(),
-            &mut data,
-            matrix,
-            &pair.left,
-            pair.left_rows,
-        )?;
+        scatter_left_sector_blocks(space.space(), &mut data, matrix, &pair.left, pair.left_rows)?;
     }
     let nout = space.space().nout();
     BoundDynFactor::from_bound(space, data, nout, 1)
 }
 
-fn scatter_left_sector_blocks<R, D>(
-    rule: &R,
+fn scatter_left_sector_blocks<D>(
     left_space: &DynamicFusionMapSpace,
     left_data: &mut [D],
     matrix: &SectorMatricization<D>,
@@ -2435,7 +2377,6 @@ fn scatter_left_sector_blocks<R, D>(
     factor_rows: usize,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let left_structure = Arc::clone(left_space.structure());
@@ -2446,7 +2387,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of(rule, key.codomain_tree()) != matrix.sector {
+        if coupled_of(key.codomain_tree()) != matrix.sector {
             continue;
         }
         let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
@@ -2464,8 +2405,7 @@ where
     Ok(())
 }
 
-fn scatter_right_sector_blocks<R, D>(
-    rule: &R,
+fn scatter_right_sector_blocks<D>(
     right_space: &DynamicFusionMapSpace,
     right_data: &mut [D],
     matrix: &SectorMatricization<D>,
@@ -2473,7 +2413,6 @@ fn scatter_right_sector_blocks<R, D>(
     factor_rows: usize,
 ) -> Result<(), OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let right_structure = Arc::clone(right_space.structure());
@@ -2484,7 +2423,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of(rule, key.domain_tree()) != matrix.sector {
+        if coupled_of(key.domain_tree()) != matrix.sector {
             continue;
         }
         let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
@@ -2609,7 +2548,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
         return Err(OperationError::UnsupportedTensorContractScope {
@@ -2619,8 +2557,7 @@ where
     if let Some(plan) = compact_factor_plan(input.space())? {
         return eigh_full_direct_regions(dense, input, &plan);
     }
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_eigh_input_pack(&matricizations);
 
@@ -2696,14 +2633,7 @@ where
             sector: matrix.sector,
             values: sorted_values,
         });
-        scatter_left_sector_blocks(
-            rule,
-            v_space.space(),
-            &mut v_data,
-            matrix,
-            &sorted_vectors,
-            n,
-        )?;
+        scatter_left_sector_blocks(v_space.space(), &mut v_data, matrix, &sorted_vectors, n)?;
         #[cfg(test)]
         record_eigh_output_scatter::<D>(n * n);
     }
@@ -2994,10 +2924,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
 
     let mut pairs = Vec::with_capacity(matricizations.len());
     let mut singular_values = Vec::with_capacity(matricizations.len());
@@ -3214,7 +3142,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = authority.provider();
     let row_leg = SectorLeg::new(
         spectra
             .iter()
@@ -3235,7 +3162,7 @@ where
         Ok(keys
             .iter()
             .map(|key| {
-                let sector = coupled_of(rule, key.codomain_tree());
+                let sector = coupled_of(key.codomain_tree());
                 vec![rows_of(sector), cols_of(sector)]
             })
             .collect::<Vec<_>>())
@@ -3255,10 +3182,7 @@ where
         let BlockKey::FusionTree(tree) = block.key() else {
             continue;
         };
-        let sector = tree
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| tree.codomain_tree().uncoupled()[0]);
+        let sector = tree.codomain_tree().coupled();
         let Some(&entry) = spectrum_by_sector.get(&sector) else {
             continue;
         };
@@ -3500,14 +3424,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations(
-        provider.as_ref(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?;
+    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rows = matrix.rows;
@@ -3575,14 +3493,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations(
-        provider.as_ref(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?;
+    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rows = matrix.rows;
@@ -3735,15 +3647,13 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     if space.homspace().codomain() != space.homspace().domain() {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "eig requires an endomorphism (codomain == domain)",
         });
     }
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
 
     let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matricizations.len());
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
@@ -3935,7 +3845,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     // Values-only: per sector call the no-vector Hermitian eig (`eigh_vals`,
     // LAPACK `job='N'`) and keep the spectrum sorted descending by magnitude.
@@ -3948,8 +3857,7 @@ where
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let n = matrix.rows;
@@ -3995,7 +3903,6 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     // Values-only: per sector call the no-vector general eig (`eig_vals`, LAPACK
     // `job='N'`) and keep the complex spectrum sorted descending by magnitude.
@@ -4008,8 +3915,7 @@ where
             message: "eig requires an endomorphism (codomain == domain)",
         });
     }
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let n = matrix.rows;
@@ -4062,14 +3968,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations(
-        provider.as_ref(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?;
+    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::new();
     for matrix in &matrices {
         let (rows, cols) = (matrix.rows, matrix.cols);
@@ -4125,14 +4025,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations(
-        provider.as_ref(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?;
+    let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::new();
     for matrix in &matrices {
         let (rows, cols) = (matrix.rows, matrix.cols);
@@ -4362,11 +4256,8 @@ where
     if let Some(plan) = compact_factor_plan(input.space())? {
         return qr_compact_direct_regions(dense, input, &plan);
     }
-    let provider = input.space().provider_arc();
-    let rule = provider.as_ref();
     let space = input.space().space();
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_qr_input_pack(&matricizations);
     let mut pairs = Vec::with_capacity(matricizations.len());
@@ -4502,11 +4393,8 @@ where
     if let Some(plan) = compact_factor_plan(input.space())? {
         return lq_compact_direct_regions(dense, input, &plan);
     }
-    let provider = input.space().provider_arc();
-    let rule = provider.as_ref();
     let space = input.space().space();
-    let matricizations =
-        sector_matricizations(rule, space.structure(), input.data(), space.nout())?;
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_compact_lq_input_pack(&matricizations);
     let mut pairs = Vec::with_capacity(matricizations.len());
@@ -4963,11 +4851,8 @@ fn scatter_matrix_block<D: Copy>(
     }
 }
 
-fn coupled_of<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    tree.coupled().unwrap_or_else(|| rule.vacuum())
+fn coupled_of(tree: &FusionTreeKey) -> SectorId {
+    tree.coupled()
 }
 
 fn matricization_map<D>(
@@ -5056,14 +4941,12 @@ fn checked_sector_regions(
 
 /// Packs every coupled sector of the source data into its dense column-major
 /// matricization, independent of the storage layout.
-fn sector_matricizations<R, D>(
-    rule: &R,
+fn sector_matricizations<D>(
     structure: &BlockStructure,
     data: &[D],
     nout: usize,
 ) -> Result<Vec<SectorMatricization<D>>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
@@ -5078,7 +4961,7 @@ where
                 index,
             });
         };
-        let sector = coupled_of(rule, key.codomain_tree());
+        let sector = coupled_of(key.codomain_tree());
         let row_dim: usize = block.shape()[..nout].iter().product();
         let col_dim: usize = block.shape()[nout..].iter().product();
         let matrix = match matricizations
@@ -5134,7 +5017,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let sector = coupled_of(rule, key.codomain_tree());
+        let sector = coupled_of(key.codomain_tree());
         let matrix = matricizations
             .iter_mut()
             .find(|matrix| matrix.sector == sector)
@@ -5195,24 +5078,19 @@ where
 // rationale as the B3c-1 `is_core_form_..._generic` sibling).
 // ============================================================================
 
-fn coupled_of_generic<R>(rule: &R, tree: &FusionTreeKey) -> SectorId
-where
-    R: FusionRule,
-{
-    tree.coupled().unwrap_or_else(|| rule.vacuum())
+fn coupled_of_generic(tree: &FusionTreeKey) -> SectorId {
+    tree.coupled()
 }
 
 /// Generic sibling of [`sector_matricizations`]: identical two-pass stacking
 /// (vertex-labelled trees are distinct keys, so OM trees get distinct rows /
 /// columns of the coupled block, exactly TensorKit's `block(t, c)` layout).
-fn sector_matricizations_generic<R, D>(
-    rule: &R,
+fn sector_matricizations_generic<D>(
     structure: &BlockStructure,
     data: &[D],
     nout: usize,
 ) -> Result<Vec<SectorMatricization<D>>, OperationError>
 where
-    R: FusionRule,
     D: FactorScalar,
 {
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
@@ -5227,7 +5105,7 @@ where
                 index,
             });
         };
-        let sector = coupled_of_generic(rule, key.codomain_tree());
+        let sector = coupled_of_generic(key.codomain_tree());
         let row_dim: usize = block.shape()[..nout].iter().product();
         let col_dim: usize = block.shape()[nout..].iter().product();
         let matrix = match matricizations
@@ -5283,7 +5161,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let sector = coupled_of_generic(rule, key.codomain_tree());
+        let sector = coupled_of_generic(key.codomain_tree());
         let matrix = matricizations
             .iter_mut()
             .find(|matrix| matrix.sector == sector)
@@ -5348,7 +5226,7 @@ where
     let left_shapes = left_keys
         .iter()
         .map(|key| {
-            let sector = coupled_of_generic(rule, key.codomain_tree());
+            let sector = coupled_of_generic(key.codomain_tree());
             let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
             shape.push(sector_rank(sector));
             Ok(shape)
@@ -5369,7 +5247,7 @@ where
     let right_shapes = right_keys
         .iter()
         .map(|key| {
-            let sector = coupled_of_generic(rule, key.domain_tree());
+            let sector = coupled_of_generic(key.domain_tree());
             let mut shape = vec![sector_rank(sector)];
             shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
             Ok(shape)
@@ -5406,7 +5284,6 @@ where
     let mut right_data = vec![D::zero(); right_space.space().required_len()?];
     for (matrix, pair) in matricizations.iter().zip(pairs) {
         scatter_left_sector_blocks_generic(
-            provider.as_ref(),
             left_space.space(),
             &mut left_data,
             matrix,
@@ -5414,7 +5291,6 @@ where
             pair.left_rows,
         )?;
         scatter_right_sector_blocks_generic(
-            provider.as_ref(),
             right_space.space(),
             &mut right_data,
             matrix,
@@ -5431,8 +5307,7 @@ where
 }
 
 /// Generic sibling of [`scatter_left_sector_blocks`].
-fn scatter_left_sector_blocks_generic<R, D>(
-    rule: &R,
+fn scatter_left_sector_blocks_generic<D>(
     left_space: &DynamicFusionMapSpace,
     left_data: &mut [D],
     matrix: &SectorMatricization<D>,
@@ -5440,7 +5315,6 @@ fn scatter_left_sector_blocks_generic<R, D>(
     factor_rows: usize,
 ) -> Result<(), OperationError>
 where
-    R: FusionRule,
     D: FactorScalar,
 {
     let left_structure = Arc::clone(left_space.structure());
@@ -5451,7 +5325,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of_generic(rule, key.codomain_tree()) != matrix.sector {
+        if coupled_of_generic(key.codomain_tree()) != matrix.sector {
             continue;
         }
         let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
@@ -5470,8 +5344,7 @@ where
 }
 
 /// Generic sibling of [`scatter_right_sector_blocks`].
-fn scatter_right_sector_blocks_generic<R, D>(
-    rule: &R,
+fn scatter_right_sector_blocks_generic<D>(
     right_space: &DynamicFusionMapSpace,
     right_data: &mut [D],
     matrix: &SectorMatricization<D>,
@@ -5479,7 +5352,6 @@ fn scatter_right_sector_blocks_generic<R, D>(
     factor_rows: usize,
 ) -> Result<(), OperationError>
 where
-    R: FusionRule,
     D: FactorScalar,
 {
     let right_structure = Arc::clone(right_space.structure());
@@ -5490,7 +5362,7 @@ where
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        if coupled_of_generic(rule, key.domain_tree()) != matrix.sector {
+        if coupled_of_generic(key.domain_tree()) != matrix.sector {
             continue;
         }
         let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
@@ -5519,10 +5391,9 @@ where
     R: FusionRule,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     let matricizations =
-        sector_matricizations_generic(rule, space.structure(), input.data(), space.nout())?;
+        sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
 
     let ranks = matricizations
         .iter()
@@ -5606,7 +5477,6 @@ where
                 .collect(),
         });
         scatter_left_sector_blocks_generic(
-            rule,
             u_space.space(),
             &mut u_data,
             matrix,
@@ -5614,7 +5484,6 @@ where
             max_rows,
         )?;
         scatter_right_sector_blocks_generic(
-            rule,
             vt_space.space(),
             &mut vt_data,
             matrix,
@@ -5673,7 +5542,7 @@ where
         .iter()
         .map(|key| {
             let count = length_by_sector
-                .get(&coupled_of_generic(rule, key.codomain_tree()))
+                .get(&coupled_of_generic(key.codomain_tree()))
                 .copied()
                 .unwrap_or(0);
             vec![count, count]
@@ -5716,10 +5585,9 @@ where
     R: FusionRule,
     D: FactorScalar,
 {
-    let rule = input.space().provider();
     let space = input.space().space();
     let matricizations =
-        sector_matricizations_generic(rule, space.structure(), input.data(), space.nout())?;
+        sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
     let mut singular_values = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let rank = matrix.rows.min(matrix.cols);
@@ -5880,7 +5748,7 @@ where
             } else {
                 key.domain_tree()
             };
-            shape[axis] = kept_of(coupled_of_generic(rule, bond_tree));
+            shape[axis] = kept_of(coupled_of_generic(bond_tree));
             Ok(shape)
         })
         .collect::<Result<Vec<_>, OperationError>>()?;
@@ -6020,12 +5888,7 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(
-        provider.as_ref(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?;
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
@@ -6079,12 +5942,7 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
-    let matrices = sector_matricizations_generic(
-        provider.as_ref(),
-        space.structure(),
-        input.data(),
-        space.nout(),
-    )?;
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);

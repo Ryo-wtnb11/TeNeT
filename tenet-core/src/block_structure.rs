@@ -6,6 +6,11 @@ pub struct FusionTreePairKey {
 }
 
 impl FusionTreePairKey {
+    /// Combine two raw tree identities without categorical validation.
+    ///
+    /// This constructor does not check provider membership, individual tree
+    /// admissibility, or equality of the coupled sectors. Call
+    /// [`Self::validate_for_rule`] before categorical use.
     pub fn pair(codomain_tree: FusionTreeKey, domain_tree: FusionTreeKey) -> Self {
         Self {
             codomain_tree,
@@ -13,16 +18,20 @@ impl FusionTreePairKey {
         }
     }
 
-    /// Construct a raw tree pair from numeric sector IDs.
+    /// Construct a raw tree pair from numeric labels.
+    ///
+    /// Sector arrays and `coupled` contain provider-local sector IDs. The two
+    /// vertex arrays instead contain one-based outer-multiplicity labels; a
+    /// zero vertex returns [`CoreError::InvalidMultiplicityIndex`].
     ///
     /// # Provider-domain precondition
     ///
-    /// Every ID must already name a sector in the intended provider. This
+    /// Every sector ID must already name a sector in the intended provider. This
     /// constructor cannot check provider membership; call
     /// [`Self::validate_for_rule`] before categorical use. Providers with a
     /// finite table may otherwise panic through their infallible
     /// [`FusionRule`] methods.
-    pub fn pair_from_sector_ids<
+    pub fn try_pair_from_sector_ids<
         Codomain,
         Domain,
         CodomainDual,
@@ -34,14 +43,14 @@ impl FusionTreePairKey {
     >(
         codomain_uncoupled: Codomain,
         domain_uncoupled: Domain,
-        coupled: Option<usize>,
+        coupled: usize,
         codomain_is_dual: CodomainDual,
         domain_is_dual: DomainDual,
         codomain_innerlines: CodomainInner,
         domain_innerlines: DomainInner,
         codomain_vertices: CodomainVertices,
         domain_vertices: DomainVertices,
-    ) -> Self
+    ) -> Result<Self, CoreError>
     where
         Codomain: IntoIterator<Item = usize>,
         Domain: IntoIterator<Item = usize>,
@@ -52,22 +61,22 @@ impl FusionTreePairKey {
         CodomainVertices: IntoIterator<Item = usize>,
         DomainVertices: IntoIterator<Item = usize>,
     {
-        Self::pair(
-            FusionTreeKey::from_sector_ids(
+        Ok(Self::pair(
+            FusionTreeKey::try_from_sector_ids(
                 codomain_uncoupled,
                 coupled,
                 codomain_is_dual,
                 codomain_innerlines,
                 codomain_vertices,
-            ),
-            FusionTreeKey::from_sector_ids(
+            )?,
+            FusionTreeKey::try_from_sector_ids(
                 domain_uncoupled,
                 coupled,
                 domain_is_dual,
                 domain_innerlines,
                 domain_vertices,
-            ),
-        )
+            )?,
+        ))
     }
 
     #[inline]
@@ -96,22 +105,22 @@ impl FusionTreePairKey {
     }
 
     #[inline]
-    pub fn coupled(&self) -> Option<SectorId> {
+    pub fn coupled(&self) -> SectorId {
         self.codomain_tree.coupled()
     }
 
     #[inline]
-    pub fn vertices(&self) -> &[SectorId] {
+    pub fn vertices(&self) -> &[MultiplicityIndex] {
         self.codomain_tree.vertices()
     }
 
     #[inline]
-    pub fn codomain_vertices(&self) -> &[SectorId] {
+    pub fn codomain_vertices(&self) -> &[MultiplicityIndex] {
         self.codomain_tree.vertices()
     }
 
     #[inline]
-    pub fn domain_vertices(&self) -> &[SectorId] {
+    pub fn domain_vertices(&self) -> &[MultiplicityIndex] {
         self.domain_tree.vertices()
     }
 
@@ -1016,7 +1025,7 @@ impl CoupledTreeExtent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Checked contiguous column-major storage region for one coupled sector.
 pub struct CoupledSectorRegion {
-    coupled: Option<SectorId>,
+    coupled: SectorId,
     rows: usize,
     cols: usize,
     range: core::ops::Range<usize>,
@@ -1025,8 +1034,8 @@ pub struct CoupledSectorRegion {
 }
 
 impl CoupledSectorRegion {
-    /// Coupled-sector label, or `None` for a vacuum-coupled degenerate tree.
-    pub fn coupled(&self) -> Option<SectorId> {
+    /// Coupled-sector label shared by every fusion-tree block in this region.
+    pub fn coupled(&self) -> SectorId {
         self.coupled
     }
 
@@ -1323,9 +1332,9 @@ pub struct BlockStructure {
 
 /// Proof that one exact [`BlockStructure`] is categorically valid for `rule`.
 ///
-/// This proof is deliberately LOCAL: it covers tree shape, fusion
-/// admissibility, multiplicity style, and structure rank for provider-domain
-/// sector IDs in this borrowed structure. It is neither a
+/// This proof is deliberately LOCAL: it covers tree shape, fusion and
+/// vertex-label admissibility under the provider-owned fusion style, and
+/// structure rank for provider-domain sector IDs in this borrowed structure. It is neither a
 /// [`FusionTensorMapSpace`] construction proof nor a firewall for arbitrary
 /// numeric sector IDs.
 ///
@@ -1464,11 +1473,9 @@ where
             }
             return Ok(rows);
         }
-        let sources = indices
-            .into_iter()
-            .map(|index| self.required_fusion_tree_pair_key(index).cloned())
-            .collect::<Result<SmallVec<[FusionTreePairKey; 8]>, _>>()?;
-        multiplicity_free_braid_tree_pair_block_proven(self.rule, &sources, operation)
+        let batch =
+            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        multiplicity_free_braid_tree_pair_block_proven(batch, operation)
     }
 
     pub fn execute_multiplicity_free_transpose_for_block_indices<I>(
@@ -1490,11 +1497,9 @@ where
             }
             return Ok(rows);
         }
-        let sources = indices
-            .into_iter()
-            .map(|index| self.required_fusion_tree_pair_key(index).cloned())
-            .collect::<Result<SmallVec<[FusionTreePairKey; 8]>, _>>()?;
-        multiplicity_free_transpose_tree_pair_block_proven(self.rule, &sources, operation)
+        let batch =
+            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        multiplicity_free_transpose_tree_pair_block_proven(batch, operation)
     }
 }
 
@@ -1576,14 +1581,9 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
-        let sources = indices
-            .into_iter()
-            .map(|index| {
-                self.required_fusion_tree_pair_key(index)
-                    .map(|key| key.codomain_tree().clone())
-            })
-            .collect::<Result<SmallVec<[FusionTreeKey; 8]>, _>>()?;
-        multiplicity_free_braid_tree_block_proven(self.rule, &sources, permutation, levels)
+        let batch =
+            ValidatedMultiplicityFreeTreeBatch::from_locally_validated(self, indices)?;
+        multiplicity_free_braid_tree_block_proven(batch, permutation, levels)
     }
 
     pub fn permute_codomain_rows_for_block_indices<I>(
@@ -1797,12 +1797,16 @@ impl BlockStructure {
 
     /// Coupled-sector matrix layout over fusion-tree block keys.
     ///
-    /// Blocks are stable-sorted by coupled sector, then each coupled sector is
-    /// laid out as one contiguous column-major matrix with the fusion-tree
-    /// subblocks as strided views (see
+    /// Every key is first validated against `rule` in caller order. Blocks are
+    /// then stable-sorted by coupled sector, and each coupled sector is laid out
+    /// as one contiguous column-major matrix with the fusion-tree subblocks as strided views (see
     /// [`FusionTensorMapSpace::from_degeneracy_shapes_coupled`]). Fails when a
     /// coupled sector does not cover its full codomain-tree x domain-tree
     /// grid, because the sector matrix would contain uninitialized holes.
+    ///
+    /// Each key inherits [`FusionTreePairKey::validate_for_rule`]'s
+    /// provider-domain precondition: arbitrary numeric sector IDs are not
+    /// checked, and an infallible finite provider may panic on such IDs.
     pub fn coupled_sector_matrix_with_keys<R>(
         rule: &R,
         nout: usize,
@@ -1812,10 +1816,16 @@ impl BlockStructure {
     where
         R: FusionRule,
     {
+        // Why not retain an otherwise-dead provider argument: this public
+        // constructor is a categorical admission boundary, so the provider
+        // validates every key in caller order before layout arithmetic begins.
+        for (key, _) in &blocks {
+            key.validate_for_rule(rule)?;
+        }
         let mut blocks = blocks;
-        blocks.sort_by_key(|(key, _)| coupled_or_vacuum(rule, key.codomain_tree()).id());
+        blocks.sort_by_key(|(key, _)| key.codomain_tree().coupled().id());
         let (keys, shapes): (Vec<_>, Vec<_>) = blocks.into_iter().unzip();
-        let specs = coupled_sector_matrix_block_specs(rule, nout, rank, &keys, &shapes)?;
+        let specs = coupled_sector_matrix_block_specs(nout, rank, &keys, &shapes)?;
         Self::from_blocks_with_rank(rank, specs)
     }
 
@@ -1964,7 +1974,7 @@ fn compile_coupled_sector_regions(
     nout: usize,
 ) -> Result<Option<Vec<CoupledSectorRegion>>, CoreError> {
         let mut regions = Vec::new();
-        let mut seen_coupled = FxHashMap::<Option<SectorId>, ()>::default();
+        let mut seen_coupled = FxHashMap::<SectorId, ()>::default();
         let mut block_index = 0usize;
         let mut next_offset = 0usize;
         while block_index < structure.block_count() {

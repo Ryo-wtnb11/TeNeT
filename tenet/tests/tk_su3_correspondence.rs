@@ -65,7 +65,7 @@ fn vertex_fill(key: &FusionTreePairKey, dom: bool) -> f64 {
     } else {
         key.codomain_tree()
     };
-    let mu = tree.vertices().first().map(|s| s.id()).unwrap_or(0);
+    let mu = tree.vertices().first().map(|s| s.get()).unwrap_or(0);
     1.0 + 2.0 * mu as f64
 }
 
@@ -116,7 +116,7 @@ fn su3_om_vertex_actually_participates() {
                 .domain_tree()
                 .vertices()
                 .first()
-                .map(|s| s.id())
+                .map(|s| s.get())
                 .unwrap_or(0);
             seen.borrow_mut().push((cod, dom, mu));
         }

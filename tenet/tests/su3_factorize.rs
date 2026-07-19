@@ -18,7 +18,7 @@ fn eight() -> Space {
 }
 
 fn vertex(tree: &tenet_core::FusionTreeKey) -> usize {
-    tree.vertices().first().map(|s| s.id()).unwrap_or(0)
+    tree.vertices().first().map(|s| s.get()).unwrap_or(0)
 }
 
 /// Singular values of a 2x2 real matrix, descending — the independent
@@ -38,7 +38,7 @@ fn t_v(rt: &Runtime, m3: [[f64; 2]; 2], m3b: f64) -> Tensor {
     let v = v();
     Tensor::from_block_fn(rt, [&v], [&v], move |key, idx| match key {
         BlockKey::FusionTree(k) => {
-            if k.codomain_tree().coupled() == Some(c3) {
+            if k.codomain_tree().coupled() == c3 {
                 m3[idx[0]][idx[1]]
             } else {
                 m3b
@@ -57,7 +57,7 @@ fn t_8(rt: &Runtime, q: [[f64; 2]; 2], g: f64) -> Tensor {
     let e = eight();
     Tensor::from_block_fn(rt, [&e, &e], [&e, &e], move |key, _| match key {
         BlockKey::FusionTree(k) => {
-            if k.codomain_tree().coupled() == Some(c8) {
+            if k.codomain_tree().coupled() == c8 {
                 q[vertex(k.codomain_tree()) - 1][vertex(k.domain_tree()) - 1]
             } else {
                 g

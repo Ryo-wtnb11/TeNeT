@@ -421,7 +421,7 @@ fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() 
                 FusionTreeKey::try_new_for_rule(
                     &Z2FusionRule,
                     [cod_sector],
-                    Some(cod_sector),
+                    cod_sector,
                     [false],
                     [],
                     [],
@@ -430,7 +430,7 @@ fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() 
                 FusionTreeKey::try_new_for_rule(
                     &Z2FusionRule,
                     [dom_sector],
-                    Some(dom_sector),
+                    dom_sector,
                     [false],
                     [],
                     [],
@@ -1026,9 +1026,7 @@ where
                 continue;
             }
 
-            let coupled = trace_codomain_tree
-                .coupled()
-                .unwrap_or_else(|| rule.vacuum());
+            let coupled = trace_codomain_tree.coupled();
             let first = trace_codomain_tree.uncoupled()[0];
             let mut trace_factor = rule.dim_scalar(coupled) * rule.inv_dim_scalar(first);
             for (&sector, &is_dual) in trace_codomain_tree
@@ -1504,19 +1502,21 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
                         panic!("fixture source must use fusion-tree keys");
                     };
                     let codomain = key.codomain_tree();
-                    // What: the later member is deliberately malformed so the
-                    // public trace boundary proves source-major group admission.
-                    let raw = FusionTreePairKey::pair_from_sector_ids(
+                    // What: the later member omits its rank-two vertex while
+                    // retaining the same external group, so the public trace
+                    // boundary proves source-major group admission.
+                    let raw = FusionTreePairKey::try_pair_from_sector_ids(
                         codomain.uncoupled().iter().map(|sector| sector.id()),
                         Vec::<usize>::new(),
-                        None,
+                        codomain.coupled().id(),
                         codomain.is_dual().iter().copied(),
                         Vec::<bool>::new(),
                         codomain.innerlines().iter().map(|sector| sector.id()),
                         Vec::<usize>::new(),
-                        codomain.vertices().iter().map(|sector| sector.id()),
                         Vec::<usize>::new(),
-                    );
+                        Vec::<usize>::new(),
+                    )
+                    .unwrap();
                     FusionTreePairKey::pair(raw.codomain_tree().clone(), key.domain_tree().clone())
                         .into()
                 } else {

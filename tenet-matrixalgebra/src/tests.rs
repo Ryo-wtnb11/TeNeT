@@ -404,23 +404,17 @@ fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
     }
 }
 
-fn scale_vt_rows_by_singular_values<R, const NIN: usize>(
-    rule: &R,
+fn scale_vt_rows_by_singular_values<const NIN: usize>(
     vt: &mut TensorMap<f64, 1, NIN>,
     singular_values: &[SectorSpectrum],
-) where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
+) {
     let structure = std::sync::Arc::clone(vt.structure());
     for index in 0..structure.block_count() {
         let block = structure.block(index).unwrap();
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let sector = key
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| rule.vacuum());
+        let sector = key.codomain_tree().coupled();
         let values = &singular_values
             .iter()
             .find(|entry| entry.sector == sector)
@@ -496,7 +490,7 @@ where
     }
 
     let mut scaled_vt = svd.vh.tensor().clone();
-    scale_vt_rows_by_singular_values(rule, &mut scaled_vt, &svd.singular_values);
+    scale_vt_rows_by_singular_values(&mut scaled_vt, &svd.singular_values);
 
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; len],
@@ -1001,18 +995,12 @@ fn compact_factor_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
 
     let mut duplicate = u.to_vec();
     duplicate.push(u[0].clone());
-    assert!(crate::factorize::validate_compact_factor_routes_for_test(
-        &rule, &source, &duplicate, &vh,
-    )
-    .is_err());
     assert!(
-        crate::factorize::validate_compact_factor_routes_for_test(&rule, &source, &[], &vh,)
+        crate::factorize::validate_compact_factor_routes_for_test(&source, &duplicate, &vh,)
             .is_err()
     );
-    assert!(
-        crate::factorize::validate_compact_factor_routes_for_test(&rule, &source, &vh, &vh,)
-            .is_err()
-    );
+    assert!(crate::factorize::validate_compact_factor_routes_for_test(&source, &[], &vh,).is_err());
+    assert!(crate::factorize::validate_compact_factor_routes_for_test(&source, &vh, &vh,).is_err());
 
     let multi = tsvd_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let multi_bound = bound_tensor(Arc::new(rule), &multi);
@@ -1026,7 +1014,6 @@ fn compact_factor_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
     reversed_u.reverse();
     reversed_vh.reverse();
     crate::factorize::validate_compact_factor_routes_for_test(
-        &rule,
         &multi_source,
         &reversed_u,
         &reversed_vh,
@@ -1036,13 +1023,12 @@ fn compact_factor_plan_rejects_duplicate_missing_mismatched_and_extra_routes() {
     extra.push(
         multi_u
             .iter()
-            .find(|region| region.coupled() == Some(SectorId::new(1)))
+            .find(|region| region.coupled() == SectorId::new(1))
             .unwrap()
             .clone(),
     );
     assert!(
-        crate::factorize::validate_compact_factor_routes_for_test(&rule, &source, &extra, &vh,)
-            .is_err()
+        crate::factorize::validate_compact_factor_routes_for_test(&source, &extra, &vh,).is_err()
     );
 }
 
@@ -1269,7 +1255,7 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
     let shapes = homspace
         .fusion_tree_keys(&rule)
         .iter()
-        .map(|key| match key.codomain_tree().coupled().unwrap() {
+        .map(|key| match key.codomain_tree().coupled() {
             sector if sector == even => vec![5, 3],
             sector if sector == odd => vec![2, 4],
             sector => panic!("unexpected Z2 sector {sector:?}"),
@@ -1323,14 +1309,14 @@ fn compact_svd_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
         .unwrap()
         .unwrap();
     for input_region in input_regions.iter() {
-        let sector = input_region.coupled().unwrap();
+        let sector = input_region.coupled();
         let u_region = u_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let vh_region = vh_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let singular = &svd
             .singular_values
@@ -1368,7 +1354,7 @@ fn mixed_rectangular_c32_tensor() -> TensorMap<Complex32, 1, 1> {
     let shapes = homspace
         .fusion_tree_keys(&rule)
         .iter()
-        .map(|key| match key.codomain_tree().coupled().unwrap() {
+        .map(|key| match key.codomain_tree().coupled() {
             sector if sector == even => vec![5, 3],
             sector if sector == odd => vec![2, 4],
             sector => panic!("unexpected Z2 sector {sector:?}"),
@@ -1428,14 +1414,14 @@ fn compact_qr_c64_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
     let q_regions = q.structure().coupled_sector_regions(1).unwrap().unwrap();
     let r_regions = r.structure().coupled_sector_regions(1).unwrap().unwrap();
     for input_region in input_regions.iter() {
-        let sector = input_region.coupled().unwrap();
+        let sector = input_region.coupled();
         let q_region = q_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let r_region = r_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let rows = input_region.rows();
         let cols = input_region.cols();
@@ -1495,14 +1481,14 @@ fn compact_lq_c64_reconstructs_mixed_tall_and_wide_sectors_with_bounded_scratch(
         .unwrap()
         .unwrap();
     for input_region in input_regions.iter() {
-        let sector = input_region.coupled().unwrap();
+        let sector = input_region.coupled();
         let left_region = left_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let right_region = right_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let rows = input_region.rows();
         let cols = input_region.cols();
@@ -1556,14 +1542,14 @@ fn compact_svd_c32_reconstructs_mixed_tall_and_wide_sectors_without_copies() {
         .unwrap()
         .unwrap();
     for input_region in input_regions.iter() {
-        let sector = input_region.coupled().unwrap();
+        let sector = input_region.coupled();
         let u_region = u_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let vh_region = vh_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let singular = &svd
             .singular_values
@@ -1710,19 +1696,15 @@ fn svd_trunc_c32_reports_the_discarded_reconstruction_error() {
         .unwrap();
     let mut distance_squared = 0.0f64;
     for input_region in input_regions.iter() {
-        let sector = input_region.coupled().unwrap();
+        let sector = input_region.coupled();
         let singular = &svd
             .singular_values
             .iter()
             .find(|values| values.sector == sector)
             .unwrap()
             .values;
-        let u_region = u_regions
-            .iter()
-            .find(|region| region.coupled() == Some(sector));
-        let vh_region = vh_regions
-            .iter()
-            .find(|region| region.coupled() == Some(sector));
+        let u_region = u_regions.iter().find(|region| region.coupled() == sector);
+        let vh_region = vh_regions.iter().find(|region| region.coupled() == sector);
         let rows = input_region.rows();
         let cols = input_region.cols();
         for col in 0..cols {
@@ -1771,11 +1753,7 @@ where
         let BlockKey::FusionTree(key) = lhs_block.key() else {
             continue;
         };
-        let weight = rule.dim_scalar(
-            key.codomain_tree()
-                .coupled()
-                .unwrap_or_else(|| rule.vacuum()),
-        );
+        let weight = rule.dim_scalar(key.codomain_tree().coupled());
         let shape = lhs_block.shape().to_vec();
         let count = shape.iter().product::<usize>();
         let mut multi_index = vec![0usize; shape.len()];
@@ -2248,7 +2226,7 @@ where
         + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
 {
     let mut scaled_vt = svd.vh.tensor().clone();
-    scale_vt_rows_by_singular_values(rule, &mut scaled_vt, &svd.singular_values);
+    scale_vt_rows_by_singular_values(&mut scaled_vt, &svd.singular_values);
     let mut reconstructed = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         vec![0.0; template.data().len()],
         template.fusion_space().unwrap().as_ref().clone(),
@@ -3091,10 +3069,10 @@ fn eigh_c64_reconstructs_multi_sector_hermitian_input_and_fixes_gauge() {
         .unwrap()
         .unwrap();
     for input_region in input_regions.iter() {
-        let sector = input_region.coupled().unwrap();
+        let sector = input_region.coupled();
         let vector_region = vector_regions
             .iter()
-            .find(|region| region.coupled() == Some(sector))
+            .find(|region| region.coupled() == sector)
             .unwrap();
         let values = &eigh
             .eigenvalues
@@ -3185,11 +3163,7 @@ fn dense_sector_matrices<const A: usize, const B: usize>(
         let BlockKey::FusionTree(key) = block.key() else {
             continue;
         };
-        let sector = key
-            .codomain_tree()
-            .coupled()
-            .or_else(|| key.domain_tree().coupled())
-            .unwrap_or_else(|| key.domain_tree().uncoupled()[0]);
+        let sector = key.codomain_tree().coupled();
         let entry = match sectors.iter_mut().find(|entry| entry.sector == sector) {
             Some(entry) => entry,
             None => {
@@ -3373,10 +3347,7 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
         .fusion_tree_keys(&rule)
         .iter()
         .map(|key| {
-            let sector = key
-                .domain_tree()
-                .coupled()
-                .unwrap_or_else(|| key.domain_tree().uncoupled()[0]);
+            let sector = key.domain_tree().coupled();
             let mut shape = None;
             for index in 0..u_structure.block_count() {
                 let block = u_structure.block(index).unwrap();
@@ -3395,10 +3366,7 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
                 let BlockKey::FusionTree(s_key) = block.key() else {
                     continue;
                 };
-                let s_sector = s_key
-                    .domain_tree()
-                    .coupled()
-                    .unwrap_or_else(|| s_key.domain_tree().uncoupled()[0]);
+                let s_sector = s_key.domain_tree().coupled();
                 if s_sector == sector {
                     s_cols = block.shape()[1];
                     break;
@@ -3501,10 +3469,7 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
             let BlockKey::FusionTree(key) = block.key() else {
                 continue;
             };
-            let sector = key
-                .codomain_tree()
-                .coupled()
-                .unwrap_or_else(|| rule.vacuum());
+            let sector = key.codomain_tree().coupled();
             let values = &svd
                 .singular_values
                 .iter()
@@ -4444,10 +4409,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
             let BlockKey::FusionTree(key) = block.key() else {
                 continue;
             };
-            let sector = key
-                .codomain_tree()
-                .coupled()
-                .unwrap_or_else(|| rule.vacuum());
+            let sector = key.codomain_tree().coupled();
             let values = &svd
                 .singular_values
                 .iter()

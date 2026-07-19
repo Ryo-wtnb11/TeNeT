@@ -1074,7 +1074,7 @@ mod tests {
                 (
                     sector_ids(key.codomain_uncoupled()),
                     sector_ids(key.domain_uncoupled()),
-                    key.coupled().expect("test keys have a coupled sector").id(),
+                    key.coupled().id(),
                 )
             })
             .collect()
@@ -1181,21 +1181,21 @@ mod tests {
 
     #[test]
     fn unique_artin_braid_first_allows_unit_crossing_without_braiding() {
-        let tree = FusionTreeKey::from_sector_ids([0, 1], Some(1), [false, true], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([0, 1], 1, [false, true], [], [1]).unwrap();
 
         let (braided, coefficient) = unique_artin_braid_first(&PlanarZ2Rule, &tree).unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(0)]);
         assert_eq!(braided.is_dual(), &[true, false]);
-        assert_eq!(braided.coupled(), Some(SectorId::new(1)));
+        assert_eq!(braided.coupled(), SectorId::new(1));
         assert!(braided.innerlines().is_empty());
-        assert_eq!(braided.vertices(), &[SectorId::new(1)]);
+        assert_eq!(braided.vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_artin_braid_first_rejects_nonunit_crossing_without_braiding() {
-        let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, false], [], [1]).unwrap();
 
         let err = unique_artin_braid_first(&PlanarZ2Rule, &tree).unwrap_err();
 
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn unique_artin_braid_first_uses_r_symbol_for_first_crossing() {
-        let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, true], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, true], [], [1]).unwrap();
 
         let (braided, coefficient) =
             unique_artin_braid_first(&FermionParityFusionRule, &tree).unwrap();
@@ -1219,15 +1219,15 @@ mod tests {
         assert_eq!(coefficient, -1.0);
         assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(1)]);
         assert_eq!(braided.is_dual(), &[true, false]);
-        assert_eq!(braided.coupled(), Some(SectorId::new(0)));
+        assert_eq!(braided.coupled(), SectorId::new(0));
         assert!(braided.innerlines().is_empty());
-        assert_eq!(braided.vertices(), &[SectorId::new(1)]);
+        assert_eq!(braided.vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_artin_braid_first_uses_first_innerline_for_rank_three() {
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [0], [1, 1]).unwrap();
 
         let (braided, coefficient) =
             unique_artin_braid_first(&FermionParityFusionRule, &tree).unwrap();
@@ -1238,13 +1238,13 @@ mod tests {
             &[SectorId::new(1), SectorId::new(1), SectorId::new(1)]
         );
         assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
-        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+        assert_eq!(braided.vertices(), &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_artin_braid_at_updates_innerline_for_later_unit_crossing() {
         let tree =
-            FusionTreeKey::from_sector_ids([1, 0, 1], Some(0), [false, false, true], [1], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 0, 1], 0, [false, false, true], [1], [1, 1]).unwrap();
 
         let (braided, coefficient) = unique_artin_braid_at(&PlanarZ2Rule, &tree, 1).unwrap();
 
@@ -1255,13 +1255,13 @@ mod tests {
         );
         assert_eq!(braided.is_dual(), &[false, true, false]);
         assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
-        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+        assert_eq!(braided.vertices(), &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_artin_braid_at_uses_f_and_r_symbols_for_later_crossing() {
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, true, false], [0], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, true, false], [0], [1, 1]).unwrap();
 
         let (braided, coefficient) =
             unique_artin_braid_at(&FermionParityFusionRule, &tree, 1).unwrap();
@@ -1273,12 +1273,12 @@ mod tests {
         );
         assert_eq!(braided.is_dual(), &[false, false, true]);
         assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
-        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+        assert_eq!(braided.vertices(), &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_artin_braid_at_rejects_out_of_range_index() {
-        let tree = FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, false], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, false], [], [1]).unwrap();
 
         let err = unique_artin_braid_at(&FermionParityFusionRule, &tree, 1).unwrap_err();
 
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn unique_braid_tree_replays_tensorkit_swap_order_and_level_updates() {
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [0], [1, 1]).unwrap();
 
         let (braided, coefficient) =
             unique_braid_tree(&FermionParityFusionRule, &tree, &[2, 0, 1], &[0, 1, 2]).unwrap();
@@ -1311,14 +1311,14 @@ mod tests {
             &[SectorId::new(1), SectorId::new(1), SectorId::new(1)]
         );
         assert_eq!(braided.is_dual(), &[false, false, false]);
-        assert_eq!(braided.coupled(), Some(SectorId::new(1)));
+        assert_eq!(braided.coupled(), SectorId::new(1));
         assert_eq!(braided.innerlines(), &[SectorId::new(0)]);
-        assert_eq!(braided.vertices(), &[SectorId::new(1), SectorId::new(1)]);
+        assert_eq!(braided.vertices(), &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_braid_tree_uses_inverse_artin_branch_from_levels() {
-        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
 
         let (braided_forward, forward) =
             unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0, 1]).unwrap();
@@ -1332,12 +1332,12 @@ mod tests {
             braided_forward.uncoupled(),
             &[SectorId::new(2), SectorId::new(1)]
         );
-        assert_eq!(braided_forward.coupled(), Some(SectorId::new(3)));
+        assert_eq!(braided_forward.coupled(), SectorId::new(3));
     }
 
     #[test]
     fn unique_braid_tree_reflected_levels_select_inverse_artin_branch() {
-        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
         let levels = [3, 8];
         let min_level = levels.iter().copied().min().unwrap();
         let max_level = levels.iter().copied().max().unwrap();
@@ -1361,13 +1361,12 @@ mod tests {
     fn symmetric_unique_direct_braid_matches_artin_replay_exactly() {
         // What: every rank-4 fZ2 permutation has the exact tree and sign of
         // TensorKit's adjacent-Artin semantics, including multiplication order.
-        let tree = FusionTreeKey::from_sector_ids(
-            [1, 1, 0, 1],
-            Some(1),
+        let tree = FusionTreeKey::try_from_sector_ids(
+            [1, 1, 0, 1], 1,
             [false, true, false, true],
             [0, 0],
             [1, 1, 1],
-        );
+        ).unwrap();
         let levels = [0, 1, 2, 3];
         let mut permutation = [0usize, 1, 2, 3];
         loop {
@@ -1413,11 +1412,10 @@ mod tests {
         assert_eq!(
             FusionTreeKey::try_new_for_rule(
             &FermionParityFusionRule,
-            [SectorId::new(1), SectorId::new(1), SectorId::new(1)],
-            Some(SectorId::new(1)),
+            [SectorId::new(1), SectorId::new(1), SectorId::new(1)], SectorId::new(1),
             [false, false, false],
             [SectorId::new(1)],
-            [SectorId::new(1), SectorId::new(1)],
+            [MultiplicityIndex::ONE, MultiplicityIndex::ONE],
             )
             .unwrap_err(),
             CoreError::MalformedFusionTree {
@@ -1428,71 +1426,48 @@ mod tests {
 
     #[test]
     fn rule_aware_tree_validation_covers_rank_shape_style_and_vertices() {
-        // What: categorical interpretation accepts both empty-tree vacuum
-        // encodings and rejects every malformed left-associated tree field.
-        let empty_none = FusionTreeKey::new([], None, [], [], []);
-        let empty_vacuum =
-            FusionTreeKey::new([], Some(z2_even()), [], [], []);
-        empty_none.validate_for_rule(&Z2FusionRule).unwrap();
+        // What: categorical interpretation requires the canonical empty-tree
+        // vacuum and rejects every representable malformed tree field.
+        let empty_vacuum = FusionTreeKey::new([], z2_even(), [], [], []);
         empty_vacuum.validate_for_rule(&Z2FusionRule).unwrap();
-        assert_ne!(empty_none, empty_vacuum);
         assert_eq!(
-            FusionTreeKey::new([], Some(z2_odd()), [], [], [])
+            FusionTreeKey::new([], z2_odd(), [], [], [])
                 .validate_for_rule(&Z2FusionRule)
                 .unwrap_err(),
             CoreError::MalformedFusionTree {
-                message: "rank-0 fusion tree coupled sector must normalize to the vacuum",
+                message: "rank-0 fusion tree coupled sector must equal the vacuum",
             }
         );
 
         let rank_one =
-            FusionTreeKey::new([z2_odd()], Some(z2_odd()), [true], [], []);
+            FusionTreeKey::new([z2_odd()], z2_odd(), [true], [], []);
         rank_one.validate_for_rule(&Z2FusionRule).unwrap();
-        for malformed in [
-            FusionTreeKey::new([z2_odd()], None, [true], [], []),
-            FusionTreeKey::new([z2_odd()], Some(z2_even()), [true], [], []),
-        ] {
-            assert_eq!(
-                malformed.validate_for_rule(&Z2FusionRule).unwrap_err(),
-                CoreError::MalformedFusionTree {
-                    message: "rank-1 fusion tree coupled sector must equal its uncoupled sector",
-                }
-            );
-        }
         assert_eq!(
-            FusionTreeKey::new(
-                [z2_odd(), z2_odd()],
-                None,
-                [false; 2],
-                [],
-                [SectorId::new(1)],
-            )
-            .validate_for_rule(&Z2FusionRule)
-            .unwrap_err(),
+            FusionTreeKey::new([z2_odd()], z2_even(), [true], [], [])
+                .validate_for_rule(&Z2FusionRule)
+                .unwrap_err(),
             CoreError::MalformedFusionTree {
-                message: "rank >= 2 fusion tree requires a coupled sector",
+                message: "rank-1 fusion tree coupled sector must equal its uncoupled sector",
             }
         );
 
         let bad_shapes = [
             (
-                FusionTreeKey::new([z2_odd(), z2_odd()], Some(z2_even()), [false], [], [SectorId::new(1)]),
+                FusionTreeKey::new([z2_odd(), z2_odd()], z2_even(), [false], [], [MultiplicityIndex::ONE]),
                 "fusion tree sectors and duality flags must have matching length",
             ),
             (
                 FusionTreeKey::new(
-                    [z2_odd(), z2_odd(), z2_odd()],
-                    Some(z2_odd()),
+                    [z2_odd(), z2_odd(), z2_odd()], z2_odd(),
                     [false; 3],
                     [],
-                    [SectorId::new(1); 2],
+                    [MultiplicityIndex::ONE; 2],
                 ),
                 "fusion tree has an invalid number of innerlines",
             ),
             (
                 FusionTreeKey::new(
-                    [z2_odd(), z2_odd()],
-                    Some(z2_even()),
+                    [z2_odd(), z2_odd()], z2_even(),
                     [false; 2],
                     [],
                     [],
@@ -1507,52 +1482,18 @@ mod tests {
             );
         }
 
-        let wrong_simple_style = FusionTreeKey::new(
-            [z2_odd(), z2_odd()],
-            Some(z2_even()),
-            [false; 2],
-            [],
-            [SectorId::new(1)],
-        )
-        .with_has_multiplicity(true);
-        assert_eq!(
-            wrong_simple_style
-                .validate_for_rule(&Z2FusionRule)
-                .unwrap_err(),
-            CoreError::MalformedFusionTree {
-                message: "fusion tree multiplicity style disagrees with the fusion rule",
-            }
-        );
-        let wrong_generic_style = FusionTreeKey::new(
-            [SectorId::new(ToyOmRule::A), SectorId::new(ToyOmRule::A)],
-            Some(SectorId::new(ToyOmRule::C)),
-            [false; 2],
-            [],
-            [SectorId::new(1)],
-        );
-        assert_eq!(
-            wrong_generic_style
-                .validate_for_rule(&ToyOmRule)
-                .unwrap_err(),
-            CoreError::MalformedFusionTree {
-                message: "fusion tree multiplicity style disagrees with the fusion rule",
-            }
-        );
-
         for tree in [
             FusionTreeKey::new(
-                [z2_odd(); 4],
-                Some(z2_even()),
+                [z2_odd(); 4], z2_even(),
                 [false; 4],
                 [z2_even(), z2_even()],
-                [SectorId::new(1); 3],
+                [MultiplicityIndex::ONE; 3],
             ),
             FusionTreeKey::new(
-                [z2_odd(); 4],
-                Some(z2_odd()),
+                [z2_odd(); 4], z2_odd(),
                 [false; 4],
                 [z2_even(), z2_odd()],
-                [SectorId::new(1); 3],
+                [MultiplicityIndex::ONE; 3],
             ),
         ] {
             assert_eq!(
@@ -1571,55 +1512,93 @@ mod tests {
         assert_eq!(
             FusionTreeKey::try_new_for_rule(
                 &Z2FusionRule,
-                [z2_odd(), z2_odd()],
-                Some(z2_even()),
+                [z2_odd(), z2_odd()], z2_even(),
                 [false; 2],
                 [],
-                [SectorId::new(2)],
+                [MultiplicityIndex::new(2).expect("test multiplicity label is one-based")],
             )
             .unwrap_err(),
             CoreError::MalformedFusionTree {
                 message: "fusion tree vertex label exceeds its fusion multiplicity",
             }
         );
-        for (label, message) in [
-            (0, "fusion tree vertex labels are 1-based"),
-            (3, "fusion tree vertex label exceeds its fusion multiplicity"),
-        ] {
-            assert_eq!(
-                FusionTreeKey::try_new_for_rule(
-                    &ToyOmRule,
-                    [SectorId::new(ToyOmRule::A), SectorId::new(ToyOmRule::A)],
-                    Some(SectorId::new(ToyOmRule::C)),
-                    [false; 2],
-                    [],
-                    [SectorId::new(label)],
-                )
-                .unwrap_err(),
-                CoreError::MalformedFusionTree { message }
-            );
-        }
+        assert_eq!(
+            MultiplicityIndex::try_from(0).unwrap_err(),
+            CoreError::InvalidMultiplicityIndex { value: 0 }
+        );
+        assert_eq!(
+            FusionTreeKey::try_new_for_rule(
+                &ToyOmRule,
+                [SectorId::new(ToyOmRule::A), SectorId::new(ToyOmRule::A)],
+                SectorId::new(ToyOmRule::C),
+                [false; 2],
+                [],
+                [MultiplicityIndex::new(3).unwrap()],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree vertex label exceeds its fusion multiplicity",
+            }
+        );
     }
 
     #[test]
-    fn tree_pair_validation_normalizes_empty_vacuum_but_not_dual_coupled() {
+    fn raw_tree_pair_constructor_rejects_zero_vertices_in_source_order() {
+        let domain_vertices = std::iter::once_with(|| {
+            panic!("domain vertices must not be consumed after a codomain error")
+        });
+        let error = FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [1, 1],
+            0,
+            [false; 2],
+            [false; 2],
+            [],
+            [],
+            [0],
+            domain_vertices,
+        )
+        .unwrap_err();
+        // What: the public numeric import rejects zero while constructing the
+        // codomain and does not continue into the domain after that error.
+        assert_eq!(error, CoreError::InvalidMultiplicityIndex { value: 0 });
+
+        assert_eq!(
+            FusionTreePairKey::try_pair_from_sector_ids(
+                [1, 1],
+                [1, 1],
+                0,
+                [false; 2],
+                [false; 2],
+                [],
+                [],
+                [1],
+                [0],
+            )
+            .unwrap_err(),
+            CoreError::InvalidMultiplicityIndex { value: 0 },
+        );
+    }
+
+    #[test]
+    fn tree_pair_validation_requires_exact_coupled_sector() {
         // What: pair compatibility compares the same coupled sector on both
-        // sides, while treating None and Some(vacuum) as the same empty root.
+        // sides, including the canonical rank-zero vacuum.
         let empty_pair = FusionTreePairKey::pair(
-            FusionTreeKey::new([], None, [], [], []),
-            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+            FusionTreeKey::new([], u1(0), [], [], []),
+            FusionTreeKey::new([], u1(0), [], [], []),
         );
         empty_pair.validate_for_rule(&U1FusionRule).unwrap();
         FusionTreePairKey::pair(
-            FusionTreeKey::new([], None, [], [], []),
-            FusionTreeKey::new([u1(0)], Some(u1(0)), [false], [], []),
+            FusionTreeKey::new([], u1(0), [], [], []),
+            FusionTreeKey::new([u1(0)], u1(0), [false], [], []),
         )
         .validate_for_rule(&U1FusionRule)
         .unwrap();
         assert_eq!(
             FusionTreePairKey::pair(
-                FusionTreeKey::new([], None, [], [], []),
-                FusionTreeKey::new([u1(1)], Some(u1(1)), [false], [], []),
+                FusionTreeKey::new([], u1(0), [], [], []),
+                FusionTreeKey::new([u1(1)], u1(1), [false], [], []),
             )
             .validate_for_rule(&U1FusionRule)
             .unwrap_err(),
@@ -1630,20 +1609,18 @@ mod tests {
 
         let codomain = FusionTreeKey::try_new_for_rule(
             &U1FusionRule,
-            [u1(1), u1(2)],
-            Some(u1(3)),
+            [u1(1), u1(2)], u1(3),
             [false; 2],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap();
         let same_c_domain = FusionTreeKey::try_new_for_rule(
             &U1FusionRule,
-            [u1(4), u1(-1)],
-            Some(u1(3)),
+            [u1(4), u1(-1)], u1(3),
             [true, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap();
         FusionTreePairKey::pair(codomain.clone(), same_c_domain)
@@ -1651,11 +1628,10 @@ mod tests {
             .unwrap();
         let dual_c_domain = FusionTreeKey::try_new_for_rule(
             &U1FusionRule,
-            [u1(-4), u1(1)],
-            Some(u1(-3)),
+            [u1(-4), u1(1)], u1(-3),
             [false; 2],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap();
         assert_eq!(
@@ -1675,20 +1651,18 @@ mod tests {
         let valid = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &U1FusionRule,
-                [u1(1), u1(-1)],
-                Some(u1(0)),
+                [u1(1), u1(-1)], u1(0),
                 [false; 2],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
-            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+            FusionTreeKey::new([], u1(0), [], [], []),
         );
         let mismatched_pair = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &U1FusionRule,
-                [u1(1)],
-                Some(u1(1)),
+                [u1(1)], u1(1),
                 [false],
                 [],
                 [],
@@ -1696,8 +1670,7 @@ mod tests {
             .unwrap(),
             FusionTreeKey::try_new_for_rule(
                 &U1FusionRule,
-                [u1(2)],
-                Some(u1(2)),
+                [u1(2)], u1(2),
                 [false],
                 [],
                 [],
@@ -1705,8 +1678,8 @@ mod tests {
             .unwrap(),
         );
         let later_bad_shape = FusionTreePairKey::pair(
-            FusionTreeKey::new([u1(1), u1(-1)], Some(u1(0)), [false], [], [SectorId::new(1)]),
-            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+            FusionTreeKey::new([u1(1), u1(-1)], u1(0), [false], [], [MultiplicityIndex::ONE]),
+            FusionTreeKey::new([], u1(0), [], [], []),
         );
         let structure = BlockStructure::from_blocks(vec![
             BlockSpec::column_major_with_key(valid.into(), vec![1, 1], 0).unwrap(),
@@ -1724,6 +1697,92 @@ mod tests {
             error,
             CoreError::MalformedFusionTree {
                 message: "fusion tree pair requires matching coupled sectors",
+            }
+        );
+    }
+
+    #[test]
+    fn fusion_tree_block_structure_proof_rejects_nontrivial_vertex_for_unique_provider() {
+        let invalid = FusionTreePairKey::pair(
+            FusionTreeKey::new(
+                [z2_odd(), z2_odd()],
+                z2_even(),
+                [false; 2],
+                [],
+                [MultiplicityIndex::new(2).unwrap()],
+            ),
+            FusionTreeKey::new([z2_even()], z2_even(), [false], [], []),
+        );
+        let structure = BlockStructure::from_blocks(vec![
+            BlockSpec::column_major_with_key(invalid.into(), vec![1, 1, 1], 0).unwrap(),
+        ])
+        .unwrap();
+
+        // What: a raw label-two key cannot acquire the local proof required
+        // by compact multiplicity-free batch execution.
+        let error =
+            match LocallyValidatedFusionTreeBlockStructure::try_new(&Z2FusionRule, &structure) {
+                Ok(_) => panic!("nontrivial multiplicity label unexpectedly admitted"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error,
+            CoreError::MalformedFusionTree {
+                message: "fusion tree vertex label exceeds its fusion multiplicity",
+            }
+        );
+    }
+
+    #[test]
+    fn coupled_sector_constructor_validates_in_caller_order_before_sorting() {
+        let first = FusionTreePairKey::pair(
+            FusionTreeKey::new(
+                [SectorId::new(1), SectorId::new(2)],
+                SectorId::new(3),
+                [false; 2],
+                [],
+                [MultiplicityIndex::new(2).unwrap()],
+            ),
+            FusionTreeKey::new(
+                [SectorId::new(3)],
+                SectorId::new(3),
+                [false],
+                [],
+                [],
+            ),
+        );
+        let later_lower_coupled = FusionTreePairKey::pair(
+            FusionTreeKey::new(
+                [SectorId::new(0), SectorId::new(1)],
+                SectorId::new(1),
+                [false],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+            FusionTreeKey::new(
+                [SectorId::new(1)],
+                SectorId::new(1),
+                [false],
+                [],
+                [],
+            ),
+        );
+
+        // What: the first caller-supplied categorical error wins even though
+        // coupled-sector layout order would move the later key before it.
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys(
+                &IdentitySymbolPanicRule,
+                2,
+                3,
+                vec![
+                    (first, vec![1, 1, 1]),
+                    (later_lower_coupled, vec![1, 1, 1]),
+                ],
+            )
+            .unwrap_err(),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree vertex label exceeds its fusion multiplicity",
             }
         );
     }
@@ -1756,14 +1815,13 @@ mod tests {
         let key = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &Z2FusionRule,
-                [z2_even()],
-                Some(z2_even()),
+                [z2_even()], z2_even(),
                 [false],
                 [],
                 [],
             )
             .unwrap(),
-            FusionTreeKey::new([], Some(z2_even()), [], [], []),
+            FusionTreeKey::new([], z2_even(), [], [], []),
         );
         let structure = BlockStructure::from_blocks(vec![
             BlockSpec::column_major_with_key(key.into(), vec![1, 1], 0).unwrap(),
@@ -1788,8 +1846,8 @@ mod tests {
         // What: a raw one-leg key with missing dual metadata remains a fallible
         // categorical input rather than panicking during structure indexing.
         let malformed = FusionTreePairKey::pair(
-            FusionTreeKey::new([z2_even()], None, [], [], []),
-            FusionTreeKey::new([], None, [], [], []),
+            FusionTreeKey::new([z2_even()], z2_even(), [], [], []),
+            FusionTreeKey::new([], z2_even(), [], [], []),
         );
         let structure = BlockStructure::from_blocks(vec![
             BlockSpec::column_major_with_key(malformed.clone().into(), vec![1], 0).unwrap(),
@@ -1813,14 +1871,13 @@ mod tests {
         let valid = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &U1FusionRule,
-                [u1(1), u1(-1)],
-                Some(u1(0)),
+                [u1(1), u1(-1)], u1(0),
                 [false; 2],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
-            FusionTreeKey::new([], Some(u1(0)), [], [], []),
+            FusionTreeKey::new([], u1(0), [], [], []),
         );
         let structure = BlockStructure::from_blocks(vec![
             BlockSpec::column_major_with_key(valid.clone().into(), vec![1, 1], 0).unwrap(),
@@ -1927,17 +1984,15 @@ mod tests {
         let simple_pair = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
-                [half, half],
-                Some(vacuum),
+                [half, half], vacuum,
                 [false; 2],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
-                [],
-                Some(vacuum),
+                [], vacuum,
                 [],
                 [],
                 [],
@@ -1963,14 +2018,13 @@ mod tests {
         let unique_pair = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &U1FusionRule,
-                [u1(1), u1(-1)],
-                Some(u1(0)),
+                [u1(1), u1(-1)], u1(0),
                 [false; 2],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
-            FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(u1(0)), [], [], []).unwrap(),
+            FusionTreeKey::try_new_for_rule(&U1FusionRule, [], u1(0), [], [], []).unwrap(),
         );
         let unique_structure =
             packed_fixture_structure(2, [(unique_pair, vec![1, 1])]).unwrap();
@@ -2003,11 +2057,10 @@ mod tests {
             &U1FusionRule,
             FusionTreeKey::try_new_for_rule(
                 &U1FusionRule,
-                [u1(1), u1(-2), u1(3)],
-                Some(u1(2)),
+                [u1(1), u1(-2), u1(3)], u1(2),
                 [false; 3],
                 [u1(-1)],
-                [SectorId::new(1); 2],
+                [MultiplicityIndex::ONE; 2],
             )
             .unwrap(),
         );
@@ -2017,11 +2070,10 @@ mod tests {
             &SU2FusionRule,
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
-                [half, half, one],
-                Some(one),
+                [half, half, one], one,
                 [false, true, false],
                 [su2(0)],
-                [SectorId::new(1); 2],
+                [MultiplicityIndex::ONE; 2],
             )
             .unwrap(),
         );
@@ -2029,11 +2081,10 @@ mod tests {
             &FibonacciFusionRule,
             FusionTreeKey::try_new_for_rule(
                 &FibonacciFusionRule,
-                [SectorId::new(1); 3],
-                Some(SectorId::new(1)),
+                [SectorId::new(1); 3], SectorId::new(1),
                 [false; 3],
                 [SectorId::new(0)],
-                [SectorId::new(1); 2],
+                [MultiplicityIndex::ONE; 2],
             )
             .unwrap(),
         );
@@ -2041,11 +2092,10 @@ mod tests {
             &FermionParityFusionRule,
             FusionTreeKey::try_new_for_rule(
                 &FermionParityFusionRule,
-                [z2_odd(); 3],
-                Some(z2_odd()),
+                [z2_odd(); 3], z2_odd(),
                 [false, true, false],
                 [z2_even()],
-                [SectorId::new(1); 2],
+                [MultiplicityIndex::ONE; 2],
             )
             .unwrap(),
         );
@@ -2059,11 +2109,10 @@ mod tests {
             &product,
             FusionTreeKey::try_new_for_rule(
                 &product,
-                [left, right],
-                Some(coupled),
+                [left, right], coupled,
                 [false; 2],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
         );
@@ -2086,11 +2135,10 @@ mod tests {
         let odd = SectorId::new(1);
         let vacuum = SectorId::new(0);
         let source = FusionTreeKey::new(
-            [odd; 3],
-            Some(vacuum),
+            [odd; 3], vacuum,
             [false; 3],
             [vacuum],
-            [SectorId::new(1); 2],
+            [MultiplicityIndex::ONE; 2],
         );
         let identity = [0, 1, 2];
         let levels = [0, 1, 2];
@@ -2112,7 +2160,7 @@ mod tests {
 
         let pair = FusionTreePairKey::pair(
             source,
-            FusionTreeKey::new([], Some(vacuum), [], [], []),
+            FusionTreeKey::new([], vacuum, [], [], []),
         );
         let prepared = PreparedTreePairOperation::prepare_braid(
             &rule,
@@ -2171,11 +2219,10 @@ mod tests {
         let tau = SectorId::new(1);
         let vacuum = SectorId::new(0);
         let invalid = FusionTreeKey::new(
-            [tau; 3],
-            Some(vacuum),
+            [tau; 3], vacuum,
             [false; 3],
             [vacuum],
-            [SectorId::new(1); 2],
+            [MultiplicityIndex::ONE; 2],
         );
         assert_eq!(
             multiplicity_free_braid_tree(
@@ -2236,7 +2283,7 @@ mod tests {
 
         let pair = FusionTreePairKey::pair(
             invalid,
-            FusionTreeKey::new([], Some(vacuum), [], [], []),
+            FusionTreeKey::new([], vacuum, [], [], []),
         );
         let wrong_rank = PreparedTreePairOperation::prepare_braid(
             &FibonacciFusionRule,
@@ -2265,18 +2312,16 @@ mod tests {
         // providers can observe a malformed source.
         let rule = SplitOnlyCountingRule::default();
         let invalid = FusionTreeKey::new(
-            [SectorId::new(1); 2],
-            Some(SectorId::new(1)),
+            [SectorId::new(1); 2], SectorId::new(1),
             [false; 2],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         );
         assert!(unique_braid_tree(&rule, &invalid, &[0, 1], &[0, 1]).is_err());
         let pair = FusionTreePairKey::pair(
             invalid,
             FusionTreeKey::new(
-                [SectorId::new(1)],
-                Some(SectorId::new(1)),
+                [SectorId::new(1)], SectorId::new(1),
                 [false],
                 [],
                 [],
@@ -2305,25 +2350,22 @@ mod tests {
         let tau = SectorId::new(1);
         let vacuum = SectorId::new(0);
         let invalid_first = FusionTreeKey::new(
-            [tau; 3],
-            Some(vacuum),
+            [tau; 3], vacuum,
             [false; 3],
             [vacuum],
-            [SectorId::new(1); 2],
+            [MultiplicityIndex::ONE; 2],
         );
         let valid_first = FusionTreeKey::new(
-            [tau; 3],
-            Some(tau),
+            [tau; 3], tau,
             [false; 3],
             [vacuum],
-            [SectorId::new(1); 2],
+            [MultiplicityIndex::ONE; 2],
         );
         let different_group = FusionTreeKey::new(
-            [tau; 2],
-            Some(vacuum),
+            [tau; 2], vacuum,
             [false; 2],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         );
         assert_eq!(
             multiplicity_free_braid_tree_block(
@@ -2352,11 +2394,10 @@ mod tests {
 
         let rule = SplitOnlyCountingRule::default();
         let valid = FusionTreeKey::new(
-            [SectorId::new(1); 2],
-            Some(SectorId::new(0)),
+            [SectorId::new(1); 2], SectorId::new(0),
             [false; 2],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         );
         let rows = multiplicity_free_braid_tree_block(
             &rule,
@@ -2376,8 +2417,7 @@ mod tests {
         let pair = FusionTreePairKey::pair(
             valid,
             FusionTreeKey::new(
-                [SectorId::new(0)],
-                Some(SectorId::new(0)),
+                [SectorId::new(0)], SectorId::new(0),
                 [false],
                 [],
                 [],
@@ -2399,19 +2439,19 @@ mod tests {
 
     #[test]
     fn unique_direct_braid_eligibility_excludes_rank_zero() {
-        // What: the canonical empty-tree convention keeps `coupled = None`,
-        // but no rank-zero operation is eligible for a direct braid rebuild.
+        // What: the canonical empty tree carries the vacuum, but no rank-zero
+        // operation is eligible for a direct braid rebuild.
         let empty = FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             [],
-            None,
+            Z2FusionRule.vacuum(),
             [],
             [],
             [],
         )
         .unwrap();
 
-        assert_eq!(empty.coupled(), None);
+        assert_eq!(empty.coupled(), Z2FusionRule.vacuum());
         assert!(!is_unique_direct_braid_source(&Z2FusionRule, &empty));
     }
 
@@ -2423,7 +2463,7 @@ mod tests {
         let rule = UncertifiedCustomSymbolsRule;
         assert!(!rule.has_trivial_associator_gauge());
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [0], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [0], [1, 1]).unwrap();
 
         let (destination, coefficient) =
             unique_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
@@ -2438,7 +2478,7 @@ mod tests {
         // What: prepared Artin steps retain Complex64 conjugation and reverse
         // R-symbol argument order for an inverse anyonic crossing.
         let rule = ComplexAsymmetricUniqueRule;
-        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, true], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, true], [], [1]).unwrap();
 
         let forward = unique_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
         let inverse = unique_braid_tree(&rule, &tree, &[1, 0], &[1, 0]).unwrap();
@@ -2461,7 +2501,7 @@ mod tests {
 
     #[test]
     fn unique_braid_tree_rejects_invalid_permutation_and_level_count() {
-        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
 
         let err = unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 1], &[0, 1]).unwrap_err();
         assert_eq!(
@@ -2484,7 +2524,7 @@ mod tests {
 
     #[test]
     fn unique_permute_tree_requires_symmetric_braiding() {
-        let tree = FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+        let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
 
         let err = unique_permute_tree(&AsymmetricAnyonicRule, &tree, &[1, 0]).unwrap_err();
 
@@ -2593,7 +2633,7 @@ mod tests {
     fn complex_scalar_r_symbol_and_conjugate_inverse_braid_stage0_spike() {
         let rule = ComplexScalarProbeRule;
         for coupled in [0usize, 1usize] {
-            let tree = FusionTreeKey::from_sector_ids([1, 1], Some(coupled), [false, false], [], [1]);
+            let tree = FusionTreeKey::try_from_sector_ids([1, 1], coupled, [false, false], [], [1]).unwrap();
             let expected = num_complex::Complex64::from_polar(
                 1.0,
                 if coupled == 0 {
@@ -2627,7 +2667,7 @@ mod tests {
         // single-r-symbol `index == 0` branch).
         let rule = ComplexScalarProbeRule;
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [1], [1, 1]).unwrap();
 
         let braided = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
 
@@ -2768,7 +2808,7 @@ mod tests {
         let rule = FibonacciFusionRule;
         for coupled in [0usize, 1usize] {
             let tree =
-                FusionTreeKey::from_sector_ids([1, 1], Some(coupled), [false, false], [], [1]);
+                FusionTreeKey::try_from_sector_ids([1, 1], coupled, [false, false], [], [1]).unwrap();
 
             let forward = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
             assert_eq!(forward.len(), 1);
@@ -2787,7 +2827,7 @@ mod tests {
         // identity because TensorKitSectors' F^{τττ}_τ block is a genuine
         // (real, orthogonal) unitary matrix.
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [1], [1, 1]).unwrap();
         let forward = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
         assert_eq!(forward.len(), 2);
         let mut total = Complex64::new(0.0, 0.0);
@@ -2813,7 +2853,7 @@ mod tests {
         // branch) substituting TensorKitSectors' F/R values directly.
         let rule = FibonacciFusionRule;
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [1], [1, 1]).unwrap();
 
         let braided = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
         assert_eq!(braided.len(), 2);
@@ -2841,7 +2881,7 @@ mod tests {
         // for both crossing orientations.
         let rule = FibonacciFusionRule;
         let tree =
-            FusionTreeKey::from_sector_ids([1, 1, 1], Some(1), [false, false, false], [1], [1, 1]);
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [1], [1, 1]).unwrap();
         let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
         let cispi = |x: f64| Complex64::from_polar(1.0, std::f64::consts::PI * x);
 
@@ -2905,17 +2945,16 @@ mod tests {
     fn identity_braid_tree_pair_skips_symbols_and_repartition() {
         // What: an exact same-split braid is source => one for both Unique and
         // multiplicity-free entry points, without consulting F/R/bend data.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
 
         let unique = unique_braid_tree_pair(
             &IdentitySymbolPanicRule,
@@ -2957,20 +2996,18 @@ mod tests {
 
         let rule = SU2FusionRule;
         let sources = [
-            FusionTreeKey::from_sector_ids(
-                [1, 1, 1],
-                Some(1),
+            FusionTreeKey::try_from_sector_ids(
+                [1, 1, 1], 1,
                 [false, false, false],
                 [0],
                 [1, 1],
-            ),
-            FusionTreeKey::from_sector_ids(
-                [1, 1, 1],
-                Some(1),
+            ).unwrap(),
+            FusionTreeKey::try_from_sector_ids(
+                [1, 1, 1], 1,
                 [false, false, false],
                 [2],
                 [1, 1],
-            ),
+            ).unwrap(),
         ];
 
         let block =
@@ -3008,10 +3045,10 @@ mod tests {
     #[test]
     fn tree_block_admits_every_source_before_group_check_and_symbols() {
         let base =
-            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
+            FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
         let valid_mixed = [
-            FusionTreeKey::from_sector_ids([1, 4], Some(5), [false, false], [], [1]),
-            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, true], [], [1]),
+            FusionTreeKey::try_from_sector_ids([1, 4], 5, [false, false], [], [1]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, true], [], [1]).unwrap(),
         ];
         let expected = CoreError::MalformedFusionTree {
             message: "fusion-tree keys must share one group",
@@ -3042,20 +3079,28 @@ mod tests {
             );
         }
 
-        // What: categorical admission of every source precedes the group check.
-        let style_mismatch = [base.clone(), base.with_has_multiplicity(true)];
-        let expected_style = CoreError::MalformedFusionTree {
-            message: "fusion tree multiplicity style disagrees with the fusion rule",
+        let invalid_vertex = FusionTreeKey::new(
+            base.uncoupled().iter().copied(),
+            base.coupled(),
+            base.is_dual().iter().copied(),
+            base.innerlines().iter().copied(),
+            [MultiplicityIndex::new(2).unwrap()],
+        );
+        let invalid_sources = [base, invalid_vertex];
+        let expected_vertex = CoreError::MalformedFusionTree {
+            message: "fusion tree vertex label exceeds its fusion multiplicity",
         };
+        // What: provider-owned multiplicity admission checks every source
+        // before a block shortcut can discard explicit vertex identity.
         assert_eq!(
             multiplicity_free_braid_tree_block(
                 &IdentitySymbolPanicRule,
-                &style_mismatch,
+                &invalid_sources,
                 &[0, 1],
                 &[0, 1],
             )
             .unwrap_err(),
-            expected_style
+            expected_vertex
         );
     }
 
@@ -3079,20 +3124,18 @@ mod tests {
 
         let half = su2(1);
         let sources = [
-            FusionTreeKey::from_sector_ids(
-                [half.id(), half.id()],
-                Some(su2(0).id()),
+            FusionTreeKey::try_from_sector_ids(
+                [half.id(), half.id()], su2(0).id(),
                 [false; 2],
                 [],
                 [1],
-            ),
-            FusionTreeKey::from_sector_ids(
-                [half.id(), half.id()],
-                Some(su2(2).id()),
+            ).unwrap(),
+            FusionTreeKey::try_from_sector_ids(
+                [half.id(), half.id()], su2(2).id(),
                 [false; 2],
                 [],
                 [1],
-            ),
+            ).unwrap(),
         ];
         let expected = sources
             .iter()
@@ -3131,17 +3174,16 @@ mod tests {
     ) -> FusionTreePairKey {
         let codomain_vertices = vec![1; codomain.len().saturating_sub(1)];
         let domain_vertices = vec![1; domain.len().saturating_sub(1)];
-        FusionTreePairKey::pair_from_sector_ids(
+        FusionTreePairKey::try_pair_from_sector_ids(
             codomain.iter().copied(),
-            domain.iter().copied(),
-            Some(coupled),
+            domain.iter().copied(), coupled,
             codomain_dual.iter().copied(),
             domain_dual.iter().copied(),
             [],
             [],
             codomain_vertices,
             domain_vertices,
-        )
+        ).unwrap()
     }
 
     fn assert_mixed_tree_pair_block_group_is_rejected<R>(
@@ -3328,20 +3370,27 @@ mod tests {
     }
 
     #[test]
-    fn tree_pair_block_apis_reject_mixed_multiplicity_flags() {
+    fn tree_pair_block_apis_reject_invalid_later_vertex_before_symbols() {
         let codomain =
-            FusionTreeKey::from_sector_ids([1, 2], Some(3), [false, false], [], [1]);
-        let domain = FusionTreeKey::from_sector_ids([3], Some(3), [false], [], []);
+            FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
+        let domain = FusionTreeKey::try_from_sector_ids([3], 3, [false], [], []).unwrap();
         let base = FusionTreePairKey::pair(codomain.clone(), domain.clone());
-        let generic = FusionTreePairKey::pair(codomain.with_has_multiplicity(true), domain);
+        let invalid_codomain = FusionTreeKey::new(
+            codomain.uncoupled().iter().copied(),
+            codomain.coupled(),
+            codomain.is_dual().iter().copied(),
+            codomain.innerlines().iter().copied(),
+            [MultiplicityIndex::new(2).unwrap()],
+        );
+        let invalid = FusionTreePairKey::pair(invalid_codomain, domain);
 
-        // What: every source pair is categorically admitted before a later
-        // group comparison can observe outer-multiplicity semantics.
+        // What: every source pair is categorically admitted before block
+        // identity shortcuts or symbol evaluation.
         assert_mixed_tree_pair_block_group_is_rejected(
             &IdentitySymbolPanicRule,
-            &[base, generic],
+            &[base, invalid],
             CoreError::MalformedFusionTree {
-                message: "fusion tree multiplicity style disagrees with the fusion rule",
+                message: "fusion tree vertex label exceeds its fusion multiplicity",
             },
         );
     }
@@ -3351,17 +3400,16 @@ mod tests {
         // What: moving the split from 1|2 to 2|1 with unchanged linearized
         // external-leg order evaluates one bend and no braid symbols, for both
         // the single-source and block entry points.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [0, 1],
-            Some(1),
+            [0, 1], 1,
             [false],
             [false, true],
             [],
             [],
             [],
             [1],
-        );
+        ).unwrap();
 
         let rule = SplitOnlyCountingRule::default();
         let single = multiplicity_free_braid_tree_pair(
@@ -3396,17 +3444,16 @@ mod tests {
     fn split_only_su2_braid_matches_legacy_composition_in_both_directions() {
         // What: SU(2) 2|2 -> 3|1 and 2|2 -> 1|3 retain the exact tree keys,
         // dual flags, and bend coefficients of the old all-codomain route.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 2],
-            [2, 1],
-            Some(1),
+            [2, 1], 1,
             [false, true],
             [true, false],
             [],
             [],
             [1],
             [1],
-        );
+        ).unwrap();
 
         for (codomain_axes, domain_axes, target_rank) in
             [(&[0, 1, 3][..], &[2][..], 3), (&[0][..], &[2, 3, 1][..], 1)]
@@ -3437,17 +3484,16 @@ mod tests {
         // What: the two extreme repartitions 0|2 -> 2|0 and 2|0 -> 0|2
         // preserve the same keys, dual flags, and coefficients as the direct
         // primitive, including an empty codomain or domain tree.
-        let all_domain = FusionTreePairKey::pair_from_sector_ids(
+        let all_domain = FusionTreePairKey::try_pair_from_sector_ids(
             [],
-            [1, 1],
-            Some(0),
+            [1, 1], 0,
             [],
             [false, true],
             [],
             [],
             [],
             [1],
-        );
+        ).unwrap();
         let to_codomain = multiplicity_free_braid_tree_pair(
             &SU2FusionRule,
             &all_domain,
@@ -3500,8 +3546,7 @@ mod tests {
         let source = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
-                [coupled],
-                Some(coupled),
+                [coupled], coupled,
                 [false],
                 [],
                 [],
@@ -3509,11 +3554,10 @@ mod tests {
             .unwrap(),
             FusionTreeKey::try_new_for_rule(
                 &rule,
-                [domain_left, domain_right],
-                Some(coupled),
+                [domain_left, domain_right], coupled,
                 [false, true],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
         );
@@ -3563,17 +3607,16 @@ mod tests {
     fn nonidentity_tree_pair_braid_does_not_enter_split_only_path() {
         // What: changing the split does not suppress a real external-leg
         // permutation, and malformed axis maps still fail validation.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [0, 1],
-            Some(1),
+            [0, 1], 1,
             [false],
             [false, true],
             [],
             [],
             [],
             [1],
-        );
+        ).unwrap();
 
         let rule = SplitOnlyCountingRule::default();
         multiplicity_free_braid_tree_pair(
@@ -3606,17 +3649,16 @@ mod tests {
     fn identity_braid_tree_pair_validates_levels_before_symbol_free_return() {
         // What: malformed levels remain errors even when the axis map is the
         // exact current split.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
 
         assert!(unique_braid_tree_pair(
             &IdentitySymbolPanicRule,
@@ -3651,7 +3693,7 @@ mod tests {
     fn unique_identity_tree_operations_reject_simple_fusion_rules() {
         // What: identity axes do not let a Simple rule enter APIs whose
         // contract requires Unique fusion.
-        let tree = FusionTreeKey::from_sector_ids([1], Some(1), [false], [], []);
+        let tree = FusionTreeKey::try_from_sector_ids([1], 1, [false], [], []).unwrap();
         let expected = CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Unique,
             actual: FusionStyleKind::Simple,
@@ -3671,17 +3713,16 @@ mod tests {
     fn same_split_transpose_of_dual_tree_pair_skips_bend_symbols() {
         // What: a real codomain/domain tree pair at its current 2|1 split is
         // source => one without consulting bend/fold data.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 0],
-            [1],
-            Some(1),
+            [1], 1,
             [false, true],
             [true],
             [],
             [],
             [1],
             [],
-        );
+        ).unwrap();
 
         assert_eq!(
             unique_transpose_tree_pair(&IdentitySymbolPanicRule, &source, &[0, 1], &[2])
@@ -3695,17 +3736,16 @@ mod tests {
         // What: identity rows preserve their exact source key and unit
         // coefficient for fermionic, non-abelian, product, and scalar spaces.
         let pair = |sector: SectorId| {
-            FusionTreePairKey::pair_from_sector_ids(
+            FusionTreePairKey::try_pair_from_sector_ids(
                 [sector.id()],
-                [sector.id()],
-                Some(sector.id()),
+                [sector.id()], sector.id(),
                 [false],
                 [false],
                 [],
                 [],
                 [],
                 [],
-            )
+            ).unwrap()
         };
 
         let fz2_source = pair(z2_odd());
@@ -3758,17 +3798,16 @@ mod tests {
             vec![(product_source, 1.0)]
         );
 
-        let scalar_source = FusionTreePairKey::pair_from_sector_ids(
+        let scalar_source = FusionTreePairKey::try_pair_from_sector_ids(
             Vec::<usize>::new(),
-            Vec::<usize>::new(),
-            Some(z2_even().id()),
+            Vec::<usize>::new(), z2_even().id(),
             Vec::<bool>::new(),
             Vec::<bool>::new(),
             Vec::<usize>::new(),
             Vec::<usize>::new(),
             Vec::<usize>::new(),
             Vec::<usize>::new(),
-        );
+        ).unwrap();
         assert_eq!(
             unique_braid_tree_pair(
                 &Z2FusionRule,
@@ -3785,17 +3824,16 @@ mod tests {
 
     #[test]
     fn unique_repartition_tree_pair_moves_domain_to_reversed_dual_codomain() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [0, 1],
-            Some(1),
+            [0, 1], 1,
             [false],
             [false, true],
             [],
             [],
             [],
             [1],
-        );
+        ).unwrap();
 
         let (all_out, coefficient) =
             unique_repartition_tree_pair(&Z2FusionRule, &source, 3).unwrap();
@@ -3809,22 +3847,22 @@ mod tests {
         assert_eq!(all_out.codomain_innerlines(), &[SectorId::new(0)]);
         assert_eq!(
             all_out.codomain_vertices(),
-            &[SectorId::new(1), SectorId::new(1)]
+            &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]
         );
         assert!(all_out.domain_uncoupled().is_empty());
-        assert_eq!(all_out.domain_tree().coupled(), Some(SectorId::new(0)));
+        assert_eq!(all_out.domain_tree().coupled(), SectorId::new(0));
     }
 
     #[test]
     fn unique_braid_tree_pair_matches_single_tree_when_domain_is_empty() {
         let source = FusionTreePairKey::pair(
-            FusionTreeKey::from_sector_ids([1, 1], Some(0), [false, true], [], [1]),
+            FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, true], [], [1]).unwrap(),
             FusionTreeKey::new(
                 Vec::<SectorId>::new(),
-                None,
+                FermionParityFusionRule.vacuum(),
                 Vec::<bool>::new(),
                 Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
+                Vec::<MultiplicityIndex>::new(),
             ),
         );
 
@@ -3845,22 +3883,24 @@ mod tests {
         );
         assert_eq!(braided.codomain_is_dual(), &[true, false]);
         assert!(braided.domain_uncoupled().is_empty());
-        assert_eq!(braided.domain_tree().coupled(), None);
+        assert_eq!(
+            braided.domain_tree().coupled(),
+            FermionParityFusionRule.vacuum()
+        );
     }
 
     #[test]
     fn unique_permute_tree_pair_handles_domain_only_swap() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [0, 1],
-            Some(1),
+            [0, 1], 1,
             [false],
             [false, true],
             [],
             [],
             [],
             [1],
-        );
+        ).unwrap();
 
         let (permuted, coefficient) =
             unique_permute_tree_pair(&Z2FusionRule, &source, &[0], &[2, 1]).unwrap();
@@ -3872,22 +3912,21 @@ mod tests {
             &[SectorId::new(1), SectorId::new(0)]
         );
         assert_eq!(permuted.domain_is_dual(), &[true, false]);
-        assert_eq!(permuted.domain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(permuted.domain_vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
     fn unique_permute_tree_pair_includes_codomain_domain_crossing() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
 
         let (permuted, coefficient) =
             unique_permute_tree_pair(&FermionParityFusionRule, &source, &[1], &[0]).unwrap();
@@ -3903,17 +3942,16 @@ mod tests {
     fn prepared_fermionic_domain_crossing_is_exactly_negative_one() {
         // What: an actual odd fZ2 domain leg crossing an odd codomain leg
         // retains the exact TensorKit fermionic phase through prepared replay.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let prepared = PreparedTreePairOperation::prepare_permute(
             &FermionParityFusionRule,
             1,
@@ -3958,17 +3996,16 @@ mod tests {
     fn prepared_permute_revalidates_symmetric_capability_for_reused_rule() {
         // What: a prepared permutation cannot become an identity, repartition,
         // or general braid when executed with a non-symmetric provider.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let plans = [
             PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 1, &[0], &[1]).unwrap(),
             PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 1, &[0, 1], &[]).unwrap(),
@@ -3996,17 +4033,16 @@ mod tests {
     fn prepared_transpose_fixes_both_cycle_directions_once() {
         // What: clockwise and anticlockwise TensorKit cyclic permutations are
         // lowered to one fixed direction/count before any source execution.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 0],
-            [1, 0],
-            Some(1),
+            [1, 0], 1,
             [false, false],
             [false, false],
             [],
             [],
             [1],
             [1],
-        );
+        ).unwrap();
         let cases = [
             (
                 &[1, 3][..],
@@ -4054,17 +4090,16 @@ mod tests {
     fn unique_prepared_executor_rejects_simple_for_every_plan_variant() {
         // What: a general multiplicity-free plan never becomes a Unique plan
         // merely because its operation variant is an identity or repartition.
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let plans = [
             PreparedTreePairOperation::prepare_braid(
                 &SU2FusionRule,
@@ -4230,17 +4265,16 @@ mod tests {
 
     #[test]
     fn unique_transpose_tree_pair_is_cyclic_and_reversible() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
 
         let (transposed, coefficient) =
             unique_transpose_tree_pair(&Z2FusionRule, &source, &[1], &[0]).unwrap();
@@ -4254,28 +4288,26 @@ mod tests {
 
     #[test]
     fn unique_transpose_tree_pair_matches_tensorkit_clockwise_cycle() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 0],
-            [1, 0],
-            Some(1),
+            [1, 0], 1,
             [false, false],
             [false, false],
             [],
             [],
             [1],
             [1],
-        );
-        let expected = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let expected = FusionTreePairKey::try_pair_from_sector_ids(
             [0, 0],
-            [1, 1],
-            Some(0),
+            [1, 1], 0,
             [false, true],
             [true, false],
             [],
             [],
             [1],
             [1],
-        );
+        ).unwrap();
 
         let (transposed, coefficient) =
             unique_transpose_tree_pair(&Z2FusionRule, &source, &[1, 3], &[0, 2]).unwrap();
@@ -4286,28 +4318,26 @@ mod tests {
 
     #[test]
     fn unique_transpose_tree_pair_matches_tensorkit_anticlockwise_cycle() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 0],
-            [1, 0],
-            Some(1),
+            [1, 0], 1,
             [false, false],
             [false, false],
             [],
             [],
             [1],
             [1],
-        );
-        let expected = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let expected = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 1],
-            [0, 0],
-            Some(0),
+            [0, 0], 0,
             [true, false],
             [false, true],
             [],
             [],
             [1],
             [1],
-        );
+        ).unwrap();
 
         let (transposed, coefficient) =
             unique_transpose_tree_pair(&Z2FusionRule, &source, &[2, 0], &[3, 1]).unwrap();
@@ -4318,17 +4348,16 @@ mod tests {
 
     #[test]
     fn unique_transpose_tree_pair_rejects_noncyclic_permutation() {
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1, 0],
-            [1],
-            Some(1),
+            [1], 1,
             [false, false],
             [false],
             [],
             [],
             [1],
             [],
-        );
+        ).unwrap();
 
         let err = unique_transpose_tree_pair(&Z2FusionRule, &source, &[0, 2], &[1]).unwrap_err();
 
@@ -4384,28 +4413,26 @@ mod tests {
 
     #[test]
     fn block_structure_finds_fusion_tree_subblock_by_key() {
-        let first = FusionTreePairKey::pair_from_sector_ids(
+        let first = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
-        let second = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let second = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [0],
-            Some(0),
+            [0], 0,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let structure = packed_fixture_structure(
             2,
             [
@@ -4430,28 +4457,26 @@ mod tests {
 
     #[test]
     fn tensormap_subblock_by_tree_returns_matching_view() {
-        let first = FusionTreePairKey::pair_from_sector_ids(
+        let first = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
-        let second = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let second = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [0],
-            Some(0),
+            [0], 0,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let structure = packed_fixture_structure(
             2,
             [
@@ -4483,28 +4508,26 @@ mod tests {
 
     #[test]
     fn tensormap_subblock_mut_by_tree_updates_selected_storage() {
-        let key = FusionTreePairKey::pair_from_sector_ids(
+        let key = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
-        let other = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let other = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [0],
-            Some(0),
+            [0], 0,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let structure = packed_fixture_structure(
             2,
             [
@@ -4530,28 +4553,26 @@ mod tests {
 
     #[test]
     fn subblock_by_tree_reports_missing_fusion_tree_key() {
-        let existing = FusionTreePairKey::pair_from_sector_ids(
+        let existing = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [0],
-            Some(0),
+            [0], 0,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
-        let missing = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let missing = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let structure =
             packed_fixture_structure(2, [(BlockKey::from(existing), vec![1, 1])]).unwrap();
         let space = TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap();
@@ -4933,14 +4954,14 @@ mod tests {
 
         assert_eq!(keys.len(), 2);
         for (key, coupled) in keys.iter().zip([c0, c1]) {
-            assert_eq!(key.coupled(), Some(coupled));
+            assert_eq!(key.coupled(), coupled);
             assert_eq!(key.codomain_uncoupled(), &[a, b]);
             assert_eq!(key.domain_uncoupled(), &[coupled]);
             assert_eq!(key.codomain_is_dual(), &[false, false]);
             assert_eq!(key.domain_is_dual(), &[false]);
             assert_eq!(key.codomain_innerlines(), &[]);
             assert_eq!(key.domain_innerlines(), &[]);
-            assert_eq!(key.codomain_vertices(), &[SectorId::new(1)]);
+            assert_eq!(key.codomain_vertices(), &[MultiplicityIndex::ONE]);
             assert_eq!(key.domain_vertices(), &[]);
         }
     }
@@ -5008,7 +5029,7 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].codomain_uncoupled(), &[a]);
         assert_eq!(keys[0].domain_uncoupled(), &[a]);
-        assert_eq!(keys[0].coupled(), Some(a));
+        assert_eq!(keys[0].coupled(), a);
 
         let err = hom
             .fusion_tree_keys_from_external_sectors(&rule, &[a, a])
@@ -5146,13 +5167,12 @@ mod tests {
     #[test]
     fn multiplicity_free_su2_braid_expands_innerline_channels() {
         let rule = SU2FusionRule;
-        let tree = FusionTreeKey::from_sector_ids(
-            [1, 1, 1, 1],
-            Some(0),
+        let tree = FusionTreeKey::try_from_sector_ids(
+            [1, 1, 1, 1], 0,
             [false, false, false, false],
             [0, 1],
             [1, 1, 1],
-        );
+        ).unwrap();
 
         let braided =
             multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1, 3], &[0, 1, 2, 3]).unwrap();
@@ -5174,17 +5194,16 @@ mod tests {
     #[test]
     fn multiplicity_free_su2_repartition_matches_tensorkit_bend_factor() {
         let rule = SU2FusionRule;
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
 
         let all_codomain = multiplicity_free_repartition_tree_pair(&rule, &source, 2).unwrap();
         assert_eq!(all_codomain.len(), 1);
@@ -5194,15 +5213,15 @@ mod tests {
         );
         assert_eq!(all_codomain[0].0.codomain_is_dual(), &[false, true]);
         assert_eq!(all_codomain[0].0.codomain_innerlines(), &[]);
-        assert_eq!(all_codomain[0].0.codomain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(all_codomain[0].0.codomain_vertices(), &[MultiplicityIndex::ONE]);
         assert_eq!(
             all_codomain[0].0.codomain_tree().coupled(),
-            Some(SectorId::new(0))
+            SectorId::new(0)
         );
         assert_eq!(all_codomain[0].0.domain_uncoupled(), &[]);
         assert_eq!(
             all_codomain[0].0.domain_tree().coupled(),
-            Some(SectorId::new(0))
+            SectorId::new(0)
         );
         assert!((all_codomain[0].1 - 2.0_f64.sqrt()).abs() < 1.0e-12);
 
@@ -5211,7 +5230,7 @@ mod tests {
         assert_eq!(all_domain[0].0.codomain_uncoupled(), &[]);
         assert_eq!(
             all_domain[0].0.codomain_tree().coupled(),
-            Some(SectorId::new(0))
+            SectorId::new(0)
         );
         assert_eq!(all_domain[0].0.domain_uncoupled(), &[SectorId::new(1); 2]);
         assert_eq!(all_domain[0].0.domain_is_dual(), &[false, true]);
@@ -5221,17 +5240,16 @@ mod tests {
     #[test]
     fn multiplicity_free_su2_permute_tree_pair_matches_tensorkit_swap() {
         let rule = SU2FusionRule;
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
 
         let permuted = multiplicity_free_permute_tree_pair(&rule, &source, &[1], &[0]).unwrap();
 
@@ -5242,11 +5260,11 @@ mod tests {
         assert_eq!(permuted[0].0.domain_is_dual(), &[true]);
         assert_eq!(
             permuted[0].0.codomain_tree().coupled(),
-            Some(SectorId::new(1))
+            SectorId::new(1)
         );
         assert_eq!(
             permuted[0].0.domain_tree().coupled(),
-            Some(SectorId::new(1))
+            SectorId::new(1)
         );
         assert!((permuted[0].1 - 1.0).abs() < 1.0e-12);
     }
@@ -5256,17 +5274,16 @@ mod tests {
         // What: a prepared Simple-fusion pair operation equals the explicit
         // repartition -> all-codomain Artin -> repartition composition.
         let rule = SU2FusionRule;
-        let source = FusionTreePairKey::pair_from_sector_ids(
+        let source = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [1],
-            Some(1),
+            [1], 1,
             [false],
             [false],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let prepared =
             PreparedTreePairOperation::prepare_permute(&rule, 1, 1, &[1], &[0]).unwrap();
         let actual = prepared
@@ -5311,18 +5328,16 @@ mod tests {
     fn u1_nonselfdual_tree_pair_fixture() -> FusionTreePairKey {
         FusionTreePairKey::pair(
             FusionTreeKey::new(
-                [u1(1), u1(2)],
-                Some(u1(3)),
+                [u1(1), u1(2)], u1(3),
                 [false, false],
                 Vec::<SectorId>::new(),
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             ),
             FusionTreeKey::new(
-                [u1(3)],
-                Some(u1(3)),
+                [u1(3)], u1(3),
                 [false],
                 Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
+                Vec::<MultiplicityIndex>::new(),
             ),
         )
     }
@@ -5338,15 +5353,15 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1.0);
         assert_eq!(out[0].0.codomain_uncoupled(), &[u1(1)]);
-        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(1)));
+        assert_eq!(out[0].0.codomain_tree().coupled(), u1(1));
         assert_eq!(out[0].0.codomain_is_dual(), &[false]);
         assert_eq!(out[0].0.codomain_innerlines(), &[]);
         assert_eq!(out[0].0.codomain_vertices(), &[]);
         assert_eq!(out[0].0.domain_uncoupled(), &[u1(3), u1(-2)]);
-        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(1)));
+        assert_eq!(out[0].0.domain_tree().coupled(), u1(1));
         assert_eq!(out[0].0.domain_is_dual(), &[false, true]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
-        assert_eq!(out[0].0.domain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(out[0].0.domain_vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
@@ -5360,15 +5375,15 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1.0);
         assert_eq!(out[0].0.codomain_uncoupled(), &[u1(2)]);
-        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(2)));
+        assert_eq!(out[0].0.codomain_tree().coupled(), u1(2));
         assert_eq!(out[0].0.codomain_is_dual(), &[false]);
         assert_eq!(out[0].0.codomain_innerlines(), &[]);
         assert_eq!(out[0].0.codomain_vertices(), &[]);
         assert_eq!(out[0].0.domain_uncoupled(), &[u1(-1), u1(3)]);
-        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(2)));
+        assert_eq!(out[0].0.domain_tree().coupled(), u1(2));
         assert_eq!(out[0].0.domain_is_dual(), &[true, false]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
-        assert_eq!(out[0].0.domain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(out[0].0.domain_vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
@@ -5383,17 +5398,17 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1.0);
         assert_eq!(out[0].0.codomain_uncoupled(), &[]);
-        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.codomain_tree().coupled(), u1(0));
         assert_eq!(out[0].0.codomain_is_dual(), &[] as &[bool]);
         assert_eq!(out[0].0.codomain_innerlines(), &[]);
         assert_eq!(out[0].0.codomain_vertices(), &[]);
         assert_eq!(out[0].0.domain_uncoupled(), &[u1(3), u1(-2), u1(-1)]);
-        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.domain_tree().coupled(), u1(0));
         assert_eq!(out[0].0.domain_is_dual(), &[false, true, true]);
         assert_eq!(out[0].0.domain_innerlines(), &[u1(1)]);
         assert_eq!(
             out[0].0.domain_vertices(),
-            &[SectorId::new(1), SectorId::new(1)]
+            &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]
         );
     }
 
@@ -5409,15 +5424,15 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1.0);
         assert_eq!(out[0].0.codomain_uncoupled(), &[u1(1), u1(2), u1(-3)]);
-        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.codomain_tree().coupled(), u1(0));
         assert_eq!(out[0].0.codomain_is_dual(), &[false, false, true]);
         assert_eq!(out[0].0.codomain_innerlines(), &[u1(3)]);
         assert_eq!(
             out[0].0.codomain_vertices(),
-            &[SectorId::new(1), SectorId::new(1)]
+            &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]
         );
         assert_eq!(out[0].0.domain_uncoupled(), &[]);
-        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(0)));
+        assert_eq!(out[0].0.domain_tree().coupled(), u1(0));
         assert_eq!(out[0].0.domain_is_dual(), &[] as &[bool]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
         assert_eq!(out[0].0.domain_vertices(), &[]);
@@ -5436,12 +5451,12 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, 1.0);
         assert_eq!(out[0].0.codomain_uncoupled(), &[u1(2), u1(-3)]);
-        assert_eq!(out[0].0.codomain_tree().coupled(), Some(u1(-1)));
+        assert_eq!(out[0].0.codomain_tree().coupled(), u1(-1));
         assert_eq!(out[0].0.codomain_is_dual(), &[false, true]);
         assert_eq!(out[0].0.codomain_innerlines(), &[]);
-        assert_eq!(out[0].0.codomain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(out[0].0.codomain_vertices(), &[MultiplicityIndex::ONE]);
         assert_eq!(out[0].0.domain_uncoupled(), &[u1(-1)]);
-        assert_eq!(out[0].0.domain_tree().coupled(), Some(u1(-1)));
+        assert_eq!(out[0].0.domain_tree().coupled(), u1(-1));
         assert_eq!(out[0].0.domain_is_dual(), &[true]);
         assert_eq!(out[0].0.domain_innerlines(), &[]);
         assert_eq!(out[0].0.domain_vertices(), &[]);
@@ -5464,8 +5479,7 @@ mod tests {
         let source = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
-                [coupled],
-                Some(coupled),
+                [coupled], coupled,
                 [false],
                 [],
                 [],
@@ -5473,11 +5487,10 @@ mod tests {
             .unwrap(),
             FusionTreeKey::try_new_for_rule(
                 &rule,
-                [odd_half, odd_one],
-                Some(coupled),
+                [odd_half, odd_one], coupled,
                 [false, true],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
         );
@@ -5496,14 +5509,13 @@ mod tests {
         // What: local coupled/innerline errors remain observable before a
         // missing final duality flag when several malformed fields coexist.
         let missing_innerline = FusionTreePairKey::pair(
-            FusionTreeKey::from_sector_ids(
-                [1, 1, 1],
-                Some(1),
+            FusionTreeKey::try_from_sector_ids(
+                [1, 1, 1], 1,
                 [false, false],
                 [],
                 [1, 1],
-            ),
-            FusionTreeKey::from_sector_ids([], Some(0), [], [], []),
+            ).unwrap(),
+            FusionTreeKey::try_from_sector_ids([], 0, [], [], []).unwrap(),
         );
         assert_eq!(
             multiplicity_free_bendright_tree_pair(&SU2FusionRule, &missing_innerline).unwrap_err(),
@@ -5513,8 +5525,8 @@ mod tests {
         );
 
         let mismatched_coupled = FusionTreePairKey::pair(
-            FusionTreeKey::from_sector_ids([1, 1], Some(0), [false], [], [1]),
-            FusionTreeKey::from_sector_ids([1], Some(1), [false], [], []),
+            FusionTreeKey::try_from_sector_ids([1, 1], 0, [false], [], [1]).unwrap(),
+            FusionTreeKey::try_from_sector_ids([1], 1, [false], [], []).unwrap(),
         );
         assert_eq!(
             multiplicity_free_bendright_tree_pair(&SU2FusionRule, &mismatched_coupled).unwrap_err(),
@@ -5538,7 +5550,7 @@ mod tests {
 
         assert_eq!(key.codomain_uncoupled(), &[U1Irrep::new(2).sector_id()]);
         assert_eq!(key.domain_uncoupled(), &[U1Irrep::new(2).sector_id()]);
-        assert_eq!(key.coupled(), Some(U1Irrep::new(2).sector_id()));
+        assert_eq!(key.coupled(), U1Irrep::new(2).sector_id());
     }
 
     #[test]
@@ -5568,17 +5580,16 @@ mod tests {
         assert_eq!(fusion_space.required_len().unwrap(), 5);
         assert_eq!(
             fusion_space.subblock_structure().block(0).unwrap().key(),
-            &BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+            &BlockKey::from(FusionTreePairKey::try_pair_from_sector_ids(
                 [0],
-                [0],
-                Some(0),
+                [0], 0,
                 [false],
                 [false],
                 [],
                 [],
                 [],
                 [],
-            ))
+            ).unwrap())
         );
         assert_eq!(
             fusion_space.subblock_structure().block(1).unwrap().shape(),
@@ -5805,17 +5816,16 @@ mod tests {
 
     #[test]
     fn fusion_tree_pair_key_records_tensorkit_subblock_pair_fields() {
-        let key = FusionTreePairKey::pair_from_sector_ids(
+        let key = FusionTreePairKey::try_pair_from_sector_ids(
             [2, 3],
-            [5, 7],
-            Some(11),
+            [5, 7], 11,
             [false, true],
             [true, false],
             [13],
             [17],
             [19, 23],
             [29, 31],
-        );
+        ).unwrap();
 
         assert_eq!(
             key.codomain_uncoupled(),
@@ -5825,18 +5835,24 @@ mod tests {
             key.domain_uncoupled(),
             &[SectorId::new(5), SectorId::new(7)]
         );
-        assert_eq!(key.coupled(), Some(SectorId::new(11)));
+        assert_eq!(key.coupled(), SectorId::new(11));
         assert_eq!(key.codomain_is_dual(), &[false, true]);
         assert_eq!(key.domain_is_dual(), &[true, false]);
         assert_eq!(key.codomain_innerlines(), &[SectorId::new(13)]);
         assert_eq!(key.domain_innerlines(), &[SectorId::new(17)]);
         assert_eq!(
             key.codomain_vertices(),
-            &[SectorId::new(19), SectorId::new(23)]
+            &[
+                MultiplicityIndex::new(19).unwrap(),
+                MultiplicityIndex::new(23).unwrap(),
+            ]
         );
         assert_eq!(
             key.domain_vertices(),
-            &[SectorId::new(29), SectorId::new(31)]
+            &[
+                MultiplicityIndex::new(29).unwrap(),
+                MultiplicityIndex::new(31).unwrap(),
+            ]
         );
 
         let group = key.group_key();
@@ -5848,28 +5864,26 @@ mod tests {
 
     #[test]
     fn sorted_lookup_distinguishes_rank1_tree_duality() {
-        let nondual = FusionTreePairKey::pair_from_sector_ids(
+        let nondual = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [],
-            Some(0),
+            [], 0,
             [false],
             [],
             [],
             [],
             [],
             [],
-        );
-        let dual = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let dual = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [],
-            Some(0),
+            [], 0,
             [true],
             [],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let structure = SectorStructure::from_keys(1, [BlockKey::from(nondual)]).unwrap();
 
         assert!(!structure.has_compact_lookup());
@@ -5885,8 +5899,8 @@ mod tests {
         let keys = hom.fusion_tree_keys(&rule);
 
         assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0].coupled(), Some(SectorId::new(0)));
-        assert_eq!(keys[1].coupled(), Some(SectorId::new(2)));
+        assert_eq!(keys[0].coupled(), SectorId::new(0));
+        assert_eq!(keys[1].coupled(), SectorId::new(2));
         assert_eq!(
             keys[0].codomain_uncoupled(),
             &[SectorId::new(1), SectorId::new(1)]
@@ -5897,8 +5911,8 @@ mod tests {
         );
         assert!(keys[0].codomain_innerlines().is_empty());
         assert!(keys[0].domain_innerlines().is_empty());
-        assert_eq!(keys[0].codomain_vertices(), &[SectorId::new(1)]);
-        assert_eq!(keys[0].domain_vertices(), &[SectorId::new(1)]);
+        assert_eq!(keys[0].codomain_vertices(), &[MultiplicityIndex::ONE]);
+        assert_eq!(keys[0].domain_vertices(), &[MultiplicityIndex::ONE]);
 
         let sector = hom.sector_structure(&rule).unwrap();
         let groups = sector.fusion_tree_groups();
@@ -5967,7 +5981,7 @@ mod tests {
 
         assert_eq!(key.codomain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(key.domain_uncoupled(), &[SectorId::new(1)]);
-        assert_eq!(key.coupled(), Some(SectorId::new(1)));
+        assert_eq!(key.coupled(), SectorId::new(1));
         assert_eq!(key.codomain_is_dual(), &[false]);
         assert_eq!(key.domain_is_dual(), &[false]);
     }
@@ -5989,7 +6003,7 @@ mod tests {
 
         assert_eq!(key.codomain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(key.domain_uncoupled(), &[SectorId::new(1)]);
-        assert_eq!(key.coupled(), Some(SectorId::new(1)));
+        assert_eq!(key.coupled(), SectorId::new(1));
     }
 
     #[test]
@@ -6960,13 +6974,13 @@ mod tests {
         let keys = hom.fusion_tree_keys(&rule);
 
         assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0].coupled(), Some(SectorId::new(1)));
-        assert_eq!(keys[1].coupled(), Some(SectorId::new(1)));
+        assert_eq!(keys[0].coupled(), SectorId::new(1));
+        assert_eq!(keys[1].coupled(), SectorId::new(1));
         assert_eq!(keys[0].codomain_innerlines(), &[SectorId::new(0)]);
         assert_eq!(keys[1].codomain_innerlines(), &[SectorId::new(2)]);
         assert_eq!(
             keys[0].codomain_vertices(),
-            &[SectorId::new(1), SectorId::new(1)]
+            &[MultiplicityIndex::ONE, MultiplicityIndex::ONE]
         );
         assert!(keys[0].domain_innerlines().is_empty());
         assert!(keys[0].domain_vertices().is_empty());
@@ -7154,7 +7168,6 @@ mod tests {
         );
         let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
         let layout = Arc::new(fusion_tree_layout_from_keys(
-            &rule,
             next_fusion_tree_layout_id(),
             hom.fusion_tree_keys_uncached(&rule),
         ));
@@ -7878,7 +7891,6 @@ mod tests {
         );
         let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
         let layout = Arc::new(fusion_tree_layout_from_keys(
-            &rule,
             next_fusion_tree_layout_id(),
             hom.fusion_tree_keys_uncached(&rule),
         ));
@@ -7986,7 +7998,7 @@ mod tests {
                         );
                         let keys = hom.fusion_tree_keys(&rule);
                         assert_eq!(keys.len(), 1);
-                        assert_eq!(keys[0].coupled(), Some(U1Irrep::new(charge).sector_id()));
+                        assert_eq!(keys[0].coupled(), U1Irrep::new(charge).sector_id());
                         let structure = hom
                             .coupled_subblock_structure(&rule, 1, [vec![2, 3]])
                             .unwrap();
@@ -8042,7 +8054,7 @@ mod tests {
         );
         assert!(keys
             .iter()
-            .all(|key| key.codomain_vertices() == [SectorId::new(1)]));
+            .all(|key| key.codomain_vertices() == [MultiplicityIndex::ONE]));
         assert!(keys.iter().all(|key| key.domain_vertices().is_empty()));
     }
 
@@ -8162,7 +8174,10 @@ mod tests {
 
             // What: a direct compact bend-left produces the exact public
             // full-key rows in source and first-appearance destination order.
-            let basis = CompactMultiplicityFreeTreePairBasis::from_sources(cohort).unwrap();
+            let group = validate_tree_pair_block_group_for_rule(rule, cohort)
+                .unwrap()
+                .unwrap();
+            let basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
             let (basis, columns) = compact_bendleft_block_first(rule, basis).unwrap();
             let got = scatter_compact_block(basis, columns);
             let want = cohort
@@ -8177,7 +8192,10 @@ mod tests {
 
             // What: a direct compact bend-right preserves the same one-row
             // oracle and ordering for every requested block cohort size.
-            let basis = CompactMultiplicityFreeTreePairBasis::from_sources(cohort).unwrap();
+            let group = validate_tree_pair_block_group_for_rule(rule, cohort)
+                .unwrap()
+                .unwrap();
+            let basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
             let (basis, columns) = compact_bendright_block_first(rule, basis).unwrap();
             let got = scatter_compact_block(basis, columns);
             let want = cohort
@@ -8192,7 +8210,10 @@ mod tests {
 
             // What: compact non-first Artin rows use the public F/R kernel and
             // retain its channel order for SU(2)-branching source cohorts.
-            let basis = CompactMultiplicityFreeTreePairBasis::from_sources(cohort).unwrap();
+            let group = validate_tree_pair_block_group_for_rule(rule, cohort)
+                .unwrap()
+                .unwrap();
+            let basis = CompactMultiplicityFreeTreePairBasis::from_group(group).unwrap();
             let (basis, columns) =
                 compact_codomain_artin_block_first(rule, basis, 3, false).unwrap();
             let got = scatter_compact_block(basis, columns);
@@ -8319,125 +8340,44 @@ mod tests {
     }
 
     #[test]
-    fn all_codomain_first_step_preserves_tree_vertex_identity() {
-        let tree = |vertex, has_multiplicity| {
-            FusionTreeKey::from_sector_ids(
-                [2, 2],
-                Some(2),
-                [false, false],
-                [],
-                [vertex],
-            )
-            .with_has_multiplicity(has_multiplicity)
+    fn generic_tree_cannot_enter_multiplicity_free_projection() {
+        // What: a genuine SU(3) 8 x 8 -> 8 multiplicity-two tree is rejected
+        // before the compact path can erase its vertex identity.
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let tree = FusionTreeKey::try_new_for_rule(
+            &rule,
+            [eight, eight],
+            eight,
+            [false, false],
+            [],
+            [MultiplicityIndex::new(2).unwrap()],
+        )
+        .unwrap();
+
+        let error = match project_multiplicity_free_tree(&rule, &tree) {
+            Ok(_) => panic!("Generic tree entered multiplicity-free projection"),
+            Err(error) => error,
         };
+        assert_eq!(
+            error,
+            CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Simple,
+                actual: FusionStyleKind::Generic,
+            }
+        );
 
-        // What: the direct-first path coalesces ignored multiplicity-free
-        // vertex payloads without first constructing an identity matrix.
-        let basis =
-            CompactMultiplicityFreeTreeBasis::from_sources(&[tree(1, false), tree(9, false)])
+        // A proof is an indexed view of the exact slice it checked. Creating
+        // another key later cannot extend that authority.
+        let checked = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false; 2], [], [1]).unwrap();
+        let separate =
+            FusionTreeKey::try_from_sector_ids([1, 1], 0, [false; 2], [], [2]).unwrap();
+        let projection =
+            MultiplicityFreeTreeProjection::checked(&SU2FusionRule, std::slice::from_ref(&checked))
                 .unwrap();
-        let (locals, columns) =
-            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
-                Ok(std::iter::once((local.clone(), 1.0)))
-            })
-            .unwrap();
-        assert_eq!(locals.len(), 1);
-        assert_eq!(columns.num_src, 2);
-        assert_eq!(columns.row(0), &[Some(1.0), Some(1.0)]);
-
-        // What: multiplicity-bearing vertices remain distinct local identities
-        // and materialization restores both their flag and payload.
-        let basis =
-            CompactMultiplicityFreeTreeBasis::from_sources(&[tree(1, true), tree(9, true)])
-                .unwrap();
-        let (locals, columns) =
-            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
-                Ok(std::iter::once((local.clone(), 1.0)))
-            })
-            .unwrap();
-        let rows = scatter_compact_tree_block(
-            CompactMultiplicityFreeTreeBasis {
-                frame: basis.frame,
-                locals,
-            },
-            &columns,
-        );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0][0].0.vertices(), &[SectorId::new(1)]);
-        assert_eq!(rows[1][0].0.vertices(), &[SectorId::new(9)]);
-        assert!(rows
-            .iter()
-            .all(|row| row[0].0.has_multiplicity()));
-    }
-
-    #[test]
-    fn compact_first_operator_matches_fusion_tree_vertex_identity() {
-        let tree = |vertex, has_multiplicity| {
-            FusionTreeKey::from_sector_ids(
-                [2, 2],
-                Some(2),
-                [false, false],
-                [],
-                [vertex],
-            )
-            .with_has_multiplicity(has_multiplicity)
-        };
-        let domain = FusionTreeKey::from_sector_ids([2], Some(2), [false], [], []);
-
-        // What: multiplicity-free vertex payloads coalesce to the first
-        // destination row, exactly as FusionTreeKey identity does.
-        let simple_sources = [
-            FusionTreePairKey::pair(tree(1, false), domain.clone()),
-            FusionTreePairKey::pair(tree(9, false), domain.clone()),
-        ];
-        let basis =
-            CompactMultiplicityFreeTreePairBasis::from_sources(&simple_sources).unwrap();
-        let (locals, columns) =
-            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
-                Ok(std::iter::once((local.clone(), 1.0)))
-            })
-            .unwrap();
-        assert_eq!(locals.len(), 1);
-        let rows = scatter_compact_block(
-            CompactMultiplicityFreeTreePairBasis {
-                frame: basis.frame,
-                locals,
-            },
-            columns,
-        );
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0][0].1, 1.0);
-        assert_eq!(rows[1][0].1, 1.0);
-        assert_eq!(rows[0][0].0.codomain_vertices(), &[SectorId::new(1)]);
-        assert_eq!(rows[1][0].0.codomain_vertices(), &[SectorId::new(1)]);
-        assert!(!rows[0][0].0.codomain_tree().has_multiplicity());
-
-        // What: unchecked multiplicity-bearing payloads remain distinct and
-        // materialization restores their identity flag and vertex labels.
-        let generic_sources = [
-            FusionTreePairKey::pair(tree(1, true), domain.clone()),
-            FusionTreePairKey::pair(tree(9, true), domain),
-        ];
-        let basis =
-            CompactMultiplicityFreeTreePairBasis::from_sources(&generic_sources).unwrap();
-        let (locals, columns) =
-            apply_first_compact_block_terms(&SU2FusionRule, &basis.locals, |_, local| {
-                Ok(std::iter::once((local.clone(), 1.0)))
-            })
-            .unwrap();
-        assert_eq!(locals.len(), 2);
-        let rows = scatter_compact_block(
-            CompactMultiplicityFreeTreePairBasis {
-                frame: basis.frame,
-                locals,
-            },
-            columns,
-        );
-        assert_eq!(rows[0][0].0.codomain_vertices(), &[SectorId::new(1)]);
-        assert_eq!(rows[1][0].0.codomain_vertices(), &[SectorId::new(9)]);
-        assert!(rows
-            .iter()
-            .all(|row| row[0].0.codomain_tree().has_multiplicity()));
+        assert!(projection.tree_at(0).is_some());
+        assert!(projection.tree_at(1).is_none());
+        assert_eq!(separate.vertices(), &[MultiplicityIndex::new(2).unwrap()]);
     }
 
     #[test]
@@ -8493,17 +8433,15 @@ mod tests {
     fn compact_repartition_preserves_source_major_error_precedence() {
         let codomain = |coupled, innerlines: &[SectorId]| {
             FusionTreeKey::new(
-                [u1(1), u1(1), u1(1), u1(1)],
-                Some(coupled),
+                [u1(1), u1(1), u1(1), u1(1)], coupled,
                 [false; 4],
                 innerlines.iter().copied(),
-                [SectorId::new(1); 3],
+                [MultiplicityIndex::ONE; 3],
             )
         };
         let domain = |coupled| {
             FusionTreeKey::new(
-                [u1(4)],
-                Some(coupled),
+                [u1(4)], coupled,
                 [false],
                 [],
                 [],
@@ -8732,7 +8670,7 @@ mod tests {
         // collect(sectors(Vect[U1Irrep](1=>1)')) == [U1Irrep(-1)]
         // fusiontrees((U1Irrep(-1),), U1Irrep(-1), (true,)) keeps uncoupled = -1.
         assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].coupled(), Some(minus_one.into()));
+        assert_eq!(keys[0].coupled(), minus_one.into());
         assert_eq!(keys[0].codomain_uncoupled(), &[minus_one.into()]);
         assert_eq!(keys[0].codomain_is_dual(), &[true]);
         assert_eq!(keys[0].domain_uncoupled(), &[minus_one.into()]);
@@ -8750,7 +8688,7 @@ mod tests {
         let keys = hom.fusion_tree_keys(&rule);
 
         assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].coupled(), Some(SectorId::new(1)));
+        assert_eq!(keys[0].coupled(), SectorId::new(1));
         assert_eq!(keys[0].codomain_uncoupled(), &[SectorId::new(1)]);
         assert_eq!(keys[0].codomain_is_dual(), &[true]);
         assert_eq!(keys[0].domain_uncoupled(), &[SectorId::new(1)]);
@@ -8786,39 +8724,36 @@ mod tests {
 
     #[test]
     fn fusion_tree_groups_preserve_structure_order_and_ignore_internal_tree_data() {
-        let first = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        let first = BlockKey::from(FusionTreePairKey::try_pair_from_sector_ids(
             [10, 20],
-            [30],
-            Some(5),
+            [30], 5,
             [false, true],
             [true],
             [101],
             [201],
             [301, 302],
             [401],
-        ));
-        let second = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap());
+        let second = BlockKey::from(FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [2, 3],
-            Some(4),
+            [2, 3], 4,
             [true],
             [false, true],
             [],
             [202],
             [303],
             [402, 403],
-        ));
-        let same_group_as_first = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap());
+        let same_group_as_first = BlockKey::from(FusionTreePairKey::try_pair_from_sector_ids(
             [10, 20],
-            [30],
-            Some(6),
+            [30], 6,
             [false, true],
             [true],
             [102],
             [203],
             [304, 305],
             [404],
-        ));
+        ).unwrap());
 
         let keys = vec![first.clone(), second.clone(), same_group_as_first.clone()];
         let sector = SectorStructure::from_keys(2, keys.clone()).unwrap();
@@ -8843,17 +8778,16 @@ mod tests {
 
     #[test]
     fn sector_structure_rejects_every_mixed_key_kind_pair() {
-        let fusion = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        let fusion = BlockKey::from(FusionTreePairKey::try_pair_from_sector_ids(
             [7],
-            [8],
-            Some(9),
+            [8], 9,
             [false],
             [true],
             [],
             [],
             [],
             [],
-        ));
+        ).unwrap());
         let keys = [
             BlockKey::trivial(),
             BlockKey::opaque([7]),
@@ -8987,17 +8921,16 @@ mod tests {
     fn lookup_never_aliases_different_key_namespaces() {
         let dense = SectorStructure::dense(0);
         let opaque_zero = SectorStructure::from_keys(0, [BlockKey::ordinal(0)]).unwrap();
-        let fusion_pair = FusionTreePairKey::pair_from_sector_ids(
+        let fusion_pair = FusionTreePairKey::try_pair_from_sector_ids(
             [0],
-            [],
-            Some(0),
+            [], 0,
             [false],
             [],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let fusion = SectorStructure::from_keys(1, [fusion_pair.clone()]).unwrap();
         let opaque_one = SectorStructure::from_keys(1, [BlockKey::ordinal(1)]).unwrap();
 
@@ -9026,28 +8959,26 @@ mod tests {
     #[allow(deprecated)]
     #[test]
     fn deprecated_fusion_tree_lookup_forwarders_match_canonical_results() {
-        let present = FusionTreePairKey::pair_from_sector_ids(
+        let present = FusionTreePairKey::try_pair_from_sector_ids(
             [1],
-            [],
-            Some(1),
+            [], 1,
             [false],
             [],
             [],
             [],
             [],
             [],
-        );
-        let missing = FusionTreePairKey::pair_from_sector_ids(
+        ).unwrap();
+        let missing = FusionTreePairKey::try_pair_from_sector_ids(
             [2],
-            [],
-            Some(2),
+            [], 2,
             [false],
             [],
             [],
             [],
             [],
             [],
-        );
+        ).unwrap();
         let structure = BlockStructure::from_blocks(vec![
             BlockSpec::column_major_with_key(present.clone().into(), vec![1], 0).unwrap(),
         ])
@@ -9149,25 +9080,24 @@ mod tests {
         let half = SU2Irrep::from_twice_spin(1).sector_id();
         let one = SU2Irrep::from_twice_spin(2).sector_id();
         let tree = FusionTreeKey::new(
-            [half, half, one],
-            Some(one),
+            [half, half, one], one,
             [false, false, true],
             [SectorId::new(0)],
-            [SectorId::new(1), SectorId::new(1)],
+            [MultiplicityIndex::ONE, MultiplicityIndex::ONE],
         );
 
         let (front, tail) = split_fusion_tree(&rule, &tree, 2).unwrap();
 
         assert_eq!(front.uncoupled(), &[half, half]);
-        assert_eq!(front.coupled(), Some(SectorId::new(0)));
+        assert_eq!(front.coupled(), SectorId::new(0));
         assert_eq!(front.is_dual(), &[false, false]);
         assert_eq!(front.innerlines(), &[]);
-        assert_eq!(front.vertices(), &[SectorId::new(1)]);
+        assert_eq!(front.vertices(), &[MultiplicityIndex::ONE]);
         assert_eq!(tail.uncoupled(), &[SectorId::new(0), one]);
-        assert_eq!(tail.coupled(), Some(one));
+        assert_eq!(tail.coupled(), one);
         assert_eq!(tail.is_dual(), &[false, true]);
         assert_eq!(tail.innerlines(), &[]);
-        assert_eq!(tail.vertices(), &[SectorId::new(1)]);
+        assert_eq!(tail.vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
@@ -9190,8 +9120,8 @@ mod tests {
     // `ToyOmRule` is purely synthetic (following `AsymmetricAnyonicRule`
     // above as a template): sector 1 ("a") fuses with itself to sector 3
     // ("c") via two independent channels, i.e. N(a,a,c) = 2. It exists only
-    // to exercise the `GenericFusionSymbols` wiring and the
-    // `FusionTreeKey::has_multiplicity` gate added in this stage.
+    // to exercise the `GenericFusionSymbols` wiring and provider-owned
+    // `FusionStyleKind::Generic` gate added in this stage.
     // Pentagon/hexagon are NOT required to hold — see
     // scratchpad/toy-om-stageA-plan.md, this is wiring validation only, not
     // a physical anyon model. The recoupling engine (recouple wrapper,
@@ -9318,11 +9248,10 @@ mod tests {
         let c = SectorId::new(ToyOmRule::C);
         let source = FusionTreeKey::try_new_for_rule(
             &rule,
-            [a, a, a],
-            Some(a),
+            [a, a, a], a,
             [false; 3],
             [c],
-            [SectorId::new(2), SectorId::new(1)],
+            [MultiplicityIndex::new(2).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
         )
         .unwrap();
 
@@ -9330,10 +9259,8 @@ mod tests {
 
         front.validate_for_rule(&rule).unwrap();
         tail.validate_for_rule(&rule).unwrap();
-        assert!(front.has_multiplicity());
-        assert!(tail.has_multiplicity());
-        assert_eq!(front.vertices(), &[SectorId::new(2)]);
-        assert_eq!(tail.vertices(), &[SectorId::new(1)]);
+        assert_eq!(front.vertices(), &[MultiplicityIndex::new(2).unwrap()]);
+        assert_eq!(tail.vertices(), &[MultiplicityIndex::ONE]);
     }
 
     #[test]
@@ -9343,13 +9270,11 @@ mod tests {
         let a = SectorId::new(ToyOmRule::A);
         let c = SectorId::new(ToyOmRule::C);
         let invalid = FusionTreeKey::new(
-            [a; 3],
-            Some(c),
+            [a; 3], c,
             [false; 3],
             [c],
-            [SectorId::new(1); 2],
-        )
-        .with_has_multiplicity(true);
+            [MultiplicityIndex::ONE; 2],
+        );
 
         assert_eq!(
             generic_braid_tree(&ToyOmRule, &invalid, &[0, 1, 2], &[0, 1, 2])
@@ -9457,28 +9382,24 @@ mod tests {
                 sector(CrossIncompatibleGenericRule::B),
                 sector(CrossIncompatibleGenericRule::C),
                 sector(CrossIncompatibleGenericRule::X),
-            ],
-            Some(sector(CrossIncompatibleGenericRule::Q)),
+            ], sector(CrossIncompatibleGenericRule::Q),
             [false; 4],
             [
                 sector(CrossIncompatibleGenericRule::E),
                 sector(CrossIncompatibleGenericRule::D),
             ],
-            [SectorId::new(1); 3],
-        )
-        .with_has_multiplicity(true);
+            [MultiplicityIndex::ONE; 3],
+        );
         let short = FusionTreeKey::new(
             [
                 sector(CrossIncompatibleGenericRule::B),
                 sector(CrossIncompatibleGenericRule::C),
                 sector(CrossIncompatibleGenericRule::X),
-            ],
-            Some(sector(CrossIncompatibleGenericRule::G)),
+            ], sector(CrossIncompatibleGenericRule::G),
             [false; 3],
             [sector(CrossIncompatibleGenericRule::F)],
-            [SectorId::new(1); 2],
-        )
-        .with_has_multiplicity(true);
+            [MultiplicityIndex::ONE; 2],
+        );
         long.validate_for_rule(&rule).unwrap();
         short.validate_for_rule(&rule).unwrap();
 
@@ -9543,41 +9464,16 @@ mod tests {
     fn generic_tree_pair(vertices_first: usize, vertices_second: usize) -> (FusionTreeKey, FusionTreeKey) {
         let a = SectorId::new(ToyOmRule::A);
         let c = SectorId::new(ToyOmRule::C);
-        let first = FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(vertices_first)]);
-        let second = FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(vertices_second)]);
+        let first = FusionTreeKey::new([a, a], c, [false, false], [], [MultiplicityIndex::new(vertices_first).expect("test multiplicity label is one-based")]);
+        let second = FusionTreeKey::new([a, a], c, [false, false], [], [MultiplicityIndex::new(vertices_second).expect("test multiplicity label is one-based")]);
         (first, second)
     }
 
     #[test]
-    fn fusion_tree_key_raw_identity_preserves_mult_free_vertices() {
-        // What: raw keys retain invalid or noncanonical vertex payloads until
-        // categorical admission rejects them, including through intern maps.
-        let (first, second) = generic_tree_pair(0, 1);
-        assert!(!first.has_multiplicity());
-        assert!(!second.has_multiplicity());
-        assert_ne!(first, second);
-        assert_ne!(first.cmp(&second), std::cmp::Ordering::Equal);
-
-        let mut set = std::collections::HashSet::new();
-        set.insert(first);
-        set.insert(second);
-        assert_eq!(
-            set.len(),
-            2,
-            "raw mult-free keys differing in vertices must remain distinct"
-        );
-    }
-
-    #[test]
     fn fusion_tree_key_generic_distinguishes_vertices() {
-        // OM-distinction gate: the same two keys as above, but flagged
-        // has_multiplicity=true (as a Generic-fusion tree from ToyOmRule
-        // would be) are now distinct: vertices participates in Hash/Eq/Ord.
-        let (first, second) = generic_tree_pair(0, 1);
-        let first = first.with_has_multiplicity(true);
-        let second = second.with_has_multiplicity(true);
-        assert!(first.has_multiplicity());
-        assert!(second.has_multiplicity());
+        // What: multiplicity vertices are always part of categorical identity;
+        // fusion style comes from the provider rather than a duplicated flag.
+        let (first, second) = generic_tree_pair(1, 2);
         assert_ne!(first, second);
         assert_ne!(first.cmp(&second), std::cmp::Ordering::Equal);
 
@@ -9588,32 +9484,19 @@ mod tests {
     }
 
     #[test]
-    fn fusion_tree_key_has_multiplicity_is_itself_part_of_identity() {
-        // What: fusion-style provenance remains part of raw identity even
-        // when every stored sector and vertex label agrees.
-        let (mult_free, _) = generic_tree_pair(0, 0);
-        let generic = mult_free.clone().with_has_multiplicity(true);
-        assert_ne!(mult_free, generic);
-        assert_ne!(generic, mult_free);
-        assert_ne!(mult_free.cmp(&generic), std::cmp::Ordering::Equal);
-        assert_ne!(generic.cmp(&mult_free), std::cmp::Ordering::Equal);
-    }
-
-    #[test]
     fn tree_pair_axis_validation_remains_linear_above_inline_bitset_capacity() {
         let rule = Z2FusionRule;
         let rank = 129;
         let codomain = FusionTreeKey::try_new_for_rule(
             &rule,
-            vec![SectorId::new(0); rank],
-            Some(SectorId::new(0)),
+            vec![SectorId::new(0); rank], SectorId::new(0),
             vec![false; rank],
             vec![SectorId::new(0); rank - 2],
-            vec![SectorId::new(1); rank - 1],
+            vec![MultiplicityIndex::ONE; rank - 1],
         )
         .unwrap();
         let domain =
-            FusionTreeKey::try_new_for_rule(&rule, [], Some(SectorId::new(0)), [], [], [])
+            FusionTreeKey::try_new_for_rule(&rule, [], SectorId::new(0), [], [], [])
                 .unwrap();
         let pair = FusionTreePairKey::pair(codomain, domain);
         let identity = (0..rank).collect::<Vec<_>>();
@@ -9771,8 +9654,7 @@ mod tests {
     fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
         let a = SectorId::new(UnitaryToyOmRule::A);
         let c = SectorId::new(UnitaryToyOmRule::C);
-        FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(vertex)])
-            .with_has_multiplicity(true)
+        FusionTreeKey::new([a, a], c, [false, false], [], [MultiplicityIndex::new(vertex).expect("test multiplicity label is one-based")])
     }
 
     // Rank-3 tree [a, a, a] -> a: fuse a⊗a->c (OM vertex `vertex1`, N=2), then
@@ -9782,13 +9664,11 @@ mod tests {
         let a = SectorId::new(UnitaryToyOmRule::A);
         let c = SectorId::new(UnitaryToyOmRule::C);
         FusionTreeKey::new(
-            [a, a, a],
-            Some(a),
+            [a, a, a], a,
             [false, false, false],
             [c],
-            [SectorId::new(vertex1), SectorId::new(1)],
+            [MultiplicityIndex::new(vertex1).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
         )
-        .with_has_multiplicity(true)
     }
 
     // Braid at `index` (inv=false) then braid every output at `index`
@@ -9899,10 +9779,7 @@ mod tests {
         assert_eq!(outputs.len(), 2, "expected N(a,a,c)=2 output trees");
         let mut labels: Vec<usize> = outputs
             .iter()
-            .map(|(t, _)| {
-                assert!(t.has_multiplicity(), "Generic braid output must be flagged");
-                t.vertices()[0].id()
-            })
+            .map(|(t, _)| t.vertices()[0].get())
             .collect();
         labels.sort_unstable();
         assert_eq!(labels, vec![1, 2], "output vertex labels must be {{1,2}}");
@@ -9920,7 +9797,7 @@ mod tests {
             .iter()
             .map(|(t, _)| {
                 assert_eq!(t.innerlines(), &[SectorId::new(UnitaryToyOmRule::C)]);
-                (t.vertices()[0].id(), t.vertices()[1].id())
+                (t.vertices()[0].get(), t.vertices()[1].get())
             })
             .collect();
         labels.sort_unstable();
@@ -10095,13 +9972,11 @@ mod tests {
         let a = SectorId::new(RefuteOmRule::A);
         let c = SectorId::new(RefuteOmRule::C);
         FusionTreeKey::new(
-            [a, a, a],
-            Some(a),
+            [a, a, a], a,
             [false, false, false],
             [c],
-            [SectorId::new(vertex1), SectorId::new(1)],
+            [MultiplicityIndex::new(vertex1).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
         )
-        .with_has_multiplicity(true)
     }
 
     // INDEPENDENT re-evaluation of TK braiding_manipulations.jl:170-194 for the
@@ -10175,8 +10050,8 @@ mod tests {
                 generic_artin_braid_at_with_inverse(rule, &tree, 1, inverse).unwrap();
             for (out, coeff) in outs {
                 assert_eq!(out.innerlines(), &[SectorId::new(RefuteOmRule::C)]);
-                assert_eq!(out.vertices()[1].id(), 1, "lambda must be 1");
-                let sigma = out.vertices()[0].id() - 1;
+                assert_eq!(out.vertices()[1].get(), 1, "lambda must be 1");
+                let sigma = out.vertices()[0].get() - 1;
                 m[sigma][mu1 - 1] = coeff;
             }
         }
@@ -10252,7 +10127,7 @@ mod tests {
                     generic_artin_braid_at_with_inverse(&rule, &mid, 1, true).unwrap()
                 {
                     assert_eq!(fin.innerlines(), &[SectorId::new(RefuteOmRule::C)]);
-                    let sigma = fin.vertices()[0].id() - 1;
+                    let sigma = fin.vertices()[0].get() - 1;
                     *col.entry(sigma).or_insert(0.0) += cf * ci;
                 }
             }
@@ -10394,20 +10269,18 @@ mod tests {
             for mu in 1..=2usize {
                 for nu in 1..=2usize {
                     let tree = FusionTreeKey::new(
-                        [three, three, three, three],
-                        Some(vac),
+                        [three, three, three, three], vac,
                         [false, false, false, false],
                         [three, three],
-                        [SectorId::new(mu), SectorId::new(nu), SectorId::new(1)],
-                    )
-                    .with_has_multiplicity(true);
+                        [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based"), MultiplicityIndex::new(nu).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
+                    );
                     for (out, coeff) in
                         generic_artin_braid_at_with_inverse(&rule, &tree, 1, inverse).unwrap()
                     {
                         assert_eq!(out.innerlines(), &[three, three], "c'=3, e=3 unchanged");
-                        assert_eq!(out.vertices()[2].id(), 1);
-                        let sigma = out.vertices()[0].id();
-                        let lambda = out.vertices()[1].id();
+                        assert_eq!(out.vertices()[2].get(), 1);
+                        let sigma = out.vertices()[0].get();
+                        let lambda = out.vertices()[1].get();
                         got.insert(((mu, nu), (sigma, lambda)), coeff);
                     }
                 }
@@ -10648,9 +10521,8 @@ mod tests {
     // cod [3,3]->3 (vertex μ), dom [3]->3.
     fn a4_pair_rank2(mu: usize) -> FusionTreePairKey {
         let t = a4_three();
-        let cod = FusionTreeKey::new([t, t], Some(t), [false, false], [], [SectorId::new(mu)])
-            .with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        let cod = FusionTreeKey::new([t, t], t, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         FusionTreePairKey::pair(cod, dom)
     }
 
@@ -10658,14 +10530,12 @@ mod tests {
     fn a4_pair_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreePairKey {
         let t = a4_three();
         let cod = FusionTreeKey::new(
-            [t, t, t],
-            Some(t),
+            [t, t, t], t,
             [false, false, false],
             [SectorId::new(inner)],
-            [SectorId::new(v1), SectorId::new(v2)],
-        )
-        .with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+            [MultiplicityIndex::new(v1).expect("test multiplicity label is one-based"), MultiplicityIndex::new(v2).expect("test multiplicity label is one-based")],
+        );
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         FusionTreePairKey::pair(cod, dom)
     }
 
@@ -10817,12 +10687,12 @@ mod tests {
         fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
             match (left.id(), right.id()) {
                 (0, x) | (x, 0) => smallvec![SectorId::new(x)],
-                (1, 1) => smallvec![SectorId::new(2)],
+                (1, 1) => smallvec![SectorId::new(0)],
                 _ => smallvec![SectorId::new(0)],
             }
         }
         fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-            if (left.id(), right.id(), coupled.id()) == (1, 1, 2) {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 0) {
                 2
             } else {
                 usize::from(self.fusion_channels(left, right).contains(&coupled))
@@ -10877,15 +10747,15 @@ mod tests {
     fn b2a_generic_bendright_domain_empty_keeps_last_nu() {
         let rule = OverwriteProbeRule;
         let a = SectorId::new(1);
-        let c = SectorId::new(2);
-        // cod [1,1]->2 (vertex 1); dom []->2 (EMPTY domain ⇒ ν has nowhere to go).
-        let cod = FusionTreeKey::new([a, a], Some(c), [false, false], [], [SectorId::new(1)])
-            .with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([], Some(c), [], [], []).with_has_multiplicity(true);
+        let c = rule.vacuum();
+        // cod [1,1]->vac (vertex 1); dom []->vac (EMPTY domain ⇒ ν has nowhere to go).
+        let cod = FusionTreeKey::new([a, a], c, [false, false], [], [MultiplicityIndex::ONE]);
+        let dom = FusionTreeKey::new([], c, [], [], []);
         let pair = FusionTreePairKey::pair(cod, dom);
+        pair.validate_for_rule(&rule).unwrap();
         let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
         assert_eq!(out.len(), 1, "empty domain collapses ν to one key");
-        // coeff0 = √dim(2)·(1/√dim(1)) = 1; keep-last ⇒ B[0,1] = 0.7.
+        // coeff0 = √dim(vac)·(1/√dim(1)) = 1; keep-last ⇒ B[0,1] = 0.7.
         assert!((out[0].1 - 0.7).abs() < 1e-12, "keep-last ν: got {}", out[0].1);
     }
 
@@ -10904,7 +10774,7 @@ mod tests {
             let (key, coeff) = nonzero[0];
             assert_eq!(key.codomain_tree().uncoupled(), [a4_three()], "rank2 cod");
             assert!(key.codomain_tree().vertices().is_empty(), "rank2 cod rank-1 no vtx");
-            assert_eq!(key.domain_tree().vertices()[0].id(), mu, "rank2 ν == μ (B diagonal)");
+            assert_eq!(key.domain_tree().vertices()[0].get(), mu, "rank2 ν == μ (B diagonal)");
             assert!((coeff - 1.0).abs() < 1e-10, "rank2 μ={mu} coeff {coeff}");
         }
 
@@ -10926,10 +10796,10 @@ mod tests {
             let nonzero: Vec<_> = out.iter().filter(|(_, c)| c.abs() > 1e-10).collect();
             assert_eq!(nonzero.len(), 1, "rank3 ({inner},{v1},{v2}) one nonzero");
             let (key, got) = nonzero[0];
-            let left_coupled = key.codomain_tree().coupled().unwrap().id();
+            let left_coupled = key.codomain_tree().coupled().id();
             assert_eq!(left_coupled, inner, "rank3 left_coupled == innerline");
-            assert_eq!(key.codomain_tree().vertices()[0].id(), cod_vtx, "rank3 cod vtx");
-            assert_eq!(key.domain_tree().vertices()[0].id(), dom_vtx, "rank3 dom vtx");
+            assert_eq!(key.codomain_tree().vertices()[0].get(), cod_vtx, "rank3 cod vtx");
+            assert_eq!(key.domain_tree().vertices()[0].get(), dom_vtx, "rank3 dom vtx");
             assert!((got - coeff).abs() < 1e-10, "rank3 ({inner},{v1},{v2}) coeff {got} want {coeff}");
         }
     }
@@ -11103,15 +10973,14 @@ mod tests {
         let b = tp_expected_b();
         for mu in 1..=2usize {
             // cod [1,1]->1 vertex μ ; dom [1]->1.
-            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
-                .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let cod = FusionTreeKey::new([s, s], s, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+            let dom = FusionTreeKey::new([s], s, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
             // Collect coeff keyed by output domain vertex label (=ν+1).
             let mut got = [0.0f64; 2];
             for (key, coeff) in &out {
-                let nu = key.domain_tree().vertices()[0].id(); // 1-based ν label
+                let nu = key.domain_tree().vertices()[0].get(); // 1-based ν label
                 got[nu - 1] = *coeff;
             }
             let row = &b[mu - 1];
@@ -11306,13 +11175,11 @@ mod tests {
     fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
         let t = SectorId::new(3);
         FusionTreeKey::new(
-            [t, t, t],
-            Some(t),
+            [t, t, t], t,
             [false, false, false],
             [SectorId::new(inner)],
-            [SectorId::new(v1), SectorId::new(v2)],
+            [MultiplicityIndex::new(v1).expect("test multiplicity label is one-based"), MultiplicityIndex::new(v2).expect("test multiplicity label is one-based")],
         )
-        .with_has_multiplicity(true)
     }
 
     // Look up the coeff vector for the multi_Fmove output tree with the given
@@ -11324,7 +11191,7 @@ mod tests {
     ) -> Vec<f64> {
         out.iter()
             .find(|(tr, _)| {
-                tr.coupled().unwrap().id() == coupled && tr.vertices()[0].id() == vtx
+                tr.coupled().id() == coupled && tr.vertices()[0].get() == vtx
             })
             .unwrap_or_else(|| panic!("no output tree coupled={coupled} vtx={vtx}"))
             .1
@@ -11406,16 +11273,14 @@ mod tests {
         let t = SectorId::new(3);
         for mu in 1..=2 {
             // src: cod [3,3]->3 (vtx μ), dom [3]->3.
-            let cod = FusionTreeKey::new([t, t], Some(t), [false, false], [], [SectorId::new(mu)])
-                .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+            let cod = FusionTreeKey::new([t, t], t, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+            let dom = FusionTreeKey::new([t], t, [false], [], []);
             let map = foldright_map(&rule, &FusionTreePairKey::pair(cod, dom));
             // TK dst: cod [3]->3, dom [3,3]->3 (isdual=(true,false)) vtx μ, U[μ,μ]=1.
             let exp_cod =
-                FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+                FusionTreeKey::new([t], t, [false], [], []);
             let exp_dom =
-                FusionTreeKey::new([t, t], Some(t), [true, false], [], [SectorId::new(mu)])
-                    .with_has_multiplicity(true);
+                FusionTreeKey::new([t, t], t, [true, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
             let exp = FusionTreePairKey::pair(exp_cod, exp_dom);
             for (key, coeff) in &map {
                 let want = if key == &exp { 1.0 } else { 0.0 };
@@ -11432,7 +11297,7 @@ mod tests {
     fn b2b_a4_foldright_rank3_matches_tensorkit() {
         let rule = A4FoldRule;
         let t = SectorId::new(3);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         // src columns (cod [3,3,3]->3 inner=x vtx=(v1,v2), dom [3]->3).
         let cols: [(usize, usize, usize); 7] = [
             (0, 1, 1), (1, 1, 1), (2, 1, 1), (3, 1, 1), (3, 2, 1), (3, 1, 2), (3, 2, 2),
@@ -11460,13 +11325,11 @@ mod tests {
             let map = foldright_map(&rule, &pair);
             for (ri, &(cc, cv, dc, dv)) in rows.iter().enumerate() {
                 let ex_cod = FusionTreeKey::new(
-                    [t, t], Some(SectorId::new(cc)), [false, false], [], [SectorId::new(cv)],
-                )
-                .with_has_multiplicity(true);
+                    [t, t], SectorId::new(cc), [false, false], [], [MultiplicityIndex::new(cv).expect("test multiplicity label is one-based")],
+                );
                 let ex_dom = FusionTreeKey::new(
-                    [t, t], Some(SectorId::new(dc)), [true, false], [], [SectorId::new(dv)],
-                )
-                .with_has_multiplicity(true);
+                    [t, t], SectorId::new(dc), [true, false], [], [MultiplicityIndex::new(dv).expect("test multiplicity label is one-based")],
+                );
                 let key = FusionTreePairKey::pair(ex_cod, ex_dom);
                 let got = map.get(&key).copied().unwrap_or(0.0);
                 assert!(
@@ -11485,7 +11348,7 @@ mod tests {
     fn b2b_a4_fold_round_trip_identity() {
         let rule = A4FoldRule;
         let t = SectorId::new(3);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         for (inner, v1, v2) in
             [(0, 1, 1), (1, 1, 1), (2, 1, 1), (3, 1, 1), (3, 2, 1), (3, 1, 2), (3, 2, 2)]
         {
@@ -11515,7 +11378,7 @@ mod tests {
     fn b2b_a4_cycle_round_trip_identity() {
         let rule = A4FoldRule;
         let t = SectorId::new(3);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         for (inner, v1, v2) in [(0, 1, 1), (3, 1, 1), (3, 2, 1), (3, 1, 2), (3, 2, 2)] {
             let pair = FusionTreePairKey::pair(a4f_rank3(inner, v1, v2), dom.clone());
             let mut totals = std::collections::HashMap::new();
@@ -11551,13 +11414,11 @@ mod tests {
             for (dom_inner, dv) in [(0, 1), (1, 1), (2, 1), (3, 1), (3, 2)] {
                 // cod [3,3]->3 (vtx cod_mu); dom [3,3]->3 inner=dom_inner (vtx dv).
                 let cod = FusionTreeKey::new(
-                    [t, t], Some(t), [false, false], [], [SectorId::new(cod_mu)],
-                )
-                .with_has_multiplicity(true);
+                    [t, t], t, [false, false], [], [MultiplicityIndex::new(cod_mu).expect("test multiplicity label is one-based")],
+                );
                 let dom = FusionTreeKey::new(
-                    [t, t], Some(t), [false, false], [], [SectorId::new(dv)],
-                )
-                .with_has_multiplicity(true);
+                    [t, t], t, [false, false], [], [MultiplicityIndex::new(dv).expect("test multiplicity label is one-based")],
+                );
                 let _ = dom_inner; // rank-2 dom has no innerline; kept for label clarity
                 let pair = FusionTreePairKey::pair(cod, dom);
                 let mut totals = std::collections::HashMap::new();
@@ -11588,13 +11449,11 @@ mod tests {
         for cod_mu in 1..=2 {
             for dv in 1..=2 {
                 let cod = FusionTreeKey::new(
-                    [t, t], Some(t), [false, false], [], [SectorId::new(cod_mu)],
-                )
-                .with_has_multiplicity(true);
+                    [t, t], t, [false, false], [], [MultiplicityIndex::new(cod_mu).expect("test multiplicity label is one-based")],
+                );
                 let dom = FusionTreeKey::new(
-                    [t, t], Some(t), [false, false], [], [SectorId::new(dv)],
-                )
-                .with_has_multiplicity(true);
+                    [t, t], t, [false, false], [], [MultiplicityIndex::new(dv).expect("test multiplicity label is one-based")],
+                );
                 let pair = FusionTreePairKey::pair(cod, dom);
                 let mut totals = std::collections::HashMap::new();
                 for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
@@ -11731,14 +11590,13 @@ mod tests {
         assert!(u[1].im.abs() > 0.1, "U must be complex");
         assert!((u[1] - u[2].conj()).norm() > 0.1, "U must be non-Hermitian");
         for mu in 1..=2usize {
-            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
-                .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let cod = FusionTreeKey::new([s, s], s, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+            let dom = FusionTreeKey::new([s], s, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let out = generic_foldright_tree_pair(&rule, &pair).unwrap();
             let mut got = [cx(0.0, 0.0); 2];
             for (key, coeff) in &out {
-                let nu = key.domain_tree().vertices()[0].id();
+                let nu = key.domain_tree().vertices()[0].get();
                 got[nu - 1] = *coeff;
             }
             for nu in 0..2 {
@@ -11766,9 +11624,8 @@ mod tests {
         let rule = ComplexUnitaryRule;
         let s = SectorId::new(1);
         for mu in 1..=2usize {
-            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
-                .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let cod = FusionTreeKey::new([s, s], s, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+            let dom = FusionTreeKey::new([s], s, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let mut totals: std::collections::HashMap<FusionTreePairKey, Complex64> =
                 std::collections::HashMap::new();
@@ -11797,9 +11654,8 @@ mod tests {
         let rule = ComplexUnitaryRule;
         let s = SectorId::new(1);
         for mu in 1..=2usize {
-            let cod = FusionTreeKey::new([s, s], Some(s), [false, false], [], [SectorId::new(mu)])
-                .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([s], Some(s), [false], [], []).with_has_multiplicity(true);
+            let cod = FusionTreeKey::new([s, s], s, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+            let dom = FusionTreeKey::new([s], s, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let mut totals: std::collections::HashMap<FusionTreePairKey, Complex64> =
                 std::collections::HashMap::new();
@@ -11938,13 +11794,11 @@ mod tests {
         let w = c2c_w();
         // domain tree [3,3] -> 3 (single vertex); leading dual(a)=1, target b=2.
         let domain = FusionTreeKey::new(
-            [s3, s3],
-            Some(s3),
+            [s3, s3], s3,
             [false, false],
             [],
-            [SectorId::new(1)],
-        )
-        .with_has_multiplicity(true);
+            [MultiplicityIndex::ONE],
+        );
         let terms =
             generic_multi_fmove_inv_tree(&rule, s1, SectorId::new(2), &domain, true).unwrap();
         assert_eq!(terms.len(), 1, "expected a single recoupled candidate");
@@ -11973,11 +11827,9 @@ mod tests {
         // codomain [1,2] -> 3 (coeff1 = unit, A = Asymbol(1,2,3) real = 1),
         // domain [3,3] -> 3 (drives complex coeff2).
         let codomain =
-            FusionTreeKey::new([s1, s2], Some(s3), [false, false], [], [SectorId::new(1)])
-                .with_has_multiplicity(true);
+            FusionTreeKey::new([s1, s2], s3, [false, false], [], [MultiplicityIndex::ONE]);
         let domain =
-            FusionTreeKey::new([s3, s3], Some(s3), [false, false], [], [SectorId::new(1)])
-                .with_has_multiplicity(true);
+            FusionTreeKey::new([s3, s3], s3, [false, false], [], [MultiplicityIndex::ONE]);
         let pair = FusionTreePairKey::pair(codomain, domain);
         let out = generic_foldright_tree_pair(&rule, &pair).unwrap();
         assert_eq!(out.len(), 1, "expected a single folded term");
@@ -12119,16 +11971,15 @@ mod tests {
         for mu in 1..=2usize {
             // cod [42,31]->31 (vtx μ), dom [31]->31.
             let cod = FusionTreeKey::new(
-                [s42, s31], Some(s31), [false, false], [], [SectorId::new(mu)],
-            )
-            .with_has_multiplicity(true);
+                [s42, s31], s31, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")],
+            );
             let dom =
-                FusionTreeKey::new([s31], Some(s31), [false], [], []).with_has_multiplicity(true);
+                FusionTreeKey::new([s31], s31, [false], [], []);
             let out = generic_bendright_tree_pair(&rule, &FusionTreePairKey::pair(cod, dom))
                 .unwrap();
             let mut got = [0.0f64; 2];
             for (key, coeff) in &out {
-                let nu = key.domain_tree().vertices().last().unwrap().id();
+                let nu = key.domain_tree().vertices().last().unwrap().get();
                 got[nu - 1] = *coeff;
             }
             for nu in 0..2 {
@@ -12155,11 +12006,10 @@ mod tests {
         let s31 = SectorId::new(2);
         for mu in 1..=2usize {
             let cod = FusionTreeKey::new(
-                [s42, s31], Some(s31), [false, false], [], [SectorId::new(mu)],
-            )
-            .with_has_multiplicity(true);
+                [s42, s31], s31, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")],
+            );
             let dom =
-                FusionTreeKey::new([s31], Some(s31), [false], [], []).with_has_multiplicity(true);
+                FusionTreeKey::new([s31], s31, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let mut totals = std::collections::HashMap::new();
             for (mid, c1) in generic_bendright_tree_pair(&rule, &pair).unwrap() {
@@ -12232,8 +12082,8 @@ mod tests {
     // A4 rank-1/rank-1 pair: cod [3]->3, dom [3]->3 (coupled sector 3).
     fn a4_pair_rank1_1() -> FusionTreePairKey {
         let t = SectorId::new(3);
-        let cod = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        let cod = FusionTreeKey::new([t], t, [false], [], []);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         FusionTreePairKey::pair(cod, dom)
     }
 
@@ -12241,9 +12091,8 @@ mod tests {
     // outer-multiplicity tree pair with N(3,3,3)=2.
     fn a4_pair_rank2_1(mu: usize) -> FusionTreePairKey {
         let t = SectorId::new(3);
-        let cod = FusionTreeKey::new([t, t], Some(t), [false, false], [], [SectorId::new(mu)])
-            .with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([t], Some(t), [false], [], []).with_has_multiplicity(true);
+        let cod = FusionTreeKey::new([t, t], t, [false, false], [], [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")]);
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
         FusionTreePairKey::pair(cod, dom)
     }
 
@@ -12903,13 +12752,11 @@ mod tests {
             for smu in 1..=2usize {
                 for snu in 1..=2usize {
                     let tree = FusionTreeKey::new(
-                        [eight, eight, eight, eight],
-                        Some(vac),
+                        [eight, eight, eight, eight], vac,
                         [false, false, false, false],
                         [eight, eight],
-                        [SectorId::new(smu), SectorId::new(snu), SectorId::new(1)],
-                    )
-                    .with_has_multiplicity(true);
+                        [MultiplicityIndex::new(smu).expect("test multiplicity label is one-based"), MultiplicityIndex::new(snu).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
+                    );
                     let out = generic_artin_braid_at_with_inverse(&rule, &tree, 1, inverse).unwrap();
                     // The impl must reproduce every oracle row for this source and
                     // must emit no unexpected nonzero term.
@@ -12926,9 +12773,9 @@ mod tests {
                                 && n == snu
                                 && o0 == i0
                                 && o1 == i1
-                                && w0 == v[0].id()
-                                && w1 == v[1].id()
-                                && w2 == v[2].id()
+                                && w0 == v[0].get()
+                                && w1 == v[1].get()
+                                && w2 == v[2].get()
                                 && (val - coeff).abs() < 1e-10
                         });
                         match idx {
@@ -12936,9 +12783,9 @@ mod tests {
                             None => panic!(
                                 "inv={inverse} src=({smu},{snu}) spurious term \
                                  inner=[{i0},{i1}] vtx=[{},{},{}] = {coeff}",
-                                v[0].id(),
-                                v[1].id(),
-                                v[2].id()
+                                v[0].get(),
+                                v[1].get(),
+                                v[2].get()
                             ),
                         }
                     }
@@ -12963,9 +12810,8 @@ mod tests {
         let rule = su3();
         let eight = su3_id(1, 1);
         let vac = SectorId::new(0);
-        let cod = FusionTreeKey::new([eight, eight], Some(vac), [false, false], [], [SectorId::new(1)])
-            .with_has_multiplicity(true);
-        let dom = FusionTreeKey::new([], Some(vac), [], [], []).with_has_multiplicity(true);
+        let cod = FusionTreeKey::new([eight, eight], vac, [false, false], [], [MultiplicityIndex::ONE]);
+        let dom = FusionTreeKey::new([], vac, [], [], []);
         let pair = FusionTreePairKey::pair(cod, dom);
         let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
         let total: f64 = out.iter().map(|(_, c)| c.abs()).sum();
@@ -12986,13 +12832,11 @@ mod tests {
         for smu in 1..=2usize {
             for snu in 1..=2usize {
                 let tree = FusionTreeKey::new(
-                    [eight, eight, eight, eight],
-                    Some(vac),
+                    [eight, eight, eight, eight], vac,
                     [false, false, false, false],
                     [eight, eight],
-                    [SectorId::new(smu), SectorId::new(snu), SectorId::new(1)],
-                )
-                .with_has_multiplicity(true);
+                    [MultiplicityIndex::new(smu).expect("test multiplicity label is one-based"), MultiplicityIndex::new(snu).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
+                );
                 let mut totals: std::collections::HashMap<FusionTreeKey, f64> =
                     std::collections::HashMap::new();
                 for (mid, c1) in generic_artin_braid_at_with_inverse(&rule, &tree, 1, false).unwrap() {
@@ -13022,15 +12866,12 @@ mod tests {
         assert_eq!(rule.nsymbol(eight, eight, eight), rule.nsymbol(eight, rule.dual(eight), eight));
         for mu in 1..=2 {
             let cod = FusionTreeKey::new(
-                [eight, eight],
-                Some(eight),
+                [eight, eight], eight,
                 [false, false],
                 [],
-                [SectorId::new(mu)],
-            )
-            .with_has_multiplicity(true);
-            let dom = FusionTreeKey::new([eight], Some(eight), [false], [], [])
-                .with_has_multiplicity(true);
+                [MultiplicityIndex::new(mu).expect("test multiplicity label is one-based")],
+            );
+            let dom = FusionTreeKey::new([eight], eight, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let mut totals: std::collections::HashMap<FusionTreePairKey, f64> =
                 std::collections::HashMap::new();
@@ -13069,9 +12910,9 @@ mod tests {
         let mut set = std::collections::BTreeSet::new();
         for k in &keys {
             let t = k.codomain_tree();
-            let c = t.coupled().unwrap().id();
+            let c = t.coupled().id();
             let inner: Vec<usize> = t.innerlines().iter().map(|x| x.id()).collect();
-            let vtx: Vec<usize> = t.vertices().iter().map(|x| x.id()).collect();
+            let vtx: Vec<usize> = t.vertices().iter().map(|x| x.get()).collect();
             set.insert((c, inner, vtx));
         }
         set.into_iter().collect()
@@ -13081,7 +12922,36 @@ mod tests {
     fn refute_a_enum_rank2_88() {
         let rule = su3();
         let eight = su3_id(1, 1);
-        let trees = refute_enum_codomain_trees(&rule, &[eight, eight]);
+        let codomain = FusionProductSpace::new([
+            SectorLeg::new([(eight, 1)], false),
+            SectorLeg::new([(eight, 1)], false),
+        ]);
+        let domain = FusionProductSpace::new([SectorLeg::new(
+            [
+                (SectorId::new(0), 1),
+                (SectorId::new(5), 1),
+                (SectorId::new(6), 1),
+                (SectorId::new(7), 1),
+                (SectorId::new(16), 1),
+            ],
+            false,
+        )]);
+        let keys = FusionTreeHomSpace::new(codomain, domain)
+            .fusion_tree_keys_generic(&rule)
+            .unwrap();
+        let trees = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.coupled().id(),
+                    Vec::new(),
+                    key.codomain_vertices()
+                        .iter()
+                        .map(|vertex| vertex.get())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
         // TensorKit in-table oracle for uncoupled (8,8): 6 trees.
         let oracle: Vec<(usize, Vec<usize>, Vec<usize>)> = vec![
             (0, vec![], vec![1]),
@@ -13092,6 +12962,40 @@ mod tests {
             (16, vec![], vec![1]),
         ];
         assert_eq!(trees, oracle, "rank-2 [8,8] enumeration mismatch vs TK");
+    }
+
+    #[test]
+    fn su3_n888_pair_identity_is_exact_and_ordered() {
+        // What: the two outer-multiplicity basis vectors of 8 x 8 -> 8 are
+        // distinct pair identities in the production enumerator.
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(eight, 1)], false),
+                SectorLeg::new([(eight, 1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(eight, 1)], false)]),
+        );
+        let keys = hom
+            .fusion_tree_keys_generic_for_coupled(&rule, eight)
+            .unwrap();
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].codomain_vertices(), &[MultiplicityIndex::ONE]);
+        assert_eq!(
+            keys[1].codomain_vertices(),
+            &[MultiplicityIndex::new(2).unwrap()]
+        );
+        assert!(keys[0] < keys[1]);
+        assert_eq!(
+            keys.iter().cloned().collect::<std::collections::HashSet<_>>().len(),
+            2
+        );
+        assert_eq!(
+            keys.iter().cloned().collect::<std::collections::BTreeSet<_>>().len(),
+            2
+        );
     }
 
     #[test]
@@ -13183,11 +13087,11 @@ mod tests {
                 .iter()
                 .map(|k| {
                     let t = k.codomain_tree();
-                    assert_eq!(t.coupled(), Some(c));
+                    assert_eq!(t.coupled(), c);
                     (
                         t.innerlines()[0].id(),
-                        t.vertices()[0].id(),
-                        t.vertices()[1].id(),
+                        t.vertices()[0].get(),
+                        t.vertices()[1].get(),
                     )
                 })
                 .collect();
@@ -13569,14 +13473,16 @@ mod tests {
             .all(|pair| Arc::ptr_eq(&pair[0].key, &pair[1].key)));
     }
 
-    // Canary (#153) against silent growth of the hottest recoupling-plan key:
-    // pins today's `size_of::<FusionTreeKey>()`. If this fails, a field was
-    // added or a `SmallVec` inline capacity changed — re-check the zero-cost
-    // mult-free Hash/Eq/Ord contract documented on `FusionTreeKey` before
-    // bumping the constant.
+    // Canary (#153) against silent growth of the hottest recoupling-plan key.
+    // A smaller representation is allowed; growth requires re-checking the
+    // compact Hash/Eq/Ord and allocation contracts.
     #[test]
     fn fusion_tree_key_size_has_not_silently_grown() {
-        assert_eq!(std::mem::size_of::<FusionTreeKey>(), 264);
+        assert!(std::mem::size_of::<FusionTreeKey>() <= 264);
+        assert_eq!(
+            std::mem::size_of::<MultiplicityIndex>(),
+            std::mem::size_of::<usize>()
+        );
     }
 
     // Canary (#231) against `CoreError` regrowing past the clippy

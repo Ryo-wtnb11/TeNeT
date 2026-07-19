@@ -8,7 +8,7 @@ fn grouped_su2_test_pair(first_inner: usize) -> FusionTreePairKey {
     all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [4, 4, 4, 4],
-        Some(0),
+        0,
         [false, false, false, false],
         [first_inner, 4],
         [1, 1, 1],
@@ -322,10 +322,10 @@ fn grouped_spec_rejects_empty_sets_and_wrong_coefficient_count() {
 #[test]
 fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
     let key = |codomain| {
-        FusionTreePairKey::pair_from_sector_ids(
+        FusionTreePairKey::try_pair_from_sector_ids(
             codomain,
             [1],
-            Some(1),
+            1,
             [false, false],
             [false],
             [],
@@ -333,6 +333,7 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
             [1],
             [],
         )
+        .unwrap()
     };
     let src_key1 = key([1, 0]);
     let src_key2 = key([0, 1]);
@@ -408,7 +409,7 @@ fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -416,7 +417,7 @@ fn tree_transform_plan_builder_accepts_simple_multi_destination_callback() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -467,7 +468,7 @@ fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order()
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -475,7 +476,7 @@ fn tree_transform_plan_builder_lowers_injective_singleton_rows_in_source_order()
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -565,7 +566,7 @@ fn tree_transform_plan_builder_keeps_destination_collisions_in_multi() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -573,7 +574,7 @@ fn tree_transform_plan_builder_keeps_destination_collisions_in_multi() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -609,7 +610,7 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [1, 1, 1, 1],
-            Some(0),
+            0,
             [false, false, false, false],
             inner,
             [1, 1, 1],
@@ -773,13 +774,13 @@ fn nested_fz2_u1_su2_first_pair_braid_preserves_product_phases_in_singles() {
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [odd_half; 4],
-                Some(even_singlet),
+                even_singlet,
                 [false; 4],
                 [first_inner, odd_half_inner],
-                [SectorId::new(1); 3],
+                [MultiplicityIndex::ONE; 3],
             )
             .unwrap(),
-            FusionTreeKey::try_new_for_rule(&rule, [], Some(even_singlet), [], [], []).unwrap(),
+            FusionTreeKey::try_new_for_rule(&rule, [], even_singlet, [], [], []).unwrap(),
         )
     });
     let structure =
@@ -813,7 +814,7 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -821,7 +822,7 @@ fn multiplicity_free_su2_plan_builder_creates_generic_recoupling_block() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -894,7 +895,7 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -902,7 +903,7 @@ fn tree_pair_transform_public_helper_executes_su2_recoupling_block() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -952,7 +953,7 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -960,7 +961,7 @@ fn tree_transform_recoupling_replays_complex_data_with_real_structural_coefficie
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -1078,7 +1079,7 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -1086,7 +1087,7 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -1168,7 +1169,7 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             uncoupled,
-            Some(0),
+            0,
             [false, false, false, false],
             inner,
             [1, 1, 1],
@@ -1227,7 +1228,7 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
 }
 
 #[test]
-fn all_codomain_duplicate_rows_count_one_lookup_for_every_thread_count() {
+fn all_codomain_canonical_empty_domain_row_has_stable_cold_warm_lookups() {
     use crate::tree_transform::{
         build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
     };
@@ -1235,18 +1236,13 @@ fn all_codomain_duplicate_rows_count_one_lookup_for_every_thread_count() {
     let codomain = FusionTreeKey::try_new_for_rule(
         &SU2FusionRule,
         [SectorId::new(1), SectorId::new(1)],
-        Some(SectorId::new(0)),
+        SectorId::new(0),
         [false, false],
         [],
-        [SectorId::new(1)],
+        [MultiplicityIndex::ONE],
     )
     .unwrap();
-    let domain_none = empty_fusion_tree();
-    let domain_vacuum = empty_fusion_tree_with_coupled(Some(0));
-    let keys = [
-        FusionTreePairKey::pair(codomain.clone(), domain_none),
-        FusionTreePairKey::pair(codomain, domain_vacuum),
-    ];
+    let keys = [FusionTreePairKey::pair(codomain, empty_fusion_tree())];
     let structure =
         packed_fixture_structure(2, keys.iter().cloned().map(|key| (key, vec![1, 1]))).unwrap();
     let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
@@ -1275,8 +1271,8 @@ fn all_codomain_duplicate_rows_count_one_lookup_for_every_thread_count() {
         for threads in [1, 2, 4] {
             let mut memo = AllCodomainRowMemo::default();
             let (cold, hits, misses) = build(threads, &mut memo);
-            // What: both legal empty-domain encodings share one codomain memo
-            // row in identity and general assembly for every worker count.
+            // What: the mandatory vacuum removes the prior empty-domain alias,
+            // and its canonical row has worker-count-independent cache stats.
             assert_eq!((hits, misses, memo.len()), (0, 1, 1));
             if let Some(expected) = &expected_plan {
                 assert_eq!(&cold, expected);
@@ -1302,10 +1298,10 @@ fn all_codomain_worker_error_does_not_commit_rows_or_stats() {
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
                 [SectorId::new(sector), SectorId::new(sector)],
-                Some(SectorId::new(0)),
+                SectorId::new(0),
                 [false, false],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap(),
             empty_fusion_tree(),
@@ -1373,7 +1369,7 @@ fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [1, 1],
-            Some(0),
+            0,
             [false, false],
             [],
             [1],
@@ -1381,7 +1377,7 @@ fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [2, 2],
-            Some(0),
+            0,
             [false, false],
             [],
             [1],
@@ -1442,7 +1438,7 @@ fn parallel_group_callbacks_expose_reversed_completion_order_and_preserve_transa
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [1, 1],
-            Some(0),
+            0,
             [false, false],
             [],
             [1],
@@ -1450,7 +1446,7 @@ fn parallel_group_callbacks_expose_reversed_completion_order_and_preserve_transa
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [2, 2],
-            Some(0),
+            0,
             [false, false],
             [],
             [1],
@@ -1537,7 +1533,7 @@ fn tree_pair_block_transform_runs_once_per_group_for_cold_and_partial_memos() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             uncoupled,
-            Some(0),
+            0,
             [false, false, false, false],
             inner,
             [1, 1, 1],
@@ -1661,17 +1657,18 @@ fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
         build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
     };
 
-    let source = FusionTreePairKey::pair_from_sector_ids(
+    let source = FusionTreePairKey::try_pair_from_sector_ids(
         [1, 2],
         [2, 1],
-        Some(1),
+        1,
         [false, true],
         [true, false],
         [],
         [],
         [1],
         [1],
-    );
+    )
+    .unwrap();
     let source_key = BlockKey::from(source.clone());
     let source_structure = packed_fixture_structure(4, [(source_key, vec![1usize; 4])]).unwrap();
     let operation = TreeTransformOperation::braid([0, 1, 3], [2], [0, 1], [2, 3]);
@@ -1727,7 +1724,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [3, 3, 3, 3],
-            Some(0),
+            0,
             [false, false, false, false],
             inner,
             [1, 1, 1],
@@ -1864,16 +1861,16 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
         FusionTreeKey::try_new_for_rule(
             &FermionParityFusionRule,
             [SectorId::new(1), SectorId::new(0)],
-            Some(SectorId::new(1)),
+            SectorId::new(1),
             [false, true],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &FermionParityFusionRule,
             [SectorId::new(1)],
-            Some(SectorId::new(1)),
+            SectorId::new(1),
             [true],
             [],
             [],
@@ -1909,13 +1906,13 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [one, one],
-            Some(one),
+            one,
             [false, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], Some(one), [true], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], one, [true], [], []).unwrap(),
     );
     let su2_rows = tenet_core::multiplicity_free_transpose_tree_pair(
         &SU2FusionRule,
@@ -1949,14 +1946,13 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
                 [one, one, one],
-                Some(one),
+                one,
                 [false, false, false],
                 [SectorId::new(inner)],
-                [SectorId::new(1), SectorId::new(1)],
+                [MultiplicityIndex::ONE, MultiplicityIndex::ONE],
             )
             .unwrap(),
-            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], Some(one), [true], [], [])
-                .unwrap(),
+            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [one], one, [true], [], []).unwrap(),
         ))
     });
     let control_src = packed_fixture_structure(
@@ -1997,7 +1993,7 @@ fn tree_row_memo_survives_structure_change() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [2, 2, 2, 2],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 2],
         [1, 1, 1],
@@ -2005,7 +2001,7 @@ fn tree_row_memo_survives_structure_change() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [2, 2, 2, 2],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 2],
         [1, 1, 1],
@@ -2013,7 +2009,7 @@ fn tree_row_memo_survives_structure_change() {
     let src_key2 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [2, 2, 2, 2],
-        Some(0),
+        0,
         [false, false, false, false],
         [4, 2],
         [1, 1, 1],
@@ -2073,22 +2069,25 @@ fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<
     let valid = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1],
-        Some(0),
+        0,
         [false, false],
         [],
         [1],
     );
-    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(1),
-        [false, false],
-        [],
-        [],
-        [],
-        [1],
-        [],
-    ));
+    let malformed = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            1,
+            [false, false],
+            [],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap(),
+    );
     let dst_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
     let src_structure = packed_fixture_structure(2, [(malformed, vec![1, 1])]).unwrap();
     let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -2101,17 +2100,21 @@ fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<
 }
 
 fn simple_su2_vertex_structure(vertex: usize) -> Arc<BlockStructure> {
-    let key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(0),
-        [false, false],
-        [],
-        [],
-        [],
-        [vertex],
-        [],
-    ));
+    let vertices = (vertex != 0).then_some(vertex);
+    let key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            0,
+            [false, false],
+            [],
+            [],
+            [],
+            vertices,
+            [],
+        )
+        .unwrap(),
+    );
     Arc::new(packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap())
 }
 
@@ -2232,7 +2235,7 @@ fn assert_invalid_simple_vertex(error: OperationError) {
     assert_eq!(
         error,
         OperationError::Core(CoreError::MalformedFusionTree {
-            message: "fusion tree vertex labels are 1-based",
+            message: "fusion tree has an invalid number of vertices",
         })
     );
 }
@@ -2242,22 +2245,25 @@ fn valid_simple_source_and_nonalias_malformed_destination(
     let valid = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1],
-        Some(0),
+        0,
         [false, false],
         [],
         [1],
     );
-    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(0),
-        [false, false],
-        [],
-        [],
-        [],
-        [0],
-        [],
-    ));
+    let malformed = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            0,
+            [false, false],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
     let src_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(malformed, vec![2, 1])]).unwrap();
     assert_ne!(src_structure.content_id(), dst_structure.content_id());
@@ -2278,28 +2284,34 @@ fn valid_simple_source_and_nonalias_malformed_destination(
 
 #[test]
 fn callback_builder_admits_whole_source_before_first_callback() {
-    let valid = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(0),
-        [false, false],
-        [],
-        [],
-        [],
-        [1],
-        [],
-    ));
-    let malformed_later = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(2),
-        [false, false],
-        [],
-        [],
-        [],
-        [0],
-        [],
-    ));
+    let valid = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            0,
+            [false, false],
+            [],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap(),
+    );
+    let malformed_later = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            2,
+            [false, false],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
     let structure =
         packed_fixture_structure(2, [(valid, vec![1, 1]), (malformed_later, vec![1, 1])]).unwrap();
     let callbacks = std::cell::Cell::new(0usize);
@@ -2327,26 +2339,26 @@ fn callback_builder_rejects_malformed_destination_before_assembly() {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
-            Some(SectorId::new(0)),
+            SectorId::new(0),
             [false, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], Some(SectorId::new(0)), [], [], [])
-            .unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], SectorId::new(0), [], [], []).unwrap(),
     );
-    let malformed_destination = FusionTreePairKey::pair_from_sector_ids(
+    let malformed_destination = FusionTreePairKey::try_pair_from_sector_ids(
         [1, 1],
         [],
-        Some(0),
+        0,
         [false, false],
         [],
         [],
         [],
-        [0],
         [],
-    );
+        [],
+    )
+    .unwrap();
     assert_ne!(source, malformed_destination);
     let structure = packed_fixture_structure(2, [(BlockKey::from(source), vec![1, 1])]).unwrap();
 
@@ -2753,18 +2765,21 @@ fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation()
 fn invalid_unique_source_does_not_count_eager_compile_misses() {
     // What: a failed Unique eager build reports no successful plan or structure
     // compile in cache statistics.
-    let valid = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
-    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(1),
-        [false, false],
-        [],
-        [],
-        [],
-        [1],
-        [],
-    ));
+    let valid = all_codomain_fusion_tree_test_key([1, 1], 0, [false, false], [], [1]);
+    let malformed = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            1,
+            [false, false],
+            [],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap(),
+    );
     let dst_structure = packed_fixture_structure(2, [(valid, vec![1, 1])]).unwrap();
     let src_structure = packed_fixture_structure(2, [(malformed, vec![1, 1])]).unwrap();
     let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -2850,16 +2865,16 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
-            Some(SectorId::new(0)),
+            SectorId::new(0),
             [false, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(0)],
-            Some(SectorId::new(0)),
+            SectorId::new(0),
             [false],
             [],
             [],
@@ -2870,16 +2885,16 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
-            Some(SectorId::new(0)),
+            SectorId::new(0),
             [false, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             [SectorId::new(2)],
-            Some(SectorId::new(2)),
+            SectorId::new(2),
             [false],
             [],
             [],
@@ -2895,7 +2910,7 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
     )
     .unwrap();
     let dst_key =
-        all_codomain_fusion_tree_test_key([0, 0, 0], Some(0), [false, false, false], [0], [1, 1]);
+        all_codomain_fusion_tree_test_key([0, 0, 0], 0, [false, false, false], [0], [1, 1]);
     let dst_structure = packed_fixture_structure(3, [(dst_key, vec![1, 1, 1])]).unwrap();
     let src_space = TensorMapSpace::<2, 1>::from_dims([1, 1], [1]).unwrap();
     let dst_space = TensorMapSpace::<3, 0>::from_dims([1, 1, 1], []).unwrap();
@@ -2966,7 +2981,7 @@ fn process_global_tree_transform_cache_warms_independent_contexts() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -2974,7 +2989,7 @@ fn process_global_tree_transform_cache_warms_independent_contexts() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3030,7 +3045,7 @@ fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -3038,7 +3053,7 @@ fn tree_transform_cache_reuses_su2_recoupling_descriptor() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3108,7 +3123,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -3116,7 +3131,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3216,7 +3231,7 @@ fn all_codomain_row_memo_reuses_codomain_rows_across_plan_misses() {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [4, 4, 4, 4],
-            Some(0),
+            0,
             [false, false, false, false],
             inner,
             [1, 1, 1],
@@ -3313,7 +3328,7 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -3321,7 +3336,7 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3393,7 +3408,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -3401,7 +3416,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3456,7 +3471,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -3464,7 +3479,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3529,7 +3544,7 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [0, 1],
         [1, 1, 1],
@@ -3537,7 +3552,7 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
     let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [1, 1, 1, 1],
-        Some(0),
+        0,
         [false, false, false, false],
         [2, 1],
         [1, 1, 1],
@@ -3583,28 +3598,14 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
 
 #[test]
 fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [false],
-        [false],
-        [],
-        [],
-        [],
-        [],
-    ));
-    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [true],
-        [true],
-        [],
-        [],
-        [],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [false], [], [], [], [])
+            .unwrap(),
+    );
+    let expected_dst_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [true], [true], [], [], [], [])
+            .unwrap(),
+    );
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
     let dst_structure =
         packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
@@ -3628,28 +3629,14 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
 
 #[test]
 fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [false],
-        [false],
-        [],
-        [],
-        [],
-        [],
-    ));
-    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [true],
-        [true],
-        [],
-        [],
-        [],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [false], [], [], [], [])
+            .unwrap(),
+    );
+    let expected_dst_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [true], [true], [], [], [], [])
+            .unwrap(),
+    );
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let dst_structure =
         packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
@@ -3668,28 +3655,14 @@ fn tree_pair_transform_public_helper_executes_su2_domain_crossing() {
 
 #[test]
 fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [false],
-        [false],
-        [],
-        [],
-        [],
-        [],
-    ));
-    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [true],
-        [true],
-        [],
-        [],
-        [],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [false], [], [], [], [])
+            .unwrap(),
+    );
+    let expected_dst_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [true], [true], [], [], [], [])
+            .unwrap(),
+    );
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let dst_structure =
         packed_fixture_structure(2, [(expected_dst_key.clone(), vec![1, 1])]).unwrap();
@@ -3725,17 +3698,20 @@ fn tree_pair_transform_public_helper_executes_su2_with_complex_data() {
 
 #[test]
 fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 0],
-        [1],
-        Some(1),
-        [false, false],
-        [false],
-        [],
-        [],
-        [1],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 0],
+            [1],
+            1,
+            [false, false],
+            [false],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap(),
+    );
     let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
 
     let local_domain_identity = build_tree_pair_transform_group_plan(
@@ -3764,17 +3740,20 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
 fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
     // Why-not: UniqueFusion intentionally bypasses reusable plan/row caches;
     // this protects the process from retaining cheap, layout-specific keys.
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [0, 1],
-        Some(1),
-        [false],
-        [false, true],
-        [],
-        [],
-        [],
-        [1],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1],
+            [0, 1],
+            1,
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        )
+        .unwrap(),
+    );
     // The cache API requires the built-in rule-key marker and rigid symbols;
     // use the production Z2 rule, whose semantics match the local UniqueZ2
     // oracle while satisfying both bounds without adding test-only adapters.
@@ -3849,17 +3828,20 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
 
 #[test]
 fn tree_pair_transform_public_helper_executes_split_changing_permute() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [0, 1],
-        Some(1),
-        [false],
-        [false, true],
-        [],
-        [],
-        [],
-        [1],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1],
+            [0, 1],
+            1,
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        )
+        .unwrap(),
+    );
     let src_tree = expect_tree_key(&src_key);
     let operation = TreeTransformOperation::permute([0, 2], [1]);
     let (dst_tree, coefficient) =
@@ -3883,17 +3865,20 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
 
 #[test]
 fn tree_pair_transform_public_helper_compiles_against_actual_destination_structure() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [0, 1],
-        Some(1),
-        [false],
-        [false, true],
-        [],
-        [],
-        [],
-        [1],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1],
+            [0, 1],
+            1,
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        )
+        .unwrap(),
+    );
     let src_tree = expect_tree_key(&src_key);
     let operation = TreeTransformOperation::permute([0, 2], [1]);
     let (dst_tree, _) = unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
@@ -4624,17 +4609,20 @@ fn unique_tree_transform_plan_builder_rejects_permute_without_symmetric_braiding
 
 #[test]
 fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_logic() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 0],
-        [1],
-        Some(1),
-        [false, false],
-        [false],
-        [],
-        [],
-        [1],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 0],
+            [1],
+            1,
+            [false, false],
+            [false],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap(),
+    );
     let src_tree = expect_tree_key(&src_key);
     let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
 
@@ -4655,9 +4643,8 @@ fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_lo
 
 #[test]
 fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
-    let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, true], [], [1]);
-    let expected_dst_key =
-        all_codomain_fusion_tree_test_key([1, 1], Some(0), [true, false], [], [1]);
+    let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, true], [], [1]);
+    let expected_dst_key = all_codomain_fusion_tree_test_key([1, 1], 0, [true, false], [], [1]);
     let src_tree = expect_tree_key(&src_key);
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
@@ -4680,9 +4667,8 @@ fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
 
 #[test]
 fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
-    let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, true], [], [1]);
-    let expected_dst_key =
-        all_codomain_fusion_tree_test_key([1, 1], Some(0), [true, false], [], [1]);
+    let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, true], [], [1]);
+    let expected_dst_key = all_codomain_fusion_tree_test_key([1, 1], 0, [true, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_unique_all_codomain_tree_transform_group_plan(
@@ -4703,8 +4689,8 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 
 #[test]
 fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
-    let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, true], [], [1]);
-    let dst_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [true, false], [], [1]);
+    let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, true], [], [1]);
+    let dst_key = all_codomain_fusion_tree_test_key([1, 1], 0, [true, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(dst_key, vec![1, 1])]).unwrap();
     let src_space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -4743,7 +4729,7 @@ fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
 
 #[test]
 fn unique_all_codomain_plan_builder_rejects_domain_operation_scope() {
-    let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
+    let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let operation = TreeTransformOperation::braid([1, 0], [0], [0, 1], [0]);
 
@@ -4769,25 +4755,25 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
         FusionTreeKey::try_from_sector_ids_for_rule(
             &UniqueZ2Rule,
             [1, 1],
-            Some(0),
+            0,
             [false, false],
             [],
             [1],
         )
         .unwrap(),
-        empty_fusion_tree_with_coupled(Some(0)),
+        empty_fusion_tree_with_coupled(0),
     ));
     let expected_dst_key = BlockKey::from(FusionTreePairKey::pair(
         FusionTreeKey::try_from_sector_ids_for_rule(
             &UniqueZ2Rule,
             [1, 1],
-            Some(0),
+            0,
             [false, false],
             [],
             [1],
         )
         .unwrap(),
-        empty_fusion_tree_with_coupled(Some(0)),
+        empty_fusion_tree_with_coupled(0),
     ));
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
@@ -4809,17 +4795,20 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
 
 #[test]
 fn unique_all_codomain_plan_builder_rejects_explicit_nonvacuum_empty_domain() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 0],
-        [],
-        Some(1),
-        [false, false],
-        [],
-        [],
-        [],
-        [1],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 0],
+            [],
+            1,
+            [false, false],
+            [],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap(),
+    );
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
 
     let err = build_unique_all_codomain_tree_transform_group_plan(
@@ -4857,7 +4846,7 @@ fn unique_all_codomain_plan_builder_rejects_nonempty_domain_tree() {
 
 #[test]
 fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
-    let src_key = all_codomain_fusion_tree_test_key([1, 1], Some(0), [false, false], [], [1]);
+    let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
     let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
 
@@ -4879,28 +4868,34 @@ fn unique_all_codomain_permute_plan_builder_rejects_nonsymmetric_braiding() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [0, 1],
-        Some(1),
-        [false],
-        [false, true],
-        [],
-        [],
-        [],
-        [1],
-    ));
-    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1, 0],
-        Some(1),
-        [false],
-        [true, false],
-        [],
-        [],
-        [],
-        [1],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1],
+            [0, 1],
+            1,
+            [false],
+            [false, true],
+            [],
+            [],
+            [],
+            [1],
+        )
+        .unwrap(),
+    );
+    let expected_dst_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1],
+            [1, 0],
+            1,
+            [false],
+            [true, false],
+            [],
+            [],
+            [],
+            [1],
+        )
+        .unwrap(),
+    );
     let src_tree = expect_tree_key(&src_key);
     let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
 
@@ -4923,28 +4918,14 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [false],
-        [true],
-        [],
-        [],
-        [],
-        [],
-    ));
-    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [false],
-        [true],
-        [],
-        [],
-        [],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [true], [], [], [], [])
+            .unwrap(),
+    );
+    let expected_dst_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [true], [], [], [], [])
+            .unwrap(),
+    );
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
 
     let plan = build_unique_tree_pair_transform_group_plan(
@@ -4965,17 +4946,10 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1],
-        [1],
-        Some(1),
-        [false],
-        [true],
-        [],
-        [],
-        [],
-        [],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids([1], [1], 1, [false], [true], [], [], [], [])
+            .unwrap(),
+    );
     let expected_dst_key = src_key.clone();
     let src_structure = packed_fixture_structure(2, [(src_key.clone(), vec![1, 1])]).unwrap();
     let operation = TreeTransformOperation::transpose([1], [0]);
@@ -4995,28 +4969,34 @@ fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
 
 #[test]
 fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
-    let src_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 0],
-        [1, 0],
-        Some(1),
-        [false, false],
-        [false, false],
-        [],
-        [],
-        [1],
-        [1],
-    ));
-    let expected_dst_key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [0, 0],
-        Some(0),
-        [true, false],
-        [false, true],
-        [],
-        [],
-        [1],
-        [1],
-    ));
+    let src_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 0],
+            [1, 0],
+            1,
+            [false, false],
+            [false, false],
+            [],
+            [],
+            [1],
+            [1],
+        )
+        .unwrap(),
+    );
+    let expected_dst_key = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [0, 0],
+            0,
+            [true, false],
+            [false, true],
+            [],
+            [],
+            [1],
+            [1],
+        )
+        .unwrap(),
+    );
     let src_structure = packed_fixture_structure(4, [(src_key.clone(), vec![1, 1, 1, 1])]).unwrap();
     let operation = TreeTransformOperation::transpose([2, 0], [3, 1]);
 
@@ -5164,16 +5144,16 @@ fn tensor_kit_z4_rank_three_pair() -> FusionTreePairKey {
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(1), SectorId::new(2), SectorId::new(3)],
-            Some(SectorId::new(2)),
+            SectorId::new(2),
             [false, false, false],
             [SectorId::new(3)],
-            [SectorId::new(1), SectorId::new(1)],
+            [MultiplicityIndex::ONE, MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(2)],
-            Some(SectorId::new(2)),
+            SectorId::new(2),
             [false],
             [],
             [],
@@ -5194,8 +5174,8 @@ fn unique_production_domain_fermion_crossing_matches_tensorkit_oracle() {
     let rule = FermionParityFusionRule;
     let odd = SectorId::new(1);
     let source = FusionTreePairKey::pair(
-        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
-        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [true], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [true], [], []).unwrap(),
     );
     let source_structure =
         packed_fixture_structure(2, [(BlockKey::from(source.clone()), vec![1, 1])]).unwrap();
@@ -5224,10 +5204,10 @@ fn unique_production_complex_artin_and_inverse_match_tensorkit_oracle() {
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(1), SectorId::new(3), SectorId::new(2)],
-            Some(SectorId::new(2)),
+            SectorId::new(2),
             [false, false, false],
             [SectorId::new(0)],
-            [SectorId::new(1), SectorId::new(1)],
+            [MultiplicityIndex::ONE, MultiplicityIndex::ONE],
         )
         .unwrap(),
         source.domain_tree().clone(),
@@ -5262,16 +5242,16 @@ fn unique_production_pivotal_transpose_matches_tensorkit_oracle() {
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(1), SectorId::new(2)],
-            Some(SectorId::new(3)),
+            SectorId::new(3),
             [false, true],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(3)],
-            Some(SectorId::new(3)),
+            SectorId::new(3),
             [true],
             [],
             [],
@@ -5282,16 +5262,16 @@ fn unique_production_pivotal_transpose_matches_tensorkit_oracle() {
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(2), SectorId::new(1)],
-            Some(SectorId::new(3)),
+            SectorId::new(3),
             [true, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &rule,
             [SectorId::new(3)],
-            Some(SectorId::new(3)),
+            SectorId::new(3),
             [true],
             [],
             [],
@@ -5340,13 +5320,13 @@ where
         FusionTreeKey::try_new_for_rule(
             rule,
             [left, right],
-            Some(coupled),
+            coupled,
             [false, true],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(rule, [coupled], Some(coupled), [true], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(rule, [coupled], coupled, [true], [], []).unwrap(),
     )
 }
 
@@ -5434,19 +5414,19 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
         FusionTreeKey::try_new_for_rule(
             &product,
             [odd_charge, even_charge],
-            Some(coupled),
+            coupled,
             [false, true],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
         FusionTreeKey::try_new_for_rule(
             &product,
             [product.vacuum(), coupled],
-            Some(coupled),
+            coupled,
             [true, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
     );
@@ -5460,7 +5440,7 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
         FusionTreeKey::try_new_for_rule(
             &UniqueAnyonicRule,
             [SectorId::new(1)],
-            Some(SectorId::new(1)),
+            SectorId::new(1),
             [false],
             [],
             [],
@@ -5469,7 +5449,7 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
         FusionTreeKey::try_new_for_rule(
             &UniqueAnyonicRule,
             [SectorId::new(1)],
-            Some(SectorId::new(1)),
+            SectorId::new(1),
             [true],
             [],
             [],
@@ -5502,9 +5482,9 @@ fn unique_production_lowering_matches_generic_across_pointed_rules_and_operation
 #[test]
 fn unique_production_lowering_matches_generic_at_rank_zero_and_one() {
     let scalar = FusionTreePairKey::pair(
-        FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(U1FusionRule.vacuum()), [], [], [])
+        FusionTreeKey::try_new_for_rule(&U1FusionRule, [], U1FusionRule.vacuum(), [], [], [])
             .unwrap(),
-        FusionTreeKey::try_new_for_rule(&U1FusionRule, [], Some(U1FusionRule.vacuum()), [], [], [])
+        FusionTreeKey::try_new_for_rule(&U1FusionRule, [], U1FusionRule.vacuum(), [], [], [])
             .unwrap(),
     );
     assert_unique_and_generic_plan_are_identical(
@@ -5517,13 +5497,13 @@ fn unique_production_lowering_matches_generic_at_rank_zero_and_one() {
         FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             [Z2FusionRule.vacuum()],
-            Some(Z2FusionRule.vacuum()),
+            Z2FusionRule.vacuum(),
             [true],
             [],
             [],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], Some(Z2FusionRule.vacuum()), [], [], [])
+        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], Z2FusionRule.vacuum(), [], [], [])
             .unwrap(),
     );
     assert_unique_and_generic_plan_are_identical(
@@ -5539,13 +5519,13 @@ fn unique_all_codomain_production_lowering_matches_generic_replay_exactly() {
         FusionTreeKey::try_new_for_rule(
             &Z2FusionRule,
             [SectorId::new(1), SectorId::new(1)],
-            Some(Z2FusionRule.vacuum()),
+            Z2FusionRule.vacuum(),
             [false, true],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], Some(Z2FusionRule.vacuum()), [], [], [])
+        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], Z2FusionRule.vacuum(), [], [], [])
             .unwrap(),
     );
     let source_structure =
@@ -5637,52 +5617,54 @@ fn unique_production_lowering_preserves_generic_error_precedence() {
     );
 }
 
-fn z2_two_leg_pair_with_empty_domain(
-    uncoupled: [SectorId; 2],
-    empty_coupled: Option<SectorId>,
-) -> FusionTreePairKey {
+fn z2_two_leg_pair_with_empty_domain(uncoupled: [SectorId; 2]) -> FusionTreePairKey {
     let rule = Z2FusionRule;
     let coupled = rule.fusion_channels(uncoupled[0], uncoupled[1])[0];
     FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             uncoupled,
-            Some(coupled),
+            coupled,
             [false, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&rule, [], empty_coupled, [], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [], rule.vacuum(), [], [], []).unwrap(),
     )
 }
 
 #[test]
-fn unique_production_preserves_interleaved_source_block_order() {
-    let vacuum = Z2FusionRule.vacuum();
-    let group_a_first =
-        z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], None);
-    let group_b = z2_two_leg_pair_with_empty_domain([SectorId::new(0), SectorId::new(0)], None);
-    let group_a_second =
-        z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], Some(vacuum));
-    let source_order = [group_a_first, group_b, group_a_second];
+fn unique_production_valid_groups_are_singleton_and_preserve_source_order() {
+    let rule = Z2FusionRule;
+    let odd = SectorId::new(1);
+    let group_a = z2_two_leg_pair_with_empty_domain([odd, odd]);
+    let group_b = z2_two_leg_pair_with_empty_domain([SectorId::new(0), SectorId::new(0)]);
+    let split_group = FusionTreePairKey::pair(
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [false], [], []).unwrap(),
+    );
+    let source_order = [group_a, group_b, split_group];
     let source_structure =
         packed_fixture_structure(2, source_order.iter().cloned().map(|key| (key, vec![1, 1])))
             .unwrap();
-    assert_eq!(
-        source_structure.fusion_tree_groups()[0].block_indices(),
-        &[0, 2]
-    );
+    // What: canonical UniqueFusion admits exactly one tree for each external
+    // group; the former interleaved same-group fixture relied on the removed
+    // rank-zero coupled alias.
+    assert!(source_structure
+        .fusion_tree_groups()
+        .iter()
+        .all(|group| group.block_indices().len() == 1));
 
     let plan = build_tree_pair_transform_group_plan(
-        &Z2FusionRule,
-        TreeTransformOperation::permute([0, 1], []),
+        &rule,
+        TreeTransformOperation::permute([0], [1]),
         &source_structure,
     )
     .unwrap();
 
-    // What: the Unique/Abelian transformer emits one spec per stored source
-    // block in raw source order, including when one group is interleaved.
+    // What: the Unique/Abelian transformer emits one spec per canonical source
+    // block in raw source order.
     assert_eq!(
         plan.specs()
             .iter()
@@ -5698,20 +5680,20 @@ fn unique_production_prepares_each_distinct_source_split() {
     let vacuum = rule.vacuum();
     let odd = SectorId::new(1);
     let split_one_one = FusionTreePairKey::pair(
-        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
-        FusionTreeKey::try_new_for_rule(&rule, [odd], Some(odd), [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [false], [], []).unwrap(),
     );
     let split_two_zero = FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
             &rule,
             [odd, odd],
-            Some(vacuum),
+            vacuum,
             [false, false],
             [],
-            [SectorId::new(1)],
+            [MultiplicityIndex::ONE],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&rule, [], None, [], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [], vacuum, [], [], []).unwrap(),
     );
     let source_order = [split_one_one, split_two_zero];
     let source_structure =
@@ -7059,10 +7041,10 @@ fn b2c_toy_src_pair() -> FusionTreePairKey {
             style: FusionStyleKind::Generic,
         },
         [SectorId::new(1), SectorId::new(1)],
-        Some(SectorId::new(0)),
+        SectorId::new(0),
         [false, false],
         [],
-        [SectorId::new(1)],
+        [MultiplicityIndex::ONE],
     )
     .unwrap();
     let dom = FusionTreeKey::try_new_for_rule(
@@ -7070,7 +7052,7 @@ fn b2c_toy_src_pair() -> FusionTreePairKey {
             style: FusionStyleKind::Generic,
         },
         [],
-        Some(SectorId::new(0)),
+        SectorId::new(0),
         [],
         [],
         [],
@@ -7148,12 +7130,12 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     let rule = ToyGenericRule {
         style: FusionStyleKind::Generic,
     };
-    let pairs = [SectorId::new(1), SectorId::new(2)].map(|vertex| {
+    let pairs = [MultiplicityIndex::ONE, MultiplicityIndex::new(2).unwrap()].map(|vertex| {
         FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [SectorId::new(1), SectorId::new(1)],
-                Some(SectorId::new(1)),
+                SectorId::new(1),
                 [false, false],
                 [],
                 [vertex],
@@ -7162,7 +7144,7 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [SectorId::new(1)],
-                Some(SectorId::new(1)),
+                SectorId::new(1),
                 [false],
                 [],
                 [],
@@ -7241,17 +7223,20 @@ fn direct_generic_tree_pair_rejects_malformed_destination_without_writing() {
     };
     let src_structure =
         packed_fixture_structure(2, [(BlockKey::from(b2c_toy_src_pair()), vec![1, 1])]).unwrap();
-    let malformed = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-        [1, 1],
-        [],
-        Some(0),
-        [false, false],
-        [],
-        [],
-        [],
-        [0],
-        [],
-    ));
+    let malformed = BlockKey::from(
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [1, 1],
+            [],
+            0,
+            [false, false],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    );
     let dst_structure = packed_fixture_structure(2, [(malformed, vec![2, 1])]).unwrap();
     assert_ne!(src_structure.content_id(), dst_structure.content_id());
     let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
@@ -7283,7 +7268,7 @@ fn direct_generic_tree_pair_rejects_malformed_destination_without_writing() {
     assert_eq!(
         error,
         OperationError::Core(CoreError::MalformedFusionTree {
-            message: "fusion tree multiplicity style disagrees with the fusion rule",
+            message: "fusion tree has an invalid number of vertices",
         })
     );
     assert_eq!(dst.data(), before);
@@ -7393,13 +7378,13 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
         let cod = FusionTreeKey::try_new_for_rule(
             &rule,
             [eight, eight],
-            Some(vac),
+            vac,
             [false, false],
             [],
-            [tenet_core::SectorId::new(1)],
+            [tenet_core::MultiplicityIndex::ONE],
         )
         .unwrap();
-        let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
+        let dom = FusionTreeKey::try_new_for_rule(&rule, [], vac, [], [], []).unwrap();
         let key = BlockKey::from(FusionTreePairKey::pair(cod, dom));
         let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
         let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -7505,13 +7490,13 @@ mod b3c1_su4_smoke {
             let cod = FusionTreeKey::try_new_for_rule(
                 &rule,
                 [a, b],
-                Some(vac),
+                vac,
                 [false, false],
                 [],
-                [SectorId::new(1)],
+                [MultiplicityIndex::ONE],
             )
             .unwrap();
-            let dom = FusionTreeKey::try_new_for_rule(&rule, [], Some(vac), [], [], []).unwrap();
+            let dom = FusionTreeKey::try_new_for_rule(&rule, [], vac, [], [], []).unwrap();
             let key = BlockKey::from(FusionTreePairKey::pair(cod, dom));
             let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
             let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
@@ -7591,7 +7576,7 @@ mod b3c1_su4_smoke {
         let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [1, 1, 1, 1],
-            Some(0),
+            0,
             [false, false, false, false],
             [0, 1],
             [1, 1, 1],
@@ -7599,7 +7584,7 @@ mod b3c1_su4_smoke {
         let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
             [1, 1, 1, 1],
-            Some(0),
+            0,
             [false, false, false, false],
             [2, 1],
             [1, 1, 1],
@@ -7654,7 +7639,7 @@ mod b3c1_su4_smoke {
             let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
                 &SU2FusionRule,
                 [1, 1, 1, 1],
-                Some(0),
+                0,
                 [false, false, false, false],
                 [0, 1],
                 [1, 1, 1],
@@ -7662,7 +7647,7 @@ mod b3c1_su4_smoke {
             let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
                 &SU2FusionRule,
                 [1, 1, 1, 1],
-                Some(0),
+                0,
                 [false, false, false, false],
                 [2, 1],
                 [1, 1, 1],

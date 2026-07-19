@@ -2233,17 +2233,20 @@ mod owned_overwrite_tests {
     };
 
     fn canonical_structure(offset: usize) -> Arc<BlockStructure> {
-        let key = BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
-            [1],
-            [1],
-            Some(1),
-            [false],
-            [false],
-            [],
-            [],
-            [],
-            [],
-        ));
+        let key = BlockKey::from(
+            FusionTreePairKey::try_pair_from_sector_ids(
+                [1],
+                [1],
+                1,
+                [false],
+                [false],
+                [],
+                [],
+                [],
+                [],
+            )
+            .unwrap(),
+        );
         Arc::new(
             BlockStructure::from_blocks_with_rank(
                 2,

@@ -87,10 +87,7 @@ where
         };
         let codomain = key.codomain_tree().uncoupled();
         let domain = key.domain_tree().uncoupled();
-        let coupled = key
-            .codomain_tree()
-            .coupled()
-            .unwrap_or_else(|| rule.vacuum());
+        let coupled = key.codomain_tree().coupled();
         let labels = [
             label_of(codomain[0]),
             label_of(codomain[1]),

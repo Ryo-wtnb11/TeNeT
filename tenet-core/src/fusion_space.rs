@@ -900,35 +900,28 @@ fn reset_hom_space_intern_table() {
     }
 }
 
-fn fusion_tree_layout_from_keys<R>(
-    rule: &R,
+fn fusion_tree_layout_from_keys(
     id: FusionTreeLayoutId,
     keys: Vec<FusionTreePairKey>,
-) -> FusionTreeHomSpaceLayout
-where
-    R: FusionRule,
-{
+) -> FusionTreeHomSpaceLayout {
     FusionTreeHomSpaceLayout {
         id,
-        data: fusion_tree_layout_data_from_keys(rule.vacuum(), keys),
+        data: fusion_tree_layout_data_from_keys(keys),
     }
 }
 
-fn fusion_tree_layout_data_from_keys(
-    vacuum: SectorId,
-    keys: Vec<FusionTreePairKey>,
-) -> FusionTreeHomSpaceLayoutData {
+fn fusion_tree_layout_data_from_keys(keys: Vec<FusionTreePairKey>) -> FusionTreeHomSpaceLayoutData {
     let keys = Arc::<[FusionTreePairKey]>::from(keys);
     let mut sectors = Vec::new();
     let mut run_start = 0usize;
     while run_start < keys.len() {
-        let coupled = keys[run_start].codomain_tree().coupled().unwrap_or(vacuum);
+        let coupled = keys[run_start].codomain_tree().coupled();
         let mut run_end = run_start;
         let mut row_indices = FxHashMap::<FusionTreeKey, usize>::default();
         let mut col_indices = FxHashMap::<FusionTreeKey, usize>::default();
         let mut entries = Vec::new();
         while run_end < keys.len()
-            && keys[run_end].codomain_tree().coupled().unwrap_or(vacuum) == coupled
+            && keys[run_end].codomain_tree().coupled() == coupled
         {
             let row = match row_indices.get(keys[run_end].codomain_tree()) {
                 Some(&index) => index,
@@ -1296,10 +1289,7 @@ impl FusionTreeHomSpace {
         drop(read);
 
         let keys = self.try_fusion_tree_keys_uncached_lowered(rule)?;
-        let vacuum = rule
-            .try_lowered_vacuum()
-            .and_then(|sector| rule.try_encode_lowered(sector))?;
-        let data = fusion_tree_layout_data_from_keys(vacuum, keys);
+        let data = fusion_tree_layout_data_from_keys(keys);
         Ok(PreparedLoweredFusionTreeLayout {
             state: PreparedLoweredFusionTreeLayoutState::Cold {
                 key,
@@ -1380,7 +1370,6 @@ impl FusionTreeHomSpace {
         let key = Arc::new(key);
         let keys = build()?;
         let computed = Arc::new(fusion_tree_layout_from_keys(
-            rule,
             next_fusion_tree_layout_id(),
             keys,
         ));
@@ -1482,8 +1471,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let layout =
-            fusion_tree_layout_data_from_keys(rule.vacuum(), self.fusion_tree_keys_uncached(rule));
+        let layout = fusion_tree_layout_data_from_keys(self.fusion_tree_keys_uncached(rule));
         let (sector, degeneracy) = coupled_subblock_parts_from_layout(
             self,
             self.codomain.len(),
@@ -1512,7 +1500,7 @@ impl FusionTreeHomSpace {
         R: FusionRule,
     {
         let keys = self.fusion_tree_keys_generic(rule)?;
-        let layout = fusion_tree_layout_from_keys(rule, next_fusion_tree_layout_id(), keys);
+        let layout = fusion_tree_layout_from_keys(next_fusion_tree_layout_id(), keys);
         coupled_subblock_structure_from_layout(
             self,
             self.codomain.len(),
@@ -2242,15 +2230,13 @@ where
 /// at that (row block, column block) position. Full coverage of the
 /// `rows × columns` grid is required so the sector matrix has no
 /// uninitialized holes.
-fn coupled_sector_matrix_block_specs<R, S>(
-    rule: &R,
+fn coupled_sector_matrix_block_specs<S>(
     nout: usize,
     rank: usize,
     keys: &[FusionTreePairKey],
     shapes: &[S],
 ) -> Result<Vec<BlockSpec>, CoreError>
 where
-    R: FusionRule,
     S: AsRef<[usize]>,
 {
     for shape in shapes {
@@ -2268,7 +2254,7 @@ where
     let mut sector_offset = 0usize;
     let mut run_start = 0usize;
     while run_start < keys.len() {
-        let coupled = coupled_or_vacuum(rule, keys[run_start].codomain_tree());
+        let coupled = keys[run_start].codomain_tree().coupled();
         if seen_sectors.contains(&coupled) {
             return Err(CoreError::MalformedFusionTree {
                 message: "coupled sectors must be contiguous in fusion tree key order",
@@ -2277,9 +2263,9 @@ where
         seen_sectors.push(coupled);
         let mut run_end = run_start;
         while run_end < keys.len()
-            && coupled_or_vacuum(rule, keys[run_end].codomain_tree()) == coupled
+            && keys[run_end].codomain_tree().coupled() == coupled
         {
-            if coupled_or_vacuum(rule, keys[run_end].domain_tree()) != coupled {
+            if keys[run_end].domain_tree().coupled() != coupled {
                 return Err(CoreError::MalformedFusionTree {
                     message: "codomain and domain trees must share the coupled sector",
                 });

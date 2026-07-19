@@ -1,24 +1,24 @@
-//! Zero-cost-claim canary (#153): `FusionTreeKey` hash/eq on the
-//! multiplicity-free path (`has_multiplicity == false`, every rule in this
-//! crate today — see the big comment on `FusionTreeKey`'s `Hash` impl). No
-//! timing assertion here: shared CI runners are too noisy for a
-//! pass/fail latency gate. The gate is this bench compiling and running,
-//! plus the `size_of` canary in `src/tests.rs`.
+//! `FusionTreeKey` identity hash/eq canary (#153) for a multiplicity-free
+//! provider. Vertex labels remain part of exact identity; the benchmark uses
+//! the categorical label one required by `Z2FusionRule`. No timing assertion
+//! is used because shared CI runners are too noisy for a pass/fail latency
+//! gate. The gate is this bench compiling and running plus the `size_of`
+//! canary in `src/tests.rs`.
 
 use std::hash::{Hash, Hasher};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use rustc_hash::FxHasher;
-use tenet_core::{FusionTreeKey, SectorId, Z2FusionRule};
+use tenet_core::{FusionTreeKey, MultiplicityIndex, SectorId, Z2FusionRule};
 
 fn mult_free_key() -> FusionTreeKey {
     FusionTreeKey::try_new_for_rule(
         &Z2FusionRule,
         [SectorId::new(0); 4],
-        Some(SectorId::new(0)),
+        SectorId::new(0),
         [false; 4],
         [SectorId::new(0); 2],
-        [SectorId::new(1); 3],
+        [MultiplicityIndex::ONE; 3],
     )
     .expect("the benchmark fixture is a valid Z2 fusion tree")
 }

@@ -9,8 +9,8 @@ use tenet_core::{
     BlockKey, BlockStructure, BraidingStyleKind, DegeneracyStructure, FusionProductSpace,
     FusionRule, FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, TensorMap,
-    TensorMapSpace, U1FusionRule, U1Irrep,
+    MultiplicityIndex, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
+    TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
@@ -63,13 +63,13 @@ fn su2_f_move_structure() -> BlockStructure {
             FusionTreeKey::try_new_for_rule(
                 &SU2FusionRule,
                 [SectorId::new(1); 4],
-                Some(SectorId::new(0)),
+                SectorId::new(0),
                 [false; 4],
                 inner.map(SectorId::new),
-                [SectorId::new(1); 3],
+                [MultiplicityIndex::ONE; 3],
             )
             .unwrap(),
-            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], Some(SectorId::new(0)), [], [], [])
+            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], SectorId::new(0), [], [], [])
                 .unwrap(),
         ))
     });
@@ -191,13 +191,13 @@ fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
         FusionTreeKey::try_new_for_rule(
             &SU2FusionRule,
             vec![vacuum; RANK],
-            Some(vacuum),
+            vacuum,
             vec![false; RANK],
             vec![vacuum; RANK - 2],
-            vec![SectorId::new(1); RANK - 1],
+            vec![MultiplicityIndex::ONE; RANK - 1],
         )
         .unwrap(),
-        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], Some(vacuum), [], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], vacuum, [], [], []).unwrap(),
     );
     Arc::new(
         BlockStructure::from_parts(
@@ -393,9 +393,9 @@ fn rank_one_u1_pair_structure(count: usize) -> BlockStructure {
     let keys = (0..count).map(|charge| {
         let sector = U1Irrep::new(charge as i32).sector_id();
         BlockKey::from(FusionTreePairKey::pair(
-            FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], Some(sector), [false], [], [])
+            FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], sector, [false], [], [])
                 .unwrap(),
-            FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], Some(sector), [false], [], [])
+            FusionTreeKey::try_new_for_rule(&U1FusionRule, [sector], sector, [false], [], [])
                 .unwrap(),
         ))
     });

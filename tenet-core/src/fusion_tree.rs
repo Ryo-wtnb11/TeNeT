@@ -321,10 +321,10 @@ where
             }
             out.push(FusionTreeKey::new(
                 uncoupled.iter().copied(),
-                Some(coupled_encoded),
+                coupled_encoded,
                 is_dual.iter().copied(),
                 innerlines,
-                std::iter::repeat(SectorId::new(1)).take(vertex_count),
+                std::iter::repeat_n(MultiplicityIndex::ONE, vertex_count),
             ));
             Ok(())
         },
@@ -616,10 +616,10 @@ where
     visit_fusion_trees(rule, effective, coupled, &mut inner_rev, &mut |inner_rev| {
         out.push(FusionTreeKey::new(
             uncoupled.iter().copied(),
-            Some(coupled),
+            coupled,
             is_dual.iter().copied(),
             inner_rev.iter().rev().copied(),
-            std::iter::repeat(SectorId::new(1)).take(vertex_count),
+            std::iter::repeat_n(MultiplicityIndex::ONE, vertex_count),
         ));
     });
     out
@@ -747,56 +747,13 @@ impl FusionTreeGroupKey {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeKey {
     uncoupled: SectorVec,
-    coupled: Option<SectorId>,
+    coupled: SectorId,
     is_dual: DualVec,
     innerlines: SectorVec,
-    vertices: SectorVec,
-    has_multiplicity: bool,
-}
-
-impl std::hash::Hash for FusionTreeKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.uncoupled.hash(state);
-        self.coupled.hash(state);
-        self.is_dual.hash(state);
-        self.innerlines.hash(state);
-        self.vertices.hash(state);
-        self.has_multiplicity.hash(state);
-    }
-}
-
-impl PartialEq for FusionTreeKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.uncoupled == other.uncoupled
-            && self.coupled == other.coupled
-            && self.is_dual == other.is_dual
-            && self.innerlines == other.innerlines
-            && self.vertices == other.vertices
-            && self.has_multiplicity == other.has_multiplicity
-    }
-}
-
-impl Eq for FusionTreeKey {}
-
-impl Ord for FusionTreeKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.uncoupled
-            .cmp(&other.uncoupled)
-            .then_with(|| self.coupled.cmp(&other.coupled))
-            .then_with(|| self.is_dual.cmp(&other.is_dual))
-            .then_with(|| self.innerlines.cmp(&other.innerlines))
-            .then_with(|| self.vertices.cmp(&other.vertices))
-            .then_with(|| self.has_multiplicity.cmp(&other.has_multiplicity))
-    }
-}
-
-impl PartialOrd for FusionTreeKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    vertices: MultiplicityVec,
 }
 
 impl FusionTreeKey {
@@ -810,7 +767,7 @@ impl FusionTreeKey {
     pub fn try_new_for_rule<R, Uncoupled, Dual, Innerlines, Vertices>(
         rule: &R,
         uncoupled: Uncoupled,
-        coupled: Option<SectorId>,
+        coupled: SectorId,
         is_dual: Dual,
         innerlines: Innerlines,
         vertices: Vertices,
@@ -820,21 +777,18 @@ impl FusionTreeKey {
         Uncoupled: IntoIterator<Item = SectorId>,
         Dual: IntoIterator<Item = bool>,
         Innerlines: IntoIterator<Item = SectorId>,
-        Vertices: IntoIterator<Item = SectorId>,
+        Vertices: IntoIterator<Item = MultiplicityIndex>,
     {
-        let tree = Self::new(uncoupled, coupled, is_dual, innerlines, vertices)
-            .with_has_multiplicity(rule.fusion_style().has_multiplicity());
+        let tree = Self::new(uncoupled, coupled, is_dual, innerlines, vertices);
         tree.validate_for_rule(rule)?;
         Ok(tree)
     }
 
-    // Why-not require a fusion style here: exact categorical reconstruction
-    // and deserialization may create a raw tree before a provider is available.
-    // Such callers must validate at the categorical execution boundary;
-    // application-defined routing metadata belongs in OpaqueBlockKey instead.
+    // Why not store a fusion style here: the bound rule is the authority for
+    // categorical capabilities; duplicating it in identity can become stale.
     pub(crate) fn new<Uncoupled, Dual, Innerlines, Vertices>(
         uncoupled: Uncoupled,
-        coupled: Option<SectorId>,
+        coupled: SectorId,
         is_dual: Dual,
         innerlines: Innerlines,
         vertices: Vertices,
@@ -843,7 +797,7 @@ impl FusionTreeKey {
         Uncoupled: IntoIterator<Item = SectorId>,
         Dual: IntoIterator<Item = bool>,
         Innerlines: IntoIterator<Item = SectorId>,
-        Vertices: IntoIterator<Item = SectorId>,
+        Vertices: IntoIterator<Item = MultiplicityIndex>,
     {
         Self {
             uncoupled: uncoupled.into_iter().collect(),
@@ -851,57 +805,49 @@ impl FusionTreeKey {
             is_dual: is_dual.into_iter().collect(),
             innerlines: innerlines.into_iter().collect(),
             vertices: vertices.into_iter().collect(),
-            has_multiplicity: false,
         }
     }
 
-    /// Set the outer-multiplicity flag (see the Hash impl comment). Chainable
-    /// setter rather than a constructor parameter — see the rationale on
-    /// `new` above for why the existing constructors were left alone.
-    #[must_use]
-    pub(crate) fn with_has_multiplicity(mut self, has_multiplicity: bool) -> Self {
-        self.has_multiplicity = has_multiplicity;
-        self
-    }
-
-    #[inline]
-    pub fn has_multiplicity(&self) -> bool {
-        self.has_multiplicity
-    }
-
-    pub(crate) fn from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
+    pub(crate) fn try_from_sector_ids<Uncoupled, Dual, Innerlines, Vertices>(
         uncoupled: Uncoupled,
-        coupled: Option<usize>,
+        coupled: usize,
         is_dual: Dual,
         innerlines: Innerlines,
         vertices: Vertices,
-    ) -> Self
+    ) -> Result<Self, CoreError>
     where
         Uncoupled: IntoIterator<Item = usize>,
         Dual: IntoIterator<Item = bool>,
         Innerlines: IntoIterator<Item = usize>,
         Vertices: IntoIterator<Item = usize>,
     {
-        Self::new(
+        Ok(Self::new(
             uncoupled.into_iter().map(SectorId::new),
-            coupled.map(SectorId::new),
+            SectorId::new(coupled),
             is_dual,
             innerlines.into_iter().map(SectorId::new),
-            vertices.into_iter().map(SectorId::new),
-        )
+            vertices
+                .into_iter()
+                .map(MultiplicityIndex::try_from)
+                .collect::<Result<MultiplicityVec, _>>()?,
+        ))
     }
 
-    /// Construct and validate a categorical fusion tree from numeric IDs.
+    /// Construct and validate a categorical fusion tree from numeric labels.
+    ///
+    /// `uncoupled`, `coupled`, and `innerlines` contain provider-local sector
+    /// IDs. `vertices` instead contains one-based outer-multiplicity labels;
+    /// a zero vertex returns [`CoreError::InvalidMultiplicityIndex`].
     ///
     /// # Provider-domain precondition
     ///
-    /// Every ID must already name a sector in `rule`'s provider domain. This
+    /// Every sector ID must already name a sector in `rule`'s provider domain. This
     /// method checks categorical structure, not provider membership, and has
     /// the same limitation documented on [`Self::validate_for_rule`].
     pub fn try_from_sector_ids_for_rule<R, Uncoupled, Dual, Innerlines, Vertices>(
         rule: &R,
         uncoupled: Uncoupled,
-        coupled: Option<usize>,
+        coupled: usize,
         is_dual: Dual,
         innerlines: Innerlines,
         vertices: Vertices,
@@ -916,10 +862,13 @@ impl FusionTreeKey {
         Self::try_new_for_rule(
             rule,
             uncoupled.into_iter().map(SectorId::new),
-            coupled.map(SectorId::new),
+            SectorId::new(coupled),
             is_dual,
             innerlines.into_iter().map(SectorId::new),
-            vertices.into_iter().map(SectorId::new),
+            vertices
+                .into_iter()
+                .map(MultiplicityIndex::try_from)
+                .collect::<Result<MultiplicityVec, _>>()?,
         )
     }
 
@@ -929,7 +878,7 @@ impl FusionTreeKey {
     }
 
     #[inline]
-    pub fn coupled(&self) -> Option<SectorId> {
+    pub fn coupled(&self) -> SectorId {
         self.coupled
     }
 
@@ -944,7 +893,7 @@ impl FusionTreeKey {
     }
 
     #[inline]
-    pub fn vertices(&self) -> &[SectorId] {
+    pub fn vertices(&self) -> &[MultiplicityIndex] {
         &self.vertices
     }
 
@@ -988,28 +937,17 @@ where
 
     let rank = tree.uncoupled().len();
     match rank {
-        0 if tree.coupled().is_some_and(|coupled| coupled != rule.vacuum()) => {
+        0 if tree.coupled() != rule.vacuum() => {
             return Err(CoreError::MalformedFusionTree {
-                message: "rank-0 fusion tree coupled sector must normalize to the vacuum",
+                message: "rank-0 fusion tree coupled sector must equal the vacuum",
             });
         }
-        1 if tree.coupled() != tree.uncoupled().first().copied() => {
+        1 if Some(tree.coupled()) != tree.uncoupled().first().copied() => {
             return Err(CoreError::MalformedFusionTree {
                 message: "rank-1 fusion tree coupled sector must equal its uncoupled sector",
             });
         }
-        2.. if tree.coupled().is_none() => {
-            return Err(CoreError::MalformedFusionTree {
-                message: "rank >= 2 fusion tree requires a coupled sector",
-            });
-        }
         _ => {}
-    }
-
-    if tree.has_multiplicity() != rule.fusion_style().has_multiplicity() {
-        return Err(CoreError::MalformedFusionTree {
-            message: "fusion tree multiplicity style disagrees with the fusion rule",
-        });
     }
 
     for vertex_index in 0..rank.saturating_sub(1) {
@@ -1021,7 +959,6 @@ where
         let right = tree.uncoupled()[vertex_index + 1];
         let coupled = if vertex_index + 2 == rank {
             tree.coupled()
-                .expect("rank >= 2 validation established a coupled sector")
         } else {
             tree.innerlines()[vertex_index]
         };
@@ -1031,12 +968,7 @@ where
                 message: "fusion tree contains an inadmissible fusion vertex",
             });
         }
-        let label = tree.vertices()[vertex_index].id();
-        if label == 0 {
-            return Err(CoreError::MalformedFusionTree {
-                message: "fusion tree vertex labels are 1-based",
-            });
-        }
+        let label = tree.vertices()[vertex_index].get();
         if label > multiplicity {
             return Err(CoreError::MalformedFusionTree {
                 message: "fusion tree vertex label exceeds its fusion multiplicity",
@@ -1048,10 +980,7 @@ where
 }
 
 impl FusionTreePairKey {
-    /// Validate both trees and their shared normalized coupled sector.
-    ///
-    /// Empty trees use the provider vacuum for pair comparison, accepting both
-    /// existing raw encodings `None` and `Some(vacuum)`.
+    /// Validate both trees and their shared coupled sector.
     ///
     /// # Provider-domain precondition
     ///
@@ -1081,8 +1010,8 @@ where
 {
     let codomain = validate_fusion_tree_for_rule(rule, tree_pair.codomain_tree())?;
     let domain = validate_fusion_tree_for_rule(rule, tree_pair.domain_tree())?;
-    let codomain_coupled = codomain.key.coupled().unwrap_or_else(|| rule.vacuum());
-    let domain_coupled = domain.key.coupled().unwrap_or_else(|| rule.vacuum());
+    let codomain_coupled = codomain.key.coupled();
+    let domain_coupled = domain.key.coupled();
     if codomain_coupled != domain_coupled {
         return Err(CoreError::MalformedFusionTree {
             message: "fusion tree pair requires matching coupled sectors",
@@ -1123,15 +1052,14 @@ where
     validate_fusion_tree_for_rule(rule, tree)?;
 
     if front_rank == rank {
-        let coupled = coupled_or_vacuum(rule, tree);
+        let coupled = tree.coupled();
         let trace_tree = FusionTreeKey::new(
             [coupled],
-            Some(coupled),
+            coupled,
             [false],
             Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
-        )
-        .with_has_multiplicity(tree.has_multiplicity());
+            Vec::<MultiplicityIndex>::new(),
+        );
         return Ok((tree.clone(), trace_tree));
     }
 
@@ -1139,12 +1067,11 @@ where
         let first = tree.uncoupled()[0];
         let front_tree = FusionTreeKey::new(
             [first],
-            Some(first),
+            first,
             [tree.is_dual()[0]],
             Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
-        )
-        .with_has_multiplicity(tree.has_multiplicity());
+            Vec::<MultiplicityIndex>::new(),
+        );
         let mut tail_is_dual = tree.is_dual().to_vec();
         tail_is_dual[0] = false;
         let tail_tree = FusionTreeKey::new(
@@ -1153,8 +1080,7 @@ where
             tail_is_dual,
             tree.innerlines().to_vec(),
             tree.vertices().to_vec(),
-        )
-        .with_has_multiplicity(tree.has_multiplicity());
+        );
         return Ok((front_tree, tail_tree));
     }
 
@@ -1167,12 +1093,11 @@ where
         let unit = rule.vacuum();
         let front_tree = FusionTreeKey::new(
             Vec::<SectorId>::new(),
-            Some(unit),
+            unit,
             Vec::<bool>::new(),
             Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
-        )
-        .with_has_multiplicity(tree.has_multiplicity());
+            Vec::<MultiplicityIndex>::new(),
+        );
         let mut tail_uncoupled = Vec::with_capacity(rank + 1);
         tail_uncoupled.push(unit);
         tail_uncoupled.extend_from_slice(tree.uncoupled());
@@ -1185,7 +1110,7 @@ where
             tail_innerlines.extend_from_slice(tree.innerlines());
         }
         let mut tail_vertices = Vec::with_capacity(rank);
-        tail_vertices.push(SectorId::new(1));
+        tail_vertices.push(MultiplicityIndex::ONE);
         tail_vertices.extend_from_slice(tree.vertices());
         let tail_tree = FusionTreeKey::new(
             tail_uncoupled,
@@ -1193,8 +1118,7 @@ where
             tail_is_dual,
             tail_innerlines,
             tail_vertices,
-        )
-        .with_has_multiplicity(tree.has_multiplicity());
+        );
         return Ok((front_tree, tail_tree));
     }
 
@@ -1207,12 +1131,11 @@ where
             })?;
     let front_tree = FusionTreeKey::new(
         tree.uncoupled()[..front_rank].to_vec(),
-        Some(intermediate),
+        intermediate,
         tree.is_dual()[..front_rank].to_vec(),
         tree.innerlines()[..front_rank.saturating_sub(2)].to_vec(),
         tree.vertices()[..front_rank - 1].to_vec(),
-    )
-    .with_has_multiplicity(tree.has_multiplicity());
+    );
 
     let mut tail_uncoupled = Vec::with_capacity(rank - front_rank + 1);
     tail_uncoupled.push(intermediate);
@@ -1226,8 +1149,7 @@ where
         tail_is_dual,
         tree.innerlines()[front_rank - 1..].to_vec(),
         tree.vertices()[front_rank - 1..].to_vec(),
-    )
-    .with_has_multiplicity(tree.has_multiplicity());
+    );
     Ok((front_tree, tail_tree))
 }
 
@@ -2598,22 +2520,32 @@ struct CompactMultiplicityFreeTreeBasis {
 }
 
 impl CompactMultiplicityFreeTreeBasis {
-    fn from_sources(src_keys: &[FusionTreeKey]) -> Result<Self, CoreError> {
-        let (frame, first_local) =
-            MultiplicityFreeTreeFrame::split(src_keys.first().ok_or(
-                CoreError::MalformedFusionTree {
+    fn from_group<R>(
+        group: ValidatedFusionTreeBlockGroup<'_, R>,
+    ) -> Result<Self, CoreError> {
+        let src_keys = group.src_keys;
+        let (frame, first_local) = MultiplicityFreeTreeFrame::split(
+            group
+                .projection
+                .tree_at(0)
+                .ok_or(CoreError::MalformedFusionTree {
                     message: "compact block basis requires at least one source",
-                },
-            )?);
+                })?,
+        );
         let mut locals = Vec::with_capacity(src_keys.len());
         locals.push(first_local);
-        for source in &src_keys[1..] {
+        for (index, source) in src_keys.iter().enumerate().skip(1) {
             if !frame.matches_tree(source) {
                 return Err(CoreError::MalformedFusionTree {
                     message: "fusion-tree keys must share one group",
                 });
             }
-            locals.push(MultiplicityFreeTreeLocal::from_tree(source));
+            locals.push(MultiplicityFreeTreeLocal::from_proven(
+                group
+                    .projection
+                    .tree_at(index)
+                    .expect("validated projection covers every source"),
+            ));
         }
         Ok(Self { frame, locals })
     }
@@ -2627,22 +2559,32 @@ struct CompactMultiplicityFreeTreePairBasis {
 type CompactMultiplicityFreeTreePairRows<S> = Vec<Vec<(FusionTreePairKey, S)>>;
 
 impl CompactMultiplicityFreeTreePairBasis {
-    fn from_sources(src_keys: &[FusionTreePairKey]) -> Result<Self, CoreError> {
-        let (frame, first_local) =
-            MultiplicityFreeTreePairFrame::split(src_keys.first().ok_or(
-                CoreError::MalformedFusionTree {
+    fn from_group<R>(
+        group: ValidatedTreePairBlockGroup<'_, R>,
+    ) -> Result<Self, CoreError> {
+        let src_keys = group.src_keys;
+        let (frame, first_local) = MultiplicityFreeTreePairFrame::split(
+            group
+                .projection
+                .pair_at(0)
+                .ok_or(CoreError::MalformedFusionTree {
                     message: "compact block basis requires at least one source",
-                },
-            )?);
+                })?,
+        );
         let mut locals = Vec::with_capacity(src_keys.len());
         locals.push(first_local);
-        for source in &src_keys[1..] {
+        for (index, source) in src_keys.iter().enumerate().skip(1) {
             if !frame.matches_tree_pair(source) {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
                 });
             }
-            locals.push(MultiplicityFreeTreePairLocal::from_tree_pair(source));
+            locals.push(MultiplicityFreeTreePairLocal::from_proven(
+                group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source"),
+            ));
         }
         Ok(Self { frame, locals })
     }
@@ -3045,20 +2987,23 @@ fn scatter_compact_block<S: Clone>(
 }
 
 fn preflight_compact_repartition_source_major<R>(
-    rule: &R,
-    src_keys: &[FusionTreePairKey],
+    group: &ValidatedTreePairBlockGroup<'_, R>,
     current_codomain_rank: usize,
     target_codomain_rank: usize,
 ) -> Result<(), CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
 {
-    let (initial_frame, first_local) =
-        MultiplicityFreeTreePairFrame::split(src_keys.first().ok_or(
-            CoreError::MalformedFusionTree {
+    let rule = group.rule;
+    let src_keys = group.src_keys;
+    let (initial_frame, first_local) = MultiplicityFreeTreePairFrame::split(
+        group
+            .projection
+            .pair_at(0)
+            .ok_or(CoreError::MalformedFusionTree {
                 message: "compact repartition requires at least one source",
-            },
-        )?);
+            })?,
+    );
     if current_codomain_rank > target_codomain_rank {
         let mut steps: SmallVec<[PreparedMultiplicityFreeBendRight; 8]> =
             SmallVec::new();
@@ -3077,9 +3022,14 @@ where
             }
             steps.push(prepared);
         }
-        for source in &src_keys[1..] {
+        for (index, _source) in src_keys.iter().enumerate().skip(1) {
             let (source_frame, mut local) =
-                MultiplicityFreeTreePairFrame::split(source);
+                MultiplicityFreeTreePairFrame::split(
+                    group
+                        .projection
+                        .pair_at(index)
+                        .expect("validated projection covers every source"),
+                );
             if source_frame != initial_frame {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
@@ -3109,9 +3059,14 @@ where
             }
             steps.push(prepared);
         }
-        for source in &src_keys[1..] {
+        for (index, _source) in src_keys.iter().enumerate().skip(1) {
             let (source_frame, mut local) =
-                MultiplicityFreeTreePairFrame::split(source);
+                MultiplicityFreeTreePairFrame::split(
+                    group
+                        .projection
+                        .pair_at(index)
+                        .expect("validated projection covers every source"),
+                );
             if source_frame != initial_frame {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
@@ -3129,15 +3084,16 @@ where
 }
 
 fn compact_repartition_tree_pair_block<R>(
-    rule: &R,
-    src_keys: &[FusionTreePairKey],
-    mut current_codomain_rank: usize,
+    group: ValidatedTreePairBlockGroup<'_, R>,
     target_codomain_rank: usize,
 ) -> Result<CompactMultiplicityFreeTreePairRows<R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    let rule = group.rule;
+    let src_keys = group.src_keys;
+    let mut current_codomain_rank = group.codomain_rank;
     if current_codomain_rank == target_codomain_rank {
         return Ok(src_keys
             .iter()
@@ -3147,22 +3103,28 @@ where
     // Why not rely on the step-major compact execution for malformed inputs:
     // the legacy public API reports the first error in source-major order.
     preflight_compact_repartition_source_major(
-        rule,
-        src_keys,
+        &group,
         current_codomain_rank,
         target_codomain_rank,
     )?;
-    let (mut frame, first_local) =
-        MultiplicityFreeTreePairFrame::split(src_keys.first().ok_or(
-            CoreError::MalformedFusionTree {
+    let (mut frame, first_local) = MultiplicityFreeTreePairFrame::split(
+        group
+            .projection
+            .pair_at(0)
+            .ok_or(CoreError::MalformedFusionTree {
                 message: "compact repartition requires at least one source",
-            },
-        )?);
+            })?,
+    );
     let mut rows = Vec::with_capacity(src_keys.len());
     rows.push((first_local, rule.scalar_one()));
-    for source in &src_keys[1..] {
+    for (index, _source) in src_keys.iter().enumerate().skip(1) {
         let (source_frame, source_local) =
-            MultiplicityFreeTreePairFrame::split(source);
+            MultiplicityFreeTreePairFrame::split(
+                group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source"),
+            );
         if source_frame != frame {
             return Err(CoreError::MalformedFusionTree {
                 message: TREE_PAIR_BLOCK_GROUP_ERROR,
@@ -3207,6 +3169,7 @@ struct ValidatedFusionTreeBlockGroup<'a, R> {
     rule: &'a R,
     src_keys: &'a [FusionTreeKey],
     rank: usize,
+    projection: MultiplicityFreeTreeProjection<'a>,
 }
 
 fn validate_fusion_tree_block_group_for_rule<'a, R>(
@@ -3229,13 +3192,13 @@ fn validate_fusion_tree_block_group_proven<'a, R>(
 where
     R: FusionRule,
 {
+    let projection = MultiplicityFreeTreeProjection::from_validated(rule, src_keys)?;
     let Some(reference) = src_keys.first() else {
         return Ok(None);
     };
     let same_group = |key: &FusionTreeKey| {
         key.uncoupled() == reference.uncoupled()
             && key.is_dual() == reference.is_dual()
-            && key.has_multiplicity() == reference.has_multiplicity()
     };
     for source in src_keys {
         // Why not compare `coupled`: distinct coupled labels are basis states
@@ -3252,13 +3215,13 @@ where
         rule,
         src_keys,
         rank: reference.uncoupled().len(),
+        projection,
     }))
 }
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn multiplicity_free_braid_tree_block_proven<R>(
-    rule: &R,
-    src_keys: &[FusionTreeKey],
+    batch: ValidatedMultiplicityFreeTreeBatch<'_, R>,
     permutation: &[usize],
     levels: &[usize],
 ) -> Result<Vec<Vec<(FusionTreeKey, R::Scalar)>>, CoreError>
@@ -3266,6 +3229,7 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    let (rule, src_keys) = batch.parts();
     let Some(first) = src_keys.first() else {
         return Ok(Vec::new());
     };
@@ -3338,7 +3302,7 @@ where
             .collect());
     }
 
-    let mut basis = CompactMultiplicityFreeTreeBasis::from_sources(src_keys)?;
+    let mut basis = CompactMultiplicityFreeTreeBasis::from_group(group)?;
     let mut columns = None;
     for step in &prepared.artin_steps {
         let (next_basis, next_columns) = match &columns {
@@ -3405,6 +3369,7 @@ struct ValidatedTreePairBlockGroup<'a, R> {
     src_keys: &'a [FusionTreePairKey],
     codomain_rank: usize,
     domain_rank: usize,
+    projection: MultiplicityFreePairProjection<'a>,
 }
 
 const TREE_PAIR_BLOCK_GROUP_ERROR: &str = "fusion-tree block keys must share one group";
@@ -3429,6 +3394,7 @@ fn validate_tree_pair_block_group_proven<'a, R>(
 where
     R: FusionRule,
 {
+    let projection = MultiplicityFreePairProjection::from_validated(rule, src_keys)?;
     let Some(reference) = src_keys.first() else {
         return Ok(None);
     };
@@ -3441,8 +3407,6 @@ where
             && domain.uncoupled() == reference_domain.uncoupled()
             && codomain.is_dual() == reference_codomain.is_dual()
             && domain.is_dual() == reference_domain.is_dual()
-            && codomain.has_multiplicity() == reference_codomain.has_multiplicity()
-            && domain.has_multiplicity() == reference_domain.has_multiplicity()
     };
     for source in src_keys {
         // Why not infer a block from matching ranks or tree shape:
@@ -3460,19 +3424,20 @@ where
         src_keys,
         codomain_rank: reference_codomain.uncoupled().len(),
         domain_rank: reference_domain.uncoupled().len(),
+        projection,
     }))
 }
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn multiplicity_free_braid_tree_pair_block_proven<R>(
-    rule: &R,
-    src_keys: &[FusionTreePairKey],
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
     prepared: PreparedTreePairOperation,
 ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    let (rule, src_keys) = batch.parts();
     let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
         return Ok(Vec::new());
     };
@@ -3481,14 +3446,14 @@ where
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn multiplicity_free_transpose_tree_pair_block_proven<R>(
-    rule: &R,
-    src_keys: &[FusionTreePairKey],
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
     prepared: PreparedTreePairOperation,
 ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    let (rule, src_keys) = batch.parts();
     let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
         return Ok(Vec::new());
     };
@@ -3566,9 +3531,7 @@ where
         }
         PreparedTreePairPlan::Repartition => {
             return compact_repartition_tree_pair_block(
-                rule,
-                src_keys,
-                codomain_rank,
+                group,
                 prepared.target_codomain_rank,
             );
         }
@@ -3581,7 +3544,7 @@ where
 
     // The first compact operator writes source columns directly; later
     // operators compose through the resulting dense coefficient matrix.
-    let mut basis = CompactMultiplicityFreeTreePairBasis::from_sources(src_keys)?;
+    let mut basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
     let mut columns = None;
 
     // Step A: repartition everything into the codomain (bendleft chain).
@@ -4422,9 +4385,7 @@ where
             .iter()
             .map(|&axis| tree.is_dual()[axis])
             .collect::<SmallVec<[bool; 8]>>();
-        let coupled = tree.coupled().ok_or(CoreError::MalformedFusionTree {
-            message: "braided unique tree requires a coupled sector",
-        })?;
+        let coupled = tree.coupled();
         let destination =
             rebuild_unique_standard_fusion_tree(rule, &uncoupled, coupled, &is_dual)?;
         return Ok((destination, coefficient));
@@ -4451,15 +4412,15 @@ where
 {
     let rank = tree.uncoupled().len();
     if rank < 2
-        || tree.has_multiplicity()
         || validate_fusion_tree_key_shape(tree).is_err()
-        || tree.vertices().iter().any(|vertex| vertex.id() != 1)
+        || tree
+            .vertices()
+            .iter()
+            .any(|vertex| *vertex != MultiplicityIndex::ONE)
     {
         return false;
     }
-    let Some(coupled) = tree.coupled() else {
-        return false;
-    };
+    let coupled = tree.coupled();
 
     let mut running = tree.uncoupled()[0];
     for (offset, &right) in tree.uncoupled()[1..].iter().enumerate() {
@@ -4520,10 +4481,10 @@ where
 
     Ok(FusionTreeKey::new(
         uncoupled.iter().copied(),
-        Some(coupled),
+        coupled,
         is_dual.iter().copied(),
         innerlines,
-        std::iter::repeat_n(SectorId::new(1), uncoupled.len().saturating_sub(1)),
+        std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1)),
     ))
 }
 
@@ -4599,9 +4560,7 @@ where
                     message: "first braid of a rank > 2 tree requires the first innerline",
                 })?
         } else {
-            tree.coupled().ok_or(CoreError::MalformedFusionTree {
-                message: "first braid of a rank 2 tree requires a coupled sector",
-            })?
+            tree.coupled()
         };
 
         let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
@@ -4639,15 +4598,13 @@ where
 }
 
 trait MultiplicityFreeTreeLocalData {
-    fn coupled(&self) -> Option<SectorId>;
+    fn coupled(&self) -> SectorId;
     fn innerlines(&self) -> &[SectorId];
-    fn vertices(&self) -> &[SectorId];
-    fn has_multiplicity(&self) -> bool;
 }
 
 impl MultiplicityFreeTreeLocalData for FusionTreeKey {
     #[inline]
-    fn coupled(&self) -> Option<SectorId> {
+    fn coupled(&self) -> SectorId {
         self.coupled()
     }
 
@@ -4656,15 +4613,6 @@ impl MultiplicityFreeTreeLocalData for FusionTreeKey {
         self.innerlines()
     }
 
-    #[inline]
-    fn vertices(&self) -> &[SectorId] {
-        self.vertices()
-    }
-
-    #[inline]
-    fn has_multiplicity(&self) -> bool {
-        self.has_multiplicity()
-    }
 }
 
 trait MultiplicityFreeTreeData: MultiplicityFreeTreeLocalData {
@@ -4684,17 +4632,220 @@ struct MultiplicityFreeTreeFrame {
     is_dual: DualVec,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct MultiplicityFreeTreeLocal {
-    coupled: Option<SectorId>,
+    coupled: SectorId,
     innerlines: SectorVec,
-    vertices: SectorVec,
-    has_multiplicity: bool,
 }
+
+mod multiplicity_free_projection {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Trees<'a> {
+        keys: &'a [FusionTreeKey],
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Pairs<'a> {
+        keys: &'a [FusionTreePairKey],
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Tree<'a> {
+        key: &'a FusionTreeKey,
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Pair<'a> {
+        key: &'a FusionTreePairKey,
+    }
+
+    pub(super) struct TreeBatch<'rule, R> {
+        rule: &'rule R,
+        keys: SmallVec<[FusionTreeKey; 8]>,
+    }
+
+    pub(super) struct PairBatch<'rule, R> {
+        rule: &'rule R,
+        keys: SmallVec<[FusionTreePairKey; 8]>,
+    }
+
+    impl<'rule, R> TreeBatch<'rule, R>
+    where
+        R: FusionRule,
+    {
+        pub(super) fn from_locally_validated<'structure, I>(
+            proof: &LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>,
+            indices: I,
+        ) -> Result<Self, CoreError>
+        where
+            I: IntoIterator<Item = usize>,
+        {
+            let keys = indices
+                .into_iter()
+                .map(|index| {
+                    proof
+                        .required_fusion_tree_pair_key(index)
+                        .map(|key| key.codomain_tree().clone())
+                })
+                .collect::<Result<SmallVec<_>, _>>()?;
+            Ok(Self {
+                rule: proof.rule,
+                keys,
+            })
+        }
+
+        pub(super) fn parts(&self) -> (&R, &[FusionTreeKey]) {
+            (self.rule, &self.keys)
+        }
+    }
+
+    impl<'rule, R> PairBatch<'rule, R>
+    where
+        R: FusionRule,
+    {
+        pub(super) fn from_locally_validated<'structure, I>(
+            proof: &LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>,
+            indices: I,
+        ) -> Result<Self, CoreError>
+        where
+            I: IntoIterator<Item = usize>,
+        {
+            let keys = indices
+                .into_iter()
+                .map(|index| proof.required_fusion_tree_pair_key(index).cloned())
+                .collect::<Result<SmallVec<_>, _>>()?;
+            Ok(Self {
+                rule: proof.rule,
+                keys,
+            })
+        }
+
+        pub(super) fn parts(&self) -> (&R, &[FusionTreePairKey]) {
+            (self.rule, &self.keys)
+        }
+    }
+
+    impl<'a> Trees<'a> {
+        pub(super) fn checked<R>(
+            rule: &R,
+            trees: &'a [FusionTreeKey],
+        ) -> Result<Self, CoreError>
+        where
+            R: FusionRule,
+        {
+            validate_multiplicity_free_execution_style(rule)?;
+            for tree in trees {
+                Self::check_vertices(tree)?;
+            }
+            Ok(Self { keys: trees })
+        }
+
+        pub(super) fn from_validated<R>(
+            rule: &R,
+            trees: &'a [FusionTreeKey],
+        ) -> Result<Self, CoreError>
+        where
+            R: FusionRule,
+        {
+            // Why not rescan vertices: categorical validation already proved
+            // every multiplicity-free N-symbol bound, hence label ONE. The
+            // `_proven` callers receive keys from a LocallyValidated block.
+            validate_multiplicity_free_execution_style(rule)?;
+            Ok(Self { keys: trees })
+        }
+
+        pub(super) fn tree_at(&self, index: usize) -> Option<Tree<'a>> {
+            self.keys.get(index).map(|key| Tree { key })
+        }
+
+        fn check_vertices(tree: &FusionTreeKey) -> Result<(), CoreError> {
+            check_vertices(tree)
+        }
+    }
+
+    impl<'a> Pairs<'a> {
+        pub(super) fn checked<R>(
+            rule: &R,
+            pairs: &'a [FusionTreePairKey],
+        ) -> Result<Self, CoreError>
+        where
+            R: FusionRule,
+        {
+            validate_multiplicity_free_execution_style(rule)?;
+            for pair in pairs {
+                check_vertices(pair.codomain_tree())?;
+                check_vertices(pair.domain_tree())?;
+            }
+            Ok(Self { keys: pairs })
+        }
+
+        pub(super) fn from_validated<R>(
+            rule: &R,
+            pairs: &'a [FusionTreePairKey],
+        ) -> Result<Self, CoreError>
+        where
+            R: FusionRule,
+        {
+            // Pair validation proves the same vertex invariant for both trees
+            // in the single categorical validation pass.
+            validate_multiplicity_free_execution_style(rule)?;
+            Ok(Self { keys: pairs })
+        }
+
+        pub(super) fn pair_at(&self, index: usize) -> Option<Pair<'a>> {
+            self.keys.get(index).map(|key| Pair { key })
+        }
+    }
+
+    fn check_vertices(tree: &FusionTreeKey) -> Result<(), CoreError> {
+        if tree
+            .vertices()
+            .iter()
+            .any(|&vertex| vertex != MultiplicityIndex::ONE)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "multiplicity-free projection requires vertex label one",
+            });
+        }
+        Ok(())
+    }
+
+    impl<'a> Tree<'a> {
+        pub(super) fn key(self) -> &'a FusionTreeKey {
+            self.key
+        }
+    }
+
+    impl<'a> Pair<'a> {
+        pub(super) fn key(self) -> &'a FusionTreePairKey {
+            self.key
+        }
+
+        pub(super) fn codomain(self) -> Tree<'a> {
+            Tree {
+                key: self.key.codomain_tree(),
+            }
+        }
+
+        pub(super) fn domain(self) -> Tree<'a> {
+            Tree {
+                key: self.key.domain_tree(),
+            }
+        }
+    }
+}
+
+use multiplicity_free_projection::{
+    Pair as ValidatedMultiplicityFreeTreePair, PairBatch as ValidatedMultiplicityFreePairBatch,
+    Pairs as MultiplicityFreePairProjection, Tree as ValidatedMultiplicityFreeTree,
+    TreeBatch as ValidatedMultiplicityFreeTreeBatch, Trees as MultiplicityFreeTreeProjection,
+};
 
 impl MultiplicityFreeTreeLocalData for MultiplicityFreeTreeLocal {
     #[inline]
-    fn coupled(&self) -> Option<SectorId> {
+    fn coupled(&self) -> SectorId {
         self.coupled
     }
 
@@ -4703,47 +4854,16 @@ impl MultiplicityFreeTreeLocalData for MultiplicityFreeTreeLocal {
         &self.innerlines
     }
 
-    #[inline]
-    fn vertices(&self) -> &[SectorId] {
-        &self.vertices
-    }
-
-    #[inline]
-    fn has_multiplicity(&self) -> bool {
-        self.has_multiplicity
-    }
 }
-
-impl std::hash::Hash for MultiplicityFreeTreeLocal {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.coupled.hash(state);
-        self.innerlines.hash(state);
-        if self.has_multiplicity {
-            self.vertices.hash(state);
-        }
-    }
-}
-
-impl PartialEq for MultiplicityFreeTreeLocal {
-    fn eq(&self, other: &Self) -> bool {
-        self.coupled == other.coupled
-            && self.innerlines == other.innerlines
-            && self.has_multiplicity == other.has_multiplicity
-            && (!self.has_multiplicity || self.vertices == other.vertices)
-    }
-}
-
-impl Eq for MultiplicityFreeTreeLocal {}
 
 type MultiplicityFreeArtinTerms<S> = SmallVec<[(MultiplicityFreeTreeLocal, S); 2]>;
 
 impl MultiplicityFreeTreeLocal {
-    fn from_tree(tree: &FusionTreeKey) -> Self {
+    fn from_proven(tree: ValidatedMultiplicityFreeTree<'_>) -> Self {
+        let tree = tree.key();
         Self {
             coupled: tree.coupled(),
             innerlines: tree.innerlines().iter().copied().collect(),
-            vertices: tree.vertices().iter().copied().collect(),
-            has_multiplicity: tree.has_multiplicity(),
         }
     }
 }
@@ -4756,10 +4876,13 @@ impl MultiplicityFreeTreeFrame {
         }
     }
 
-    fn split(tree: &FusionTreeKey) -> (Self, MultiplicityFreeTreeLocal) {
+    fn split(
+        tree: ValidatedMultiplicityFreeTree<'_>,
+    ) -> (Self, MultiplicityFreeTreeLocal) {
+        let key = tree.key();
         (
-            Self::from_tree(tree),
-            MultiplicityFreeTreeLocal::from_tree(tree),
+            Self::from_tree(key),
+            MultiplicityFreeTreeLocal::from_proven(tree),
         )
     }
 
@@ -4771,15 +4894,31 @@ impl MultiplicityFreeTreeFrame {
     }
 
     fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
+        let vertex_count = self.uncoupled.len().saturating_sub(1);
         FusionTreeKey::new(
             self.uncoupled.iter().copied(),
             local.coupled,
             self.is_dual.iter().copied(),
             local.innerlines,
-            local.vertices,
+            std::iter::repeat_n(MultiplicityIndex::ONE, vertex_count),
         )
-        .with_has_multiplicity(local.has_multiplicity)
     }
+}
+
+fn project_multiplicity_free_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+) -> Result<(MultiplicityFreeTreeFrame, MultiplicityFreeTreeLocal), CoreError>
+where
+    R: FusionRule,
+{
+    let projection =
+        MultiplicityFreeTreeProjection::checked(rule, std::slice::from_ref(tree))?;
+    Ok(MultiplicityFreeTreeFrame::split(
+        projection
+            .tree_at(0)
+            .expect("single-tree projection contains index zero"),
+    ))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -4795,21 +4934,24 @@ struct MultiplicityFreeTreePairLocal {
 }
 
 impl MultiplicityFreeTreePairLocal {
-    fn from_tree_pair(tree_pair: &FusionTreePairKey) -> Self {
+    fn from_proven(tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> Self {
         Self {
-            codomain: MultiplicityFreeTreeLocal::from_tree(tree_pair.codomain_tree()),
-            domain: MultiplicityFreeTreeLocal::from_tree(tree_pair.domain_tree()),
+            codomain: MultiplicityFreeTreeLocal::from_proven(tree_pair.codomain()),
+            domain: MultiplicityFreeTreeLocal::from_proven(tree_pair.domain()),
         }
     }
 }
 
 impl MultiplicityFreeTreePairFrame {
-    fn split(tree_pair: &FusionTreePairKey) -> (Self, MultiplicityFreeTreePairLocal) {
-        let codomain = MultiplicityFreeTreeFrame::from_tree(tree_pair.codomain_tree());
-        let domain = MultiplicityFreeTreeFrame::from_tree(tree_pair.domain_tree());
+    fn split(
+        tree_pair: ValidatedMultiplicityFreeTreePair<'_>,
+    ) -> (Self, MultiplicityFreeTreePairLocal) {
+        let key = tree_pair.key();
+        let codomain = MultiplicityFreeTreeFrame::from_tree(key.codomain_tree());
+        let domain = MultiplicityFreeTreeFrame::from_tree(key.domain_tree());
         (
             Self { codomain, domain },
-            MultiplicityFreeTreePairLocal::from_tree_pair(tree_pair),
+            MultiplicityFreeTreePairLocal::from_proven(tree_pair),
         )
     }
 
@@ -4824,6 +4966,28 @@ impl MultiplicityFreeTreePairFrame {
             self.domain.materialize(local.domain),
         )
     }
+}
+
+fn project_multiplicity_free_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+) -> Result<
+    (
+        MultiplicityFreeTreePairFrame,
+        MultiplicityFreeTreePairLocal,
+    ),
+    CoreError,
+>
+where
+    R: FusionRule,
+{
+    let projection =
+        MultiplicityFreePairProjection::checked(rule, std::slice::from_ref(tree_pair))?;
+    Ok(MultiplicityFreeTreePairFrame::split(
+        projection
+            .pair_at(0)
+            .expect("single-pair projection contains index zero"),
+    ))
 }
 
 struct PreparedMultiplicityFreeArtin {
@@ -4910,7 +5074,6 @@ impl PreparedMultiplicityFreeArtin {
         let right = self.right;
         if left == rule.vacuum() || right == rule.vacuum() {
             let mut innerlines = tree.innerlines().to_vec();
-            let mut vertices = tree.vertices().to_vec();
             if index > 0 {
                 let inner_source = if left == rule.vacuum() {
                     self.inner_extended(tree, index + 1)?
@@ -4922,20 +5085,12 @@ impl PreparedMultiplicityFreeArtin {
                     .ok_or(CoreError::MalformedFusionTree {
                         message: "unit braid past the first adjacent pair requires an innerline",
                     })? = inner_source;
-                if vertices.len() <= index {
-                    return Err(CoreError::MalformedFusionTree {
-                        message: "unit braid past the first adjacent pair requires adjacent vertices",
-                    });
-                }
-                vertices.swap(index - 1, index);
             }
             let mut terms = SmallVec::new();
             terms.push((
                 MultiplicityFreeTreeLocal {
                     coupled: tree.coupled(),
                     innerlines: innerlines.into_iter().collect(),
-                    vertices: vertices.into_iter().collect(),
-                    has_multiplicity: tree.has_multiplicity(),
                 },
                 rule.scalar_one(),
             ));
@@ -4951,9 +5106,7 @@ impl PreparedMultiplicityFreeArtin {
                         message: "first braid of a rank > 2 tree requires the first innerline",
                     })?
             } else {
-                tree.coupled().ok_or(CoreError::MalformedFusionTree {
-                    message: "first braid of a rank 2 tree requires a coupled sector",
-                })?
+                tree.coupled()
             };
             let coefficient = if self.inverse {
                 rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
@@ -4965,8 +5118,6 @@ impl PreparedMultiplicityFreeArtin {
                 MultiplicityFreeTreeLocal {
                     coupled: tree.coupled(),
                     innerlines: tree.innerlines().iter().copied().collect(),
-                    vertices: tree.vertices().iter().copied().collect(),
-                    has_multiplicity: tree.has_multiplicity(),
                 },
                 coefficient,
             ));
@@ -4992,8 +5143,6 @@ impl PreparedMultiplicityFreeArtin {
             let braided = MultiplicityFreeTreeLocal {
                 coupled: tree.coupled(),
                 innerlines,
-                vertices: tree.vertices().iter().copied().collect(),
-                has_multiplicity: tree.has_multiplicity(),
             };
             let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
             let coefficient = if self.inverse {
@@ -5018,9 +5167,7 @@ impl PreparedMultiplicityFreeArtin {
             return Ok(self.first);
         }
         if index + 1 == self.rank {
-            return tree.coupled().ok_or(CoreError::MalformedFusionTree {
-                message: "inner-extended tree requires a coupled sector",
-            });
+            return Ok(tree.coupled());
         }
         tree.innerlines()
             .get(index - 1)
@@ -5043,7 +5190,7 @@ where
 {
     // Why not keep a second full-key formula for block transforms: the compact
     // block basis must reuse exactly the same F/R ordering and error gates.
-    let (frame, local) = MultiplicityFreeTreeFrame::split(tree);
+    let (frame, local) = project_multiplicity_free_tree(rule, tree)?;
     let prepared = prepare_multiplicity_free_artin(rule, &frame, index, inverse)?;
     let terms = prepared.apply(rule, &local)?;
     Ok(terms
@@ -5065,16 +5212,11 @@ where
 ///
 /// Where the multiplicity-free sibling
 /// [`multiplicity_free_artin_braid_at_with_inverse`] returns a scalar per
-/// output tree, here every vertex carries an outer-multiplicity label (1-based,
-/// stored as `SectorId::new(label)` exactly like the trivial `SectorId::new(1)`
-/// the mult-free enumerator writes), and one input tree can braid into several
+/// output tree, here every vertex carries a one-based [`MultiplicityIndex`],
+/// and one input tree can braid into several
 /// output trees that differ *only* in their vertex labels. Each output's scalar
 /// coefficient is the `R · F̄ · R̄` inner-index contraction TensorKit writes at
 /// `braiding_manipulations.jl:181-182`.
-///
-/// Outputs are built `.with_has_multiplicity(true)` so the Stage A
-/// `FusionTreeKey` identity gate keeps vertex-distinct trees distinct.
-///
 /// The `inverse` flag is handled exactly as TensorKit does — the R-matrices
 /// become adjoints (`Rsymbol(...)'`, `braiding_manipulations.jl:139,172-173`),
 /// the F-symbol is *not* adjointed, and the contraction formula is otherwise
@@ -5143,8 +5285,7 @@ where
             vertices.swap(index - 1, index);
         }
         return Ok(vec![(
-            FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices)
-                .with_has_multiplicity(true),
+            FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices),
             R::Scalar::braid_one(),
         )]);
     }
@@ -5169,9 +5310,7 @@ where
                     message: "first braid of a rank > 2 tree requires the first innerline",
                 })?
         } else {
-            tree.coupled().ok_or(CoreError::MalformedFusionTree {
-                message: "first braid of a rank 2 tree requires a coupled sector",
-            })?
+            tree.coupled()
         };
         // GenericFusion i == 1 branch (braiding_manipulations.jl:137-148).
         // μ = vertices[1] (the single input vertex), 1-based label -> 0-based
@@ -5199,12 +5338,13 @@ where
                 continue; // iszero(R) && continue  (:142)
             }
             // vertices′ = setindex(vertices, ν, 1)  (:143)
-            let mut vertices: SectorVec = tree.vertices().iter().copied().collect();
+            let mut vertices: MultiplicityVec = tree.vertices().iter().copied().collect();
             *vertices
                 .get_mut(0)
                 .ok_or(CoreError::MalformedFusionTree {
                     message: "first braid of a Generic tree requires a vertex",
-                })? = SectorId::new(nu0 + 1);
+                })? = MultiplicityIndex::new(nu0 + 1)
+                .expect("enumerated Generic multiplicity labels are one-based");
             out.push((
                 FusionTreeKey::new(
                     uncoupled.clone(),
@@ -5212,8 +5352,7 @@ where
                     is_dual.clone(),
                     tree.innerlines().iter().copied(),
                     vertices,
-                )
-                .with_has_multiplicity(true),
+                ),
                 r,
             ));
         }
@@ -5302,14 +5441,16 @@ where
                     .ok_or(CoreError::MalformedFusionTree {
                         message: "non-first braid requires an innerline to update",
                     })? = c_prime;
-                let mut vertices: SectorVec = tree.vertices().iter().copied().collect();
+                let mut vertices: MultiplicityVec = tree.vertices().iter().copied().collect();
                 if vertices.len() <= index {
                     return Err(CoreError::MalformedFusionTree {
                         message: "non-first Generic braid requires adjacent vertices",
                     });
                 }
-                vertices[index - 1] = SectorId::new(sigma0 + 1);
-                vertices[index] = SectorId::new(lambda0 + 1);
+                vertices[index - 1] = MultiplicityIndex::new(sigma0 + 1)
+                    .expect("enumerated Generic multiplicity labels are one-based");
+                vertices[index] = MultiplicityIndex::new(lambda0 + 1)
+                    .expect("enumerated Generic multiplicity labels are one-based");
                 out.push((
                     FusionTreeKey::new(
                         uncoupled.clone(),
@@ -5317,8 +5458,7 @@ where
                         is_dual.clone(),
                         innerlines,
                         vertices,
-                    )
-                    .with_has_multiplicity(true),
+                    ),
                     coeff,
                 ));
             }
@@ -5328,9 +5468,8 @@ where
 }
 
 /// Read the 0-based outer-multiplicity matrix index of the vertex at position
-/// `vertex_index`. Vertex labels are stored 1-based (`SectorId::new(label)`,
-/// the same convention as the trivial `SectorId::new(1)` the mult-free
-/// enumerator writes), and TensorKit's `Rmat[μ, ν]` / `Fmat[κ, λ, μ, ρ]` are
+/// `vertex_index`. [`MultiplicityIndex`] stores the one-based categorical
+/// label, and TensorKit's `Rmat[μ, ν]` / `Fmat[κ, λ, μ, ρ]` are
 /// 1-based Julia indices, so the stored label maps to the 0-based Rust index by
 /// subtracting one.
 fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreError> {
@@ -5341,10 +5480,8 @@ fn mu_index(tree: &FusionTreeKey, vertex_index: usize) -> Result<usize, CoreErro
         .ok_or(CoreError::MalformedFusionTree {
             message: "Generic braid requires a vertex label at the braided position",
         })?
-        .id();
-    label.checked_sub(1).ok_or(CoreError::MalformedFusionTree {
-        message: "Generic vertex labels are 1-based; label 0 is invalid",
-    })
+        .get();
+    Ok(label - 1)
 }
 
 /// Braid the uncoupled legs of a Generic-fusion tree by `permutation` under the
@@ -5504,9 +5641,9 @@ impl PreparedMultiplicityFreeBendRight {
         C: MultiplicityFreeTreeLocalData + ?Sized,
         D: MultiplicityFreeTreeLocalData + ?Sized,
     {
-        let coupled = coupled_or_vacuum(rule, codomain);
+        let coupled = codomain.coupled();
         if self.domain_nonempty {
-            let domain_coupled = coupled_or_vacuum(rule, domain);
+            let domain_coupled = domain.coupled();
             if domain_coupled != coupled {
                 return Err(CoreError::MalformedFusionTree {
                     message: "fusion tree pair requires matching coupled sectors",
@@ -5533,35 +5670,20 @@ impl PreparedMultiplicityFreeBendRight {
         } else {
             &[]
         };
-        let cod_vertices = codomain.vertices();
-        let new_codomain_vertices: &[SectorId] = if self.codomain_rank > 1 {
-            &cod_vertices[..cod_vertices.len() - 1]
-        } else {
-            &[]
-        };
         Ok(ValidatedMultiplicityFreeBendRightLocal {
             local: MultiplicityFreeTreePairLocal {
                 codomain: MultiplicityFreeTreeLocal {
-                    coupled: Some(left_coupled),
+                    coupled: left_coupled,
                     innerlines: new_codomain_innerlines.iter().copied().collect(),
-                    vertices: new_codomain_vertices.iter().copied().collect(),
-                    has_multiplicity: codomain.has_multiplicity(),
                 },
                 domain: MultiplicityFreeTreeLocal {
-                    coupled: Some(left_coupled),
+                    coupled: left_coupled,
                     innerlines: domain
                         .innerlines()
                         .iter()
                         .copied()
                         .chain((self.domain_rank > 1).then_some(coupled))
                         .collect(),
-                    vertices: domain
-                        .vertices()
-                        .iter()
-                        .copied()
-                        .chain((self.domain_rank > 0).then_some(SectorId::new(1)))
-                        .collect(),
-                    has_multiplicity: domain.has_multiplicity(),
                 },
             },
             coupled,
@@ -5718,7 +5840,7 @@ where
 {
     // Why not duplicate bend surgery in the future block runner: duality and
     // Frobenius-Schur phases must stay identical to the per-source operation.
-    let (frame, local) = MultiplicityFreeTreePairFrame::split(tree_pair);
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
     let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
     let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
     let frame = prepared.output_frame(rule)?;
@@ -5736,7 +5858,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (frame, local) = MultiplicityFreeTreePairFrame::split(tree_pair);
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
     let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
     let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
     let frame = prepared.output_frame(rule)?;
@@ -5780,9 +5902,9 @@ where
         });
     }
 
-    let coupled = coupled_or_vacuum(rule, codomain);
+    let coupled = codomain.coupled();
     if !domain.uncoupled().is_empty() {
-        let domain_coupled = coupled_or_vacuum(rule, domain);
+        let domain_coupled = domain.coupled();
         if domain_coupled != coupled {
             return Err(CoreError::MalformedFusionTree {
                 message: "fusion tree pair requires matching coupled sectors",
@@ -5810,8 +5932,7 @@ where
         },
     )?;
 
-    // New codomain tree: drop the last leg (TK `_bendright_treepair` :41-45);
-    // has_multiplicity kept so the surviving vertex labels stay meaningful.
+    // New codomain tree: drop the last leg (TK `_bendright_treepair` :41-45).
     let cod_inner = codomain.innerlines();
     let new_codomain_innerlines: &[SectorId] = if codomain_rank > 2 {
         &cod_inner[..cod_inner.len() - 1]
@@ -5819,19 +5940,18 @@ where
         &[]
     };
     let cod_vertices = codomain.vertices();
-    let new_codomain_vertices: &[SectorId] = if codomain_rank > 1 {
+    let new_codomain_vertices: &[MultiplicityIndex] = if codomain_rank > 1 {
         &cod_vertices[..cod_vertices.len() - 1]
     } else {
         &[]
     };
     let new_codomain = FusionTreeKey::new(
         codomain.uncoupled()[..codomain_rank - 1].iter().copied(),
-        Some(left_coupled),
+        left_coupled,
         codomain.is_dual()[..codomain_rank - 1].iter().copied(),
         new_codomain_innerlines.iter().copied(),
         new_codomain_vertices.iter().copied(),
-    )
-    .with_has_multiplicity(true);
+    );
 
     let domain_rank = domain.uncoupled().len();
     // Base domain data shared by every ν; only the appended vertex label varies
@@ -5885,16 +6005,20 @@ where
         // 1-based output vertex label (mu_index inverts this on the way back).
         let new_domain = FusionTreeKey::new(
             domain_uncoupled.iter().copied(),
-            Some(left_coupled),
+            left_coupled,
             domain_is_dual.iter().copied(),
             domain_innerlines.iter().copied(),
             domain
                 .vertices()
                 .iter()
                 .copied()
-                .chain((domain_rank > 0).then_some(SectorId::new(nu0 + 1))),
-        )
-        .with_has_multiplicity(true);
+                .chain(
+                    (domain_rank > 0).then(|| {
+                        MultiplicityIndex::new(nu0 + 1)
+                            .expect("enumerated Generic multiplicity labels are one-based")
+                    }),
+                ),
+        );
         let key = FusionTreePairKey::pair(new_codomain.clone(), new_domain);
         // TK block writes `U[row, col] = coeff` (:110), so a repeated key (only
         // when the domain was empty) is overwritten, keeping the last ν.
@@ -6072,8 +6196,9 @@ type GenericFmoveTerms<S> = Vec<(FusionTreeKey, Vec<S>)>;
 /// Enumerate every standard-form fusion tree with the given `uncoupled` legs,
 /// `is_dual` flags and `coupled` sector, INCLUDING all outer-multiplicity
 /// vertex-label assignments. Generic sibling of
-/// [`collect_fusion_trees_for_coupled`] (which hard-codes `SectorId::new(1)`
-/// for every vertex and is bounded on `MultiplicityFreeFusionRule`): here each
+/// [`collect_fusion_trees_for_coupled`] (which uses
+/// [`MultiplicityIndex::ONE`] for every vertex and is bounded on
+/// `MultiplicityFreeFusionRule`): here each
 /// vertex with `Nsymbol > 1` branches over its `1..=N` labels, producing one
 /// tree per (innerlines, vertices) combination. This is the enumeration
 /// TensorKit's `multi_Fmove` Stage 1 performs inline (`for μ in 1:Nbce′` at
@@ -6106,12 +6231,14 @@ where
             out.push(
                 FusionTreeKey::new(
                     uncoupled.iter().copied(),
-                    Some(coupled),
+                    coupled,
                     is_dual.iter().copied(),
                     inner_rev.iter().rev().copied(),
-                    vtx_rev.iter().rev().map(|&label| SectorId::new(label)),
+                    vtx_rev.iter().rev().map(|&label| {
+                        MultiplicityIndex::new(label)
+                            .expect("enumerated Generic multiplicity labels are one-based")
+                    }),
                 )
-                .with_has_multiplicity(true),
             );
         },
     );
@@ -6121,8 +6248,8 @@ where
 /// Recursive walker for [`collect_generic_fusion_trees_for_coupled`]. Mirrors
 /// [`visit_fusion_trees`] (peels the LAST leg, recursing inward), but at every
 /// vertex it iterates `1..=Nsymbol(...)` and records the 1-based label. Vertex
-/// labels are stored 1-based (`SectorId::new(label)`, the same convention
-/// [`mu_index`] decodes).
+/// labels are stored in [`MultiplicityIndex`] using the same one-based
+/// convention that [`mu_index`] decodes.
 fn visit_generic_fusion_trees<R, F>(
     rule: &R,
     effective: &[SectorId],
@@ -6227,7 +6354,7 @@ where
     // rank-2 candidate over a rank-1 tail) gets the right seed too.
     if rank == 2 {
         let b = long.uncoupled()[1];
-        let c = coupled_or_vacuum(rule, long);
+        let c = long.coupled();
         let n = rule.nsymbol(first, b, c);
         let mu0 = mu_index(long, 0)?;
         let mut coeff = vec![R::Scalar::braid_zero(); n];
@@ -6323,12 +6450,11 @@ where
         return Ok(vec![(
             FusionTreeKey::new(
                 Vec::<SectorId>::new(),
-                Some(rule.vacuum()),
+                rule.vacuum(),
                 Vec::<bool>::new(),
                 Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
-            )
-            .with_has_multiplicity(true),
+                Vec::<MultiplicityIndex>::new(),
+            ),
             vec![R::Scalar::braid_one()],
         )]);
     }
@@ -6337,7 +6463,7 @@ where
         // the (unchanged) topmost vertex `a ⊗ b → c`, μ = tree.vertices[0].
         let a = tree.uncoupled()[0];
         let b = tree.uncoupled()[1];
-        let c = coupled_or_vacuum(rule, tree);
+        let c = tree.coupled();
         let n = rule.nsymbol(a, b, c);
         let mu0 = mu_index(tree, 0)?;
         let mut coeff = vec![R::Scalar::braid_zero(); n];
@@ -6350,17 +6476,16 @@ where
         }
         let tail = FusionTreeKey::new(
             vec![b],
-            Some(b),
+            b,
             vec![tree.is_dual()[1]],
             Vec::<SectorId>::new(),
-            Vec::<SectorId>::new(),
-        )
-        .with_has_multiplicity(true);
+            Vec::<MultiplicityIndex>::new(),
+        );
         return Ok(vec![(tail, coeff)]);
     }
 
     let first = tree.uncoupled()[0];
-    let coupled = coupled_or_vacuum(rule, tree);
+    let coupled = tree.coupled();
     let tail_uncoupled = &tree.uncoupled()[1..];
     let tail_is_dual = &tree.is_dual()[1..];
     let mut terms = Vec::new();
@@ -6407,7 +6532,7 @@ where
     R: GenericFusionSymbols,
     R::Scalar: GenericBraidScalar,
 {
-    let tree_coupled = coupled_or_vacuum(rule, tree);
+    let tree_coupled = tree.coupled();
     if rule.nsymbol(leading_sector, tree_coupled, coupled) == 0 {
         return Err(CoreError::SectorMismatch {
             expected: coupled,
@@ -6506,11 +6631,11 @@ where
             message: "codomain tree is missing the first duality flag",
         })?;
     let kappa = rule.frobenius_schur_phase_scalar(a);
-    let c = coupled_or_vacuum(rule, codomain);
+    let c = codomain.coupled();
 
     let mut terms = FusionTermAccumulator::new();
     for (codomain_prime, coeff1) in generic_multi_fmove_tree(rule, codomain)? {
-        let b = coupled_or_vacuum(rule, &codomain_prime);
+        let b = codomain_prime.coupled();
         // A = Asymbol(a, b, c): rows = topmost codomain vertex λ₁ ∈ N(a,b,c)
         // (indexes coeff1), cols = topmost domain vertex λ₂ ∈ N(dual(a),c,b)
         // (indexes coeff2). `a_symbol_generic` already bakes in κ_a and the
@@ -7146,11 +7271,11 @@ where
             message: "codomain tree is missing the first duality flag",
         })?;
     let kappa = rule.frobenius_schur_phase_scalar(a);
-    let c = coupled_or_vacuum(rule, codomain);
+    let c = codomain.coupled();
 
     let mut terms = FusionTermAccumulator::new();
     for (codomain_prime, coeff1) in multiplicity_free_multi_fmove_tree(rule, codomain)? {
-        let b = coupled_or_vacuum(rule, &codomain_prime);
+        let b = codomain_prime.coupled();
         let a_symbol = rule.a_symbol_scalar(a, b, c);
         let coeff0 = rule.sqrt_dim_scalar(c) * rule.inv_sqrt_dim_scalar(b);
         for (domain_prime, coeff2) in multiplicity_free_multi_fmove_inv_tree(
@@ -7270,10 +7395,10 @@ where
         return Ok(vec![(
             FusionTreeKey::new(
                 Vec::<SectorId>::new(),
-                Some(rule.vacuum()),
+                rule.vacuum(),
                 Vec::<bool>::new(),
                 Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
+                Vec::<MultiplicityIndex>::new(),
             ),
             rule.scalar_one(),
         )]);
@@ -7282,17 +7407,17 @@ where
         return Ok(vec![(
             FusionTreeKey::new(
                 vec![tree.uncoupled()[1]],
-                Some(tree.uncoupled()[1]),
+                tree.uncoupled()[1],
                 vec![tree.is_dual()[1]],
                 Vec::<SectorId>::new(),
-                Vec::<SectorId>::new(),
+                Vec::<MultiplicityIndex>::new(),
             ),
             rule.scalar_one(),
         )]);
     }
 
     let first = tree.uncoupled()[0];
-    let coupled = coupled_or_vacuum(rule, tree);
+    let coupled = tree.coupled();
     let tail_uncoupled = &tree.uncoupled()[1..];
     let tail_is_dual = &tree.is_dual()[1..];
     let mut terms = Vec::new();
@@ -7326,7 +7451,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let tree_coupled = coupled_or_vacuum(rule, tree);
+    let tree_coupled = tree.coupled();
     if rule.nsymbol(leading_sector, tree_coupled, coupled) == 0 {
         return Err(CoreError::SectorMismatch {
             expected: coupled,
@@ -7422,7 +7547,7 @@ fn fusion_tree_vertex_neighbors(
             })?
     };
     let right = if leg_index + 1 == tree.uncoupled().len() {
-        coupled_or_vacuum_for_tree(tree)?
+        tree.coupled()
     } else {
         tree.innerlines()
             .get(leg_index - 1)
@@ -7432,20 +7557,6 @@ fn fusion_tree_vertex_neighbors(
             })?
     };
     Ok((left, right))
-}
-
-fn coupled_or_vacuum<R, T>(rule: &R, tree: &T) -> SectorId
-where
-    R: FusionRule,
-    T: MultiplicityFreeTreeLocalData + ?Sized,
-{
-    tree.coupled().unwrap_or_else(|| rule.vacuum())
-}
-
-fn coupled_or_vacuum_for_tree(tree: &FusionTreeKey) -> Result<SectorId, CoreError> {
-    tree.coupled().ok_or(CoreError::MalformedFusionTree {
-        message: "non-empty fusion tree requires a coupled sector",
-    })
 }
 
 fn effective_sectors_for_uncoupled<R>(
@@ -7517,9 +7628,7 @@ where
             });
     }
     if index + 1 == rank {
-        return tree.coupled().ok_or(CoreError::MalformedFusionTree {
-            message: "inner-extended tree requires a coupled sector",
-        });
+        return Ok(tree.coupled());
     }
     tree.innerlines()
         .get(index - 1)
@@ -7552,7 +7661,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (frame, local) = MultiplicityFreeTreePairFrame::split(tree_pair);
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
     let prepared = prepare_multiplicity_free_bendright(rule, &frame)?;
     let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
     let output_frame = prepared.output_frame(rule)?;
@@ -7568,7 +7677,7 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
-    let (frame, local) = MultiplicityFreeTreePairFrame::split(tree_pair);
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
     let prepared = prepare_multiplicity_free_bendleft(rule, &frame)?;
     let validated = prepared.validate_local(rule, &local.codomain, &local.domain)?;
     let output_frame = prepared.output_frame(rule)?;
@@ -7600,10 +7709,10 @@ where
                 message: "codomain tree is missing the first duality flag",
             })?;
     let kappa = rule.frobenius_schur_phase_scalar(a);
-    let c = coupled_or_vacuum(rule, codomain);
+    let c = codomain.coupled();
 
     let (codomain_prime, coeff1) = unique_rigid_multi_fmove_tree(rule, codomain)?;
-    let b = coupled_or_vacuum(rule, &codomain_prime);
+    let b = codomain_prime.coupled();
     let a_symbol = rule.a_symbol_scalar(a, b, c);
     let coeff0 = rule.sqrt_dim_scalar(c) * rule.inv_sqrt_dim_scalar(b);
     let (domain_prime, coeff2) = unique_rigid_multi_fmove_inv_tree(
@@ -7798,18 +7907,11 @@ where
         });
     }
 
-    let coupled = codomain.coupled().ok_or(CoreError::MalformedFusionTree {
-        message: "bendright requires a coupled sector on the codomain tree",
-    })?;
-    if !domain.uncoupled().is_empty() {
-        match domain.coupled() {
-            Some(domain_coupled) if domain_coupled == coupled => {}
-            _ => {
-                return Err(CoreError::MalformedFusionTree {
-                    message: "fusion tree pair requires matching coupled sectors",
-                });
-            }
-        }
+    let coupled = codomain.coupled();
+    if !domain.uncoupled().is_empty() && domain.coupled() != coupled {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree pair requires matching coupled sectors",
+        });
     }
 
     let bent_sector = codomain.uncoupled()[codomain_rank - 1];
@@ -7854,7 +7956,7 @@ where
     };
     let new_codomain = FusionTreeKey::new(
         codomain.uncoupled()[..codomain_rank - 1].to_vec(),
-        Some(left_coupled),
+        left_coupled,
         codomain.is_dual()[..codomain_rank - 1].to_vec(),
         new_codomain_innerlines,
         new_codomain_vertices,
@@ -7871,11 +7973,11 @@ where
     }
     let mut new_domain_vertices = domain.vertices().to_vec();
     if domain_rank > 0 {
-        new_domain_vertices.push(SectorId::new(1));
+        new_domain_vertices.push(MultiplicityIndex::ONE);
     }
     let new_domain = FusionTreeKey::new(
         new_domain_uncoupled,
-        Some(left_coupled),
+        left_coupled,
         new_domain_is_dual,
         new_domain_innerlines,
         new_domain_vertices,
@@ -7930,11 +8032,7 @@ where
                 message: "codomain tree is missing the first duality flag",
             })?;
     let codomain_prime = unique_multi_fmove_tree(rule, codomain)?;
-    let recoupled = codomain_prime
-        .coupled()
-        .ok_or(CoreError::MalformedFusionTree {
-            message: "foldright recoupled codomain tree requires a coupled sector",
-        })?;
+    let recoupled = codomain_prime.coupled();
     let domain_prime = unique_multi_fmove_inv_tree(
         rule,
         rule.dual(first),
@@ -8018,9 +8116,7 @@ where
         .ok_or(CoreError::MalformedFusionTree {
             message: "multi_Fmove requires at least one uncoupled sector",
         })?;
-    let coupled = tree.coupled().ok_or(CoreError::MalformedFusionTree {
-        message: "multi_Fmove requires a coupled sector",
-    })?;
+    let coupled = tree.coupled();
     let recoupled = only_fusion_channel(rule, rule.dual(first), coupled)?;
     unique_standard_fusion_tree(
         rule,
