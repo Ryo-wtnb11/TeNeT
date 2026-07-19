@@ -35,6 +35,10 @@ pub enum OperationError {
     DuplicateTransformDestination {
         dst_block: usize,
     },
+    DuplicateTreeTransformKey {
+        tensor: &'static str,
+        index: usize,
+    },
     ElementCountMismatch {
         expected: usize,
         actual: usize,
@@ -143,6 +147,12 @@ impl fmt::Display for OperationError {
                 write!(
                     f,
                     "tree transform destination block {dst_block} appears in more than one block"
+                )
+            }
+            Self::DuplicateTreeTransformKey { tensor, index } => {
+                write!(
+                    f,
+                    "{tensor} fusion-tree key at index {index} duplicates an earlier key"
                 )
             }
             Self::ElementCountMismatch { expected, actual } => {

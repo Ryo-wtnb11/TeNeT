@@ -4,6 +4,17 @@ use std::sync::{
     Arc,
 };
 
+fn grouped_su2_test_pair(first_inner: usize) -> FusionTreePairKey {
+    all_codomain_fusion_tree_test_key_for_rule(
+        &SimpleSu2Rule,
+        [4, 4, 4, 4],
+        Some(0),
+        [false, false, false, false],
+        [first_inner, 4],
+        [1, 1, 1],
+    )
+}
+
 #[test]
 fn tree_transform_compile_keyed_pairs_tree_blocks_by_key_not_index_for_all_numeric_dtypes() {
     assert_tree_multi_keyed_dtype(
@@ -154,16 +165,17 @@ fn tree_transform_compile_keyed_rejects_missing_tree_block_key() {
 
 #[test]
 fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let dst_key1 = BlockKey::opaque([101, 201]);
-    let dst_key2 = BlockKey::opaque([102, 202]);
-    let src_key = BlockKey::opaque([301, 401]);
-    let spec = TreeTransformGroupBlockSpec::multi(
-        group_key.clone(),
+    let group_key = FusionTreeGroupKey::from_sector_ids([4, 4, 4, 4], [], [false; 4], []);
+    let pair = grouped_su2_test_pair;
+    let dst_key1 = pair(0);
+    let dst_key2 = pair(2);
+    let src_key = pair(4);
+    let spec = TreeTransformGroupBlockSpec::try_multi(
         [dst_key1.clone(), dst_key2.clone()],
         [src_key.clone()],
         vec![2.0_f64, 3.0],
-    );
+    )
+    .unwrap();
 
     assert_eq!(spec.group_key(), &group_key);
     assert_eq!(
@@ -172,27 +184,145 @@ fn tree_transform_group_block_spec_preserves_group_identity_and_ordered_keys() {
             .iter()
             .map(|sector| sector.id())
             .collect::<Vec<_>>(),
-        vec![10, 20]
+        vec![4, 4, 4, 4]
     );
-    assert_eq!(
-        spec.group_key()
-            .domain_uncoupled()
-            .iter()
-            .map(|sector| sector.id())
-            .collect::<Vec<_>>(),
-        vec![30]
-    );
-    assert_eq!(spec.group_key().codomain_is_dual(), &[false, true]);
-    assert_eq!(spec.group_key().domain_is_dual(), &[true]);
+    assert!(spec.group_key().domain_uncoupled().is_empty());
+    assert_eq!(spec.group_key().codomain_is_dual(), &[false; 4]);
+    assert!(spec.group_key().domain_is_dual().is_empty());
+    fn assert_categorical_keys(_: &[FusionTreePairKey]) {}
+    assert_categorical_keys(spec.dst_keys());
+    assert_categorical_keys(spec.src_keys());
     assert_eq!(spec.dst_keys(), &[dst_key1, dst_key2]);
     assert_eq!(spec.src_keys(), &[src_key]);
     assert_eq!(spec.recoupling_coefficients_dst_src(), &[2.0, 3.0]);
 }
 
 #[test]
+fn grouped_spec_accepts_distinct_source_and_destination_cohorts() {
+    let src1 = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
+    let src2 = fusion_tree_test_key([10, 20], [30], 6, [false, true], [true]);
+    let dst1 = fusion_tree_test_key([20, 10], [31], 7, [true, false], [false]);
+    let dst2 = fusion_tree_test_key([20, 10], [31], 8, [true, false], [false]);
+
+    let spec = TreeTransformGroupBlockSpec::try_multi(
+        [dst1.clone(), dst2.clone()],
+        [src1.clone(), src2.clone()],
+        vec![1.0_f64, 2.0, 3.0, 4.0],
+    )
+    .unwrap();
+
+    // What: the stored identity is derived from the authoritative source
+    // cohort, while a transform may target a different coherent cohort.
+    assert_eq!(spec.group_key(), &src1.group_key());
+    assert_ne!(spec.group_key(), &dst1.group_key());
+    assert_eq!(spec.dst_keys(), &[dst1, dst2]);
+    assert_eq!(spec.src_keys(), &[src1, src2]);
+}
+
+#[test]
+fn grouped_spec_rejects_mixed_source_and_destination_cohorts() {
+    let src = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
+    let other_src = fusion_tree_test_key([10, 21], [30], 6, [false, true], [true]);
+    let dst = fusion_tree_test_key([20, 10], [31], 7, [true, false], [false]);
+    let other_dst = fusion_tree_test_key([20, 11], [31], 8, [true, false], [false]);
+
+    let src_err = TreeTransformGroupBlockSpec::try_multi(
+        [dst.clone()],
+        [src.clone(), other_src],
+        vec![1.0_f64, 2.0],
+    )
+    .unwrap_err();
+    let dst_err =
+        TreeTransformGroupBlockSpec::try_multi([dst, other_dst], [src], vec![1.0_f64, 2.0])
+            .unwrap_err();
+
+    // What: one grouped matrix cannot silently mix either categorical cohort.
+    assert_eq!(
+        src_err,
+        OperationError::FusionTreeGroupMismatch {
+            tensor: "src",
+            index: 1,
+        }
+    );
+    assert_eq!(
+        dst_err,
+        OperationError::FusionTreeGroupMismatch {
+            tensor: "dst",
+            index: 1,
+        }
+    );
+}
+
+#[test]
+fn grouped_spec_rejects_duplicate_source_columns_and_destination_rows() {
+    let src = grouped_su2_test_pair(0);
+    let dst = grouped_su2_test_pair(2);
+
+    let src_err = TreeTransformGroupBlockSpec::try_multi(
+        [dst.clone()],
+        [src.clone(), src.clone()],
+        vec![1.0_f64, 2.0],
+    )
+    .unwrap_err();
+    let dst_err =
+        TreeTransformGroupBlockSpec::try_multi([dst.clone(), dst], [src], vec![1.0_f64, 2.0])
+            .unwrap_err();
+
+    // What: each U[dst, src] row and column has one categorical basis identity,
+    // while the same identity may still occur once on each opposite side.
+    assert_eq!(
+        src_err,
+        OperationError::DuplicateTreeTransformKey {
+            tensor: "src",
+            index: 1,
+        }
+    );
+    assert_eq!(
+        dst_err,
+        OperationError::DuplicateTreeTransformKey {
+            tensor: "dst",
+            index: 1,
+        }
+    );
+}
+
+#[test]
+fn grouped_spec_rejects_empty_sets_and_wrong_coefficient_count() {
+    let src = grouped_su2_test_pair(0);
+    let dst = grouped_su2_test_pair(2);
+
+    let empty_dst = TreeTransformGroupBlockSpec::try_multi(
+        Vec::<FusionTreePairKey>::new(),
+        [src.clone()],
+        Vec::<f64>::new(),
+    )
+    .unwrap_err();
+    let empty_src = TreeTransformGroupBlockSpec::try_multi(
+        [dst.clone()],
+        Vec::<FusionTreePairKey>::new(),
+        Vec::<f64>::new(),
+    )
+    .unwrap_err();
+    let coefficient_err =
+        TreeTransformGroupBlockSpec::try_multi([dst], [src], Vec::<f64>::new()).unwrap_err();
+
+    // What: grouped matrices have at least one row and column and exactly one
+    // row-major coefficient per destination/source pair.
+    assert_eq!(empty_dst, OperationError::EmptyTransformBlock);
+    assert_eq!(empty_src, OperationError::EmptyTransformBlock);
+    assert_eq!(
+        coefficient_err,
+        OperationError::CoefficientCountMismatch {
+            expected: 1,
+            actual: 0,
+        }
+    );
+}
+
+#[test]
 fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
     let key = |codomain| {
-        BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+        FusionTreePairKey::pair_from_sector_ids(
             codomain,
             [1],
             Some(1),
@@ -202,7 +332,7 @@ fn unique_tree_transform_plan_builder_creates_single_specs_in_source_order() {
             [],
             [1],
             [],
-        ))
+        )
     };
     let src_key1 = key([1, 0]);
     let src_key2 = key([0, 1]);
@@ -547,8 +677,20 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
     let padded_structure = BlockStructure::from_blocks_with_rank(
         4,
         vec![
-            BlockSpec::with_key(keys[0].clone(), vec![2, 2, 1, 1], vec![1, 2, 4, 4], 1).unwrap(),
-            BlockSpec::with_key(keys[1].clone(), vec![2, 2, 1, 1], vec![1, 2, 4, 4], 7).unwrap(),
+            BlockSpec::with_key(
+                keys[0].clone().into(),
+                vec![2, 2, 1, 1],
+                vec![1, 2, 4, 4],
+                1,
+            )
+            .unwrap(),
+            BlockSpec::with_key(
+                keys[1].clone().into(),
+                vec![2, 2, 1, 1],
+                vec![1, 2, 4, 4],
+                7,
+            )
+            .unwrap(),
         ],
     )
     .unwrap();
@@ -627,7 +769,7 @@ fn nested_fz2_u1_su2_first_pair_braid_preserves_product_phases_in_singles() {
     let even_triplet = sector(SectorId::new(0), 0, 2);
     let odd_half_inner = sector(SectorId::new(1), 0, 1);
     let keys = [even_singlet, even_triplet].map(|first_inner| {
-        BlockKey::from(FusionTreePairKey::pair(
+        FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
                 [odd_half; 4],
@@ -638,7 +780,7 @@ fn nested_fz2_u1_su2_first_pair_braid_preserves_product_phases_in_singles() {
             )
             .unwrap(),
             FusionTreeKey::try_new_for_rule(&rule, [], Some(even_singlet), [], [], []).unwrap(),
-        ))
+        )
     });
     let structure =
         packed_fixture_structure(4, keys.iter().cloned().map(|key| (key, vec![1usize; 4])))
@@ -1565,7 +1707,7 @@ fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
     assert_eq!((serial_hits, serial_misses), (0, 1));
 
     let spec = &serial.specs()[0];
-    assert_eq!(spec.dst_keys(), &[BlockKey::from(expected[0].0.clone())]);
+    assert_eq!(spec.dst_keys(), &[expected[0].0.clone()]);
     assert!((spec.recoupling_coefficients_dst_src()[0] - expected[0].1).abs() < 1.0e-12);
 
     let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
@@ -1738,7 +1880,7 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
         )
         .unwrap(),
     );
-    let fz2_key = BlockKey::from(fz2_source);
+    let fz2_key = fz2_source;
     let fz2_structure = packed_fixture_structure(3, [(fz2_key.clone(), vec![1, 1, 1])]).unwrap();
     let exact = TreeTransformOperation::transpose([0, 1], [2]);
     let fz2_plan = build_tree_pair_transform_group_plan(
@@ -1748,7 +1890,10 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
     )
     .unwrap();
     assert_eq!(fz2_plan.specs().len(), 1);
-    assert_eq!(fz2_plan.specs()[0].src_keys(), &[fz2_key.clone()]);
+    assert_eq!(
+        fz2_plan.specs()[0].src_keys(),
+        std::slice::from_ref(&fz2_key)
+    );
     assert_eq!(fz2_plan.specs()[0].dst_keys(), &[fz2_key]);
     assert_eq!(
         fz2_plan.specs()[0].recoupling_coefficients_dst_src(),
@@ -1781,11 +1926,14 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
     .unwrap();
     assert_eq!(su2_rows, vec![(su2_source.clone(), 1.0)]);
 
-    let su2_key = BlockKey::from(su2_source);
+    let su2_key = su2_source;
     let su2_structure = packed_fixture_structure(3, [(su2_key.clone(), vec![1, 1, 1])]).unwrap();
     let su2_plan =
         build_tree_pair_transform_group_plan(&SU2FusionRule, exact, &su2_structure).unwrap();
-    assert_eq!(su2_plan.specs()[0].src_keys(), &[su2_key.clone()]);
+    assert_eq!(
+        su2_plan.specs()[0].src_keys(),
+        std::slice::from_ref(&su2_key)
+    );
     assert_eq!(su2_plan.specs()[0].dst_keys(), &[su2_key]);
     assert_eq!(
         su2_plan.specs()[0].recoupling_coefficients_dst_src(),
@@ -1873,7 +2021,7 @@ fn tree_row_memo_survives_structure_change() {
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [11, 13, 17, 19], []);
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
-    let make = |src_keys: &[BlockKey], dst_keys: &[BlockKey]| {
+    let make = |src_keys: &[FusionTreePairKey], dst_keys: &[FusionTreePairKey]| {
         let src_blocks: Vec<_> = src_keys
             .iter()
             .map(|key| (key.clone(), vec![1usize, 1, 1, 1]))
@@ -3083,7 +3231,7 @@ fn all_codomain_row_memo_reuses_codomain_rows_across_plan_misses() {
         key([8, 4]),
     ];
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let make = |keys: &[BlockKey], data: Vec<f64>| {
+    let make = |keys: &[FusionTreePairKey], data: Vec<f64>| {
         let structure = packed_fixture_structure(
             4,
             keys.iter().map(|key| (key.clone(), vec![1usize, 1, 1, 1])),
@@ -3470,8 +3618,8 @@ fn tree_pair_plan_builder_handles_su2_one_by_one_domain_crossing() {
 
     assert_eq!(plan.specs().len(), 1);
     let spec = &plan.specs()[0];
-    assert_eq!(spec.src_keys(), &[src_key]);
-    assert_eq!(spec.dst_keys(), &[expected_dst_key]);
+    assert_eq!(spec.src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(spec.dst_keys(), &[expect_tree_key(&expected_dst_key)]);
     assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
     assert!((spec.recoupling_coefficients_dst_src()[0] - 1.0).abs() < 1.0e-12);
     plan.compile_structures(&dst_structure, &src_structure)
@@ -3859,8 +4007,8 @@ fn tree_pair_transform_public_helper_executes_product_fz2_u1_su2_blocks() {
     for spec in plan.specs() {
         let src_key = &spec.src_keys()[0];
         let dst_key = &spec.dst_keys()[0];
-        let src_offset = src.structure().block_by_key(src_key).unwrap().offset();
-        let dst_offset = dst.structure().block_by_key(dst_key).unwrap().offset();
+        let src_offset = block_offset_for_tree_pair(src.structure(), src_key);
+        let dst_offset = block_offset_for_tree_pair(dst.structure(), dst_key);
         expected[dst_offset] +=
             2.0 * spec.recoupling_coefficients_dst_src()[0] * src.data()[src_offset];
     }
@@ -3948,8 +4096,8 @@ fn tree_pair_transform_public_helper_executes_product_with_complex_data() {
     for spec in plan.specs() {
         let src_key = &spec.src_keys()[0];
         let dst_key = &spec.dst_keys()[0];
-        let src_offset = src.structure().block_by_key(src_key).unwrap().offset();
-        let dst_offset = dst.structure().block_by_key(dst_key).unwrap().offset();
+        let src_offset = block_offset_for_tree_pair(src.structure(), src_key);
+        let dst_offset = block_offset_for_tree_pair(dst.structure(), dst_key);
         expected[dst_offset] = expected[dst_offset]
             + src.data()[src_offset]
                 .scale_by_coefficient(spec.recoupling_coefficients_dst_src()[0])
@@ -4500,8 +4648,8 @@ fn unique_tree_transform_plan_builder_defers_explicit_no_braiding_to_crossing_lo
 
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key.clone()]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[src_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(plan.specs()[0].dst_keys(), &[expect_tree_key(&src_key)]);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
@@ -4522,8 +4670,11 @@ fn unique_all_codomain_braid_plan_builder_lowers_codomain_single_tree() {
 
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-2.0]);
 }
 
@@ -4542,8 +4693,11 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
     .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
@@ -4645,8 +4799,11 @@ fn unique_all_codomain_plan_builder_accepts_explicit_vacuum_empty_domain() {
     .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
@@ -4756,8 +4913,11 @@ fn unique_tree_pair_plan_builder_lowers_domain_only_permutation() {
 
     assert_eq!(plan.specs().len(), 1);
     assert_eq!(plan.specs()[0].group_key(), &src_tree.group_key());
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
@@ -4795,8 +4955,11 @@ fn unique_tree_pair_plan_builder_lowers_codomain_domain_crossing_braid() {
     .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-2.0]);
 }
 
@@ -4822,8 +4985,11 @@ fn unique_tree_pair_plan_builder_lowers_cyclic_transpose() {
             .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
@@ -4859,8 +5025,11 @@ fn unique_tree_pair_plan_builder_lowers_rank_four_cyclic_transpose() {
             .unwrap();
 
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].src_keys(), &[src_key]);
-    assert_eq!(plan.specs()[0].dst_keys(), &[expected_dst_key]);
+    assert_eq!(plan.specs()[0].src_keys(), &[expect_tree_key(&src_key)]);
+    assert_eq!(
+        plan.specs()[0].dst_keys(),
+        &[expect_tree_key(&expected_dst_key)]
+    );
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[1.0]);
 }
 
@@ -5041,7 +5210,7 @@ fn unique_production_domain_fermion_crossing_matches_tensorkit_oracle() {
     // What: moving one odd domain leg across one odd codomain leg carries the
     // exact TensorKit fermionic sign, rather than a self-consistency result.
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].dst_keys(), &[BlockKey::from(source)]);
+    assert_eq!(plan.specs()[0].dst_keys(), &[source]);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[-1.0]);
 }
 
@@ -5078,10 +5247,7 @@ fn unique_production_complex_artin_and_inverse_match_tensorkit_oracle() {
         // What: Z4Element{2}'s later Artin crossing preserves the recoupled
         // innerline and conjugates the complex phase when the levels reverse.
         assert_eq!(plan.specs().len(), 1);
-        assert_eq!(
-            plan.specs()[0].dst_keys(),
-            &[BlockKey::from(expected.clone())]
-        );
+        assert_eq!(plan.specs()[0].dst_keys(), std::slice::from_ref(&expected));
         assert_complex_oracle(
             plan.specs()[0].recoupling_coefficients_dst_src()[0],
             expected_coefficient,
@@ -5145,7 +5311,7 @@ fn unique_production_pivotal_transpose_matches_tensorkit_oracle() {
     // What: the nontrivial Z4 Frobenius-Schur/A-symbol phase survives the
     // cyclic transpose with TensorKit's exact destination dual flags.
     assert_eq!(plan.specs().len(), 1);
-    assert_eq!(plan.specs()[0].dst_keys(), &[BlockKey::from(expected)]);
+    assert_eq!(plan.specs()[0].dst_keys(), &[expected]);
     assert_complex_oracle(
         plan.specs()[0].recoupling_coefficients_dst_src()[0],
         Complex64::new(-1.0, 0.0),
@@ -5499,11 +5665,7 @@ fn unique_production_preserves_interleaved_source_block_order() {
     let group_b = z2_two_leg_pair_with_empty_domain([SectorId::new(0), SectorId::new(0)], None);
     let group_a_second =
         z2_two_leg_pair_with_empty_domain([SectorId::new(1), SectorId::new(1)], Some(vacuum));
-    let source_order = [
-        BlockKey::from(group_a_first),
-        BlockKey::from(group_b),
-        BlockKey::from(group_a_second),
-    ];
+    let source_order = [group_a_first, group_b, group_a_second];
     let source_structure =
         packed_fixture_structure(2, source_order.iter().cloned().map(|key| (key, vec![1, 1])))
             .unwrap();
@@ -5551,10 +5713,7 @@ fn unique_production_prepares_each_distinct_source_split() {
         .unwrap(),
         FusionTreeKey::try_new_for_rule(&rule, [], None, [], [], []).unwrap(),
     );
-    let source_order = [
-        BlockKey::from(split_one_one),
-        BlockKey::from(split_two_zero),
-    ];
+    let source_order = [split_one_one, split_two_zero];
     let source_structure =
         packed_fixture_structure(2, source_order.iter().cloned().map(|key| (key, vec![1, 1])))
             .unwrap();
@@ -5647,12 +5806,11 @@ fn explicit_keyed_replay_accepts_dense_and_opaque_namespaces() {
 
 #[test]
 fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let key10 = BlockKey::opaque([10]);
-    let key20 = BlockKey::opaque([20]);
-    let key100 = BlockKey::opaque([100]);
-    let key200 = BlockKey::opaque([200]);
-    let key300 = BlockKey::opaque([300]);
+    let key10 = grouped_su2_test_pair(0);
+    let key20 = grouped_su2_test_pair(2);
+    let key100 = grouped_su2_test_pair(0);
+    let key200 = grouped_su2_test_pair(2);
+    let key300 = grouped_su2_test_pair(4);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(
@@ -5681,12 +5839,12 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
     let structure = TreeTransformStructure::compile_grouped(
         &dst,
         &src,
-        &[TreeTransformGroupBlockSpec::multi(
-            group_key,
+        &[TreeTransformGroupBlockSpec::try_multi(
             [key10, key20],
             [key100, key200, key300],
             vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
-        )],
+        )
+        .unwrap()],
     )
     .unwrap();
     let mut backend = HostTensorOperations;
@@ -5711,37 +5869,32 @@ fn tree_transform_compile_grouped_lowers_to_replay_ready_structure() {
 
 #[test]
 fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
-    let present = BlockKey::opaque([1]);
-    let missing = BlockKey::opaque([2]);
+    let present = grouped_su2_test_pair(0);
+    let missing = grouped_su2_test_pair(2);
     let dst_structure = packed_fixture_structure(2, [(present.clone(), vec![1, 1])]).unwrap();
     let src_structure = packed_fixture_structure(1, [(present.clone(), vec![1])]).unwrap();
-    let coefficient_mismatch = TreeTransformGroupBlockSpec::multi(
-        group_key.clone(),
-        [present.clone()],
-        [present.clone()],
-        Vec::<f64>::new(),
-    );
-    let missing_later =
-        TreeTransformGroupBlockSpec::single(group_key, missing.clone(), present.clone(), 1.0);
+    let structurally_invalid =
+        TreeTransformGroupBlockSpec::try_multi([present.clone()], [present.clone()], vec![1.0_f64])
+            .unwrap();
+    let missing_later = TreeTransformGroupBlockSpec::single(missing.clone(), present.clone(), 1.0);
 
     let err = TreeTransformStructure::compile_grouped_structures(
         &dst_structure,
         &src_structure,
-        &[coefficient_mismatch.clone(), missing_later],
+        &[structurally_invalid.clone(), missing_later],
     )
     .unwrap_err();
     assert_eq!(
         err,
         OperationError::MissingBlockKey {
-            key: Box::new(missing)
+            key: Box::new(BlockKey::from(missing))
         }
     );
 
     let err = TreeTransformStructure::compile_grouped_structures(
         &dst_structure,
         &src_structure,
-        &[coefficient_mismatch],
+        &[structurally_invalid],
     )
     .unwrap_err();
     assert_eq!(
@@ -5771,18 +5924,12 @@ fn keyed_and_grouped_compile_resolve_every_key_before_structural_validation() {
 
 #[test]
 fn grouped_storage_mapping_preserves_callback_error_order() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
-    let present = BlockKey::opaque([1]);
-    let missing = BlockKey::opaque([2]);
+    let present = grouped_su2_test_pair(0);
+    let missing = grouped_su2_test_pair(2);
     let structure = Arc::new(packed_fixture_structure(1, [(present.clone(), vec![1])]).unwrap());
     let plan = TreeTransformGroupPlan::new(vec![
-        TreeTransformGroupBlockSpec::single(
-            group_key.clone(),
-            present.clone(),
-            present.clone(),
-            1.0_f64,
-        ),
-        TreeTransformGroupBlockSpec::single(group_key, missing, present, 1.0),
+        TreeTransformGroupBlockSpec::single(present.clone(), present.clone(), 1.0_f64),
+        TreeTransformGroupBlockSpec::single(missing, present, 1.0),
     ]);
     let axis_called = std::cell::Cell::new(false);
 
@@ -5806,13 +5953,12 @@ fn grouped_storage_mapping_preserves_callback_error_order() {
 
 #[test]
 fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [false]);
-    let dst0 = BlockKey::opaque([10]);
-    let dst1 = BlockKey::opaque([20]);
-    let dst2 = BlockKey::opaque([25]);
-    let src0 = BlockKey::opaque([30]);
-    let src1 = BlockKey::opaque([40]);
-    let src2 = BlockKey::opaque([50]);
+    let dst0 = grouped_su2_test_pair(0);
+    let dst1 = grouped_su2_test_pair(2);
+    let dst2 = grouped_su2_test_pair(4);
+    let src0 = grouped_su2_test_pair(0);
+    let src1 = grouped_su2_test_pair(2);
+    let src2 = grouped_su2_test_pair(4);
     let dst_structure = Arc::new(
         packed_fixture_structure(
             2,
@@ -5854,14 +6000,14 @@ fn grouped_storage_mapping_owns_coefficients_and_matches_direct_complex_replay()
     let callback_trace = std::cell::RefCell::new(Vec::new());
     let grouped = {
         let plan = TreeTransformGroupPlan::new(vec![
-            TreeTransformGroupBlockSpec::single(group_key.clone(), dst0, src0, coefficients[0])
+            TreeTransformGroupBlockSpec::single(dst0, src0, coefficients[0])
                 .with_source_axes([1, 0]),
-            TreeTransformGroupBlockSpec::multi(
-                group_key,
+            TreeTransformGroupBlockSpec::try_multi(
                 [dst1, dst2],
                 [src1, src2],
                 coefficients[1..].to_vec(),
             )
+            .unwrap()
             .with_source_axes([1, 0]),
         ]);
         plan.compile_shared_structures_with_storage_mapping(
@@ -6077,12 +6223,11 @@ impl<T: Clone> tenet_core::ScratchStorage<T> for TrackingScratch<T> {
 
 #[test]
 fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let key10 = BlockKey::opaque([10]);
-    let key20 = BlockKey::opaque([20]);
-    let key100 = BlockKey::opaque([100]);
-    let key200 = BlockKey::opaque([200]);
-    let key300 = BlockKey::opaque([300]);
+    let key10 = grouped_su2_test_pair(0);
+    let key20 = grouped_su2_test_pair(2);
+    let key100 = grouped_su2_test_pair(0);
+    let key200 = grouped_su2_test_pair(2);
+    let key300 = grouped_su2_test_pair(4);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(
@@ -6120,12 +6265,12 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
     let structure = TreeTransformStructure::compile_grouped(
         &dst,
         &src,
-        &[TreeTransformGroupBlockSpec::multi(
-            group_key,
+        &[TreeTransformGroupBlockSpec::try_multi(
             [key10, key20],
             [key100, key200, key300],
             vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
-        )],
+        )
+        .unwrap()],
     )
     .unwrap();
     let mut workspace = crate::storage_scratch::StorageTreeTransformWorkspace::<
@@ -6221,9 +6366,8 @@ fn tree_transform_storage_scratch_allocates_from_source_and_destination_storage(
 fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     let src_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
-    let group_key = FusionTreeGroupKey::from_sector_ids([1], [1], [false], [true]);
-    let present_key = BlockKey::opaque([1]);
-    let missing_key = BlockKey::opaque([2]);
+    let present_key = grouped_su2_test_pair(0);
+    let missing_key = grouped_su2_test_pair(2);
     let src_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let dst_structure = packed_fixture_structure(2, [(present_key.clone(), vec![2, 2])]).unwrap();
     let src =
@@ -6237,7 +6381,6 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
         &dst,
         &src,
         &[TreeTransformGroupBlockSpec::single(
-            group_key,
             missing_key.clone(),
             present_key,
             1.0,
@@ -6248,7 +6391,7 @@ fn tree_transform_compile_grouped_rejects_missing_tree_block_key() {
     assert_eq!(
         err,
         OperationError::MissingBlockKey {
-            key: Box::new(missing_key)
+            key: Box::new(BlockKey::from(missing_key))
         }
     );
 }
@@ -6294,6 +6437,48 @@ fn tree_transform_group_block_spec_from_groups_uses_source_group_and_ordered_key
     assert_eq!(
         spec.recoupling_coefficients_dst_src(),
         &[1.0, 2.0, 3.0, 4.0]
+    );
+}
+
+#[test]
+fn grouped_spec_from_public_groups_rejects_repeated_block_indices() {
+    let key = grouped_su2_test_pair(0);
+    let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
+    let group = structure.fusion_tree_groups().pop().unwrap();
+    let repeated = tenet_core::FusionTreeBlockGroup::new(group.group_key().clone(), vec![0, 0]);
+
+    let src_err = TreeTransformGroupBlockSpec::from_block_groups(
+        &structure,
+        &group,
+        &structure,
+        &repeated,
+        vec![1.0_f64, 2.0],
+    )
+    .unwrap_err();
+    let dst_err = TreeTransformGroupBlockSpec::from_block_groups(
+        &structure,
+        &repeated,
+        &structure,
+        &group,
+        vec![1.0_f64, 2.0],
+    )
+    .unwrap_err();
+
+    // What: a caller-built group cannot duplicate a matrix column or row by
+    // repeating one otherwise valid BlockStructure index.
+    assert_eq!(
+        src_err,
+        OperationError::DuplicateTreeTransformKey {
+            tensor: "src",
+            index: 1,
+        }
+    );
+    assert_eq!(
+        dst_err,
+        OperationError::DuplicateTreeTransformKey {
+            tensor: "dst",
+            index: 1,
+        }
     );
 }
 
@@ -6366,17 +6551,15 @@ fn tree_transform_group_plan_compiles_across_degeneracy_shapes_without_layout_le
 
 #[test]
 fn tree_transform_group_plan_cache_key_tracks_operation_but_not_coefficients() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
     let dst_key = fusion_tree_test_key([20, 10], [30], 7, [true, false], [true]);
     let src_key = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
     let plan_a = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
-        group_key.clone(),
         dst_key.clone(),
         src_key.clone(),
         2.0_f64,
     )]);
     let plan_b = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
-        group_key, dst_key, src_key, 3.0_f64,
+        dst_key, src_key, 3.0_f64,
     )]);
 
     let transpose = TreeTransformGroupPlanKey::from_plan(
@@ -6442,22 +6625,22 @@ fn tree_transform_structure_cache_key_tracks_concrete_layout() {
     let key = fusion_tree_test_key([10, 20], [30], 5, [false, true], [true]);
     let src = BlockStructure::from_blocks_with_rank(
         2,
-        vec![BlockSpec::with_key(key.clone(), vec![2, 3], vec![1, 2], 0).unwrap()],
+        vec![BlockSpec::with_key(key.clone().into(), vec![2, 3], vec![1, 2], 0).unwrap()],
     )
     .unwrap();
     let shape_changed = BlockStructure::from_blocks_with_rank(
         2,
-        vec![BlockSpec::with_key(key.clone(), vec![3, 2], vec![1, 3], 0).unwrap()],
+        vec![BlockSpec::with_key(key.clone().into(), vec![3, 2], vec![1, 3], 0).unwrap()],
     )
     .unwrap();
     let stride_changed = BlockStructure::from_blocks_with_rank(
         2,
-        vec![BlockSpec::with_key(key.clone(), vec![2, 3], vec![2, 1], 0).unwrap()],
+        vec![BlockSpec::with_key(key.clone().into(), vec![2, 3], vec![2, 1], 0).unwrap()],
     )
     .unwrap();
     let offset_changed = BlockStructure::from_blocks_with_rank(
         2,
-        vec![BlockSpec::with_key(key.clone(), vec![2, 3], vec![1, 2], 1).unwrap()],
+        vec![BlockSpec::with_key(key.clone().into(), vec![2, 3], vec![1, 2], 1).unwrap()],
     )
     .unwrap();
     let plan_key = TreeTransformSectorPlanKey::tree_pair(
@@ -6710,12 +6893,11 @@ impl crate::HostKernelAdapter<f64> for RecordingKernelAdapter {
 
 #[test]
 fn tree_transform_replay_dispatches_through_kernel_adapter() {
-    let group_key = FusionTreeGroupKey::from_sector_ids([10, 20], [30], [false, true], [true]);
-    let key10 = BlockKey::opaque([10]);
-    let key20 = BlockKey::opaque([20]);
-    let key100 = BlockKey::opaque([100]);
-    let key200 = BlockKey::opaque([200]);
-    let key300 = BlockKey::opaque([300]);
+    let key10 = grouped_su2_test_pair(0);
+    let key20 = grouped_su2_test_pair(2);
+    let key100 = grouped_su2_test_pair(0);
+    let key200 = grouped_su2_test_pair(2);
+    let key300 = grouped_su2_test_pair(4);
     let src_space = TensorMapSpace::<2, 0>::from_dims([6, 1], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([4, 1], []).unwrap();
     let src_structure = packed_fixture_structure(
@@ -6744,12 +6926,12 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
     let structure = TreeTransformStructure::compile_grouped(
         &dst,
         &src,
-        &[TreeTransformGroupBlockSpec::multi(
-            group_key,
+        &[TreeTransformGroupBlockSpec::try_multi(
             [key10, key20],
             [key100, key200, key300],
             vec![10.0, 100.0, 1000.0, 20.0, 200.0, 2000.0],
-        )],
+        )
+        .unwrap()],
     )
     .unwrap();
     let dst_block_structure = std::sync::Arc::clone(dst.structure());
@@ -6923,8 +7105,8 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
                     .unwrap();
             assert_eq!(plan.specs().len(), 1);
             let spec = &plan.specs()[0];
-            assert_eq!(spec.src_keys(), &[src_key.clone()]);
-            assert_eq!(spec.dst_keys(), &[BlockKey::from(core_dst.clone())]);
+            assert_eq!(spec.src_keys(), std::slice::from_ref(&src_pair));
+            assert_eq!(spec.dst_keys(), std::slice::from_ref(core_dst));
             assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
             assert!((spec.recoupling_coefficients_dst_src()[0] - core_coeff).abs() < 1e-12);
         };

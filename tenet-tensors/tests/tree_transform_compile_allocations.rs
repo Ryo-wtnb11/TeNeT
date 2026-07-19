@@ -364,7 +364,7 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
         .unwrap();
     reset_global_operation_caches();
 
-    for (missing, expected_allocations) in [(1, 63), (2, 68), (4, 78), (5, 87), (8, 95), (9, 106)] {
+    for (missing, expected_allocations) in [(1, 64), (2, 69), (4, 79), (5, 88), (8, 96), (9, 107)] {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(missing);
         let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
@@ -382,8 +382,8 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
             .unwrap();
         COUNTING.set(false);
 
-        // What: the public cold memoized path removes every allocation and
-        // reallocation formerly paid by its missing-position Vec.
+        // What: exact cold allocation counts have no additional
+        // missing-position-dependent temporary growth.
         assert_eq!(ALLOCATIONS.get(), expected_allocations, "missing={missing}");
         std::hint::black_box(plan);
     }
@@ -455,20 +455,28 @@ fn unique_rank_one_u1_plan_allocations_do_not_scale_with_source_blocks() {
 
 #[test]
 fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
-    const BLOCKS: usize = 64;
-    const COEFFICIENT_BYTES: usize = 64;
+    const BLOCKS: usize = 2;
+    const COEFFICIENT_BYTES: usize = 64 * 1024;
 
-    let structure = rank_one_u1_pair_structure(BLOCKS);
+    let structure = su2_f_move_structure();
     let keys = (0..BLOCKS)
-        .map(|block| structure.block(block).unwrap().key().clone())
+        .map(|block| {
+            structure
+                .block(block)
+                .unwrap()
+                .key()
+                .as_fusion_tree_pair()
+                .unwrap()
+                .clone()
+        })
         .collect::<Vec<_>>();
     let coefficients = vec![[1_u8; COEFFICIENT_BYTES]; BLOCKS * BLOCKS];
-    let grouped_spec = tenet_tensors::TreeTransformGroupBlockSpec::multi(
-        tenet_core::FusionTreeGroupKey::from_sector_ids([0], [0], [false], [false]),
+    let grouped_spec = tenet_tensors::TreeTransformGroupBlockSpec::try_multi(
         keys.clone(),
         keys,
         coefficients.clone(),
-    );
+    )
+    .unwrap();
     let grouped_plan = tenet_tensors::TreeTransformGroupPlan::new(vec![grouped_spec]);
     let direct_specs = [TreeTransformBlockSpec::multi(
         (0..BLOCKS).collect(),
