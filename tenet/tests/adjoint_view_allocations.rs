@@ -72,7 +72,6 @@ fn adjoint_creation_cost_is_independent_of_block_count() {
     let mut reference = None;
     for (rank, radius) in [(2, 0), (2, 2), (2, 6), (2, 12), (4, 4), (6, 1), (8, 0)] {
         let source = tensor(&runtime, (-radius..=radius).map(|charge| (charge, 2)), rank);
-        tenet_tensors::reset_global_operation_caches();
         let cost = measure(|| {
             black_box(source.adjoint().unwrap());
         });
