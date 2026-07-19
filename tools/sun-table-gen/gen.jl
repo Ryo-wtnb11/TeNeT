@@ -180,7 +180,8 @@ function main()
         chans = collect(directproduct(a, b))          # (c => N)
         all(inset(first(cn)) for cn in chans) || continue   # escaping ⇒ hard-error, skip
         clist = [(id[c], nmul) for (c, nmul) in chans]
-        sort!(clist)
+        # Why not sort by table id: TensorKit's fusion-tree iterator consumes
+        # `directproduct` order as categorical basis order.
         push!(pairs, (id[a], id[b], clist))
     end
     pu32!(payload, length(pairs))
@@ -270,7 +271,9 @@ function main()
     for a in irreps, b in irreps
         chans = collect(directproduct(a, b))
         any(!inset(first(cn)) for cn in chans) || continue
-        ins = sort!([(id[c], nmul) for (c, nmul) in chans if inset(c)])
+        # Why not sort the in-table subset: it remains the order-preserving
+        # categorical subsequence exposed by `fusion_channels_in_table`.
+        ins = [(id[c], nmul) for (c, nmul) in chans if inset(c)]
         frs = sort!([fid[c] for (c, _) in chans if !inset(c)])
         push!(escrecs, (id[a], id[b], ins, frs))
     end
