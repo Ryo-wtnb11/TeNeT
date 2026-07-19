@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 #[test]
 fn host_tensor_contract_workspace_is_explicit_host_workspace() {
@@ -1417,6 +1418,384 @@ fn tensorcontract_structure_replays_explicit_block_terms_and_applies_beta_once()
 
     assert_eq!(structure.terms().len(), 2);
     assert_eq!(dst.data(), &[259.0]);
+}
+
+fn issue311_contract_structures() -> (BlockStructure, BlockStructure, BlockStructure) {
+    let lhs = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![
+            BlockSpec::column_major_with_key(BlockKey::ordinal(10), vec![1, 2], 0).unwrap(),
+            BlockSpec::column_major_with_key(BlockKey::ordinal(20), vec![1, 2], 2).unwrap(),
+        ],
+    )
+    .unwrap();
+    let rhs = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![
+            BlockSpec::column_major_with_key(BlockKey::ordinal(30), vec![2, 1], 0).unwrap(),
+            BlockSpec::column_major_with_key(BlockKey::ordinal(40), vec![2, 1], 2).unwrap(),
+        ],
+    )
+    .unwrap();
+    let dst = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![
+            BlockSpec::column_major_with_key(BlockKey::ordinal(50), vec![1, 1], 0).unwrap(),
+            BlockSpec::column_major_with_key(BlockKey::ordinal(60), vec![1, 1], 2).unwrap(),
+        ],
+    )
+    .unwrap();
+    (dst, lhs, rhs)
+}
+
+fn issue311_contract_specs() -> [TensorContractBlockSpec; 2] {
+    [
+        TensorContractBlockSpec::with_coefficient(0, 0, 0, 0.5),
+        TensorContractBlockSpec::with_coefficient(0, 1, 1, 2.0),
+    ]
+}
+
+#[test]
+fn prepared_structure_scales_inactive_destination_once_for_each_beta() {
+    let (dst_structure, lhs_structure, rhs_structure) = issue311_contract_structures();
+    let structure = TensorContractStructure::compile_structures_with_block_specs(
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        &issue311_contract_specs(),
+    )
+    .unwrap();
+    let key = TensorContractStructureCacheKey::from_structures(
+        issue311_contract_specs()
+            .iter()
+            .map(|term| {
+                (
+                    term.dst_block(),
+                    term.lhs_block(),
+                    term.rhs_block(),
+                    term.coefficient().to_bits(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+    )
+    .unwrap();
+    let mut cache = TensorContractStructureCache::new();
+    cache.insert(key.clone(), structure);
+    let dst_structure = Arc::new(dst_structure);
+    let lhs_structure = Arc::new(lhs_structure);
+    let rhs_structure = Arc::new(rhs_structure);
+    let lhs = [1.0, 2.0, 3.0, 4.0];
+    let rhs = [5.0, 6.0, 7.0, 8.0];
+
+    for beta in [0.0, 0.5, 1.0] {
+        for _ in 0..2 {
+            let mut dst = [10.0, -777.0, 20.0];
+            crate::contract::tensorcontract_structure_with_dense_executor_raw(
+                &mut tenet_dense::DefaultDenseExecutor::new(),
+                &mut TensorContractWorkspace::default(),
+                cache.get(&key).unwrap(),
+                &dst_structure,
+                &lhs_structure,
+                &rhs_structure,
+                &mut dst,
+                &lhs,
+                &rhs,
+                2.0,
+                beta,
+            )
+            .unwrap();
+
+            assert_eq!(dst, [229.0 + beta * 10.0, -777.0, beta * 20.0]);
+        }
+    }
+}
+
+#[test]
+fn inactive_scaling_waits_for_complete_raw_replay_validation() {
+    let (dst_structure, lhs_structure, rhs_structure) = issue311_contract_structures();
+    let structure = TensorContractStructure::compile_structures_with_block_specs(
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        &issue311_contract_specs(),
+    )
+    .unwrap();
+    let dst_structure = Arc::new(dst_structure);
+    let lhs_structure = Arc::new(lhs_structure);
+    let rhs_structure = Arc::new(rhs_structure);
+    let mut dst = [10.0, -777.0, 20.0];
+
+    let error = crate::contract::tensorcontract_structure_with_dense_executor_raw(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut TensorContractWorkspace::default(),
+        &structure,
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+        &mut dst,
+        &[1.0, 2.0, 3.0],
+        &[5.0, 6.0, 7.0, 8.0],
+        2.0,
+        0.5,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::ElementCountMismatch {
+            expected: 4,
+            actual: 3,
+        }
+    );
+    assert_eq!(dst, [10.0, -777.0, 20.0]);
+}
+
+#[test]
+fn complex_structure_scales_inactive_destination_without_norm_projection() {
+    let (dst_structure, lhs_structure, rhs_structure) = issue311_contract_structures();
+    let structure = TensorContractStructure::compile_structures_with_block_specs(
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        &issue311_contract_specs(),
+    )
+    .unwrap();
+    let dst_structure = Arc::new(dst_structure);
+    let lhs_structure = Arc::new(lhs_structure);
+    let rhs_structure = Arc::new(rhs_structure);
+    let lhs = [
+        Complex64::new(1.0, 2.0),
+        Complex64::new(-2.0, 1.0),
+        Complex64::new(3.0, -1.0),
+        Complex64::new(0.5, 4.0),
+    ];
+    let rhs = [
+        Complex64::new(2.0, -1.0),
+        Complex64::new(1.0, 3.0),
+        Complex64::new(-1.0, 2.0),
+        Complex64::new(4.0, -0.5),
+    ];
+    let initial = [
+        Complex64::new(10.0, -3.0),
+        Complex64::new(-777.0, 99.0),
+        Complex64::new(20.0, 5.0),
+    ];
+    let alpha = Complex64::new(0.75, -0.25);
+    let beta = Complex64::new(0.5, 0.25);
+    let mut dst = initial;
+
+    crate::contract::tensorcontract_structure_with_dense_executor_raw(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut TensorContractWorkspace::default(),
+        &structure,
+        &dst_structure,
+        &lhs_structure,
+        &rhs_structure,
+        &mut dst,
+        &lhs,
+        &rhs,
+        alpha,
+        beta,
+    )
+    .unwrap();
+
+    let expected_active = beta * initial[0]
+        + alpha * Complex64::new(0.5, 0.0) * (lhs[0] * rhs[0] + lhs[1] * rhs[1])
+        + alpha * Complex64::new(2.0, 0.0) * (lhs[2] * rhs[2] + lhs[3] * rhs[3]);
+    let expected_inactive = beta * initial[2];
+    assert!((dst[0].re - expected_active.re).abs() < 1.0e-12);
+    assert!((dst[0].im - expected_active.im).abs() < 1.0e-12);
+    assert_eq!(dst[1], initial[1]);
+    assert!((dst[2].re - expected_inactive.re).abs() < 1.0e-12);
+    assert!((dst[2].im - expected_inactive.im).abs() < 1.0e-12);
+}
+
+#[test]
+fn storage_workspace_scales_the_same_inactive_logical_layouts() {
+    let (dst_structure, lhs_structure, rhs_structure) = issue311_contract_structures();
+    let allocations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let lhs =
+        TensorMap::<f64, 2, 0, Trivial, ContractTrackingStorage<f64>>::from_storage_with_structure(
+            ContractTrackingStorage::new(vec![1.0, 2.0, 3.0, 4.0], "lhs", allocations.clone()),
+            TensorMapSpace::from_dims([2, 2], []).unwrap(),
+            lhs_structure,
+        )
+        .unwrap();
+    let rhs =
+        TensorMap::<f64, 2, 0, Trivial, ContractTrackingStorage<f64>>::from_storage_with_structure(
+            ContractTrackingStorage::new(vec![5.0, 6.0, 7.0, 8.0], "rhs", allocations.clone()),
+            TensorMapSpace::from_dims([2, 2], []).unwrap(),
+            rhs_structure,
+        )
+        .unwrap();
+    let mut dst =
+        TensorMap::<f64, 2, 0, Trivial, ContractTrackingStorage<f64>>::from_storage_with_structure(
+            ContractTrackingStorage::new(
+                vec![10.0, -777.0, 20.0],
+                "destination",
+                allocations.clone(),
+            ),
+            TensorMapSpace::from_dims([1, 1], []).unwrap(),
+            dst_structure,
+        )
+        .unwrap();
+    let structure = TensorContractStructure::compile_with_block_specs(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        &issue311_contract_specs(),
+    )
+    .unwrap();
+
+    crate::contract::tensorcontract_structure_with_storage_workspace_dense_executor(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut crate::storage_scratch::StorageTensorContractWorkspace::default(),
+        &structure,
+        &mut dst,
+        &lhs,
+        &rhs,
+        2.0,
+        0.5,
+    )
+    .unwrap();
+
+    assert_eq!(dst.data(), &[234.0, -777.0, 10.0]);
+    assert_eq!(
+        allocations.borrow().as_slice(),
+        &[ContractScratchAllocation {
+            label: "destination",
+            len: 1,
+        }]
+    );
+}
+
+fn contract_alias_fixture(
+    dst_structure: &BlockStructure,
+    terms: &[TensorContractBlockSpec],
+) -> Result<TensorContractStructure, OperationError> {
+    let lhs = BlockStructure::packed_column_major(2, [vec![1, 1], vec![1, 1]]).unwrap();
+    let rhs = BlockStructure::packed_column_major(2, [vec![1, 1], vec![1, 1]]).unwrap();
+    TensorContractStructure::compile_structures_with_block_specs(
+        dst_structure,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        terms,
+    )
+}
+
+#[test]
+fn tensorcontract_structure_rejects_all_destination_alias_classes() {
+    let block = |key, offset| {
+        BlockSpec::with_key(BlockKey::ordinal(key), vec![1, 1], vec![1, 1], offset).unwrap()
+    };
+    let active_inactive =
+        BlockStructure::from_blocks_with_rank(2, vec![block(0, 0), block(1, 0)]).unwrap();
+    let inactive_inactive =
+        BlockStructure::from_blocks_with_rank(2, vec![block(0, 0), block(1, 1), block(2, 1)])
+            .unwrap();
+    let active_active =
+        BlockStructure::from_blocks_with_rank(2, vec![block(0, 0), block(1, 0)]).unwrap();
+    let cases = [
+        (active_inactive, vec![TensorContractBlockSpec::new(0, 0, 0)]),
+        (
+            inactive_inactive,
+            vec![TensorContractBlockSpec::new(0, 0, 0)],
+        ),
+        (
+            active_active,
+            vec![
+                TensorContractBlockSpec::new(0, 0, 0),
+                TensorContractBlockSpec::new(1, 1, 1),
+            ],
+        ),
+    ];
+
+    for (dst, terms) in cases {
+        assert_eq!(
+            contract_alias_fixture(&dst, &terms).unwrap_err(),
+            OperationError::InvalidArgument {
+                message: "tensor contract destination layouts overlap",
+            }
+        );
+    }
+}
+
+#[test]
+fn tensorcontract_structure_rejects_zero_stride_self_overlap() {
+    let dst = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![
+            BlockSpec::with_key(BlockKey::ordinal(0), vec![1, 1], vec![1, 1], 0).unwrap(),
+            BlockSpec::with_key(BlockKey::ordinal(1), vec![2, 1], vec![0, 1], 1).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        contract_alias_fixture(&dst, &[TensorContractBlockSpec::new(0, 0, 0)]).unwrap_err(),
+        OperationError::InvalidArgument {
+            message: "tensor contract destination layouts overlap",
+        }
+    );
+}
+
+#[test]
+fn tensorcontract_structure_accepts_interleaved_disjoint_destinations() {
+    let lhs = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![BlockSpec::column_major_with_key(BlockKey::ordinal(0), vec![2, 1], 0).unwrap()],
+    )
+    .unwrap();
+    let rhs = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![BlockSpec::column_major_with_key(BlockKey::ordinal(0), vec![1, 1], 0).unwrap()],
+    )
+    .unwrap();
+    let dst = BlockStructure::from_blocks_with_rank(
+        2,
+        vec![
+            BlockSpec::with_key(BlockKey::ordinal(0), vec![2, 1], vec![2, 1], 0).unwrap(),
+            BlockSpec::with_key(BlockKey::ordinal(1), vec![2, 1], vec![2, 1], 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    let structure = TensorContractStructure::compile_structures_with_block_specs(
+        &dst,
+        &lhs,
+        &rhs,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        &[TensorContractBlockSpec::new(0, 0, 0)],
+    )
+    .unwrap();
+    let dst = Arc::new(dst);
+    let lhs = Arc::new(lhs);
+    let rhs = Arc::new(rhs);
+    let mut data = [7.0, 11.0, 13.0, 17.0];
+
+    crate::contract::tensorcontract_structure_with_dense_executor_raw(
+        &mut tenet_dense::DefaultDenseExecutor::new(),
+        &mut TensorContractWorkspace::default(),
+        &structure,
+        &dst,
+        &lhs,
+        &rhs,
+        &mut data,
+        &[2.0, 3.0],
+        &[5.0],
+        1.0,
+        0.5,
+    )
+    .unwrap();
+
+    assert_eq!(data, [13.5, 5.5, 21.5, 8.5]);
 }
 
 #[test]

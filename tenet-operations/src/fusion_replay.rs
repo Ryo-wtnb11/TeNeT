@@ -840,14 +840,14 @@ pub struct FusionSubblockMatrixLayout {
     pub coefficient: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FusionStridedBlockLayout {
     pub shape: Vec<usize>,
     pub strides: Vec<isize>,
     pub offset: isize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FusionScaleBlockLayout {
     pub block: FusionStridedBlockLayout,
 }
