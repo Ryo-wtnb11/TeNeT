@@ -1579,6 +1579,241 @@ fn fermion_parity_matrix_space_with_homspace(
 }
 
 #[test]
+fn bosonic_tensorcompose_reuses_the_ordinary_contract_resolution() {
+    // What: coefficient-free bosonic composition and ordinary contraction
+    // share one compiled Core resolution instead of retaining parallel plans.
+    let typed = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
+    let source = crate::DynamicFusionMapSpace::from_typed(&typed);
+    let dst = crate::DynamicFusionMapSpace::contracted(&Z2FusionRule, &source, &source, &[1], &[0])
+        .unwrap();
+    let provider = Arc::new(Z2FusionRule);
+    let source_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        source.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dst.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let lhs = vec![1.0; source.required_len().unwrap()];
+    let rhs = vec![2.0; source.required_len().unwrap()];
+    let mut context = crate::TensorContractFusionExecutionContext::<
+        f64,
+        TreeTransformBuiltinRuleCacheKey,
+    >::default();
+    let mut ordinary = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcontract_fusion_dyn_into_lowered(
+            &dst_bound,
+            &mut ordinary,
+            &source_bound,
+            &lhs,
+            &source_bound,
+            &rhs,
+            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert!(context.last_resolution_is_core());
+    let entries = context.contraction_resolution_cache_len();
+    let misses = context.contraction_resolution_cache_misses();
+    let hits = context.contraction_resolution_cache_hits();
+
+    let mut composed = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcompose_fusion_dyn_into_lowered(
+            &dst_bound,
+            &mut composed,
+            crate::FusionOperand::direct(&source),
+            &lhs,
+            crate::FusionOperand::direct(&source),
+            &rhs,
+            &[1],
+            &[0],
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    assert_eq!(composed, ordinary);
+    assert_eq!(context.contraction_resolution_cache_len(), entries);
+    assert_eq!(context.contraction_resolution_cache_misses(), misses);
+    assert!(context.contraction_resolution_cache_hits() > hits);
+    assert!(context.last_resolution_is_core());
+}
+
+#[test]
+fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
+    // What: both cold and cached composition plans reject malformed source or
+    // destination extents before beta scaling or grouped GEMM changes output.
+    let rule = FermionParityFusionRule;
+    let typed =
+        fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
+    let source = crate::DynamicFusionMapSpace::from_typed(&typed);
+    let dst =
+        crate::DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
+    let provider = Arc::new(rule);
+    let dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dst.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let lhs = vec![1.0; source.required_len().unwrap()];
+    let rhs = vec![2.0; source.required_len().unwrap()];
+    let operand = crate::FusionOperand::direct(&source);
+    let mut context = crate::TensorContractFusionExecutionContext::<
+        f64,
+        TreeTransformBuiltinRuleCacheKey,
+    >::default();
+
+    let mut valid = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcompose_fusion_dyn_into_lowered(
+            &dst_bound,
+            &mut valid,
+            operand,
+            &lhs,
+            operand,
+            &rhs,
+            &[1],
+            &[0],
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    let mut destination = vec![7.0; dst.required_len().unwrap()];
+    let before = destination.clone();
+    let error = context
+        .tensorcompose_fusion_dyn_into_lowered(
+            &dst_bound,
+            &mut destination,
+            operand,
+            &lhs[..lhs.len() - 1],
+            operand,
+            &rhs,
+            &[1],
+            &[0],
+            1.0,
+            0.5,
+        )
+        .unwrap_err();
+    assert!(matches!(error, OperationError::ElementCountMismatch { .. }));
+    assert_eq!(destination, before);
+
+    let mut short_destination = vec![9.0; dst.required_len().unwrap() - 1];
+    let before = short_destination.clone();
+    let error = context
+        .tensorcompose_fusion_dyn_into_lowered(
+            &dst_bound,
+            &mut short_destination,
+            operand,
+            &lhs,
+            operand,
+            &rhs,
+            &[1],
+            &[0],
+            1.0,
+            0.5,
+        )
+        .unwrap_err();
+    assert!(matches!(error, OperationError::ElementCountMismatch { .. }));
+    assert_eq!(short_destination, before);
+}
+
+#[test]
+fn fermionic_tensorcompose_keeps_a_distinct_coefficient_free_resolution() {
+    // What: a dual odd RHS leg gives ordinary contraction its supertrace sign,
+    // while composition retains and reuses a separate direct Core plan.
+    let rule = FermionParityFusionRule;
+    let odd = SectorId::new(1);
+    let typed_space = |codomain_dual: bool, domain_dual: bool| {
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),
+                FusionProductSpace::new([SectorLeg::new([(odd, 1)], domain_dual)]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let lhs = crate::DynamicFusionMapSpace::from_typed(&typed_space(false, true));
+    let rhs = crate::DynamicFusionMapSpace::from_typed(&typed_space(true, false));
+    let dst = crate::DynamicFusionMapSpace::contracted(&rule, &lhs, &rhs, &[1], &[0]).unwrap();
+    let provider = Arc::new(rule);
+    let lhs_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        lhs.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let rhs_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        rhs.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let dst_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dst.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let mut context = crate::TensorContractFusionExecutionContext::<
+        f64,
+        TreeTransformBuiltinRuleCacheKey,
+    >::default();
+    let mut contracted = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcontract_fusion_dyn_into_lowered(
+            &dst_bound,
+            &mut contracted,
+            &lhs_bound,
+            &[2.0],
+            &rhs_bound,
+            &[3.0],
+            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    assert_eq!(contracted, [-6.0]);
+    let ordinary_entries = context.contraction_resolution_cache_len();
+
+    let compose = |context: &mut crate::TensorContractFusionExecutionContext<
+        f64,
+        TreeTransformBuiltinRuleCacheKey,
+    >| {
+        let mut output = vec![0.0; dst.required_len().unwrap()];
+        context
+            .tensorcompose_fusion_dyn_into_lowered(
+                &dst_bound,
+                &mut output,
+                crate::FusionOperand::direct(&lhs),
+                &[2.0],
+                crate::FusionOperand::direct(&rhs),
+                &[3.0],
+                &[1],
+                &[0],
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        output
+    };
+    assert_eq!(compose(&mut context), [6.0]);
+    assert!(context.last_resolution_is_core());
+    assert!(context.contraction_resolution_cache_len() > ordinary_entries);
+    let entries = context.contraction_resolution_cache_len();
+    let hits = context.contraction_resolution_cache_hits();
+    assert_eq!(compose(&mut context), [6.0]);
+    assert_eq!(context.contraction_resolution_cache_len(), entries);
+    assert!(context.contraction_resolution_cache_hits() > hits);
+}
+
+#[test]
 fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
     let rule = Z2FusionRule;
     let lhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);

@@ -156,6 +156,32 @@ fn one_axis_diagonal_products_stay_compact() {
 }
 
 #[test]
+fn fermionic_diagonal_compose_multiplies_compact_values_without_supertrace_twist() {
+    // What: TensorKit map composition of two compact fermionic diagonals stays
+    // compact and equals the same coefficient-free coupled-block product.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::fz2([(0, 2), (1, 2)]).dual(),
+        Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 0, 1), 2)])
+            .unwrap()
+            .dual(),
+    ] {
+        let lhs = complex_diagonal(&rt, &space, 353_701);
+        let rhs = complex_diagonal(&rt, &space, 353_702);
+        let actual = lhs.compose(&rhs).unwrap();
+        assert!(matches!(actual.stored_data(), Data::Diagonal(_)));
+        assert!(!lhs.has_cached_materialization());
+        assert!(!rhs.has_cached_materialization());
+        let oracle = lhs
+            .densified_if_diagonal()
+            .compose(&rhs.densified_if_diagonal())
+            .unwrap();
+
+        assert_tensor_close(&actual, &oracle);
+    }
+}
+
+#[test]
 fn complex_diagonal_scales_dense_and_lazy_operands() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [

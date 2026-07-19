@@ -1761,6 +1761,12 @@ enum TensorOrientation {
     Adjoint,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContractionSemantics {
+    TensorContract,
+    Composition,
+}
+
 struct TensorMetadataView<'a> {
     body: &'a TensorBody,
     orientation: TensorOrientation,
@@ -3293,16 +3299,26 @@ impl Tensor {
         self.check_same_world(rhs)?;
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..rhs.codomain_rank()).collect();
-        let diagonal_dst = if self.diagonal_data().is_some() || rhs.diagonal_data().is_some() {
+        let mut diagonal_dst = if self.diagonal_data().is_some() || rhs.diagonal_data().is_some() {
             Some(self.contraction_output_space(rhs, &lhs_axes, &rhs_axes)?)
         } else {
             None
         };
         // Why not send a proven diagonal composition through GEMM: TensorKit's
         // `DiagonalTensorMap` `rmul!`/`lmul!` shows it is only per-block bond
-        // scaling. Two diagonals continue into `contract`, which first proves
-        // that their output still satisfies the rank-2 diagonal invariant.
+        // scaling. The compact product is valid only after the derived output
+        // proves the same rank-2 diagonal invariant.
         match (self.diagonal_data(), rhs.diagonal_data()) {
+            (Some(lhs), Some(rhs_diagonal)) => {
+                let dst_space = diagonal_dst
+                    .take()
+                    .expect("diagonal destination prepared when both operands are diagonal");
+                if Self::is_diagonal_bond_space(dst_space.raw()) {
+                    if let Some(product) = lhs.elementwise_product(rhs_diagonal) {
+                        return self.with_bound(dst_space, Data::Diagonal(product));
+                    }
+                }
+            }
             // `t * D`: scale `self`'s trailing bond axis (columns). `self.domain`
             // is the single bond leg == `D.codomain`, so the space is `self`'s.
             (None, Some(diagonal))
@@ -3321,28 +3337,16 @@ impl Tensor {
             }
             _ => {}
         }
-        // `contract` twists the dual contracted rhs legs (tensorcontract!
-        // parity); the twist is involutive (θ = ±1), so pre-twisting those
-        // legs cancels it exactly and yields mul! semantics. SU(N) (Generic)
-        // is bosonic and cannot ride the mult-free `with_rule!` binding.
         let fermionic = self.rule_kind() != RuleKind::Su3
             && with_user_rule!(self.rule_authority_space(), rule, {
                 rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
             });
         if fermionic {
-            let metadata = rhs.metadata();
-            let dual_legs: Vec<usize> = rhs_axes
-                .iter()
-                .copied()
-                .filter(|&axis| metadata.codomain().legs()[axis].is_dual())
-                .collect();
-            if !dual_legs.is_empty() {
-                let rhs = if rhs.is_adjoint_view() {
-                    rhs.materialized_tensor()?
-                } else {
-                    rhs.clone()
-                };
-                return self.contract(&rhs.twist(&dual_legs)?, &lhs_axes, &rhs_axes);
+            match (self.stored_data(), rhs.stored_data()) {
+                (Data::F64(_), Data::F64(_)) | (Data::C64(_), Data::C64(_)) => {
+                    return self.compose_host_fusion_impl(rhs, &lhs_axes, &rhs_axes);
+                }
+                _ => {}
             }
         }
         self.contract(rhs, &lhs_axes, &rhs_axes)
@@ -3556,6 +3560,38 @@ impl Tensor {
         rhs_axes: &[usize],
         output_order: OutputAxisOrder<'_>,
     ) -> Result<Self, Error> {
+        self.contract_host_fusion_impl_with_semantics(
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            ContractionSemantics::TensorContract,
+        )
+    }
+
+    fn compose_host_fusion_impl(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, Error> {
+        self.contract_host_fusion_impl_with_semantics(
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::identity(),
+            ContractionSemantics::Composition,
+        )
+    }
+
+    fn contract_host_fusion_impl_with_semantics(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+        semantics: ContractionSemantics,
+    ) -> Result<Self, Error> {
         let (lhs_logical, lhs_storage, lhs_conj) = self.seam_operand()?;
         let (rhs_logical, rhs_storage, rhs_conj) = rhs.seam_operand()?;
         // The seam always consumes the raw stored buffer (it never materializes):
@@ -3575,6 +3611,7 @@ impl Tensor {
                 lhs_axes,
                 rhs_axes,
                 output_order,
+                semantics,
             ),
             (Data::C64(a), Data::C64(b)) => self.contract_impl(
                 lhs_logical,
@@ -3589,6 +3626,7 @@ impl Tensor {
                 lhs_axes,
                 rhs_axes,
                 output_order,
+                semantics,
             ),
             _ => Err(Error::DtypeMismatch),
         }
@@ -3622,6 +3660,7 @@ impl Tensor {
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_order: OutputAxisOrder<'_>,
+        semantics: ContractionSemantics,
     ) -> Result<Self, Error> {
         // Lease a per-rule context so independent operations on one runtime do
         // not serialize while bound spaces remain the fusion authority.
@@ -3647,7 +3686,36 @@ impl Tensor {
                 // ordinary operands must retain the established accumulation
                 // order and bitwise output; only lazy operands need categorical
                 // geometry separated from their parent storage.
-                if !lhs_conj && !rhs_conj {
+                if semantics == ContractionSemantics::Composition {
+                    let lhs = if lhs_conj {
+                        tenet_tensors::FusionOperand::prelowered_adjoint(
+                            $lhs_logical.space(),
+                            $lhs_storage.space(),
+                        )?
+                    } else {
+                        tenet_tensors::FusionOperand::direct($lhs_logical.space())
+                    };
+                    let rhs = if rhs_conj {
+                        tenet_tensors::FusionOperand::prelowered_adjoint(
+                            $rhs_logical.space(),
+                            $rhs_storage.space(),
+                        )?
+                    } else {
+                        tenet_tensors::FusionOperand::direct($rhs_logical.space())
+                    };
+                    D::ctx_of($contexts).tensorcompose_fusion_dyn_into_lowered(
+                        $dst,
+                        &mut data,
+                        lhs,
+                        lhs_data,
+                        rhs,
+                        rhs_data,
+                        lhs_axes,
+                        rhs_axes,
+                        D::from_real(1.0),
+                        D::from_real(0.0),
+                    )
+                } else if !lhs_conj && !rhs_conj {
                     D::ctx_of($contexts).tensorcontract_fusion_dyn_into_lowered(
                         $dst,
                         &mut data,
@@ -8118,6 +8186,35 @@ mod adjoint_parent_view_tests {
             assert_eq!(output.rank(), 2);
         }
         assert_eq!(lhs.adjoint_build_counts(), (1, 0));
+    }
+
+    #[test]
+    fn fermionic_compose_keeps_lazy_lhs_and_rhs_parent_native() {
+        // What: A† * B and A† * B† over the non-Abelian product read both
+        // parent buffers through the Core batch without building owned adjoints.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 0, 1), 2), ((1, 1, 2), 1)]).unwrap();
+        let lhs_parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space.dual()], [&space], 353_801)
+                .unwrap();
+        let rhs = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space.dual()], [&space], 353_802)
+            .unwrap();
+        let rhs_parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space.dual()], 353_803)
+                .unwrap();
+        let lhs = lhs_parent.adjoint().unwrap();
+        let rhs_lazy = rhs_parent.adjoint().unwrap();
+
+        let lhs_result = lhs.compose(&rhs).unwrap();
+        assert_eq!(lhs.adjoint_build_counts(), (1, 0));
+        let both_result = lhs.compose(&rhs_lazy).unwrap();
+        assert_eq!(lhs.adjoint_build_counts(), (1, 0));
+        assert_eq!(rhs_lazy.adjoint_build_counts(), (1, 0));
+
+        let eager_lhs = lhs_parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let eager_rhs = rhs_parent.adjoint().unwrap().materialized_tensor().unwrap();
+        assert_close(&lhs_result, &eager_lhs.compose(&rhs).unwrap());
+        assert_close(&both_result, &eager_lhs.compose(&eager_rhs).unwrap());
     }
 
     fn assert_lazy_contract_matches_eager_oracle(space: Space, seed: u64) {
