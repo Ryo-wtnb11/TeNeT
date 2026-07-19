@@ -79,7 +79,7 @@ fn block_identity_permute_allocates_only_owned_output() {
         [false],
         [],
         [],
-        [],
+        [1],
         [],
     );
     let sources = [source.clone()];

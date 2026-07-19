@@ -175,21 +175,26 @@ fn product_rule_identity_includes_stateful_child_identity() {
 }
 
 #[test]
-fn multiplicity_free_tree_rejects_nontrivial_vertex() {
-    let error = FusionTreeKey::try_new_for_rule(
-        &Z2FusionRule,
-        [SectorId::new(1), SectorId::new(1)],
-        Some(SectorId::new(0)),
-        [false, false],
-        [],
-        [SectorId::new(2)],
-    )
-    .unwrap_err();
+fn multiplicity_free_tree_rejects_out_of_range_vertices() {
+    // What: rule-aware construction reports the precise lower and upper
+    // 1-based multiplicity bounds for a multiplicity-free vertex.
+    for (label, message) in [
+        (0, "fusion tree vertex labels are 1-based"),
+        (
+            2,
+            "fusion tree vertex label exceeds its fusion multiplicity",
+        ),
+    ] {
+        let error = FusionTreeKey::try_new_for_rule(
+            &Z2FusionRule,
+            [SectorId::new(1), SectorId::new(1)],
+            Some(SectorId::new(0)),
+            [false, false],
+            [],
+            [SectorId::new(label)],
+        )
+        .unwrap_err();
 
-    assert_eq!(
-        error,
-        CoreError::MalformedFusionTree {
-            message: "multiplicity-free fusion tree has a nontrivial vertex",
-        }
-    );
+        assert_eq!(error, CoreError::MalformedFusionTree { message });
+    }
 }
