@@ -2456,6 +2456,57 @@ struct DenseColumns<S> {
     num_rows: usize,
 }
 
+/// Ordered block-linear result produced by one categorical block transform.
+///
+/// This is an internal crate-boundary vocabulary for lowering reduced blocks.
+/// Destination keys are unique and ordered by source-major first appearance;
+/// columns retain the caller's source order. Structurally absent entries remain
+/// distinct from present zero coefficients, and no destination row is wholly
+/// absent.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderedBlockLinearMap<K, S> {
+    destinations: Vec<K>,
+    source_count: usize,
+    storage: OrderedBlockLinearStorage<S>,
+}
+
+/// Structural storage for an [`OrderedBlockLinearMap`].
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OrderedBlockLinearStorage<S> {
+    /// Exactly one structurally present destination for every source column.
+    SingletonColumns {
+        destination_rows: Vec<usize>,
+        coefficients: Vec<S>,
+    },
+    /// Row-major destination-by-source coefficients.
+    DenseDstSrc(Vec<Option<S>>),
+}
+
+#[doc(hidden)]
+impl<K, S> OrderedBlockLinearMap<K, S> {
+    #[inline]
+    pub fn destinations(&self) -> &[K] {
+        &self.destinations
+    }
+
+    #[inline]
+    pub fn source_count(&self) -> usize {
+        self.source_count
+    }
+
+    #[inline]
+    pub fn storage(&self) -> &OrderedBlockLinearStorage<S> {
+        &self.storage
+    }
+
+    #[inline]
+    pub fn into_parts(self) -> (Vec<K>, usize, OrderedBlockLinearStorage<S>) {
+        (self.destinations, self.source_count, self.storage)
+    }
+}
+
 impl<S: Clone> DenseColumns<S> {
     fn with_capacity(num_src: usize, rows_hint: usize) -> Self {
         Self {
@@ -2588,6 +2639,12 @@ impl CompactMultiplicityFreeTreeBasis {
 struct CompactMultiplicityFreeTreePairBasis {
     frame: MultiplicityFreeTreePairFrame,
     locals: Vec<MultiplicityFreeTreePairLocal>,
+}
+
+struct CompactMultiplicityFreeTreePairBlock<S> {
+    basis: CompactMultiplicityFreeTreePairBasis,
+    columns: DenseColumns<S>,
+    records_dimensions: bool,
 }
 
 type CompactMultiplicityFreeTreePairRows<S> = Vec<Vec<(FusionTreePairKey, S)>>;
@@ -3384,6 +3441,132 @@ fn scatter_compact_block<S: Clone>(
     rows_per_source
 }
 
+fn order_compact_block<S: Clone>(
+    basis: CompactMultiplicityFreeTreePairBasis,
+    mut columns: DenseColumns<S>,
+) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+    #[cfg(test)]
+    COMPACT_BLOCK_DIMENSIONS.with(|dimensions| {
+        dimensions.set(Some(CompactBlockDimensions {
+            destination_rows: basis.locals.len(),
+            source_columns: columns.num_src,
+            coefficient_slots: columns.data.len(),
+            coefficient_bytes: columns
+                .data
+                .len()
+                .saturating_mul(std::mem::size_of::<Option<S>>()),
+        }));
+    });
+
+    let source_count = columns.num_src;
+    let basis_row_count = basis.locals.len();
+    let mut ordered_basis_rows = Vec::with_capacity(basis_row_count);
+    let mut ordered_row_for_basis = vec![usize::MAX; basis_row_count];
+    let mut singleton_basis_rows = Vec::with_capacity(source_count);
+    let mut is_singleton = true;
+
+    for source in 0..source_count {
+        let mut only_basis_row = None;
+        for (basis_row, ordered_row) in ordered_row_for_basis.iter_mut().enumerate() {
+            if columns.row(basis_row)[source].is_none() {
+                continue;
+            }
+            if *ordered_row == usize::MAX {
+                *ordered_row = ordered_basis_rows.len();
+                ordered_basis_rows.push(basis_row);
+            }
+            if only_basis_row.replace(basis_row).is_some() {
+                is_singleton = false;
+            }
+        }
+        match only_basis_row {
+            Some(basis_row) => singleton_basis_rows.push(basis_row),
+            None => {
+                is_singleton = false;
+                singleton_basis_rows.push(usize::MAX);
+            }
+        }
+    }
+
+    let CompactMultiplicityFreeTreePairBasis { frame, locals } = basis;
+    let mut local_slots = locals.into_iter().map(Some).collect::<Vec<_>>();
+    let destinations = ordered_basis_rows
+        .iter()
+        .map(|&basis_row| {
+            frame.materialize(
+                local_slots[basis_row]
+                    .take()
+                    .expect("ordered compact rows contain each basis row once"),
+            )
+        })
+        .collect();
+
+    let storage = if is_singleton {
+        let mut destination_rows = Vec::with_capacity(source_count);
+        let mut coefficients = Vec::with_capacity(source_count);
+        for (source, basis_row) in singleton_basis_rows.into_iter().enumerate() {
+            destination_rows.push(ordered_row_for_basis[basis_row]);
+            coefficients.push(
+                columns.data[basis_row * source_count + source]
+                    .take()
+                    .expect("singleton source has one present coefficient"),
+            );
+        }
+        OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows,
+            coefficients,
+        }
+    } else {
+        let mut coefficients =
+            Vec::with_capacity(ordered_basis_rows.len().saturating_mul(source_count));
+        for basis_row in ordered_basis_rows {
+            let row_start = basis_row * source_count;
+            coefficients.extend(
+                columns.data[row_start..row_start + source_count]
+                    .iter_mut()
+                    .map(Option::take),
+            );
+        }
+        OrderedBlockLinearStorage::DenseDstSrc(coefficients)
+    };
+
+    OrderedBlockLinearMap {
+        destinations,
+        source_count,
+        storage,
+    }
+}
+
+fn scatter_compact_tree_pair_block<S: Clone>(
+    block: CompactMultiplicityFreeTreePairBlock<S>,
+) -> CompactMultiplicityFreeTreePairRows<S> {
+    if block.records_dimensions {
+        scatter_compact_block(block.basis, block.columns)
+    } else {
+        let mut rows_per_source = vec![Vec::new(); block.columns.num_src];
+        for (destination_row, destination_local) in
+            block.basis.locals.into_iter().enumerate()
+        {
+            let destination = block.basis.frame.materialize(destination_local);
+            for (source, coefficient) in
+                block.columns.row(destination_row).iter().enumerate()
+            {
+                if let Some(coefficient) = coefficient {
+                    rows_per_source[source]
+                        .push((destination.clone(), coefficient.clone()));
+                }
+            }
+        }
+        rows_per_source
+    }
+}
+
+fn order_compact_tree_pair_block<S: Clone>(
+    block: CompactMultiplicityFreeTreePairBlock<S>,
+) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+    order_compact_block(block.basis, block.columns)
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompactBlockDimensions {
@@ -3540,7 +3723,7 @@ where
 fn compact_repartition_tree_pair_block<R>(
     group: ValidatedTreePairBlockGroup<'_, R>,
     target_codomain_rank: usize,
-) -> Result<CompactMultiplicityFreeTreePairRows<R::Scalar>, CoreError>
+) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
@@ -3549,10 +3732,17 @@ where
     let src_keys = group.src_keys;
     let mut current_codomain_rank = group.codomain_rank;
     if current_codomain_rank == target_codomain_rank {
-        return Ok(src_keys
-            .iter()
-            .map(|source| vec![(source.clone(), rule.scalar_one())])
-            .collect());
+        let basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
+        let mut columns = DenseColumns::with_capacity(src_keys.len(), src_keys.len());
+        for source in 0..src_keys.len() {
+            let row = columns.push_empty_row();
+            columns.row_mut(row)[source] = Some(rule.scalar_one());
+        }
+        return Ok(CompactMultiplicityFreeTreePairBlock {
+            basis,
+            columns,
+            records_dimensions: false,
+        });
     }
     // Why not rely on the step-major compact execution for malformed inputs:
     // the legacy public API reports the first error in source-major order.
@@ -3612,10 +3802,27 @@ where
         frame = prepared.output_frame(rule)?;
         current_codomain_rank += 1;
     }
-    Ok(rows
-        .into_iter()
-        .map(|(local, coefficient)| vec![(frame.materialize(local), coefficient)])
-        .collect())
+    let source_count = rows.len();
+    let mut destination_locals = Vec::with_capacity(source_count);
+    let mut columns = DenseColumns::with_capacity(source_count, source_count);
+    for (source, (local, coefficient)) in rows.into_iter().enumerate() {
+        // Repartition is an invertible change of the tree split, so distinct
+        // source basis states stay distinct. Why not hash the finished locals:
+        // that would rebuild identity already proved by the reversible bend
+        // sequence merely to discover the source-major row number again.
+        destination_locals.push(local);
+        let destination_row = columns.push_empty_row();
+        debug_assert_eq!(destination_row, source);
+        columns.row_mut(destination_row)[source] = Some(coefficient);
+    }
+    Ok(CompactMultiplicityFreeTreePairBlock {
+        basis: CompactMultiplicityFreeTreePairBasis {
+            frame,
+            locals: destination_locals,
+        },
+        columns,
+        records_dimensions: false,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -3898,6 +4105,25 @@ where
     multiplicity_free_braid_tree_pair_block_validated(group, prepared)
 }
 
+pub(crate) fn multiplicity_free_braid_tree_pair_block_ordered_proven<R>(
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
+    prepared: PreparedTreePairOperation,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_braid_tree_pair_block_ordered_validated(group, prepared)
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) fn multiplicity_free_transpose_tree_pair_block_proven<R>(
     batch: ValidatedMultiplicityFreePairBatch<'_, R>,
@@ -3912,6 +4138,25 @@ where
         return Ok(Vec::new());
     };
     multiplicity_free_transpose_tree_pair_block_validated(group, prepared)
+}
+
+pub(crate) fn multiplicity_free_transpose_tree_pair_block_ordered_proven<R>(
+    batch: ValidatedMultiplicityFreePairBatch<'_, R>,
+    prepared: PreparedTreePairOperation,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    let (rule, src_keys) = batch.parts();
+    let Some(group) = validate_tree_pair_block_group_proven(rule, src_keys)? else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_transpose_tree_pair_block_ordered_validated(group, prepared)
 }
 
 /// Batched [`multiplicity_free_braid_tree_pair`] over every source tree-pair of
@@ -3972,16 +4217,43 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    if prepared.is_identity() {
+        return Ok(group
+            .src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), group.rule.scalar_one())])
+            .collect());
+    }
+    multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
+        .map(scatter_compact_tree_pair_block)
+}
+
+fn multiplicity_free_braid_tree_pair_block_ordered_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: PreparedTreePairOperation,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
+        .map(order_compact_tree_pair_block)
+}
+
+fn multiplicity_free_braid_tree_pair_block_compact_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: PreparedTreePairOperation,
+) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
     let rule = group.rule;
-    let src_keys = group.src_keys;
     let codomain_rank = group.codomain_rank;
     let domain_rank = group.domain_rank;
     let braid = match &prepared.plan {
         PreparedTreePairPlan::Identity => {
-            return Ok(src_keys
-                .iter()
-                .map(|key| vec![(key.clone(), rule.scalar_one())])
-                .collect());
+            return compact_repartition_tree_pair_block(group, codomain_rank);
         }
         PreparedTreePairPlan::Repartition => {
             return compact_repartition_tree_pair_block(
@@ -4061,10 +4333,11 @@ where
 
     // Why not materialize after each braid: both block runners keep the
     // external frame immutable and reconstruct full keys only at the API edge.
-    Ok(scatter_compact_block(
+    Ok(CompactMultiplicityFreeTreePairBlock {
         basis,
-        columns.expect("nonidentity braid executes at least one compact operator"),
-    ))
+        columns: columns.expect("nonidentity braid executes at least one compact operator"),
+        records_dimensions: true,
+    })
 }
 
 /// Batched [`multiplicity_free_permute_tree_pair`] over a block: symmetric
@@ -4164,15 +4437,42 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
+    if prepared.is_identity() {
+        return Ok(group
+            .src_keys
+            .iter()
+            .map(|key| vec![(key.clone(), group.rule.scalar_one())])
+            .collect());
+    }
+    multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
+        .map(scatter_compact_tree_pair_block)
+}
+
+fn multiplicity_free_transpose_tree_pair_block_ordered_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: PreparedTreePairOperation,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
+        .map(order_compact_tree_pair_block)
+}
+
+fn multiplicity_free_transpose_tree_pair_block_compact_validated<R>(
+    group: ValidatedTreePairBlockGroup<'_, R>,
+    prepared: PreparedTreePairOperation,
+) -> Result<CompactMultiplicityFreeTreePairBlock<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
     let rule = group.rule;
-    let src_keys = group.src_keys;
     let codomain_rank = group.codomain_rank;
     let cycle = match &prepared.plan {
         PreparedTreePairPlan::Identity => {
-            return Ok(src_keys
-                .iter()
-                .map(|key| vec![(key.clone(), rule.scalar_one())])
-                .collect());
+            return compact_repartition_tree_pair_block(group, codomain_rank);
         }
         PreparedTreePairPlan::Repartition => {
             return compact_repartition_tree_pair_block(
@@ -4235,10 +4535,11 @@ where
     // every local row and remains immutable until this ordered API boundary.
     #[cfg(test)]
     assert_compact_tree_pair_basis_matches_homspace(rule, &basis);
-    Ok(scatter_compact_block(
+    Ok(CompactMultiplicityFreeTreePairBlock {
         basis,
-        columns.expect("nonidentity transpose executes at least one compact operator"),
-    ))
+        columns: columns.expect("nonidentity transpose executes at least one compact operator"),
+        records_dimensions: true,
+    })
 }
 
 #[cfg(test)]

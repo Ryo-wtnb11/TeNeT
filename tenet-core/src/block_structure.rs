@@ -1478,6 +1478,20 @@ where
         multiplicity_free_braid_tree_pair_block_proven(batch, operation)
     }
 
+    pub fn execute_multiplicity_free_braid_ordered_for_block_indices<I>(
+        &self,
+        indices: I,
+        operation: PreparedTreePairOperation,
+    ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        validate_multiplicity_free_execution_style(self.rule)?;
+        let batch =
+            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        multiplicity_free_braid_tree_pair_block_ordered_proven(batch, operation)
+    }
+
     pub fn execute_multiplicity_free_transpose_for_block_indices<I>(
         &self,
         indices: I,
@@ -1500,6 +1514,20 @@ where
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_transpose_tree_pair_block_proven(batch, operation)
+    }
+
+    pub fn execute_multiplicity_free_transpose_ordered_for_block_indices<I>(
+        &self,
+        indices: I,
+        operation: PreparedTreePairOperation,
+    ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        validate_multiplicity_free_execution_style(self.rule)?;
+        let batch =
+            ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
+        multiplicity_free_transpose_tree_pair_block_ordered_proven(batch, operation)
     }
 }
 
