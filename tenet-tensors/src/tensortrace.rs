@@ -872,9 +872,9 @@ where
         .collect::<Vec<Option<Vec<(FusionTreePairKey, R::Scalar)>>>>();
     let is_unique = rule.fusion_style() == FusionStyleKind::Unique;
     let groups = if is_unique {
-        Vec::new()
+        &[][..]
     } else {
-        src_structure.fusion_tree_groups()
+        src_structure.fusion_tree_group_slice()
     };
     let mut group_by_source = if is_unique {
         Vec::new()

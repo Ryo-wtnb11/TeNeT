@@ -527,6 +527,15 @@ impl FusionTreeBlockGroup {
         }
     }
 
+    fn singleton(group_key: FusionTreeGroupKey, block_index: usize) -> Self {
+        let mut block_indices = DimVec::new();
+        block_indices.push(block_index);
+        Self {
+            group_key,
+            block_indices,
+        }
+    }
+
     #[inline]
     pub fn group_key(&self) -> &FusionTreeGroupKey {
         &self.group_key
@@ -543,6 +552,7 @@ pub struct SectorStructure {
     rank: usize,
     key_kind: Option<BlockKeyKind>,
     blocks: Vec<SectorBlock>,
+    fusion_tree_groups: Vec<FusionTreeBlockGroup>,
     sorted_indices: DimVec,
     compact_lookup: Option<CompactBlockLookup>,
 }
@@ -557,6 +567,7 @@ impl SectorStructure {
             rank,
             key_kind: None,
             blocks: Vec::new(),
+            fusion_tree_groups: Vec::new(),
             sorted_indices: DimVec::new(),
             compact_lookup: None,
         }
@@ -596,11 +607,26 @@ impl SectorStructure {
                 });
             }
         }
+        let mut fusion_tree_groups = Vec::<FusionTreeBlockGroup>::new();
+        let mut fusion_tree_group_indices =
+            FxHashMap::<FusionTreeGroupKey, usize>::default();
+        for (index, block) in blocks.iter().enumerate() {
+            let Some(group_key) = block.key().fusion_tree_group_key() else {
+                continue;
+            };
+            if let Some(&group_index) = fusion_tree_group_indices.get(&group_key) {
+                fusion_tree_groups[group_index].block_indices.push(index);
+            } else {
+                fusion_tree_group_indices.insert(group_key.clone(), fusion_tree_groups.len());
+                fusion_tree_groups.push(FusionTreeBlockGroup::singleton(group_key, index));
+            }
+        }
         let compact_lookup = CompactBlockLookup::from_blocks(&blocks);
         Ok(Self {
             rank,
             key_kind: expected_kind,
             blocks,
+            fusion_tree_groups,
             sorted_indices,
             compact_lookup,
         })
@@ -627,21 +653,22 @@ impl SectorStructure {
         &self.blocks
     }
 
+    /// Return owned fusion-tree groups in first-appearance storage order.
+    ///
+    /// Use [`Self::fusion_tree_group_slice`] when the groups do not need to
+    /// outlive this structure.
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
-        let mut groups = Vec::<FusionTreeBlockGroup>::new();
-        let mut group_indices = FxHashMap::<FusionTreeGroupKey, usize>::default();
-        for (index, block) in self.blocks.iter().enumerate() {
-            let Some(group_key) = block.key().fusion_tree_group_key() else {
-                continue;
-            };
-            if let Some(&group_index) = group_indices.get(&group_key) {
-                groups[group_index].block_indices.push(index);
-            } else {
-                group_indices.insert(group_key.clone(), groups.len());
-                groups.push(FusionTreeBlockGroup::new(group_key, vec![index]));
-            }
-        }
-        groups
+        self.fusion_tree_groups.clone()
+    }
+
+    /// Borrow construction-time fusion-tree groups without rebuilding them.
+    #[inline]
+    pub fn fusion_tree_group_slice(&self) -> &[FusionTreeBlockGroup] {
+        &self.fusion_tree_groups
+    }
+
+    pub(crate) fn into_fusion_tree_groups(self) -> Vec<FusionTreeBlockGroup> {
+        self.fusion_tree_groups
     }
 
     pub fn block(&self, index: usize) -> Result<&SectorBlock, CoreError> {
@@ -1889,6 +1916,12 @@ impl BlockStructure {
 
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
         self.sector.fusion_tree_groups()
+    }
+
+    /// Borrow construction-time fusion-tree groups without rebuilding them.
+    #[inline]
+    pub fn fusion_tree_group_slice(&self) -> &[FusionTreeBlockGroup] {
+        self.sector.fusion_tree_group_slice()
     }
 
     pub fn find_block_index_by_key(&self, key: &BlockKey) -> Option<usize> {

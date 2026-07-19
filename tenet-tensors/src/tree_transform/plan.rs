@@ -354,10 +354,10 @@ where
     let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::new();
-    for group in src_structure.fusion_tree_groups() {
+    for group in src_structure.fusion_tree_group_slice() {
         specs.extend(assemble_tree_pair_group_specs(
             src_structure,
-            &group,
+            group,
             &source_axes,
             &mut |_, src_key| transform(src_key).map(Arc::new),
         )?);
@@ -576,7 +576,7 @@ where
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::new();
-    for group in src_structure.fusion_tree_groups() {
+    for group in src_structure.fusion_tree_group_slice() {
         let mut rows_for = |index: usize, source: &FusionTreeKey| {
             transform_all_codomain_rows_for_block_index(source_proof, &operation, index, source)
                 .map(Arc::new)
@@ -584,14 +584,14 @@ where
         if operation.is_identity_for(group.group_key().codomain_uncoupled().len(), 0) {
             specs.extend(assemble_identity_all_codomain_group_specs(
                 src_structure,
-                &group,
+                group,
                 &source_axes,
                 &mut rows_for,
             )?);
         } else {
             specs.extend(assemble_all_codomain_group_specs(
                 src_structure,
-                &group,
+                group,
                 &source_axes,
                 &mut rows_for,
             )?);
@@ -620,7 +620,7 @@ pub(crate) type AllCodomainRowMemo<T, RuleKey> = FxHashMap<
 >;
 
 struct StagedGroupRows<'a, K, T> {
-    group: FusionTreeBlockGroup,
+    group: &'a FusionTreeBlockGroup,
     // Why not inline an unbounded group: group cardinality has no algebraic
     // rank bound. Four bounds the fixed footprint; larger groups spill without
     // changing ownership, ordering, or transactional semantics.
@@ -1133,7 +1133,7 @@ where
 {
     let src_structure = proof.structure();
     let source_axes = operation_source_axes(&operation);
-    let groups = src_structure.fusion_tree_groups();
+    let groups = src_structure.fusion_tree_group_slice();
 
     let mut counted_keys = FxHashSet::default();
     let mut staged_hits = 0;
@@ -1473,7 +1473,7 @@ where
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::new();
-    for group in src_structure.fusion_tree_groups() {
+    for group in src_structure.fusion_tree_group_slice() {
         if operation.is_identity_for(
             group.group_key().codomain_uncoupled().len(),
             group.group_key().domain_uncoupled().len(),
@@ -1484,7 +1484,7 @@ where
             };
             specs.extend(assemble_identity_tree_pair_group_specs(
                 src_structure,
-                &group,
+                group,
                 &source_axes,
                 &mut rows_for,
             )?);
@@ -1522,7 +1522,7 @@ where
             .map_err(OperationError::from_core_preserving_context)?;
             specs.extend(assemble_ordered_tree_pair_group_specs(
                 src_structure,
-                &group,
+                group,
                 &source_axes,
                 ordered,
             )?);
@@ -1713,7 +1713,7 @@ where
     let source_axes = operation_source_axes(&operation);
 
     let mut specs = Vec::new();
-    for group in src_structure.fusion_tree_groups() {
+    for group in src_structure.fusion_tree_group_slice() {
         let mut rows_for = |index: usize, _: &FusionTreePairKey| {
             let rows = match &operation {
                 TreeTransformOperation::Permute {
@@ -1754,14 +1754,14 @@ where
         ) {
             specs.extend(assemble_identity_tree_pair_group_specs(
                 src_structure,
-                &group,
+                group,
                 &source_axes,
                 &mut rows_for,
             )?);
         } else {
             specs.extend(assemble_tree_pair_group_specs(
                 src_structure,
-                &group,
+                group,
                 &source_axes,
                 &mut rows_for,
             )?);
@@ -1935,7 +1935,7 @@ where
 {
     let src_structure = proof.structure();
     let source_axes = operation_source_axes(&operation);
-    let groups = src_structure.fusion_tree_groups();
+    let groups = src_structure.fusion_tree_group_slice();
 
     let mut staged_hits = 0;
     let mut staged_misses = 0;

@@ -10329,6 +10329,21 @@ mod tests {
         let sector_groups = sector.fusion_tree_groups();
         let block_groups = block_structure.fusion_tree_groups();
         assert_eq!(sector_groups, block_groups);
+        let mut legacy_groups = Vec::<FusionTreeBlockGroup>::new();
+        for (index, key) in [first, second, same_group_as_first].iter().enumerate() {
+            let group_key = key.fusion_tree_group_key().unwrap();
+            if let Some(group) = legacy_groups
+                .iter_mut()
+                .find(|group| group.group_key() == &group_key)
+            {
+                group.block_indices.push(index);
+            } else {
+                legacy_groups.push(FusionTreeBlockGroup::new(group_key, vec![index]));
+            }
+        }
+        // What: construction-time metadata is exactly the former eager
+        // first-appearance grouping, including interleaved storage indices.
+        assert_eq!(sector_groups, legacy_groups);
         assert_eq!(sector_groups.len(), 2);
         assert_eq!(sector_groups[0].block_indices(), &[0, 2]);
         assert_eq!(sector_groups[1].block_indices(), &[1]);
@@ -10379,7 +10394,9 @@ mod tests {
         }
 
         let dense = BlockStructure::trivial(&[2, 3]).unwrap();
+        let empty = BlockStructure::empty(2);
         assert!(dense.fusion_tree_groups().is_empty());
+        assert!(empty.fusion_tree_groups().is_empty());
     }
 
     #[test]

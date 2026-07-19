@@ -4,9 +4,9 @@ use std::hint::black_box;
 
 use tenet_core::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
-    unique_permute_tree, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
+    unique_permute_tree, BlockKey, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
     FusionTreeKey, FusionTreePairKey, MultiplicityIndex, PreparedTreePairOperation, SU2FusionRule,
-    SU2Irrep, SectorLeg, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    SU2Irrep, SectorLeg, SectorStructure, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -43,6 +43,69 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[test]
+fn constructed_sector_structure_borrows_fusion_groups_without_allocation() {
+    let first = FusionTreePairKey::try_pair_from_sector_ids(
+        [1, 2],
+        [3],
+        4,
+        [false, true],
+        [true],
+        [5],
+        [],
+        [1, 1],
+        [1],
+    )
+    .unwrap();
+    let second = FusionTreePairKey::try_pair_from_sector_ids(
+        [7],
+        [8, 9],
+        10,
+        [true],
+        [false, true],
+        [],
+        [11],
+        [1],
+        [1, 1],
+    )
+    .unwrap();
+    let same_group_as_first = FusionTreePairKey::try_pair_from_sector_ids(
+        [1, 2],
+        [3],
+        12,
+        [false, true],
+        [true],
+        [13],
+        [],
+        [1, 1],
+        [1],
+    )
+    .unwrap();
+    let structure = SectorStructure::from_keys(
+        3,
+        [first, second, same_group_as_first]
+            .into_iter()
+            .map(BlockKey::from),
+    )
+    .unwrap();
+    assert_eq!(
+        structure.fusion_tree_group_slice()[0].block_indices(),
+        &[0, 2]
+    );
+    assert_eq!(structure.fusion_tree_group_slice()[1].block_indices(), &[1]);
+
+    let (_, allocations) = measured_allocations(|| {
+        let groups = black_box(&structure).fusion_tree_group_slice();
+        black_box(groups.as_ptr());
+        black_box(groups[0].group_key());
+        black_box(groups[0].block_indices());
+    });
+
+    // What: repeated group lookup borrows construction-time metadata and does
+    // not rebuild group keys, indices, or a membership hash table.
+    assert_eq!(allocations, 0);
+}
 
 #[test]
 fn unique_identity_permute_does_not_allocate() {

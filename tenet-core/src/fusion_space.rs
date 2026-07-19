@@ -1950,7 +1950,7 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         self.sector_structure(rule)
-            .map(|structure| structure.fusion_tree_groups())
+            .map(SectorStructure::into_fusion_tree_groups)
     }
 
     /// External leg view of flat axis `axis` (TensorKit's `space(t, i)`
