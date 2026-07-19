@@ -2860,6 +2860,7 @@ mod tests {
 
     struct FibonacciFAdmissibilityProbe {
         calls: std::sync::Mutex<Vec<[SectorId; 6]>>,
+        complex_f_phase: bool,
     }
 
     impl FibonacciFAdmissibilityProbe {
@@ -2868,6 +2869,14 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                complex_f_phase: false,
+            }
+        }
+
+        fn with_complex_f_phase() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+                complex_f_phase: true,
             }
         }
 
@@ -2954,14 +2963,19 @@ mod tests {
                 && FibonacciFusionRule.nsymbol(middle, right, right_coupled) != 0
                 && FibonacciFusionRule.nsymbol(left, right_coupled, coupled) != 0;
             if admissible {
-                FibonacciFusionRule.f_symbol_scalar(
+                let value = FibonacciFusionRule.f_symbol_scalar(
                     left,
                     middle,
                     right,
                     coupled,
                     left_coupled,
                     right_coupled,
-                )
+                );
+                if self.complex_f_phase {
+                    value * Complex64::new(0.6, 0.8)
+                } else {
+                    value
+                }
             } else {
                 Self::SENTINEL
             }
@@ -3221,6 +3235,71 @@ mod tests {
         let calls = rule.take_calls();
         assert!(!calls.is_empty());
         assert_fibonacci_f_calls_are_admissible(&calls);
+    }
+
+    #[test]
+    fn grouped_multi_fmove_matches_legacy_order_and_reuses_stage_symbols() {
+        let rule = FibonacciFAdmissibilityProbe::with_complex_f_phase();
+        let tau = SectorId::new(1);
+        let trees = collect_fusion_trees_for_coupled(
+            &rule,
+            &[tau; 6],
+            &[false; 6],
+            &[tau; 6],
+            tau,
+        );
+        let mut fixture = None;
+        for tree in trees {
+            let grouped = multiplicity_free_multi_fmove_tree(&rule, &tree).unwrap();
+            let grouped_calls = rule.take_calls();
+            let legacy =
+                multiplicity_free_multi_fmove_tree_legacy_oracle(&rule, &tree).unwrap();
+            let legacy_calls = rule.take_calls();
+            if grouped_calls.len() < legacy_calls.len() {
+                fixture = Some((tree, grouped, grouped_calls, legacy, legacy_calls));
+                break;
+            }
+        }
+        let (tree, grouped, grouped_calls, legacy, legacy_calls) =
+            fixture.expect("rank-six Fibonacci must repeat stage-local F arguments");
+
+        // What: grouped forward execution preserves the legacy candidate order
+        // and coefficients while evaluating one complete F sextuple per stage.
+        assert_eq!(grouped, legacy);
+        assert_eq!(grouped_calls.len(), 7);
+        assert_eq!(legacy_calls.len(), 18);
+        assert_fibonacci_f_calls_are_admissible(&grouped_calls);
+        assert!(grouped
+            .iter()
+            .any(|(_, coefficient)| coefficient.im.abs() > 1.0e-12));
+
+        let tail = grouped
+            .first()
+            .expect("rank-six Fibonacci forward move has a tail")
+            .0
+            .clone();
+        let grouped_inverse =
+            multiplicity_free_multi_fmove_inv_tree(&rule, tau, tree.coupled(), &tail, false)
+                .unwrap();
+        let grouped_inverse_calls = rule.take_calls();
+        let legacy_inverse = multiplicity_free_multi_fmove_inv_tree_legacy_oracle(
+            &rule,
+            tau,
+            tree.coupled(),
+            &tail,
+            false,
+        )
+        .unwrap();
+        let legacy_inverse_calls = rule.take_calls();
+
+        // What: inverse execution uses the same canonical candidates and applies
+        // conjugation after the same grouped associator products.
+        assert_eq!(grouped_inverse, legacy_inverse);
+        assert!(grouped_inverse_calls.len() <= legacy_inverse_calls.len());
+        assert_fibonacci_f_calls_are_admissible(&grouped_inverse_calls);
+        assert!(grouped_inverse
+            .iter()
+            .any(|(_, coefficient)| coefficient.im.abs() > 1.0e-12));
     }
 
     struct UniqueFAdmissibilityProbe {
@@ -9578,8 +9657,106 @@ mod tests {
         );
     }
 
+    trait TransposeOracleScalar {
+        fn oracle_distance(&self, other: &Self) -> f64;
+        fn oracle_magnitude(&self) -> f64;
+    }
+
+    impl TransposeOracleScalar for f64 {
+        fn oracle_distance(&self, other: &Self) -> f64 {
+            (self - other).abs()
+        }
+
+        fn oracle_magnitude(&self) -> f64 {
+            self.abs()
+        }
+    }
+
+    impl TransposeOracleScalar for Complex64 {
+        fn oracle_distance(&self, other: &Self) -> f64 {
+            (self - other).norm()
+        }
+
+        fn oracle_magnitude(&self) -> f64 {
+            self.norm()
+        }
+    }
+
+    fn assert_compact_transpose_matches_full_key_oracle<R>(
+        rule: &R,
+        sources: &[FusionTreePairKey],
+        codomain_permutation: &[usize],
+        domain_permutation: &[usize],
+        expect_compact_boundary: bool,
+    ) where
+        R: MultiplicityFreeRigidSymbols,
+        R::Scalar: Clone
+            + Add<Output = R::Scalar>
+            + Mul<Output = R::Scalar>
+            + std::fmt::Debug
+            + TransposeOracleScalar,
+    {
+        reset_compact_block_dimensions();
+        let compact = multiplicity_free_transpose_tree_pair_block(
+            rule,
+            sources,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .unwrap();
+        let dimensions = compact_block_dimensions();
+        let full_key = multiplicity_free_transpose_tree_pair_block_full_key_oracle(
+            rule,
+            sources,
+            codomain_permutation,
+            domain_permutation,
+        )
+        .unwrap();
+
+        assert_eq!(compact.len(), full_key.len());
+        for (compact_rows, full_key_rows) in compact.iter().zip(&full_key) {
+            // What: compact execution preserves the legacy per-source
+            // destination order and every categorical label.
+            assert_eq!(
+                compact_rows.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                full_key_rows.iter().map(|(key, _)| key).collect::<Vec<_>>()
+            );
+            assert_eq!(compact_rows.len(), full_key_rows.len());
+            for ((_, actual), (_, expected)) in compact_rows.iter().zip(full_key_rows) {
+                assert!(
+                    actual.oracle_distance(expected)
+                        <= 1.0e-12 * (1.0 + expected.oracle_magnitude()),
+                    "coefficient mismatch {expected:?} vs {actual:?}"
+                );
+            }
+        }
+
+        if expect_compact_boundary {
+            let dimensions = dimensions.expect("nonidentity compact transform records dimensions");
+            let destinations = full_key
+                .iter()
+                .flatten()
+                .map(|(key, _)| key)
+                .collect::<std::collections::BTreeSet<_>>();
+            // What: the dense coefficient matrix is exactly the canonical
+            // reachable block basis by the caller's source columns.
+            assert_eq!(dimensions.destination_rows, destinations.len());
+            assert_eq!(dimensions.source_columns, sources.len());
+            assert_eq!(
+                dimensions.coefficient_slots,
+                dimensions.destination_rows * dimensions.source_columns
+            );
+            assert_eq!(
+                dimensions.coefficient_bytes,
+                dimensions.coefficient_slots * std::mem::size_of::<Option<R::Scalar>>()
+            );
+        } else {
+            assert_eq!(dimensions, None);
+        }
+    }
+
     #[test]
-    fn transpose_tree_pair_block_matches_per_source() {
+    fn transpose_tree_pair_block_matches_full_key_su2_cycles_and_repartition() {
         use std::collections::BTreeMap;
         let rule = SU2FusionRule;
         let leg = || {
@@ -9612,53 +9789,185 @@ mod tests {
             blocks.entry(tag).or_default().push(key.clone());
         }
 
-        // Canonical planar transpose (`Tensor::transpose`): new codomain is the
-        // reversed old domain, new domain the reversed old codomain — a cyclic
-        // leg rotation.
-        let codomain_permutation = [3usize];
-        let domain_permutation = [2usize, 1, 0];
         let mut checked_blocks = 0;
-        for src_keys in blocks.values() {
-            let batched = multiplicity_free_transpose_tree_pair_block(
+        for (codomain_permutation, domain_permutation, uses_dense_block) in [
+            (vec![3usize], vec![2usize, 1, 0], true),
+            (vec![1usize, 2, 3], vec![0usize], true),
+            (vec![0usize, 1], vec![3usize, 2], false),
+            (vec![0usize, 1, 2, 3], vec![], false),
+        ] {
+            for src_keys in blocks.values() {
+                assert_compact_transpose_matches_full_key_oracle(
+                    &rule,
+                    src_keys,
+                    &codomain_permutation,
+                    &domain_permutation,
+                    uses_dense_block,
+                );
+                checked_blocks += 1;
+            }
+        }
+        assert!(checked_blocks > 0, "expected at least one block");
+    }
+
+    #[test]
+    fn transpose_tree_pair_block_matches_full_key_fermionic_product_cycle() {
+        type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type ProductRule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
+        let left = FpU1Rule::default();
+        let rule = ProductRule::default();
+        let coupled = rule.encode_sector(left.encode_sector(z2_even(), u1(0)), su2(1));
+        let odd_half = rule.encode_sector(left.encode_sector(z2_odd(), u1(1)), su2(1));
+        let odd_one = rule.encode_sector(left.encode_sector(z2_odd(), u1(-1)), su2(2));
+        let source = FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
                 &rule,
-                src_keys,
+                [coupled],
+                coupled,
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &rule,
+                [odd_half, odd_one],
+                coupled,
+                [false, true],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+            .unwrap(),
+        );
+
+        // What: nested fZ2 x U1 x SU2 keeps the fermionic pivotal phase,
+        // non-self-dual charge, and non-Abelian channel through a cycle.
+        assert_compact_transpose_matches_full_key_oracle(
+            &rule,
+            &[source],
+            &[2, 1],
+            &[0],
+            true,
+        );
+    }
+
+    #[test]
+    fn transpose_tree_pair_block_matches_low_rank_and_nonselfdual_u1_oracles() {
+        let empty = FusionTreeKey::new([], u1(0), [], [], []);
+        let rank_zero = [FusionTreePairKey::pair(empty.clone(), empty)];
+        // What: scalar transpose remains the symbol-free identity operation.
+        assert_compact_transpose_matches_full_key_oracle(
+            &U1FusionRule,
+            &rank_zero,
+            &[],
+            &[],
+            false,
+        );
+
+        let rank_one_hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 1)], false)]),
+            FusionProductSpace::new([]),
+        );
+        let rank_one = rank_one_hom.fusion_tree_keys(&U1FusionRule);
+        assert_eq!(rank_one.len(), 1);
+        // What: moving one vacuum leg across the partition uses only the final
+        // full-key reconstruction boundary.
+        assert_compact_transpose_matches_full_key_oracle(
+            &U1FusionRule,
+            &rank_one,
+            &[],
+            &[0],
+            false,
+        );
+
+        // What: a non-self-dual U1 cycle preserves sector dualization and flags.
+        assert_compact_transpose_matches_full_key_oracle(
+            &U1FusionRule,
+            &[u1_nonselfdual_tree_pair_fixture()],
+            &[1, 2],
+            &[0],
+            true,
+        );
+    }
+
+    #[test]
+    fn transpose_tree_pair_block_matches_fz2_odd_pivotal_oracle() {
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(z2_odd(), 1)], true),
+                SectorLeg::new([(z2_odd(), 1)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(z2_even(), 1)], false)]),
+        );
+        let sources = hom.fusion_tree_keys(&FermionParityFusionRule);
+        assert!(!sources.is_empty());
+
+        // What: cycling a dual odd leg retains the Frobenius-Schur/pivotal sign.
+        assert_compact_transpose_matches_full_key_oracle(
+            &FermionParityFusionRule,
+            &sources,
+            &[1, 2],
+            &[0],
+            true,
+        );
+    }
+
+    #[test]
+    fn transpose_tree_pair_block_matches_complex_f_oracle() {
+        let rule = FibonacciFAdmissibilityProbe::with_complex_f_phase();
+        let tau = || SectorLeg::new([(SectorId::new(1), 1)], false);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([tau(), tau()]),
+            FusionProductSpace::new([tau(), tau()]),
+        );
+        let sources = hom.fusion_tree_keys(&rule);
+        assert!(sources.len() > 1);
+        for (codomain_permutation, domain_permutation, expected_direction) in [
+            (
+                [1usize, 3],
+                [0usize, 2],
+                PreparedCycleDirection::Clockwise,
+            ),
+            (
+                [2usize, 0],
+                [3usize, 1],
+                PreparedCycleDirection::Anticlockwise,
+            ),
+        ] {
+            let prepared = PreparedTreePairOperation::prepare_transpose(
+                2,
+                2,
                 &codomain_permutation,
                 &domain_permutation,
             )
             .unwrap();
-            assert_eq!(batched.len(), src_keys.len());
-            for (src, batched_rows) in src_keys.iter().zip(&batched) {
-                let per_source = multiplicity_free_transpose_tree_pair(
-                    &rule,
-                    src,
-                    &codomain_permutation,
-                    &domain_permutation,
-                )
-                .unwrap();
-                let mut want: BTreeMap<FusionTreePairKey, f64> = BTreeMap::new();
-                for (k, c) in &per_source {
-                    *want.entry(k.clone()).or_insert(0.0) += c;
-                }
-                let mut got: BTreeMap<FusionTreePairKey, f64> = BTreeMap::new();
-                for (k, c) in batched_rows {
-                    *got.entry(k.clone()).or_insert(0.0) += c;
-                }
-                assert_eq!(
-                    want.keys().collect::<Vec<_>>(),
-                    got.keys().collect::<Vec<_>>(),
-                    "destination trees differ for a source in block"
-                );
-                for (k, wc) in &want {
-                    let gc = got[k];
-                    assert!(
-                        (wc - gc).abs() <= 1e-12 * (1.0 + wc.abs()),
-                        "coefficient mismatch {wc} vs {gc}"
-                    );
-                }
-            }
-            checked_blocks += 1;
+            assert!(matches!(
+                prepared.plan,
+                PreparedTreePairPlan::Transpose { direction, .. }
+                    if direction == expected_direction
+            ));
+            let rows = multiplicity_free_transpose_tree_pair_block(
+                &rule,
+                &sources,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .unwrap();
+            assert!(rows
+                .iter()
+                .flatten()
+                .any(|(_, coefficient)| coefficient.im.abs() > 1.0e-12));
+
+            // What: both compact cycle directions preserve ordered multi-row
+            // non-real F products and conjugation against the old full keys.
+            assert_compact_transpose_matches_full_key_oracle(
+                &rule,
+                &sources,
+                &codomain_permutation,
+                &domain_permutation,
+                true,
+            );
         }
-        assert!(checked_blocks > 0, "expected at least one block");
     }
 
     #[test]
