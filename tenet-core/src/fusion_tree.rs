@@ -6316,6 +6316,23 @@ fn visit_generic_fusion_trees<R, F>(
     }
 }
 
+#[inline]
+fn multi_associator_new_cross_channel_is_admissible<R>(
+    rule: &R,
+    leading: SectorId,
+    short_right: SectorId,
+    long_right: SectorId,
+) -> bool
+where
+    R: FusionRule,
+{
+    // Why not recheck all four F vertices: validated/generated trees prove the
+    // two stored vertices. At k=2 the left cross is long's stored first vertex;
+    // at k>2 it is the previous stage's accepted new cross. Only this right
+    // cross is newly introduced at the current stage.
+    rule.nsymbol(leading, short_right, long_right) != 0
+}
+
 /// Generic-fusion `multi_associator`: the coefficient VECTOR relating a long
 /// (`N`-leg) splitting tree to a short (`N-1`-leg) tail tree, indexed by the
 /// topmost `a ⊗ short.coupled → long.coupled` vertex `λ` (see the module
@@ -6382,11 +6399,12 @@ where
         // vertex_info(short, k) = (b, e′); κ = its vertex label.
         let (short_left, short_right) = fusion_tree_vertex_neighbors(short, tensor_kit_k - 1)?;
         let kappa0 = mu_index(short, tensor_kit_k - 2)?;
-        // Why not rely on a provider returning an empty or zero F block:
-        // providers may define F only when both cross-tree vertices exist.
-        if rule.nsymbol(first, short_left, middle_left) == 0
-            || rule.nsymbol(first, short_right, middle_right) == 0
-        {
+        if !multi_associator_new_cross_channel_is_admissible(
+            rule,
+            first,
+            short_right,
+            middle_right,
+        ) {
             return Ok(None);
         }
         // F = Fsymbol(a, b, c, d, e, e′); axis order (μ, ν, κ, λ) =
@@ -7515,6 +7533,14 @@ where
         let right_sector = long.uncoupled()[tensor_kit_k];
         let (middle_left, middle_right) = fusion_tree_vertex_neighbors(long, tensor_kit_k)?;
         let (short_left, short_right) = fusion_tree_vertex_neighbors(short, tensor_kit_k - 1)?;
+        if !multi_associator_new_cross_channel_is_admissible(
+            rule,
+            first,
+            short_right,
+            middle_right,
+        ) {
+            return Ok(None);
+        }
         coefficient = coefficient
             * rule.f_symbol_scalar(
                 first,
